@@ -1,0 +1,52 @@
+[package]
+name = "truss-image"
+version = "0.1.0"
+edition = "2024"
+description = "Image toolkit with a shared Rust core across the CLI, HTTP server, and WASM demo."
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/nao1215/truss"
+homepage = "https://nao1215.github.io/truss/"
+keywords = ["image", "cli", "server", "wasm", "avif"]
+categories = ["command-line-utilities", "multimedia::images", "web-programming::http-server"]
+
+[features]
+default = ["cli", "server", "svg", "webp-lossy"]
+cli = ["dep:clap", "dep:clap_complete", "dep:ureq", "server"]
+server = ["dep:hmac", "dep:hex", "dep:serde_json", "dep:sha2", "dep:ureq", "dep:url", "svg"]
+svg = ["dep:quick-xml", "dep:resvg"]
+wasm = ["dep:serde_json", "dep:wasm-bindgen"]
+webp-lossy = ["dep:webp"]
+
+[[bin]]
+name = "truss"
+path = "src/main.rs"
+required-features = ["cli"]
+
+[lib]
+name = "truss"
+path = "src/lib.rs"
+crate-type = ["rlib", "cdylib"]
+
+[dependencies]
+clap = { version = "4", features = ["derive"], optional = true }
+clap_complete = { version = "4", optional = true }
+hmac = { version = "0.12.1", optional = true }
+hex = { version = "0.4.3", optional = true }
+image = { version = "0.25.8", default-features = false, features = ["avif", "bmp", "jpeg", "png", "webp"] }
+kamadak-exif = "0.6.1"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = { version = "1.0.145", optional = true }
+sha2 = { version = "0.10.9", optional = true }
+ureq = { version = "3.2.0", optional = true }
+url = { version = "2.5.8", optional = true }
+rav1d-safe = { version = "0.3", default-features = false, features = ["bitdepth_8", "bitdepth_16"] }
+mp4parse = "0.17"
+yuvutils-rs = "0.8"
+wasm-bindgen = { version = "0.2.114", optional = true }
+webp = { version = "0.3", optional = true }
+quick-xml = { version = "0.37", optional = true }
+resvg = { version = "0.45", optional = true }
+
+[dev-dependencies]
+tempfile = "3"

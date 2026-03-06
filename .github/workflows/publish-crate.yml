@@ -1,0 +1,124 @@
+name: Publish crate
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Ensure tag matches Cargo.toml version
+        run: |
+          expected_tag="v$(cargo pkgid | sed -E 's/.*@//')"
+          if [ "${GITHUB_REF_NAME}" != "${expected_tag}" ]; then
+            echo "::error title=Tag/version mismatch::Expected ${expected_tag} from Cargo.toml, got ${GITHUB_REF_NAME}."
+            exit 1
+          fi
+
+      - name: Run tests
+        run: cargo test --locked --all-targets
+
+      - name: Run doc tests
+        run: cargo test --locked --doc
+
+      - name: Run clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Build documentation
+        run: cargo doc --locked --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      - name: Run security audit
+        run: cargo audit
+
+      - name: Verify publishable package
+        run: cargo publish --locked --dry-run
+
+  publish:
+    runs-on: ubuntu-latest
+    needs: verify
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      HAS_CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN != '' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Ensure tag matches Cargo.toml version
+        run: |
+          expected_tag="v$(cargo pkgid | sed -E 's/.*@//')"
+          if [ "${GITHUB_REF_NAME}" != "${expected_tag}" ]; then
+            echo "::error title=Tag/version mismatch::Expected ${expected_tag} from Cargo.toml, got ${GITHUB_REF_NAME}."
+            exit 1
+          fi
+
+      - name: Check whether this version is already published
+        id: published
+        run: |
+          pkgid="$(cargo pkgid)"
+          crate_version="${pkgid##*@}"
+          crate_name_version="${pkgid##*#}"
+          crate_name="${crate_name_version%@*}"
+          url="https://crates.io/api/v1/crates/${crate_name}/${crate_version}"
+          status="$(curl -sS -o /tmp/crate-version.json -w '%{http_code}' "${url}")"
+
+          if [ "${status}" = "200" ]; then
+            echo "published=true" >> "$GITHUB_OUTPUT"
+            echo "crate ${crate_name} ${crate_version} is already published; skipping publish"
+          elif [ "${status}" = "404" ]; then
+            echo "published=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error title=crates.io check failed::Unexpected status ${status} while checking ${url}."
+            exit 1
+          fi
+
+      - name: Authenticate to crates.io with trusted publishing
+        if: env.HAS_CARGO_REGISTRY_TOKEN == 'false' && steps.published.outputs.published != 'true'
+        id: crates-auth
+        uses: rust-lang/crates-io-auth-action@v1
+
+      - name: Publish crate with API token
+        if: env.HAS_CARGO_REGISTRY_TOKEN == 'true' && steps.published.outputs.published != 'true'
+        run: cargo publish --locked
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+      - name: Publish crate with trusted publishing
+        if: env.HAS_CARGO_REGISTRY_TOKEN == 'false' && steps.published.outputs.published != 'true'
+        run: cargo publish --locked
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.crates-auth.outputs.token }}

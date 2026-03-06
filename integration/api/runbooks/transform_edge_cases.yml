@@ -1,0 +1,134 @@
+desc: "Edge-case image handling via the transform API"
+runners:
+  req: http://truss:8080
+vars:
+  token: "test-token"
+steps:
+  transform_1px:
+    desc: "Transform a 1x1 pixel PNG (minimum dimension)"
+    req:
+      /images:transform:
+        post:
+          headers:
+            Authorization: "Bearer {{ vars.token }}"
+            Content-Type: "application/json"
+          body:
+            application/json:
+              source:
+                kind: path
+                path: /1px.png
+              options: {}
+    test: |
+      current.res.status == 200
+      && current.res.headers['Content-Type'][0] contains 'image/'
+  transform_large:
+    desc: "Transform a 10000x1 wide PNG (extreme dimension)"
+    req:
+      /images:transform:
+        post:
+          headers:
+            Authorization: "Bearer {{ vars.token }}"
+            Content-Type: "application/json"
+          body:
+            application/json:
+              source:
+                kind: path
+                path: /large.png
+              options: {}
+    test: |
+      current.res.status == 200
+      && current.res.headers['Content-Type'][0] contains 'image/'
+  transform_transparent:
+    desc: "Transform a fully transparent PNG to JPEG (alpha compositing)"
+    req:
+      /images:transform:
+        post:
+          headers:
+            Authorization: "Bearer {{ vars.token }}"
+            Content-Type: "application/json"
+          body:
+            application/json:
+              source:
+                kind: path
+                path: /transparent.png
+              options:
+                format: jpeg
+    test: |
+      current.res.status == 200
+      && current.res.headers['Content-Type'][0] contains 'image/'
+  transform_cmyk:
+    desc: "Transform a CMYK JPEG to PNG (color space conversion)"
+    req:
+      /images:transform:
+        post:
+          headers:
+            Authorization: "Bearer {{ vars.token }}"
+            Content-Type: "application/json"
+          body:
+            application/json:
+              source:
+                kind: path
+                path: /cmyk.jpg
+              options:
+                format: png
+    test: |
+      current.res.status == 200
+      && current.res.headers['Content-Type'][0] contains 'image/'
+  transform_exif_rotated:
+    desc: "Transform an EXIF-rotated JPEG (orientation handling)"
+    req:
+      /images:transform:
+        post:
+          headers:
+            Authorization: "Bearer {{ vars.token }}"
+            Content-Type: "application/json"
+          body:
+            application/json:
+              source:
+                kind: path
+                path: /exif-rotated.jpg
+              options: {}
+    test: |
+      current.res.status == 200
+      && current.res.headers['Content-Type'][0] contains 'image/'
+  transform_truncated_jpeg:
+    desc: "Truncated JPEG returns an error (not 200)"
+    req:
+      /images:transform:
+        post:
+          headers:
+            Authorization: "Bearer {{ vars.token }}"
+            Content-Type: "application/json"
+          body:
+            application/json:
+              source:
+                kind: path
+                path: /truncated.jpg
+              options: {}
+    test: |
+      current.res.status != 200
+  upload_cmyk_jpeg:
+    desc: "Upload a CMYK JPEG via multipart and transform it"
+    req:
+      /images:
+        post:
+          headers:
+            Authorization: "Bearer {{ vars.token }}"
+          body:
+            multipart/form-data:
+              file: /fixtures/cmyk.jpg
+    test: |
+      current.res.status == 200
+      && current.res.headers['Content-Type'][0] contains 'image/'
+  upload_zero_bytes:
+    desc: "Upload an empty file — returns an error"
+    req:
+      /images:
+        post:
+          headers:
+            Authorization: "Bearer {{ vars.token }}"
+          body:
+            multipart/form-data:
+              file: /fixtures/zero-bytes.bin
+    test: |
+      current.res.status != 200

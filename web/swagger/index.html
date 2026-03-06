@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>truss / API reference</title>
+    <meta
+      name="description"
+      content="Interactive Swagger UI for the truss HTTP API."
+    />
+    <link
+      rel="stylesheet"
+      href="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui.css"
+    />
+    <link rel="stylesheet" href="./swagger.css" />
+  </head>
+  <body>
+    <header class="page-header">
+      <div class="page-header__inner">
+        <p class="eyebrow">truss / API reference</p>
+        <h1>Swagger UI</h1>
+        <p class="lede">
+          Interactive reference for the HTTP image transformation API published
+          from this repository's OpenAPI document.
+        </p>
+        <p class="links">
+          <a href="../">WASM demo</a>
+          <a href="../openapi.yaml">Raw OpenAPI YAML</a>
+          <a href="https://github.com/nao1215/truss">Repository</a>
+        </p>
+      </div>
+    </header>
+
+    <main class="page-main">
+      <div id="swagger-ui"></div>
+    </main>
+
+    <script src="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui-standalone-preset.js"></script>
+    <script>
+      window.addEventListener("load", function () {
+        window.ui = window.SwaggerUIBundle({
+          url: "../openapi.yaml",
+          dom_id: "#swagger-ui",
+          deepLinking: true,
+          docExpansion: "list",
+          displayRequestDuration: true,
+          defaultModelsExpandDepth: 1,
+          presets: [
+            window.SwaggerUIBundle.presets.apis,
+            window.SwaggerUIStandalonePreset,
+          ],
+          layout: "BaseLayout",
+        });
+      });
+    </script>
+  </body>
+</html>

@@ -1,0 +1,50 @@
+desc: "Error responses - RFC 7807 problem details"
+runners:
+  req: http://truss:8080
+vars:
+  token: "test-token"
+steps:
+  not_found:
+    desc: "GET to an unknown route returns 404 with application/problem+json"
+    req:
+      /this-route-does-not-exist:
+        get:
+          body: null
+    test: |
+      current.res.status == 404
+      && current.res.headers['Content-Type'][0] == 'application/problem+json'
+      && current.res.body.status == 404
+      && current.res.body.title == 'Not Found'
+  wrong_method:
+    desc: "GET on the transform endpoint (POST-only) returns 404"
+    req:
+      /images:transform:
+        get:
+          body: null
+    test: |
+      current.res.status == 404
+  transform_wrong_content_type:
+    desc: "POST /images:transform without JSON content-type returns 415"
+    req:
+      /images:transform:
+        post:
+          headers:
+            Authorization: "Bearer {{ vars.token }}"
+            Content-Type: "text/plain"
+          body:
+            text/plain: "not json"
+    test: |
+      current.res.status == 415
+  transform_invalid_json:
+    desc: "POST /images:transform with malformed JSON returns 400"
+    req:
+      /images:transform:
+        post:
+          headers:
+            Authorization: "Bearer {{ vars.token }}"
+            Content-Type: "application/json"
+          body:
+            application/json:
+              unexpected_field: true
+    test: |
+      current.res.status == 400

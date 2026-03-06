@@ -1,0 +1,25 @@
+services:
+  truss:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    environment:
+      TRUSS_BEARER_TOKEN: test-token
+      TRUSS_STORAGE_ROOT: /data
+      TRUSS_BIND_ADDR: "0.0.0.0:8080"
+    volumes:
+      - ../fixtures:/data:ro
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+
+  runn:
+    image: ghcr.io/k1low/runn:latest
+    depends_on:
+      - truss
+    volumes:
+      - ./runbooks:/runbooks:ro
+      - ./wait-for-server.sh:/wait-for-server.sh:ro
+      - ../fixtures:/fixtures:ro
+    entrypoint: ["/bin/bash", "/wait-for-server.sh"]
+    command: ["runn", "run", "/runbooks/*.yml", "--verbose", "--scopes", "read:parent"]

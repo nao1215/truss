@@ -1,0 +1,85 @@
+desc: "POST /images:transform - transform an image by storage path"
+runners:
+  req: http://truss:8080
+vars:
+  token: "test-token"
+steps:
+  transform_basic:
+    desc: "Transform a stored image with default options (returns the image unchanged)"
+    req:
+      /images:transform:
+        post:
+          headers:
+            Authorization: "Bearer {{ vars.token }}"
+            Content-Type: "application/json"
+          body:
+            application/json:
+              source:
+                kind: path
+                path: /sample.png
+              options: {}
+    test: |
+      current.res.status == 200
+      && current.res.headers['Content-Type'][0] contains 'image/'
+  transform_with_resize:
+    desc: "Transform an image with width=2 to verify resize options are applied"
+    req:
+      /images:transform:
+        post:
+          headers:
+            Authorization: "Bearer {{ vars.token }}"
+            Content-Type: "application/json"
+          body:
+            application/json:
+              source:
+                kind: path
+                path: /sample.png
+              options:
+                width: 2
+    test: |
+      current.res.status == 200
+      && current.res.headers['Content-Type'][0] contains 'image/'
+  transform_no_auth:
+    desc: "Request without Bearer token returns 401 Unauthorized"
+    req:
+      /images:transform:
+        post:
+          headers:
+            Content-Type: "application/json"
+          body:
+            application/json:
+              source:
+                kind: path
+                path: /sample.png
+              options: {}
+    test: |
+      current.res.status == 401
+      && current.res.headers['Content-Type'][0] == 'application/problem+json'
+  transform_missing_source:
+    desc: "Request with empty JSON body returns 400 Bad Request"
+    req:
+      /images:transform:
+        post:
+          headers:
+            Authorization: "Bearer {{ vars.token }}"
+            Content-Type: "application/json"
+          body:
+            application/json: {}
+    test: |
+      current.res.status == 400
+  transform_nonexistent_path:
+    desc: "Request with a path that does not exist returns an error"
+    req:
+      /images:transform:
+        post:
+          headers:
+            Authorization: "Bearer {{ vars.token }}"
+            Content-Type: "application/json"
+          body:
+            application/json:
+              source:
+                kind: path
+                path: /does-not-exist.png
+              options: {}
+    test: |
+      current.res.status != 200

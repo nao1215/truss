@@ -1,0 +1,15 @@
+name: CLI Integration
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  cli-integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Build and run ShellSpec CLI tests
+        run: |
+          docker build -t truss-cli-test -f integration/cli/Dockerfile .
+          docker run --rm truss-cli-test

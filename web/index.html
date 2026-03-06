@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>truss / browser workshop</title>
+    <meta
+      name="description"
+      content="Local image conversion in the browser with truss WASM."
+    />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="page-shell">
+      <header class="hero panel">
+        <p class="eyebrow">truss / browser workshop</p>
+        <div class="hero-grid">
+          <div>
+            <h1>Local image conversion, quietly.</h1>
+            <p class="lede">
+              Files stay in your browser. No upload path, no background server,
+              no account state.
+            </p>
+          </div>
+          <div class="hero-note">
+            <p>
+              This page is a thin browser adapter over the same Rust core used
+              by the CLI and HTTP server.
+            </p>
+          </div>
+        </div>
+        <div id="capability-strip" class="capability-strip" aria-live="polite"></div>
+      </header>
+
+      <main class="layout">
+        <section class="panel stack">
+          <div class="section-head">
+            <p class="section-kicker">Source</p>
+            <h2>Drop a file</h2>
+          </div>
+
+          <label class="dropzone" for="source-file" id="dropzone">
+            <input id="source-file" type="file" accept="image/*,.svg" />
+            <span class="dropzone-title">Choose an image or drop it here</span>
+            <span class="dropzone-copy"
+              >JPEG, PNG, WebP, AVIF, BMP, and SVG when enabled in this build.</span
+            >
+          </label>
+
+          <div class="preview-block">
+            <div class="preview-frame">
+              <img id="input-preview" alt="Input preview" hidden />
+              <p id="input-placeholder" class="placeholder">
+                Input preview will appear here.
+              </p>
+            </div>
+            <dl id="input-meta" class="meta-grid">
+              <div>
+                <dt>Format</dt>
+                <dd>Waiting for a file</dd>
+              </div>
+              <div>
+                <dt>Dimensions</dt>
+                <dd>—</dd>
+              </div>
+              <div>
+                <dt>Alpha</dt>
+                <dd>—</dd>
+              </div>
+              <div>
+                <dt>Frames</dt>
+                <dd>—</dd>
+              </div>
+            </dl>
+          </div>
+        </section>
+
+        <section class="panel stack">
+          <div class="section-head">
+            <p class="section-kicker">Controls</p>
+            <h2>Transform options</h2>
+          </div>
+
+          <form id="transform-form" class="form-grid">
+            <label>
+              <span>Output format</span>
+              <select id="format" name="format">
+                <option value="jpeg">JPEG</option>
+                <option value="png">PNG</option>
+                <option value="webp">WebP</option>
+                <option value="avif">AVIF</option>
+                <option value="bmp">BMP</option>
+                <option value="svg">SVG</option>
+              </select>
+            </label>
+
+            <label>
+              <span>Width</span>
+              <input id="width" name="width" type="number" min="1" inputmode="numeric" />
+            </label>
+
+            <label>
+              <span>Height</span>
+              <input id="height" name="height" type="number" min="1" inputmode="numeric" />
+            </label>
+
+            <label>
+              <span>Fit</span>
+              <select id="fit" name="fit">
+                <option value="">Auto</option>
+                <option value="contain">Contain</option>
+                <option value="cover">Cover</option>
+                <option value="fill">Fill</option>
+                <option value="inside">Inside</option>
+              </select>
+            </label>
+
+            <label>
+              <span>Position</span>
+              <select id="position" name="position">
+                <option value="">Center</option>
+                <option value="top">Top</option>
+                <option value="top-right">Top right</option>
+                <option value="right">Right</option>
+                <option value="bottom-right">Bottom right</option>
+                <option value="bottom">Bottom</option>
+                <option value="bottom-left">Bottom left</option>
+                <option value="left">Left</option>
+                <option value="top-left">Top left</option>
+              </select>
+            </label>
+
+            <label>
+              <span>Rotation</span>
+              <select id="rotate" name="rotate">
+                <option value="0">0°</option>
+                <option value="90">90°</option>
+                <option value="180">180°</option>
+                <option value="270">270°</option>
+              </select>
+            </label>
+
+            <label class="quality-field" id="quality-field">
+              <span>Quality</span>
+              <div class="quality-pair">
+                <input
+                  id="quality-range"
+                  name="qualityRange"
+                  type="range"
+                  min="1"
+                  max="100"
+                  value="82"
+                />
+                <input
+                  id="quality-number"
+                  name="quality"
+                  type="number"
+                  min="1"
+                  max="100"
+                  value="82"
+                  inputmode="numeric"
+                />
+              </div>
+            </label>
+
+            <label>
+              <span>Background</span>
+              <input
+                id="background"
+                name="background"
+                type="text"
+                maxlength="8"
+                placeholder="E5DED2"
+                spellcheck="false"
+              />
+            </label>
+
+            <label>
+              <span>Metadata</span>
+              <select id="metadata-mode" name="metadataMode">
+                <option value="strip">Strip all</option>
+                <option value="keep">Keep supported metadata</option>
+                <option value="exif">Preserve EXIF only</option>
+              </select>
+            </label>
+
+            <label class="checkbox">
+              <input id="auto-orient" name="autoOrient" type="checkbox" checked />
+              <span>Apply EXIF auto-orient</span>
+            </label>
+          </form>
+
+          <div class="action-row">
+            <button id="transform-button" class="action-button" type="button">
+              Transform in browser
+            </button>
+            <p id="quality-note" class="inline-note">
+              Quality applies to JPEG, AVIF, and WebP when lossy WebP is enabled.
+            </p>
+          </div>
+        </section>
+
+        <section class="panel stack">
+          <div class="section-head">
+            <p class="section-kicker">Result</p>
+            <h2>Preview and download</h2>
+          </div>
+
+          <div class="preview-block">
+            <div class="preview-frame">
+              <img id="output-preview" alt="Output preview" hidden />
+              <p id="output-placeholder" class="placeholder">
+                Transform output will appear here.
+              </p>
+            </div>
+            <dl id="output-meta" class="meta-grid">
+              <div>
+                <dt>Format</dt>
+                <dd>—</dd>
+              </div>
+              <div>
+                <dt>Dimensions</dt>
+                <dd>—</dd>
+              </div>
+              <div>
+                <dt>Alpha</dt>
+                <dd>—</dd>
+              </div>
+              <div>
+                <dt>Frames</dt>
+                <dd>—</dd>
+              </div>
+            </dl>
+          </div>
+
+          <div class="download-row">
+            <a id="download-link" class="download-link disabled" href="#" download>
+              Download output
+            </a>
+            <p id="download-note" class="inline-note">
+              Nothing has been transformed yet.
+            </p>
+          </div>
+
+          <div class="status-stack" aria-live="polite">
+            <p id="status-line" class="status-line">WASM runtime is loading.</p>
+            <ul id="warning-list" class="warning-list" hidden></ul>
+            <div id="error-box" class="error-box" hidden></div>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

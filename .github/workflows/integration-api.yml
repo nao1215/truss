@@ -1,0 +1,21 @@
+name: API Server Integration
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  api-integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Run API integration tests
+        run: |
+          cd integration/api
+          docker compose up --build --abort-on-container-exit --exit-code-from runn
+        timeout-minutes: 10
+      - name: Cleanup
+        if: always()
+        run: |
+          cd integration/api
+          docker compose down --volumes --remove-orphans

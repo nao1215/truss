@@ -1,0 +1,25 @@
+desc: "GET /metrics - Prometheus metrics endpoint"
+runners:
+  req: http://truss:8080
+vars:
+  token: "test-token"
+steps:
+  metrics_ok:
+    desc: "Authenticated request returns Prometheus text metrics"
+    req:
+      /metrics:
+        get:
+          headers:
+            Authorization: "Bearer {{ vars.token }}"
+    test: |
+      current.res.status == 200
+      && current.res.headers['Content-Type'][0] contains 'text/plain'
+  metrics_no_auth:
+    desc: "Request without Bearer token returns 401 Unauthorized"
+    req:
+      /metrics:
+        get:
+          body: null
+    test: |
+      current.res.status == 401
+      && current.res.headers['Content-Type'][0] == 'application/problem+json'

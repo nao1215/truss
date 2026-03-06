@@ -1,0 +1,30 @@
+desc: "POST /images - multipart file upload for image transformation"
+runners:
+  req: http://truss:8080
+vars:
+  token: "test-token"
+steps:
+  upload_basic:
+    desc: "Upload a PNG file via multipart form and receive the transformed image"
+    req:
+      /images:
+        post:
+          headers:
+            Authorization: "Bearer {{ vars.token }}"
+          body:
+            multipart/form-data:
+              file: /fixtures/sample.png
+    test: |
+      current.res.status == 200
+      && current.res.headers['Content-Type'][0] contains 'image/'
+  upload_no_auth:
+    desc: "Upload without Bearer token returns 401 Unauthorized"
+    req:
+      /images:
+        post:
+          body:
+            multipart/form-data:
+              file: /fixtures/sample.png
+    test: |
+      current.res.status == 401
+      && current.res.headers['Content-Type'][0] == 'application/problem+json'

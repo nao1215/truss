@@ -1,0 +1,1013 @@
+openapi: 3.0.3
+info:
+  title: Truss Image Server API
+  version: 0.1.0
+  description: |
+    HTTP API for the Truss image toolkit.
+
+    Successful transform requests return image bytes directly as `image/*` or
+    `image/svg+xml`; they do not return JSON envelopes. Failures are reported as
+    RFC 7807 `application/problem+json`.
+
+    Choose an endpoint based on how the source image is supplied:
+
+    - `GET /images/by-path`: public, cache-friendly delivery for files under the
+      configured storage root.
+    - `GET /images/by-url`: public, cache-friendly delivery for remote HTTP(S)
+      sources.
+    - `POST /images:transform`: private server-to-server transforms using a JSON body.
+    - `POST /images`: private uploads using `multipart/form-data`.
+
+    Common transform options are shared across endpoints. When `format` is omitted,
+    the server first tries `Accept` negotiation and otherwise keeps the input format.
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+
+servers:
+  - url: http://localhost:8080
+    description: Local development
+
+tags:
+  - name: Transform
+    description: Endpoints that fetch or accept an image, apply transform options, and return transformed bytes.
+  - name: Health
+    description: Lightweight probes for liveness and readiness checks.
+  - name: Observability
+    description: Operator-facing metrics and runtime diagnostics.
+
+paths:
+  /images/by-path:
+    get:
+      tags: [Transform]
+      summary: Transform an image from local storage
+      description: |
+        Public, cache-friendly transform endpoint for files that already exist under
+        `TRUSS_STORAGE_ROOT`.
+
+        Use this when the origin asset is available on the same filesystem as the
+        Truss server. The `path` query parameter is resolved relative to the storage
+        root; path traversal and out-of-root access are rejected.
+
+        This endpoint requires signed URL authentication through `keyId`,
+        `expires`, and `signature`.
+
+        Output selection rules:
+
+        - When `format` is present, that format is requested explicitly and the
+          `Accept` header is ignored.
+        - When `format` is omitted, the server tries `Accept` negotiation and
+          otherwise keeps the input format.
+        - When both `width` and `height` are present without `fit`, `contain`
+          is applied.
+      operationId: transformImageByPath
+      security:
+        - SignedUrlAuth: []
+      parameters:
+        - $ref: '#/components/parameters/SourcePath'
+        - $ref: '#/components/parameters/SourceVersion'
+        - $ref: '#/components/parameters/KeyId'
+        - $ref: '#/components/parameters/Expires'
+        - $ref: '#/components/parameters/Signature'
+        - $ref: '#/components/parameters/Width'
+        - $ref: '#/components/parameters/Height'
+        - $ref: '#/components/parameters/Fit'
+        - $ref: '#/components/parameters/Position'
+        - $ref: '#/components/parameters/Format'
+        - $ref: '#/components/parameters/Quality'
+        - $ref: '#/components/parameters/Background'
+        - $ref: '#/components/parameters/Rotate'
+        - $ref: '#/components/parameters/AutoOrient'
+        - $ref: '#/components/parameters/StripMetadata'
+        - $ref: '#/components/parameters/PreserveExif'
+      responses:
+        '200':
+          $ref: '#/components/responses/ImageBinary'
+        '304':
+          $ref: '#/components/responses/NotModified'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '406':
+          $ref: '#/components/responses/NotAcceptable'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /images/by-url:
+    get:
+      tags: [Transform]
+      summary: Transform an image from a remote URL
+      description: |
+        Public, cache-friendly transform endpoint for remote HTTP(S) sources.
+
+        Use this when the source image is hosted elsewhere and should be fetched by
+        Truss on demand. Remote fetches are subject to URL validation, redirect
+        limits, and source size limits.
+
+        This endpoint requires signed URL authentication through `keyId`,
+        `expires`, and `signature`.
+
+        Output selection rules:
+
+        - When `format` is present, that format is requested explicitly and the
+          `Accept` header is ignored.
+        - When `format` is omitted, the server tries `Accept` negotiation and
+          otherwise keeps the input format.
+        - When both `width` and `height` are present without `fit`, `contain`
+          is applied.
+      operationId: transformImageByUrl
+      security:
+        - SignedUrlAuth: []
+      parameters:
+        - $ref: '#/components/parameters/SourceUrl'
+        - $ref: '#/components/parameters/SourceVersion'
+        - $ref: '#/components/parameters/KeyId'
+        - $ref: '#/components/parameters/Expires'
+        - $ref: '#/components/parameters/Signature'
+        - $ref: '#/components/parameters/Width'
+        - $ref: '#/components/parameters/Height'
+        - $ref: '#/components/parameters/Fit'
+        - $ref: '#/components/parameters/Position'
+        - $ref: '#/components/parameters/Format'
+        - $ref: '#/components/parameters/Quality'
+        - $ref: '#/components/parameters/Background'
+        - $ref: '#/components/parameters/Rotate'
+        - $ref: '#/components/parameters/AutoOrient'
+        - $ref: '#/components/parameters/StripMetadata'
+        - $ref: '#/components/parameters/PreserveExif'
+      responses:
+        '200':
+          $ref: '#/components/responses/ImageBinary'
+        '304':
+          $ref: '#/components/responses/NotModified'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '406':
+          $ref: '#/components/responses/NotAcceptable'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+        '502':
+          $ref: '#/components/responses/BadGateway'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '508':
+          $ref: '#/components/responses/LoopDetected'
+
+  /images:transform:
+    post:
+      tags: [Transform]
+      summary: Transform an image by reference
+      description: |
+        Private server-to-server transform endpoint.
+
+        The request body identifies the source image as either a storage-root-relative
+        path or a remote URL and provides an optional `options` object. This is the
+        most convenient endpoint for backend callers that want to authenticate with a
+        Bearer token instead of generating signed public URLs.
+
+        When `options.format` is omitted, the server tries `Accept` negotiation and
+        otherwise keeps the input format.
+      operationId: transformImageByReference
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TransformImageRequest'
+            example:
+              source:
+                kind: path
+                path: /photos/hero.jpg
+                version: v3
+              options:
+                width: 1600
+                format: webp
+                quality: 82
+                autoOrient: true
+                stripMetadata: true
+      responses:
+        '200':
+          $ref: '#/components/responses/ImageBinary'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '406':
+          $ref: '#/components/responses/NotAcceptable'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+        '502':
+          $ref: '#/components/responses/BadGateway'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '508':
+          $ref: '#/components/responses/LoopDetected'
+
+  /images:
+    post:
+      tags: [Transform]
+      summary: Transform an uploaded image
+      description: |
+        Private upload-and-transform endpoint.
+
+        Send a `multipart/form-data` body with a required `file` part containing the
+        source image or SVG, plus an optional `options` part containing JSON that
+        matches `ImageTransformOptions`.
+
+        This endpoint is useful when the caller already has the source bytes in hand
+        and does not want to make the server read from a path or remote URL.
+      operationId: transformUploadedImage
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/UploadImageTransformRequest'
+            encoding:
+              options:
+                contentType: application/json
+      responses:
+        '200':
+          $ref: '#/components/responses/ImageBinary'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /health:
+    get:
+      tags: [Health]
+      summary: Comprehensive health diagnostic
+      description: |
+        Human-oriented diagnostic endpoint that returns version information,
+        process uptime, and detailed readiness checks.
+
+        This endpoint always returns 200 OK, even when individual checks fail,
+        because it is designed for dashboards and operators who need to see the
+        full picture.
+      operationId: getHealth
+      responses:
+        '200':
+          description: Comprehensive health diagnostic
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthDiagnosticResponse'
+              example:
+                status: ok
+                service: truss
+                version: 0.1.0
+                uptimeSeconds: 3600
+                checks:
+                  - name: storageRoot
+                    status: ok
+                  - name: transformCapacity
+                    status: ok
+
+  /health/live:
+    get:
+      tags: [Health]
+      summary: Liveness probe
+      description: |
+        Lightweight liveness probe for container orchestrators (e.g. Kubernetes
+        `livenessProbe`). Returns immediately with minimal information confirming
+        the process is running and can serve HTTP. Does not check external
+        dependencies.
+      operationId: getLiveHealth
+      responses:
+        '200':
+          description: Process is alive
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LivenessResponse'
+              example:
+                status: ok
+                service: truss
+                version: 0.1.0
+
+  /health/ready:
+    get:
+      tags: [Health]
+      summary: Readiness probe
+      description: |
+        Readiness probe for container orchestrators (e.g. Kubernetes
+        `readinessProbe`). Checks that the server is able to accept traffic by
+        verifying the storage root is accessible, the cache root (if configured)
+        is accessible, and the transform pool is not saturated.
+
+        Returns 503 Service Unavailable when any check fails, signalling that
+        traffic should be routed elsewhere.
+      operationId: getReadyHealth
+      responses:
+        '200':
+          description: Server is ready to accept traffic
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReadinessResponse'
+              example:
+                status: ok
+                checks:
+                  - name: storageRoot
+                    status: ok
+                  - name: transformCapacity
+                    status: ok
+        '503':
+          description: Server is not ready to accept traffic
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReadinessResponse'
+              example:
+                status: fail
+                checks:
+                  - name: storageRoot
+                    status: fail
+                  - name: transformCapacity
+                    status: ok
+
+  /metrics:
+    get:
+      tags: [Observability]
+      summary: Prometheus metrics
+      description: |
+        Returns metrics in Prometheus text exposition format (version 0.0.4).
+        Requires Bearer token authentication.
+      operationId: getMetrics
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Prometheus text exposition format
+          content:
+            text/plain:
+              schema:
+                type: string
+              example: |
+                # HELP truss_process_up Whether the process is running.
+                # TYPE truss_process_up gauge
+                truss_process_up 1
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+components:
+  securitySchemes:
+    SignedUrlAuth:
+      type: apiKey
+      in: query
+      name: signature
+      description: |
+        HMAC-SHA256 signed URL authentication.
+        Requires `keyId`, `expires`, and `signature` query parameters on public GET
+        endpoints.
+
+        The canonical form is:
+        `METHOD\nAUTHORITY\nREQUEST_PATH\nCANONICAL_QUERY`
+
+        In practice, callers usually generate these URLs with `truss sign` or an
+        equivalent implementation that matches the server's canonicalization rules.
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque
+      description: |
+        Bearer token authentication for private server-to-server and upload endpoints.
+
+  parameters:
+    SourcePath:
+      name: path
+      in: query
+      required: true
+      description: |
+        Source path resolved relative to `TRUSS_STORAGE_ROOT`.
+        A leading slash is allowed, but the final resolved path must stay under the
+        storage root.
+      schema:
+        type: string
+        minLength: 1
+      example: /photos/hero.jpg
+    SourceUrl:
+      name: url
+      in: query
+      required: true
+      description: |
+        Remote HTTP(S) URL to fetch the source image from.
+        Private-network and loopback targets may be rejected depending on server configuration.
+      schema:
+        type: string
+        format: uri
+      example: https://example.com/images/hero.png
+    SourceVersion:
+      name: version
+      in: query
+      required: false
+      description: |
+        Optional cache-busting version tag for the source.
+        This value becomes part of the cache key but is not fetched from the origin.
+      schema:
+        type: string
+        minLength: 1
+      example: v3
+    KeyId:
+      name: keyId
+      in: query
+      required: true
+      description: Key identifier that selects the shared secret used for signed URL verification.
+      schema:
+        type: string
+        minLength: 1
+      example: public-demo
+    Expires:
+      name: expires
+      in: query
+      required: true
+      description: |
+        Expiration time as a Unix timestamp in seconds.
+        Requests are rejected after this instant.
+      schema:
+        type: integer
+        format: int64
+        minimum: 1
+      example: 1893456000
+    Signature:
+      name: signature
+      in: query
+      required: true
+      description: Lowercase hex-encoded HMAC-SHA256 signature
+      schema:
+        type: string
+        minLength: 1
+      example: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+    Width:
+      name: width
+      in: query
+      required: false
+      description: |
+        Requested output width in pixels.
+        When `height` is omitted, the image is resized proportionally.
+      schema:
+        type: integer
+        minimum: 1
+      example: 1200
+    Height:
+      name: height
+      in: query
+      required: false
+      description: |
+        Requested output height in pixels.
+        When `width` is omitted, the image is resized proportionally.
+      schema:
+        type: integer
+        minimum: 1
+      example: 630
+    Fit:
+      name: fit
+      in: query
+      required: false
+      description: |
+        Resize strategy. Only meaningful when both width and height are set.
+        Defaults to `contain`.
+
+        - `contain`: fit inside the box without cropping
+        - `cover`: fill the box, cropping excess
+        - `fill`: stretch to the exact box
+        - `inside`: like contain, but never upscale
+      schema:
+        type: string
+        enum: [contain, cover, fill, inside]
+        default: contain
+      example: cover
+    Position:
+      name: position
+      in: query
+      required: false
+      description: |
+        Crop anchor for cover mode and padding placement.
+        Only meaningful when both width and height are set.
+        Defaults to `center`.
+      schema:
+        type: string
+        enum: [center, top, right, bottom, left, top-left, top-right, bottom-left, bottom-right]
+        default: center
+      example: top
+    Format:
+      name: format
+      in: query
+      required: false
+      description: |
+        Output image format.
+        When present, the `Accept` header is ignored.
+        `svg` output is only valid for SVG input.
+      schema:
+        type: string
+        enum: [jpeg, png, webp, avif, bmp, svg]
+      example: webp
+    Quality:
+      name: quality
+      in: query
+      required: false
+      description: |
+        Encoding quality for lossy formats (jpeg, webp, avif).
+        Returns 400 for lossless formats.
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+      example: 82
+    Background:
+      name: background
+      in: query
+      required: false
+      description: |
+        Background color as RRGGBB or RRGGBBAA hex (no leading #).
+        Mainly visible when padding or flattening transparency into opaque formats.
+      schema:
+        type: string
+        pattern: '^[0-9A-Fa-f]{6}([0-9A-Fa-f]{2})?$'
+      example: ffffff
+    Rotate:
+      name: rotate
+      in: query
+      required: false
+      description: Rotation in degrees, applied after EXIF auto-orient
+      schema:
+        type: integer
+        enum: [0, 90, 180, 270]
+        default: 0
+      example: 90
+    AutoOrient:
+      name: autoOrient
+      in: query
+      required: false
+      description: |
+        Apply EXIF orientation when the input provides it, then reset the orientation tag.
+        Most useful for JPEG camera images.
+      schema:
+        type: boolean
+        default: true
+      example: true
+    StripMetadata:
+      name: stripMetadata
+      in: query
+      required: false
+      description: |
+        Remove metadata from the output when `true`.
+        Set this to `false` to keep supported metadata where the output encoder can retain it.
+      schema:
+        type: boolean
+        default: true
+      example: true
+    PreserveExif:
+      name: preserveExif
+      in: query
+      required: false
+      description: |
+        Preserve EXIF data only. Requires `stripMetadata=false`.
+        When `stripMetadata=false` and `preserveExif=false`, the server keeps all metadata
+        that the selected output encoder supports.
+        Returns 400 when output format is SVG.
+      schema:
+        type: boolean
+        default: false
+      example: false
+
+  schemas:
+    PathImageSource:
+      type: object
+      description: Source image stored under the server's configured storage root.
+      additionalProperties: false
+      required: [kind, path]
+      properties:
+        kind:
+          type: string
+          enum: [path]
+        path:
+          type: string
+          minLength: 1
+        version:
+          type: string
+          minLength: 1
+      example:
+        kind: path
+        path: /photos/hero.jpg
+        version: v3
+    UrlImageSource:
+      type: object
+      description: Source image fetched from a remote HTTP(S) URL.
+      additionalProperties: false
+      required: [kind, url]
+      properties:
+        kind:
+          type: string
+          enum: [url]
+        url:
+          type: string
+          format: uri
+        version:
+          type: string
+          minLength: 1
+      example:
+        kind: url
+        url: https://example.com/images/hero.png
+        version: v3
+    ImageSource:
+      description: Exactly one source descriptor, either a storage path or a remote URL.
+      oneOf:
+        - $ref: '#/components/schemas/PathImageSource'
+        - $ref: '#/components/schemas/UrlImageSource'
+      discriminator:
+        propertyName: kind
+        mapping:
+          path: '#/components/schemas/PathImageSource'
+          url: '#/components/schemas/UrlImageSource'
+    ImageTransformOptions:
+      type: object
+      description: |
+        Shared transform options used by the JSON and multipart endpoints.
+        The same semantics also apply to equivalent query parameters on public GET endpoints.
+      additionalProperties: false
+      properties:
+        width:
+          type: integer
+          minimum: 1
+          description: Requested output width in pixels.
+        height:
+          type: integer
+          minimum: 1
+          description: Requested output height in pixels.
+        fit:
+          type: string
+          enum: [contain, cover, fill, inside]
+          default: contain
+          description: Resize strategy used when both width and height are present.
+        position:
+          type: string
+          enum: [center, top, right, bottom, left, top-left, top-right, bottom-left, bottom-right]
+          default: center
+          description: Crop anchor or padding placement for bounded resizes.
+        format:
+          type: string
+          enum: [jpeg, png, webp, avif, bmp, svg]
+          description: Explicit output format. When omitted, the server negotiates or keeps the input format.
+        quality:
+          type: integer
+          minimum: 1
+          maximum: 100
+          description: Quality for lossy outputs (`jpeg`, `webp`, `avif`).
+        background:
+          type: string
+          pattern: '^[0-9A-Fa-f]{6}([0-9A-Fa-f]{2})?$'
+          description: Background color for padding or flattening transparency.
+        rotate:
+          type: integer
+          enum: [0, 90, 180, 270]
+          default: 0
+          description: Extra clockwise rotation applied after auto-orientation.
+        autoOrient:
+          type: boolean
+          default: true
+          description: Apply EXIF orientation when present.
+        stripMetadata:
+          type: boolean
+          default: true
+          description: Remove metadata from the output when `true`.
+        preserveExif:
+          type: boolean
+          default: false
+          description: Preserve EXIF only. Requires `stripMetadata=false`.
+      example:
+        width: 1600
+        height: 900
+        fit: cover
+        position: center
+        format: webp
+        quality: 82
+        autoOrient: true
+        stripMetadata: true
+    TransformImageRequest:
+      type: object
+      description: JSON request body for transforming a path- or URL-based source.
+      additionalProperties: false
+      required: [source]
+      properties:
+        source:
+          $ref: '#/components/schemas/ImageSource'
+        options:
+          $ref: '#/components/schemas/ImageTransformOptions'
+      example:
+        source:
+          kind: path
+          path: /photos/hero.jpg
+        options:
+          width: 1600
+          format: webp
+          quality: 82
+    UploadImageTransformRequest:
+      type: object
+      description: Multipart request body containing the source file and optional transform options.
+      additionalProperties: false
+      required: [file]
+      properties:
+        file:
+          type: string
+          format: binary
+          description: The image or SVG file to transform.
+        options:
+          $ref: '#/components/schemas/ImageTransformOptions'
+    LivenessResponse:
+      type: object
+      description: Minimal liveness payload confirming the process is running.
+      additionalProperties: false
+      required: [status, service, version]
+      properties:
+        status:
+          type: string
+          enum: [ok]
+        service:
+          type: string
+          enum: [truss]
+        version:
+          type: string
+          description: Semantic version of the running binary.
+          example: "0.1.0"
+    ReadinessResponse:
+      type: object
+      description: Readiness payload with individual dependency checks.
+      additionalProperties: false
+      required: [status, checks]
+      properties:
+        status:
+          type: string
+          enum: [ok, fail]
+        checks:
+          type: array
+          items:
+            $ref: '#/components/schemas/HealthCheck'
+    HealthDiagnosticResponse:
+      type: object
+      description: Comprehensive diagnostic payload with version, uptime, and checks.
+      additionalProperties: false
+      required: [status, service, version, uptimeSeconds, checks]
+      properties:
+        status:
+          type: string
+          enum: [ok, fail]
+        service:
+          type: string
+          enum: [truss]
+        version:
+          type: string
+          description: Semantic version of the running binary.
+          example: "0.1.0"
+        uptimeSeconds:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Seconds since the server process started.
+        checks:
+          type: array
+          items:
+            $ref: '#/components/schemas/HealthCheck'
+    HealthCheck:
+      type: object
+      description: Individual dependency check result.
+      additionalProperties: false
+      required: [name, status]
+      properties:
+        name:
+          type: string
+          description: Name of the checked dependency.
+          example: storageRoot
+        status:
+          type: string
+          enum: [ok, fail]
+    ProblemDetail:
+      type: object
+      description: RFC 7807 Problem Details
+      required: [type, title, status, detail]
+      properties:
+        type:
+          type: string
+          example: "about:blank"
+        title:
+          type: string
+          example: "Bad Request"
+        status:
+          type: integer
+          example: 400
+        detail:
+          type: string
+          example: "missing required query parameter: path"
+
+  responses:
+    ImageBinary:
+      description: |
+        Transformed image or sanitized SVG bytes.
+        The exact response media type depends on the selected output format.
+      headers:
+        Cache-Control:
+          description: |
+            `public, max-age=3600, stale-while-revalidate=60` for public GET endpoints.
+            `no-store` for private endpoints.
+          schema:
+            type: string
+        ETag:
+          description: SHA-256 based entity tag in the form `"sha256-<hex>"`
+          schema:
+            type: string
+        Vary:
+          description: Set to `Accept` when content negotiation was used
+          schema:
+            type: string
+        Cache-Status:
+          description: RFC 9211 cache status (`"truss"; hit` or `"truss"; fwd=miss`)
+          schema:
+            type: string
+        Age:
+          description: Seconds since the response was cached (only on cache hits)
+          schema:
+            type: integer
+        X-Content-Type-Options:
+          description: Always set to `nosniff`
+          schema:
+            type: string
+        Content-Disposition:
+          description: Always `inline; filename="truss.<ext>"`
+          schema:
+            type: string
+        Content-Security-Policy:
+          description: Set to `sandbox` for SVG output only
+          schema:
+            type: string
+      content:
+        image/jpeg:
+          schema:
+            type: string
+            format: binary
+        image/png:
+          schema:
+            type: string
+            format: binary
+        image/webp:
+          schema:
+            type: string
+            format: binary
+        image/avif:
+          schema:
+            type: string
+            format: binary
+        image/bmp:
+          schema:
+            type: string
+            format: binary
+        image/svg+xml:
+          schema:
+            type: string
+            format: binary
+    NotModified:
+      description: ETag matched the If-None-Match header (public GET only)
+      headers:
+        ETag:
+          schema:
+            type: string
+        Cache-Control:
+          schema:
+            type: string
+        Cache-Status:
+          schema:
+            type: string
+    BadRequest:
+      description: Invalid request parameters or body
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetail'
+          example:
+            type: about:blank
+            title: Bad Request
+            status: 400
+            detail: fit requires both width and height
+    Unauthorized:
+      description: Authentication failed or missing
+      headers:
+        WWW-Authenticate:
+          description: Set to `Bearer` for Bearer token endpoints
+          schema:
+            type: string
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetail'
+    Forbidden:
+      description: Access denied (e.g. path traversal attempt)
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetail'
+    NotFound:
+      description: Source file or route not found
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetail'
+    NotAcceptable:
+      description: |
+        `Accept` header negotiation failed because none of the requested response media types
+        matched the formats supported by the server.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetail'
+    PayloadTooLarge:
+      description: Request body or remote source exceeds size limit
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetail'
+    UnsupportedMediaType:
+      description: |
+        Unsupported input format, unsupported output format, or wrong request `Content-Type`.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetail'
+    InternalError:
+      description: Internal server error
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetail'
+    NotImplemented:
+      description: Requested transform is not supported
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetail'
+    BadGateway:
+      description: Remote origin fetch failed
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetail'
+    ServiceUnavailable:
+      description: Server overloaded or required configuration missing
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetail'
+    LoopDetected:
+      description: Too many redirects when fetching remote source
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetail'
