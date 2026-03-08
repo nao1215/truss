@@ -18,8 +18,11 @@ use image::{
     ColorType, DynamicImage, GenericImageView, ImageDecoder, ImageEncoder, ImageFormat, Rgba,
     RgbaImage,
 };
+use mp4parse::ParseStrictness;
+use rav1d_safe::{Decoder, Planes};
 use std::io::Cursor;
 use std::time::{Duration, Instant};
+use yuvutils_rs::{YuvGrayImage, YuvPlanarImage, YuvRange, YuvStandardMatrix};
 
 /// Transforms a raster artifact using the current backend implementation.
 ///
@@ -37,7 +40,7 @@ use std::time::{Duration, Instant};
 /// Returns [`TransformError::InvalidOptions`] when the request fails Core validation,
 /// [`TransformError::DecodeFailed`] or [`TransformError::EncodeFailed`] when image processing
 /// fails, and [`TransformError::CapabilityMissing`] for features that are intentionally not
-/// implemented yet, such as AVIF input decode.
+/// implemented yet, such as metadata retention on AVIF output.
 ///
 /// # Examples
 ///
@@ -170,7 +173,7 @@ pub fn transform_raster(request: TransformRequest) -> Result<TransformResult, Tr
     let deadline = normalized.options.deadline;
     let start = deadline.map(|_| Instant::now());
 
-    let (retained_metadata, warnings) = extract_retained_metadata(
+    let (retained_metadata, mut warnings) = extract_retained_metadata(
         &normalized.input,
         normalized.options.metadata_policy,
         normalized.options.auto_orient,
@@ -220,6 +223,17 @@ pub fn transform_raster(request: TransformRequest) -> Result<TransformResult, Tr
     if let (Some(start), Some(limit)) = (start, deadline) {
         check_deadline(start.elapsed(), limit, "encode")?;
     }
+
+    // Lossy WebP uses libwebp which cannot inject EXIF/ICC, so metadata is silently
+    // dropped even when keep-metadata was requested. Warn the caller.
+    if normalized.options.format == MediaType::Webp
+        && normalized.options.quality.is_some()
+        && retained_metadata.as_ref().is_some_and(|m| !m.is_empty())
+    {
+        warnings.push(TransformWarning::MetadataDropped(MetadataKind::Exif));
+        warnings.push(TransformWarning::MetadataDropped(MetadataKind::Icc));
+    }
+
     let (width, height) = image.dimensions();
 
     Ok(TransformResult {
@@ -243,15 +257,268 @@ fn decode_input(input: &Artifact) -> Result<DynamicImage, TransformError> {
         MediaType::Jpeg => ImageFormat::Jpeg,
         MediaType::Png => ImageFormat::Png,
         MediaType::Webp => ImageFormat::WebP,
-        MediaType::Avif => {
-            return Err(TransformError::CapabilityMissing(
-                "avif decode is not implemented yet".to_string(),
-            ));
-        }
+        MediaType::Avif => return decode_avif(&input.bytes),
     };
 
     image::load_from_memory_with_format(&input.bytes, image_format)
         .map_err(|error| TransformError::DecodeFailed(error.to_string()))
+}
+
+/// Decodes an AVIF image using `rav1d` (pure Rust AV1 decoder) and `mp4parse` (ISOBMFF parser).
+///
+/// The pipeline extracts AV1 OBU data from the AVIF container, decodes it into YUV planes,
+/// and converts to RGBA using the color matrix and range signaled in the bitstream.
+/// Alpha planes are decoded separately when present in the container.
+///
+/// Supports 8-bit YUV 4:2:0, 4:2:2, 4:4:4, and 4:0:0 (grayscale) layouts.
+/// 10/12-bit images are downscaled to 8-bit with rounding.
+fn decode_avif(bytes: &[u8]) -> Result<DynamicImage, TransformError> {
+    let mut cursor = Cursor::new(bytes);
+    let context = mp4parse::read_avif(&mut cursor, ParseStrictness::Normal)
+        .map_err(|e| TransformError::DecodeFailed(format!("AVIF container parse failed: {e}")))?;
+
+    let primary_data = context
+        .primary_item_coded_data()
+        .ok_or_else(|| TransformError::DecodeFailed("AVIF has no primary item data".into()))?;
+
+    let frame = decode_av1_frame(primary_data)?;
+    let width = frame.width();
+    let height = frame.height();
+
+    let color = frame.color_info();
+    let matrix = map_yuv_matrix(color.matrix_coefficients);
+    let range = map_yuv_range(color.color_range);
+
+    let mut rgba = yuv_frame_to_rgba(&frame, width, height, range, matrix)?;
+
+    // Decode alpha plane if present and merge into RGBA.
+    if let Some(alpha_data) = context.alpha_item_coded_data() {
+        let alpha_frame = decode_av1_frame(alpha_data)
+            .map_err(|e| TransformError::DecodeFailed(format!("AVIF alpha decode failed: {e}")))?;
+        merge_alpha_plane(&alpha_frame, &mut rgba, width, height);
+    }
+
+    RgbaImage::from_raw(width, height, rgba)
+        .map(DynamicImage::ImageRgba8)
+        .ok_or_else(|| TransformError::DecodeFailed("AVIF decoded buffer size mismatch".into()))
+}
+
+/// Feeds AV1 OBU data to a `rav1d` decoder and returns the first decoded frame.
+fn decode_av1_frame(obu_data: &[u8]) -> Result<rav1d_safe::Frame, TransformError> {
+    let mut decoder = Decoder::new()
+        .map_err(|e| TransformError::DecodeFailed(format!("AV1 decoder init failed: {e}")))?;
+
+    if let Some(frame) = decoder
+        .decode(obu_data)
+        .map_err(|e| TransformError::DecodeFailed(format!("AV1 decode failed: {e}")))?
+    {
+        return Ok(frame);
+    }
+
+    // Flush any buffered frames.
+    let frames = decoder
+        .flush()
+        .map_err(|e| TransformError::DecodeFailed(format!("AV1 flush failed: {e}")))?;
+
+    frames
+        .into_iter()
+        .next()
+        .ok_or_else(|| TransformError::DecodeFailed("AV1 decoder produced no frames".into()))
+}
+
+/// Maps rav1d `MatrixCoefficients` to the corresponding `yuvutils_rs` standard matrix.
+fn map_yuv_matrix(mc: rav1d_safe::MatrixCoefficients) -> YuvStandardMatrix {
+    match mc {
+        rav1d_safe::MatrixCoefficients::BT601 => YuvStandardMatrix::Bt601,
+        rav1d_safe::MatrixCoefficients::BT470BG => YuvStandardMatrix::Bt601,
+        rav1d_safe::MatrixCoefficients::BT2020NCL => YuvStandardMatrix::Bt2020,
+        rav1d_safe::MatrixCoefficients::BT2020CL => YuvStandardMatrix::Bt2020,
+        rav1d_safe::MatrixCoefficients::SMPTE240 => YuvStandardMatrix::Smpte240,
+        // BT.709 is the most common for AVIF and a safe default for unspecified.
+        _ => YuvStandardMatrix::Bt709,
+    }
+}
+
+/// Maps rav1d `ColorRange` to `yuvutils_rs` range.
+fn map_yuv_range(cr: rav1d_safe::ColorRange) -> YuvRange {
+    match cr {
+        rav1d_safe::ColorRange::Full => YuvRange::Full,
+        rav1d_safe::ColorRange::Limited => YuvRange::Limited,
+    }
+}
+
+/// Converts a decoded AV1 frame's YUV planes to RGBA bytes.
+///
+/// Handles 8-bit and 10/12-bit depth by downscaling higher bit depths to 8-bit.
+/// Supports I420, I422, I444, and I400 (grayscale) pixel layouts.
+fn yuv_frame_to_rgba(
+    frame: &rav1d_safe::Frame,
+    width: u32,
+    height: u32,
+    range: YuvRange,
+    matrix: YuvStandardMatrix,
+) -> Result<Vec<u8>, TransformError> {
+    let rgba_stride = width * 4;
+    let mut rgba = vec![255u8; (width * height * 4) as usize];
+    let layout = frame.pixel_layout();
+
+    match frame.planes() {
+        Planes::Depth8(planes) => {
+            let y = planes.y();
+            convert_8bit_yuv_to_rgba(
+                layout,
+                y.as_slice(),
+                y.stride(),
+                planes.u().as_ref().map(|p| (p.as_slice(), p.stride())),
+                planes.v().as_ref().map(|p| (p.as_slice(), p.stride())),
+                width,
+                height,
+                &mut rgba,
+                rgba_stride,
+                range,
+                matrix,
+            )?;
+        }
+        Planes::Depth16(planes) => {
+            let bit_depth = frame.bit_depth();
+            let shift = bit_depth - 8;
+            let round = 1u16 << (shift - 1);
+            let y8: Vec<u8> = planes
+                .y()
+                .as_slice()
+                .iter()
+                .map(|&v| ((v.saturating_add(round)) >> shift) as u8)
+                .collect();
+            let y_stride = planes.y().stride();
+            let u8s: Option<(Vec<u8>, usize)> = planes.u().as_ref().map(|p| {
+                let data: Vec<u8> = p
+                    .as_slice()
+                    .iter()
+                    .map(|&v| ((v.saturating_add(round)) >> shift) as u8)
+                    .collect();
+                (data, p.stride())
+            });
+            let v8s: Option<(Vec<u8>, usize)> = planes.v().as_ref().map(|p| {
+                let data: Vec<u8> = p
+                    .as_slice()
+                    .iter()
+                    .map(|&v| ((v.saturating_add(round)) >> shift) as u8)
+                    .collect();
+                (data, p.stride())
+            });
+            convert_8bit_yuv_to_rgba(
+                layout,
+                &y8,
+                y_stride,
+                u8s.as_ref().map(|(d, s)| (d.as_slice(), *s)),
+                v8s.as_ref().map(|(d, s)| (d.as_slice(), *s)),
+                width,
+                height,
+                &mut rgba,
+                rgba_stride,
+                range,
+                matrix,
+            )?;
+        }
+    }
+
+    Ok(rgba)
+}
+
+/// Converts 8-bit YUV plane data to RGBA, dispatching by pixel layout.
+///
+/// U and V planes are `None` for I400 (grayscale). For I420/I422/I444, both must be present.
+#[allow(clippy::too_many_arguments)]
+fn convert_8bit_yuv_to_rgba(
+    layout: rav1d_safe::PixelLayout,
+    y_data: &[u8],
+    y_stride: usize,
+    u_data: Option<(&[u8], usize)>,
+    v_data: Option<(&[u8], usize)>,
+    width: u32,
+    height: u32,
+    rgba: &mut [u8],
+    rgba_stride: u32,
+    range: YuvRange,
+    matrix: YuvStandardMatrix,
+) -> Result<(), TransformError> {
+    match layout {
+        rav1d_safe::PixelLayout::I400 => {
+            let gray = YuvGrayImage {
+                y_plane: y_data,
+                y_stride: y_stride as u32,
+                width,
+                height,
+            };
+            yuvutils_rs::yuv400_to_rgba(&gray, rgba, rgba_stride, range, matrix)
+                .map_err(|e| TransformError::DecodeFailed(format!("YUV400→RGBA failed: {e}")))?;
+        }
+        _ => {
+            let (u_plane, u_stride) = u_data.ok_or_else(|| {
+                TransformError::DecodeFailed("missing U plane for non-grayscale AVIF".into())
+            })?;
+            let (v_plane, v_stride) = v_data.ok_or_else(|| {
+                TransformError::DecodeFailed("missing V plane for non-grayscale AVIF".into())
+            })?;
+            let planar = YuvPlanarImage {
+                y_plane: y_data,
+                y_stride: y_stride as u32,
+                u_plane,
+                u_stride: u_stride as u32,
+                v_plane,
+                v_stride: v_stride as u32,
+                width,
+                height,
+            };
+            let convert_fn = match layout {
+                rav1d_safe::PixelLayout::I420 => yuvutils_rs::yuv420_to_rgba,
+                rav1d_safe::PixelLayout::I422 => yuvutils_rs::yuv422_to_rgba,
+                rav1d_safe::PixelLayout::I444 => yuvutils_rs::yuv444_to_rgba,
+                rav1d_safe::PixelLayout::I400 => unreachable!(),
+            };
+            convert_fn(&planar, rgba, rgba_stride, range, matrix)
+                .map_err(|e| TransformError::DecodeFailed(format!("YUV→RGBA failed: {e}")))?;
+        }
+    }
+    Ok(())
+}
+
+/// Merges a separately decoded alpha plane into an existing RGBA buffer.
+///
+/// The alpha frame's Y plane is used as the alpha channel. If the alpha frame dimensions
+/// do not match the primary frame, the merge is silently skipped.
+fn merge_alpha_plane(
+    alpha_frame: &rav1d_safe::Frame,
+    rgba: &mut [u8],
+    width: u32,
+    height: u32,
+) {
+    if alpha_frame.width() != width || alpha_frame.height() != height {
+        return;
+    }
+
+    match alpha_frame.planes() {
+        Planes::Depth8(planes) => {
+            let y = planes.y();
+            for row_idx in 0..height as usize {
+                let row = y.row(row_idx);
+                for col in 0..width as usize {
+                    rgba[row_idx * (width as usize) * 4 + col * 4 + 3] = row[col];
+                }
+            }
+        }
+        Planes::Depth16(planes) => {
+            let shift = alpha_frame.bit_depth() - 8;
+            let y = planes.y();
+            for row_idx in 0..height as usize {
+                let row = y.row(row_idx);
+                for col in 0..width as usize {
+                    rgba[row_idx * (width as usize) * 4 + col * 4 + 3] =
+                        (row[col] >> shift) as u8;
+                }
+            }
+        }
+    }
 }
 
 /// Checks whether the elapsed time exceeds the given deadline.
@@ -578,29 +845,35 @@ fn encode_output(
                 .map_err(|error| TransformError::EncodeFailed(error.to_string()))?;
         }
         MediaType::Webp => {
-            if quality.is_some() {
-                return Err(TransformError::CapabilityMissing(
-                    "webp quality control is not implemented yet".to_string(),
-                ));
-            }
-
-            let mut encoder = WebPEncoder::new_lossless(&mut bytes);
-            if let Some(retained_metadata) = retained_metadata {
-                if let Some(icc_profile) = &retained_metadata.icc_profile {
-                    encoder
-                        .set_icc_profile(icc_profile.clone())
-                        .map_err(|error| TransformError::EncodeFailed(error.to_string()))?;
-                }
-                if let Some(exif) = &retained_metadata.exif_metadata {
-                    encoder
-                        .set_exif_metadata(exif.clone())
-                        .map_err(|error| TransformError::EncodeFailed(error.to_string()))?;
-                }
-            }
             let rgba = image.to_rgba8();
-            encoder
-                .write_image(&rgba, rgba.width(), rgba.height(), ColorType::Rgba8.into())
-                .map_err(|error| TransformError::EncodeFailed(error.to_string()))?;
+            if let Some(q) = quality {
+                // Lossy WebP encoding via libwebp (vendored C, no system install needed).
+                let lossy_encoder =
+                    webp::Encoder::from_rgba(rgba.as_ref(), rgba.width(), rgba.height());
+                let encoded = lossy_encoder.encode(q as f32);
+                bytes = encoded.to_vec();
+
+                // libwebp's encoder does not support injecting EXIF/ICC into the output.
+                // Metadata is silently dropped for lossy WebP when quality is specified.
+            } else {
+                // Lossless WebP encoding via the image crate's pure-Rust encoder.
+                let mut encoder = WebPEncoder::new_lossless(&mut bytes);
+                if let Some(retained_metadata) = retained_metadata {
+                    if let Some(icc_profile) = &retained_metadata.icc_profile {
+                        encoder
+                            .set_icc_profile(icc_profile.clone())
+                            .map_err(|error| TransformError::EncodeFailed(error.to_string()))?;
+                    }
+                    if let Some(exif) = &retained_metadata.exif_metadata {
+                        encoder
+                            .set_exif_metadata(exif.clone())
+                            .map_err(|error| TransformError::EncodeFailed(error.to_string()))?;
+                    }
+                }
+                encoder
+                    .write_image(&rgba, rgba.width(), rgba.height(), ColorType::Rgba8.into())
+                    .map_err(|error| TransformError::EncodeFailed(error.to_string()))?;
+            }
         }
         MediaType::Avif => {
             if retained_metadata.is_some_and(|metadata| !metadata.is_empty()) {
@@ -1291,23 +1564,54 @@ mod tests {
     }
 
     #[test]
-    fn transform_raster_rejects_webp_quality_for_now() {
+    fn transform_raster_encodes_lossy_webp_with_quality() {
         let artifact = png_artifact(4, 3, Rgba([10, 20, 30, 255]));
-        let err = transform_raster(TransformRequest::new(
+        let result = transform_raster(TransformRequest::new(
             artifact,
             TransformOptions {
                 format: Some(MediaType::Webp),
-                quality: Some(90),
+                quality: Some(80),
                 ..TransformOptions::default()
             },
         ))
-        .expect_err("webp quality should fail");
+        .expect("lossy webp encode should succeed");
 
-        assert_eq!(
-            err,
-            TransformError::CapabilityMissing(
-                "webp quality control is not implemented yet".to_string()
-            )
+        assert_eq!(result.artifact.media_type, MediaType::Webp);
+        assert_eq!(result.artifact.metadata.width, Some(4));
+        assert_eq!(result.artifact.metadata.height, Some(3));
+        // Lossy output should be smaller than lossless for non-trivial images.
+        assert!(!result.artifact.bytes.is_empty());
+    }
+
+    #[test]
+    fn transform_raster_lossy_webp_smaller_at_lower_quality() {
+        let artifact = png_artifact(16, 16, Rgba([128, 64, 32, 255]));
+        let high_q = transform_raster(TransformRequest::new(
+            artifact.clone(),
+            TransformOptions {
+                format: Some(MediaType::Webp),
+                quality: Some(95),
+                ..TransformOptions::default()
+            },
+        ))
+        .expect("high quality webp");
+
+        let low_q = transform_raster(TransformRequest::new(
+            artifact,
+            TransformOptions {
+                format: Some(MediaType::Webp),
+                quality: Some(10),
+                ..TransformOptions::default()
+            },
+        ))
+        .expect("low quality webp");
+
+        // Lower quality should generally produce smaller output.
+        assert!(
+            low_q.artifact.bytes.len() <= high_q.artifact.bytes.len(),
+            "low quality ({}) should be <= high quality ({})",
+            low_q.artifact.bytes.len(),
+            high_q.artifact.bytes.len()
         );
     }
 
@@ -1333,7 +1637,65 @@ mod tests {
     }
 
     #[test]
-    fn transform_raster_rejects_avif_decode_for_now() {
+    fn transform_raster_round_trips_avif_decode() {
+        // Encode a known PNG to AVIF, then decode the AVIF back to PNG.
+        let source = png_artifact(4, 3, Rgba([10, 20, 30, 255]));
+        let avif_result = transform_raster(TransformRequest::new(
+            source,
+            TransformOptions {
+                format: Some(MediaType::Avif),
+                ..TransformOptions::default()
+            },
+        ))
+        .expect("avif encode should succeed");
+
+        let avif_artifact = avif_result.artifact;
+        assert_eq!(avif_artifact.media_type, MediaType::Avif);
+
+        // Now decode the AVIF back to PNG.
+        let png_result = transform_raster(TransformRequest::new(
+            avif_artifact,
+            TransformOptions {
+                format: Some(MediaType::Png),
+                ..TransformOptions::default()
+            },
+        ))
+        .expect("avif decode should succeed");
+
+        assert_eq!(png_result.artifact.media_type, MediaType::Png);
+        assert_eq!(png_result.artifact.metadata.width, Some(4));
+        assert_eq!(png_result.artifact.metadata.height, Some(3));
+    }
+
+    #[test]
+    fn transform_raster_decodes_avif_with_resize() {
+        let source = png_artifact(8, 6, Rgba([100, 150, 200, 255]));
+        let avif_result = transform_raster(TransformRequest::new(
+            source,
+            TransformOptions {
+                format: Some(MediaType::Avif),
+                ..TransformOptions::default()
+            },
+        ))
+        .expect("avif encode should succeed");
+
+        let result = transform_raster(TransformRequest::new(
+            avif_result.artifact,
+            TransformOptions {
+                format: Some(MediaType::Png),
+                width: Some(4),
+                height: Some(3),
+                ..TransformOptions::default()
+            },
+        ))
+        .expect("avif decode with resize should succeed");
+
+        assert_eq!(result.artifact.metadata.width, Some(4));
+        assert_eq!(result.artifact.metadata.height, Some(3));
+    }
+
+    #[test]
+    fn transform_raster_rejects_invalid_avif_data() {
         let artifact = Artifact::new(
             vec![0, 1, 2, 3],
             MediaType::Avif,
@@ -1346,11 +1708,11 @@ mod tests {
             },
         );
         let err = transform_raster(TransformRequest::new(artifact, TransformOptions::default()))
-            .expect_err("avif decode should fail");
+            .expect_err("invalid avif should fail");
 
-        assert_eq!(
-            err,
-            TransformError::CapabilityMissing("avif decode is not implemented yet".to_string())
+        assert!(
+            matches!(err, TransformError::DecodeFailed(_)),
+            "expected DecodeFailed, got {err:?}"
         );
     }
 

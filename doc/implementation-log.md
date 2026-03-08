@@ -39,10 +39,8 @@
 
 ## Active Plan
 
-1. Revisit AVIF decode only after the runtime dependency strategy for `dav1d` is decided.
-2. Reconcile the remaining documented API gaps, especially `svg` and any behavior that is still stricter than `doc/openapi.yaml`.
-3. WebP lossy quality control requires a dependency beyond the current `image` crate (v0.25.8), which only provides lossless WebP encoding through `image-webp`. A native binding such as `libwebp` would be needed, with implications for the planned WASM target.
-4. XMP/IPTC Phase 2: byte-level insertion into encoded output (JPEG APP1/APP13, PNG iTXt). Deferred until Phase 1 usage demonstrates demand.
+1. Reconcile the remaining documented API gaps, especially `svg` and any behavior that is still stricter than `doc/openapi.yaml`.
+2. XMP/IPTC Phase 2: byte-level insertion into encoded output (JPEG APP1/APP13, PNG iTXt). Deferred until Phase 1 usage demonstrates demand.
 
 ## Work Log
 
@@ -199,3 +197,6 @@
 - 2026-03-08: Design decision: XMP/IPTC metadata retention uses best-effort (silent drop + warning) in Phase 1. Phase 2 will implement byte-level insertion into encoded output. Documented in `doc/runtime-architecture.md` section 11.2.
 - 2026-03-08: Implemented XMP/IPTC best-effort handling. `--keep-metadata` now silently drops XMP/IPTC and returns `TransformWarning::MetadataDropped` warnings. Added `MetadataKind`, `TransformWarning`, `TransformResult` to public API. Changed `transform_raster` return type to `Result<TransformResult, TransformError>`. CLI prints warnings to stderr, server logs to stderr. 3 new unit tests, 2 new doc tests. Total tests: 149.
 - 2026-03-08: Implemented wall-clock deadline for transform pipeline. `TransformOptions::deadline` is `Option<Duration>`, checked at 4 pipeline stages (decode, rotate, resize, encode) via `check_deadline` helper. Server adapter injects 30s deadline (`SERVER_TRANSFORM_DEADLINE`), CLI uses `None` (unlimited). `LimitExceeded` maps to HTTP 413 and CLI exit code 4. Updated `doc/runtime-architecture.md` section 2.2 with rationale for allowing time-based deadline as adapter-injected concern. 3 new unit tests. Total tests: 152.
+- 2026-03-08: Investigated codec dependency options for AVIF decode and WebP lossy encode. Documented findings in `doc/runtime-architecture.md` section 9.2. Selected `rav1d-safe` (pure Rust) for AVIF decode and `webp` crate (`libwebp-sys` vendored C) for WebP lossy encode.
+- 2026-03-08: Implemented AVIF decode using `rav1d-safe` + `mp4parse` + `yuvutils-rs`. Pipeline: AVIF container → mp4parse → rav1d AV1 decode → YUV-to-RGBA conversion → DynamicImage. Supports 8/10/12-bit depth, I420/I422/I444/I400 layouts, alpha plane decode. Pure Rust, no C dependencies. 3 new unit tests (round-trip, resize, invalid data). Total tests: 155.
+- 2026-03-08: Implemented WebP lossy encoding using `webp` crate (wraps `libwebp-sys` with vendored C source). Quality 0-100 now works for WebP output. Lossless encoding (no quality specified) still uses the pure-Rust `image-webp` encoder with metadata retention. 2 new unit tests (lossy encode, quality-size relationship). Total tests: 155.

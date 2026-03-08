@@ -336,10 +336,11 @@ library は最も安定した契約である。
 許容する C 依存:
 
 - `ring`（`ureq` → `rustls` → `ring`）: TLS の暗号処理に C とアセンブリを含む。ソースを同梱しており、`cc` crate が各プラットフォームのコンパイラを自動検出してビルドする。Windows（MSVC）、macOS、Linux、ARM すべてで動作実績がある
+- `libwebp-sys`（WebP lossy エンコード用）: C ソースをデフォルトで同梱し、`cc` crate でビルドする。`apt install` 不要。C コンパイラのみ必要
 
 禁止する C 依存:
 
-- システムに事前インストールが必要な C ライブラリ（`dav1d`、`libwebp` など）
+- システムに事前インストールが必要な C ライブラリ（`dav1d` など）
 - `pkg-config` や `cmake` でシステムライブラリを探索する `-sys` crate
 
 この区別の理由:
@@ -353,7 +354,48 @@ library は最も安定した契約である。
 2. 純粋 Rust の代替がない場合、self-contained なビルド時 C 依存を許容する
 3. システムライブラリが必要な場合は feature flag で分離し、デフォルトでは無効にする
 
-### 9.2 対象プラットフォーム
+### 9.2 コーデック依存の調査結果と選定（2026-03-08）
+
+#### AVIF デコード
+
+| 方法 | C 依存 | ビルド要件 | 状態 |
+|---|---|---|---|
+| `dav1d-sys` (rust-av) | システム `libdav1d` 必要 | `apt install libdav1d-dev` | ポリシー違反 |
+| `libdav1d-sys` | ソース同梱 | Meson + Ninja + NASM | Docker なら可能 |
+| **`rav1d` (pure Rust)** | **なし** | **`cargo build` のみ** | **v1.1.0、Chromium 使用実績** |
+
+**選定: `rav1d`**
+
+- ISRG（Let's Encrypt の団体）がメンテナンスする dav1d の pure Rust 移植
+- dav1d v1.5.1 と同期済み、性能差は約 5%
+- `image` crate にも `rav1d` をデフォルトにする提案あり（image-rs/image#2621）
+- C 依存ゼロのため、全プラットフォーム・WASM で動作可能
+
+#### WebP lossy エンコード
+
+| 方法 | C 依存 | ビルド要件 | 状態 |
+|---|---|---|---|
+| `image-webp`（現在使用中） | なし（pure Rust） | なし | **lossless のみ** |
+| **`libwebp-sys`** | **ソース同梱（デフォルト）** | **C コンパイラのみ** | **v0.14.2** |
+| `webp` crate | `libwebp-sys` 経由 | C コンパイラのみ | v0.3.1、safe API |
+| pure Rust lossy | — | — | 存在しない |
+
+**選定: `webp` crate（`libwebp-sys` 経由）**
+
+- `libwebp-sys` は C ソースをデフォルトで同梱し、`cc` crate でビルドする
+- `apt install` 不要、C コンパイラだけあればよい
+- `webp` crate が safe API を提供し、quality 0-100 の lossy エンコードが可能
+- `system-dylib` feature でシステムライブラリへの切り替えも可能
+
+#### 機能の有効化方針
+
+| 対象 | AVIF デコード | WebP lossy |
+|---|---|---|
+| Docker サーバー | フル機能（デフォルト有効） | フル機能（デフォルト有効） |
+| `cargo install` | デフォルト有効（pure Rust） | デフォルト有効（vendored C） |
+| WASM | デフォルト有効（pure Rust） | 要検証（C コンパイルが WASM で動くか） |
+
+### 9.3 対象プラットフォーム
 
 | プラットフォーム | Tier | 備考 |
 | --- | --- | --- |

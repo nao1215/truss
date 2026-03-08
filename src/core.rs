@@ -565,6 +565,8 @@ impl Error for TransformError {}
 ///
 /// assert_eq!(format!("{}", MetadataKind::Xmp), "XMP");
 /// assert_eq!(format!("{}", MetadataKind::Iptc), "IPTC");
+/// assert_eq!(format!("{}", MetadataKind::Exif), "EXIF");
+/// assert_eq!(format!("{}", MetadataKind::Icc), "ICC profile");
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MetadataKind {
@@ -572,6 +574,10 @@ pub enum MetadataKind {
     Xmp,
     /// IPTC/IIM (International Press Telecommunications Council) metadata.
     Iptc,
+    /// EXIF (Exchangeable Image File Format) metadata.
+    Exif,
+    /// ICC color profile.
+    Icc,
 }
 
 impl fmt::Display for MetadataKind {
@@ -579,6 +585,8 @@ impl fmt::Display for MetadataKind {
         match self {
             Self::Xmp => f.write_str("XMP"),
             Self::Iptc => f.write_str("IPTC"),
+            Self::Exif => f.write_str("EXIF"),
+            Self::Icc => f.write_str("ICC profile"),
         }
     }
 }
