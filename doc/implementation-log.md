@@ -19,7 +19,7 @@
 - The CLI adapter now supports local-file and stdin-based `convert`.
 - The CLI adapter now supports `inspect --url` and `convert --url` over HTTP(S).
 - A raster backend now performs resize, rotate, format conversion, best-effort `preserve_exif` retention, and common-case `keep-metadata` retention for EXIF + ICC on local JPEG, PNG, and WebP workflows, with AVIF output support.
-- Core media sniffing currently supports `jpeg`, `png`, `webp`, and brand-level `avif` detection.
+- Core media sniffing currently supports `jpeg`, `png`, `webp`, and best-effort `avif` container inspection for width, height, and alpha.
 - The repository now has unit tests, integration tests, and doc tests for the implemented CLI and Core slices.
 - GIF support is explicitly out of scope for the current product direction, and SVG remains deferred for a future phase.
 - The server adapter now supports signed public GET transforms at `GET /images/by-path` and `GET /images/by-url`.
@@ -37,9 +37,10 @@
 
 ## Active Plan
 
-1. Decide how far metadata retention should go beyond the current EXIF + ICC path, especially XMP / IPTC handling and whether unsupported metadata should stay as hard errors.
-2. Revisit AVIF decode only after the runtime dependency strategy for `dav1d` is decided.
-3. Reconcile the remaining documented API gaps, especially `svg` and any behavior that is still stricter than `doc/openapi.yaml`.
+1. Improve HTTP image response semantics with adapter-level `Accept` negotiation, `ETag`, cache headers, and related response metadata.
+2. Decide how far metadata retention should go beyond the current EXIF + ICC path, especially XMP / IPTC handling and whether unsupported metadata should stay as hard errors.
+3. Revisit AVIF decode only after the runtime dependency strategy for `dav1d` is decided.
+4. Reconcile the remaining documented API gaps, especially `svg` and any behavior that is still stricter than `doc/openapi.yaml`.
 
 ## Work Log
 
@@ -161,3 +162,11 @@
 - 2026-03-08: Current coverage summary from `cargo llvm-cov` is 84.20% regions, 72.31% functions, and 83.99% lines across all targets.
 - 2026-03-08: Current automated verification covers 91 unit tests, 19 integration tests, and 11 doc tests.
 - 2026-03-08: Dropped GIF support from the planned product scope and aligned repository guidance and documentation to stop advertising GIF as a current or future target.
+- 2026-03-08: Started phase 12 planning to improve AVIF inspection with container-level width, height, and alpha extraction while keeping AVIF decode capability-gated.
+- 2026-03-08: Implemented container-level AVIF inspection in `src/core.rs` by walking ISO BMFF boxes for `ispe`, `auxC`, and `auxl` metadata without enabling full AVIF decode.
+- 2026-03-08: `sniff_artifact` can now report AVIF width, height, and best-effort alpha information when the container exposes structured metadata; minimal brand-only AVIF detection still succeeds with unknown dimensions.
+- 2026-03-08: Added unit coverage for AVIF dimensions with and without alpha, a runnable `sniff_artifact` doc test for AVIF inspection, and CLI integration coverage for `truss inspect` on a local AVIF file.
+- 2026-03-08: Ran `cargo fmt`, `cargo test`, and `./scripts/coverage.sh` after the AVIF inspection changes.
+- 2026-03-08: Current coverage summary from `cargo llvm-cov` is 84.07% regions, 72.12% functions, and 83.69% lines across all targets.
+- 2026-03-08: Current automated verification covers 93 unit tests, 20 integration tests, and 12 doc tests.
+- 2026-03-08: Started phase 13 planning to improve HTTP image response semantics with adapter-side output negotiation and response headers for cacheability and content safety.

@@ -487,8 +487,9 @@ impl Error for TransformError {}
 /// [`RawArtifact`], this function verifies that the declared type matches the detected
 /// signature before returning the classified [`Artifact`].
 ///
-/// Detection currently supports JPEG, PNG, WebP, and brand-level AVIF recognition.
-/// Width and height extraction is best-effort and depends on the underlying format.
+/// Detection currently supports JPEG, PNG, WebP, and AVIF recognition.
+/// Width, height, and alpha extraction are best-effort and depend on the underlying format
+/// and any container metadata the file exposes.
 ///
 /// # Errors
 ///
@@ -514,6 +515,25 @@ impl Error for TransformError {}
 /// assert_eq!(artifact.media_type, MediaType::Png);
 /// assert_eq!(artifact.metadata.width, Some(4));
 /// assert_eq!(artifact.metadata.height, Some(3));
+/// ```
+///
+/// ```
+/// use image::codecs::avif::AvifEncoder;
+/// use image::{ColorType, ImageEncoder, Rgba, RgbaImage};
+/// use truss::{sniff_artifact, MediaType, RawArtifact};
+///
+/// let image = RgbaImage::from_pixel(3, 2, Rgba([10, 20, 30, 0]));
+/// let mut bytes = Vec::new();
+/// AvifEncoder::new(&mut bytes)
+///     .write_image(&image, 3, 2, ColorType::Rgba8.into())
+///     .unwrap();
+///
+/// let artifact = sniff_artifact(RawArtifact::new(bytes, Some(MediaType::Avif))).unwrap();
+///
+/// assert_eq!(artifact.media_type, MediaType::Avif);
+/// assert_eq!(artifact.metadata.width, Some(3));
+/// assert_eq!(artifact.metadata.height, Some(2));
+/// assert_eq!(artifact.metadata.has_alpha, Some(true));
 /// ```
 pub fn sniff_artifact(input: RawArtifact) -> Result<Artifact, TransformError> {
     let (media_type, metadata) = detect_artifact(&input.bytes)?;
@@ -816,7 +836,15 @@ fn sniff_avif(bytes: &[u8]) -> Result<ArtifactMetadata, TransformError> {
         ));
     }
 
-    Ok(ArtifactMetadata::default())
+    let inspection = inspect_avif_container(bytes)?;
+
+    Ok(ArtifactMetadata {
+        width: inspection.dimensions.map(|(width, _)| width),
+        height: inspection.dimensions.map(|(_, height)| height),
+        frame_count: 1,
+        duration: None,
+        has_alpha: inspection.has_alpha(),
+    })
 }
 
 fn has_avif_brand(bytes: &[u8]) -> bool {
@@ -841,6 +869,157 @@ fn has_avif_brand(bytes: &[u8]) -> bool {
 
 fn is_avif_brand(bytes: &[u8]) -> bool {
     matches!(bytes, b"avif" | b"avis")
+}
+
+const AVIF_ALPHA_AUX_TYPE: &[u8] = b"urn:mpeg:mpegB:cicp:systems:auxiliary:alpha";
+
+#[derive(Debug, Default)]
+struct AvifInspection {
+    dimensions: Option<(u32, u32)>,
+    saw_structured_meta: bool,
+    found_alpha_item: bool,
+}
+
+impl AvifInspection {
+    fn has_alpha(&self) -> Option<bool> {
+        if self.saw_structured_meta {
+            Some(self.found_alpha_item)
+        } else {
+            None
+        }
+    }
+}
+
+fn inspect_avif_container(bytes: &[u8]) -> Result<AvifInspection, TransformError> {
+    let mut inspection = AvifInspection::default();
+    inspect_avif_boxes(bytes, &mut inspection)?;
+    Ok(inspection)
+}
+
+fn inspect_avif_boxes(bytes: &[u8], inspection: &mut AvifInspection) -> Result<(), TransformError> {
+    let mut offset = 0;
+
+    while offset + 8 <= bytes.len() {
+        let (box_type, payload, next_offset) = parse_mp4_box(bytes, offset)?;
+
+        match box_type {
+            b"meta" | b"iref" => {
+                inspection.saw_structured_meta = true;
+                if payload.len() < 4 {
+                    return Err(TransformError::DecodeFailed(format!(
+                        "{} box is too short",
+                        String::from_utf8_lossy(box_type)
+                    )));
+                }
+                inspect_avif_boxes(&payload[4..], inspection)?;
+            }
+            b"iprp" | b"ipco" => {
+                inspection.saw_structured_meta = true;
+                inspect_avif_boxes(payload, inspection)?;
+            }
+            b"ispe" => {
+                inspection.saw_structured_meta = true;
+                if inspection.dimensions.is_none() {
+                    inspection.dimensions = Some(parse_avif_ispe(payload)?);
+                }
+            }
+            b"auxC" => {
+                inspection.saw_structured_meta = true;
+                if avif_auxc_declares_alpha(payload)? {
+                    inspection.found_alpha_item = true;
+                }
+            }
+            b"auxl" => {
+                inspection.saw_structured_meta = true;
+                inspection.found_alpha_item = true;
+            }
+            _ => {}
+        }
+
+        offset = next_offset;
+    }
+
+    if offset != bytes.len() {
+        return Err(TransformError::DecodeFailed(
+            "avif box payload has trailing bytes".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
+fn parse_mp4_box<'a>(
+    bytes: &'a [u8],
+    offset: usize,
+) -> Result<(&'a [u8; 4], &'a [u8], usize), TransformError> {
+    if offset + 8 > bytes.len() {
+        return Err(TransformError::DecodeFailed(
+            "mp4 box header is truncated".to_string(),
+        ));
+    }
+
+    let size = read_u32_be(&bytes[offset..offset + 4])?;
+    let box_type = bytes[offset + 4..offset + 8]
+        .try_into()
+        .map_err(|_| TransformError::DecodeFailed("expected 4-byte box type".to_string()))?;
+    let mut header_len = 8_usize;
+    let end = match size {
+        0 => bytes.len(),
+        1 => {
+            if offset + 16 > bytes.len() {
+                return Err(TransformError::DecodeFailed(
+                    "extended mp4 box header is truncated".to_string(),
+                ));
+            }
+            header_len = 16;
+            let extended_size = read_u64_be(&bytes[offset + 8..offset + 16])?;
+            usize::try_from(extended_size)
+                .map_err(|_| TransformError::DecodeFailed("mp4 box is too large".to_string()))?
+        }
+        _ => size as usize,
+    };
+
+    if end < header_len {
+        return Err(TransformError::DecodeFailed(
+            "mp4 box size is smaller than its header".to_string(),
+        ));
+    }
+
+    let box_end = offset
+        .checked_add(end)
+        .ok_or_else(|| TransformError::DecodeFailed("mp4 box is too large".to_string()))?;
+    if box_end > bytes.len() {
+        return Err(TransformError::DecodeFailed(
+            "mp4 box exceeds file length".to_string(),
+        ));
+    }
+
+    Ok((box_type, &bytes[offset + header_len..box_end], box_end))
+}
+
+fn parse_avif_ispe(bytes: &[u8]) -> Result<(u32, u32), TransformError> {
+    if bytes.len() < 12 {
+        return Err(TransformError::DecodeFailed(
+            "avif ispe box is too short".to_string(),
+        ));
+    }
+
+    let width = read_u32_be(&bytes[4..8])?;
+    let height = read_u32_be(&bytes[8..12])?;
+    Ok((width, height))
+}
+
+fn avif_auxc_declares_alpha(bytes: &[u8]) -> Result<bool, TransformError> {
+    if bytes.len() < 5 {
+        return Err(TransformError::DecodeFailed(
+            "avif auxC box is too short".to_string(),
+        ));
+    }
+
+    let urn = &bytes[4..];
+    Ok(urn
+        .strip_suffix(&[0])
+        .is_some_and(|urn| urn == AVIF_ALPHA_AUX_TYPE))
 }
 
 fn is_jpeg_sof_marker(marker: u8) -> bool {
@@ -886,12 +1065,21 @@ fn read_u32_le(bytes: &[u8]) -> Result<u32, TransformError> {
     Ok(u32::from_le_bytes(array))
 }
 
+fn read_u64_be(bytes: &[u8]) -> Result<u64, TransformError> {
+    let array: [u8; 8] = bytes
+        .try_into()
+        .map_err(|_| TransformError::DecodeFailed("expected 8 bytes".to_string()))?;
+    Ok(u64::from_be_bytes(array))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         sniff_artifact, Artifact, ArtifactMetadata, Fit, MediaType, MetadataPolicy, Position,
         RawArtifact, Rgba8, Rotation, TransformError, TransformOptions, TransformRequest,
     };
+    use image::codecs::avif::AvifEncoder;
+    use image::{ColorType, ImageEncoder, Rgba, RgbaImage};
 
     fn jpeg_artifact() -> Artifact {
         Artifact::new(vec![1, 2, 3], MediaType::Jpeg, ArtifactMetadata::default())
@@ -987,6 +1175,15 @@ mod tests {
         bytes.extend_from_slice(&0_u32.to_be_bytes());
         bytes.extend_from_slice(b"mif1");
         bytes.extend_from_slice(b"avif");
+        bytes
+    }
+
+    fn encoded_avif_bytes(width: u32, height: u32, fill: Rgba<u8>) -> Vec<u8> {
+        let image = RgbaImage::from_pixel(width, height, fill);
+        let mut bytes = Vec::new();
+        AvifEncoder::new(&mut bytes)
+            .write_image(&image, width, height, ColorType::Rgba8.into())
+            .expect("encode avif");
         bytes
     }
 
@@ -1278,6 +1475,34 @@ mod tests {
 
         assert_eq!(artifact.media_type, MediaType::Avif);
         assert_eq!(artifact.metadata, ArtifactMetadata::default());
+    }
+
+    #[test]
+    fn sniff_artifact_detects_avif_dimensions_and_alpha() {
+        let artifact = sniff_artifact(RawArtifact::new(
+            encoded_avif_bytes(7, 5, Rgba([10, 20, 30, 0])),
+            None,
+        ))
+        .expect("sniff avif with alpha");
+
+        assert_eq!(artifact.media_type, MediaType::Avif);
+        assert_eq!(artifact.metadata.width, Some(7));
+        assert_eq!(artifact.metadata.height, Some(5));
+        assert_eq!(artifact.metadata.has_alpha, Some(true));
+    }
+
+    #[test]
+    fn sniff_artifact_detects_opaque_avif_without_alpha_item() {
+        let artifact = sniff_artifact(RawArtifact::new(
+            encoded_avif_bytes(9, 4, Rgba([10, 20, 30, 255])),
+            None,
+        ))
+        .expect("sniff opaque avif");
+
+        assert_eq!(artifact.media_type, MediaType::Avif);
+        assert_eq!(artifact.metadata.width, Some(9));
+        assert_eq!(artifact.metadata.height, Some(4));
+        assert_eq!(artifact.metadata.has_alpha, Some(false));
     }
 
     #[test]

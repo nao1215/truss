@@ -1,11 +1,11 @@
 use crate::{
-    sniff_artifact, transform_raster, Fit, MediaType, Position, RawArtifact, Rgba8, Rotation,
-    TransformError, TransformOptions, TransformRequest,
+    sniff_artifact, transform_raster, Artifact, Fit, MediaType, Position, RawArtifact, Rgba8,
+    Rotation, TransformError, TransformOptions, TransformRequest,
 };
 use hmac::{Hmac, Mac};
 use serde::Deserialize;
 use serde_json::json;
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::env;
 use std::fs;
@@ -29,6 +29,8 @@ const MAX_HEADER_BYTES: usize = 16 * 1024;
 const MAX_REQUEST_BODY_BYTES: usize = 1024 * 1024;
 const MAX_SOURCE_BYTES: u64 = 100 * 1024 * 1024;
 const MAX_REMOTE_REDIRECTS: usize = 5;
+const DEFAULT_PUBLIC_MAX_AGE_SECONDS: u32 = 3600;
+const DEFAULT_PUBLIC_STALE_WHILE_REVALIDATE_SECONDS: u32 = 60;
 type HmacSha256 = Hmac<Sha256>;
 
 static HTTP_REQUESTS_TOTAL: AtomicU64 = AtomicU64::new(0);
@@ -47,6 +49,7 @@ static HTTP_RESPONSES_400_TOTAL: AtomicU64 = AtomicU64::new(0);
 static HTTP_RESPONSES_401_TOTAL: AtomicU64 = AtomicU64::new(0);
 static HTTP_RESPONSES_403_TOTAL: AtomicU64 = AtomicU64::new(0);
 static HTTP_RESPONSES_404_TOTAL: AtomicU64 = AtomicU64::new(0);
+static HTTP_RESPONSES_406_TOTAL: AtomicU64 = AtomicU64::new(0);
 static HTTP_RESPONSES_413_TOTAL: AtomicU64 = AtomicU64::new(0);
 static HTTP_RESPONSES_415_TOTAL: AtomicU64 = AtomicU64::new(0);
 static HTTP_RESPONSES_500_TOTAL: AtomicU64 = AtomicU64::new(0);
@@ -361,11 +364,16 @@ impl HttpResponse {
         }
     }
 
-    fn binary(status: &'static str, content_type: &str, body: Vec<u8>) -> Self {
+    fn binary_with_headers(
+        status: &'static str,
+        content_type: &str,
+        headers: Vec<(String, String)>,
+        body: Vec<u8>,
+    ) -> Self {
         Self {
             status,
             content_type: Some(content_type.to_string()),
-            headers: Vec::new(),
+            headers,
             body,
         }
     }
@@ -376,6 +384,15 @@ impl HttpResponse {
             content_type: Some(content_type.to_string()),
             headers: Vec::new(),
             body,
+        }
+    }
+
+    fn empty(status: &'static str, headers: Vec<(String, String)>) -> Self {
+        Self {
+            status,
+            content_type: None,
+            headers,
+            body: Vec::new(),
         }
     }
 }
@@ -553,13 +570,24 @@ fn handle_transform_request(request: HttpRequest, config: &ServerConfig) -> Http
         Ok(bytes) => bytes,
         Err(response) => return response,
     };
-    transform_source_bytes(source_bytes, options)
+    transform_source_bytes(
+        source_bytes,
+        options,
+        &request,
+        ImageResponsePolicy::PrivateTransform,
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PublicSourceKind {
     Path,
     Url,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ImageResponsePolicy {
+    PublicGet,
+    PrivateTransform,
 }
 
 fn handle_public_path_request(request: HttpRequest, config: &ServerConfig) -> HttpResponse {
@@ -591,7 +619,12 @@ fn handle_public_get_request(
         Err(response) => return response,
     };
 
-    transform_source_bytes(source_bytes, options)
+    transform_source_bytes(
+        source_bytes,
+        options,
+        &request,
+        ImageResponsePolicy::PublicGet,
+    )
 }
 
 fn handle_upload_request(request: HttpRequest, config: &ServerConfig) -> HttpResponse {
@@ -607,7 +640,12 @@ fn handle_upload_request(request: HttpRequest, config: &ServerConfig) -> HttpRes
         Ok(parts) => parts,
         Err(response) => return response,
     };
-    transform_source_bytes(file_bytes, options)
+    transform_source_bytes(
+        file_bytes,
+        options,
+        &request,
+        ImageResponsePolicy::PrivateTransform,
+    )
 }
 
 fn handle_metrics_request(request: HttpRequest, config: &ServerConfig) -> HttpResponse {
@@ -675,17 +713,245 @@ fn parse_public_get_request(
     Ok((source, options))
 }
 
-fn transform_source_bytes(source_bytes: Vec<u8>, options: TransformOptions) -> HttpResponse {
+fn transform_source_bytes(
+    source_bytes: Vec<u8>,
+    mut options: TransformOptions,
+    request: &HttpRequest,
+    response_policy: ImageResponsePolicy,
+) -> HttpResponse {
     let artifact = match sniff_artifact(RawArtifact::new(source_bytes, None)) {
         Ok(artifact) => artifact,
         Err(error) => return transform_error_response(error),
+    };
+    let negotiation_used = if options.format.is_none() {
+        match negotiate_output_format(request.header("accept"), &artifact) {
+            Ok(Some(format)) => {
+                options.format = Some(format);
+                true
+            }
+            Ok(None) => false,
+            Err(response) => return response,
+        }
+    } else {
+        false
     };
     let output = match transform_raster(TransformRequest::new(artifact, options)) {
         Ok(output) => output,
         Err(error) => return transform_error_response(error),
     };
+    let etag = build_image_etag(&output.bytes);
+    let headers =
+        build_image_response_headers(output.media_type, &etag, response_policy, negotiation_used);
 
-    HttpResponse::binary("200 OK", output.media_type.as_mime(), output.bytes)
+    if matches!(response_policy, ImageResponsePolicy::PublicGet)
+        && if_none_match_matches(request.header("if-none-match"), &etag)
+    {
+        return HttpResponse::empty("304 Not Modified", headers);
+    }
+
+    HttpResponse::binary_with_headers("200 OK", output.media_type.as_mime(), headers, output.bytes)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AcceptRange {
+    Exact(&'static str),
+    TypeWildcard(&'static str),
+    Any,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AcceptPreference {
+    range: AcceptRange,
+    q_millis: u16,
+    specificity: u8,
+}
+
+fn negotiate_output_format(
+    accept_header: Option<&str>,
+    artifact: &Artifact,
+) -> Result<Option<MediaType>, HttpResponse> {
+    let Some(accept_header) = accept_header
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(None);
+    };
+
+    let preferences = parse_accept_header(accept_header);
+    if preferences.is_empty() {
+        return Ok(None);
+    }
+
+    let mut best_candidate = None;
+    let mut best_q = 0_u16;
+
+    for candidate in preferred_output_media_types(artifact).iter().copied() {
+        let (candidate_q, _) = match_accept_preferences(candidate, &preferences);
+        if candidate_q > best_q {
+            best_q = candidate_q;
+            best_candidate = Some(candidate);
+        }
+    }
+
+    if best_q == 0 {
+        return Err(not_acceptable_response(
+            "Accept does not allow any supported output media type",
+        ));
+    }
+
+    Ok(best_candidate)
+}
+
+fn parse_accept_header(value: &str) -> Vec<AcceptPreference> {
+    value
+        .split(',')
+        .filter_map(|segment| parse_accept_segment(segment.trim()))
+        .collect()
+}
+
+fn parse_accept_segment(segment: &str) -> Option<AcceptPreference> {
+    if segment.is_empty() {
+        return None;
+    }
+
+    let mut parts = segment.split(';');
+    let media_range = parts.next()?.trim().to_ascii_lowercase();
+    let (range, specificity) = parse_accept_range(&media_range)?;
+    let mut q_millis = 1000_u16;
+
+    for parameter in parts {
+        let Some((name, value)) = parameter.split_once('=') else {
+            continue;
+        };
+        if name.trim().eq_ignore_ascii_case("q") {
+            q_millis = parse_accept_qvalue(value.trim())?;
+        }
+    }
+
+    Some(AcceptPreference {
+        range,
+        q_millis,
+        specificity,
+    })
+}
+
+fn parse_accept_range(value: &str) -> Option<(AcceptRange, u8)> {
+    match value {
+        "*/*" => Some((AcceptRange::Any, 0)),
+        "image/*" => Some((AcceptRange::TypeWildcard("image"), 1)),
+        "image/jpeg" => Some((AcceptRange::Exact("image/jpeg"), 2)),
+        "image/png" => Some((AcceptRange::Exact("image/png"), 2)),
+        "image/webp" => Some((AcceptRange::Exact("image/webp"), 2)),
+        "image/avif" => Some((AcceptRange::Exact("image/avif"), 2)),
+        _ => None,
+    }
+}
+
+fn parse_accept_qvalue(value: &str) -> Option<u16> {
+    let parsed = value.parse::<f32>().ok()?;
+    if !(0.0..=1.0).contains(&parsed) {
+        return None;
+    }
+
+    Some((parsed * 1000.0).round() as u16)
+}
+
+fn preferred_output_media_types(artifact: &Artifact) -> &'static [MediaType] {
+    if artifact.metadata.has_alpha == Some(true) {
+        &[
+            MediaType::Avif,
+            MediaType::Webp,
+            MediaType::Png,
+            MediaType::Jpeg,
+        ]
+    } else {
+        &[
+            MediaType::Avif,
+            MediaType::Webp,
+            MediaType::Jpeg,
+            MediaType::Png,
+        ]
+    }
+}
+
+fn match_accept_preferences(media_type: MediaType, preferences: &[AcceptPreference]) -> (u16, u8) {
+    let mut best_q = 0_u16;
+    let mut best_specificity = 0_u8;
+
+    for preference in preferences {
+        if accept_range_matches(preference.range, media_type) {
+            if preference.q_millis > best_q
+                || (preference.q_millis == best_q && preference.specificity > best_specificity)
+            {
+                best_q = preference.q_millis;
+                best_specificity = preference.specificity;
+            }
+        }
+    }
+
+    (best_q, best_specificity)
+}
+
+fn accept_range_matches(range: AcceptRange, media_type: MediaType) -> bool {
+    match range {
+        AcceptRange::Exact(expected) => media_type.as_mime() == expected,
+        AcceptRange::TypeWildcard(expected_type) => media_type
+            .as_mime()
+            .split('/')
+            .next()
+            .is_some_and(|actual_type| actual_type == expected_type),
+        AcceptRange::Any => true,
+    }
+}
+
+fn build_image_etag(body: &[u8]) -> String {
+    let digest = Sha256::digest(body);
+    format!("\"sha256-{}\"", hex::encode(digest))
+}
+
+fn build_image_response_headers(
+    media_type: MediaType,
+    etag: &str,
+    response_policy: ImageResponsePolicy,
+    negotiation_used: bool,
+) -> Vec<(String, String)> {
+    let mut headers = vec![
+        (
+            "Cache-Control".to_string(),
+            match response_policy {
+                ImageResponsePolicy::PublicGet => format!(
+                    "public, max-age={DEFAULT_PUBLIC_MAX_AGE_SECONDS}, stale-while-revalidate={DEFAULT_PUBLIC_STALE_WHILE_REVALIDATE_SECONDS}"
+                ),
+                ImageResponsePolicy::PrivateTransform => "no-store".to_string(),
+            },
+        ),
+        ("ETag".to_string(), etag.to_string()),
+        (
+            "X-Content-Type-Options".to_string(),
+            "nosniff".to_string(),
+        ),
+        (
+            "Content-Disposition".to_string(),
+            format!("inline; filename=\"truss.{}\"", media_type.as_name()),
+        ),
+    ];
+
+    if negotiation_used {
+        headers.push(("Vary".to_string(), "Accept".to_string()));
+    }
+
+    headers
+}
+
+fn if_none_match_matches(value: Option<&str>, etag: &str) -> bool {
+    let Some(value) = value else {
+        return false;
+    };
+
+    value
+        .split(',')
+        .map(str::trim)
+        .any(|candidate| candidate == "*" || candidate == etag)
 }
 
 fn parse_query_params(request: &HttpRequest) -> Result<BTreeMap<String, String>, HttpResponse> {
@@ -1011,7 +1277,8 @@ fn render_metrics_text() -> String {
     );
     body.push_str("# TYPE truss_http_responses_total counter\n");
     for status in [
-        "200", "400", "401", "403", "404", "413", "415", "500", "501", "502", "503", "508", "other",
+        "200", "400", "401", "403", "404", "406", "413", "415", "500", "501", "502", "503", "508",
+        "other",
     ] {
         body.push_str(&format!(
             "truss_http_responses_total{{status=\"{status}\"}} {}\n",
@@ -1043,6 +1310,7 @@ fn status_counter(status: &str) -> &'static AtomicU64 {
         Some("401") => &HTTP_RESPONSES_401_TOTAL,
         Some("403") => &HTTP_RESPONSES_403_TOTAL,
         Some("404") => &HTTP_RESPONSES_404_TOTAL,
+        Some("406") => &HTTP_RESPONSES_406_TOTAL,
         Some("413") => &HTTP_RESPONSES_413_TOTAL,
         Some("415") => &HTTP_RESPONSES_415_TOTAL,
         Some("500") => &HTTP_RESPONSES_500_TOTAL,
@@ -1061,6 +1329,7 @@ fn status_counter_value(status: &str) -> u64 {
         "401" => HTTP_RESPONSES_401_TOTAL.load(Ordering::Relaxed),
         "403" => HTTP_RESPONSES_403_TOTAL.load(Ordering::Relaxed),
         "404" => HTTP_RESPONSES_404_TOTAL.load(Ordering::Relaxed),
+        "406" => HTTP_RESPONSES_406_TOTAL.load(Ordering::Relaxed),
         "413" => HTTP_RESPONSES_413_TOTAL.load(Ordering::Relaxed),
         "415" => HTTP_RESPONSES_415_TOTAL.load(Ordering::Relaxed),
         "500" => HTTP_RESPONSES_500_TOTAL.load(Ordering::Relaxed),
@@ -1844,6 +2113,10 @@ fn unsupported_media_type_response(message: &str) -> HttpResponse {
     error_response("415 Unsupported Media Type", message)
 }
 
+fn not_acceptable_response(message: &str) -> HttpResponse {
+    error_response("406 Not Acceptable", message)
+}
+
 fn payload_too_large_response(message: &str) -> HttpResponse {
     error_response("413 Payload Too Large", message)
 }
@@ -1883,11 +2156,12 @@ fn json_error_body(message: &str) -> Vec<u8> {
 mod tests {
     use super::{
         auth_required_response, authorize_signed_request, bad_request_response, bind_addr,
-        canonical_query_without_signature, parse_public_get_request, prepare_remote_fetch_target,
+        build_image_etag, build_image_response_headers, canonical_query_without_signature,
+        negotiate_output_format, parse_public_get_request, prepare_remote_fetch_target,
         read_request, resolve_storage_path, route_request, serve_once_with_config, HttpRequest,
-        PinnedResolver, PublicSourceKind, ServerConfig, DEFAULT_BIND_ADDR,
+        ImageResponsePolicy, PinnedResolver, PublicSourceKind, ServerConfig, DEFAULT_BIND_ADDR,
     };
-    use crate::{sniff_artifact, MediaType, RawArtifact};
+    use crate::{sniff_artifact, Artifact, ArtifactMetadata, MediaType, RawArtifact};
     use hmac::{Hmac, Mac};
     use image::codecs::png::PngEncoder;
     use image::{ColorType, ImageEncoder, Rgba, RgbaImage};
@@ -1922,6 +2196,20 @@ mod tests {
 
     fn write_png(path: &Path) {
         fs::write(path, png_bytes()).expect("write png fixture");
+    }
+
+    fn artifact_with_alpha(has_alpha: bool) -> Artifact {
+        Artifact::new(
+            png_bytes(),
+            MediaType::Png,
+            ArtifactMetadata {
+                width: Some(4),
+                height: Some(3),
+                frame_count: 1,
+                duration: None,
+                has_alpha: Some(has_alpha),
+            },
+        )
     }
 
     fn sign_public_query(
@@ -2137,6 +2425,46 @@ mod tests {
         config.public_base_url = Some("https://cdn.example.com".to_string());
 
         authorize_signed_request(&request, &query, &config).expect("signed auth should pass");
+    }
+
+    #[test]
+    fn negotiate_output_format_prefers_alpha_safe_formats_for_transparent_inputs() {
+        let format =
+            negotiate_output_format(Some("image/jpeg,image/png"), &artifact_with_alpha(true))
+                .expect("negotiate output format")
+                .expect("resolved output format");
+
+        assert_eq!(format, MediaType::Png);
+    }
+
+    #[test]
+    fn negotiate_output_format_prefers_avif_for_wildcard_accept() {
+        let format = negotiate_output_format(Some("image/*"), &artifact_with_alpha(false))
+            .expect("negotiate output format")
+            .expect("resolved output format");
+
+        assert_eq!(format, MediaType::Avif);
+    }
+
+    #[test]
+    fn build_image_response_headers_include_cache_and_safety_metadata() {
+        let headers = build_image_response_headers(
+            MediaType::Webp,
+            &build_image_etag(b"demo"),
+            ImageResponsePolicy::PublicGet,
+            true,
+        );
+
+        assert!(headers.contains(&(
+            "Cache-Control".to_string(),
+            "public, max-age=3600, stale-while-revalidate=60".to_string()
+        )));
+        assert!(headers.contains(&("Vary".to_string(), "Accept".to_string())));
+        assert!(headers.contains(&("X-Content-Type-Options".to_string(), "nosniff".to_string())));
+        assert!(headers.contains(&(
+            "Content-Disposition".to_string(),
+            "inline; filename=\"truss.webp\"".to_string()
+        )));
     }
 
     #[test]
