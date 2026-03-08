@@ -310,6 +310,18 @@ pub enum Fit {
     Inside,
 }
 
+impl Fit {
+    /// Returns the canonical option name used by the API and CLI.
+    pub const fn as_name(self) -> &'static str {
+        match self {
+            Self::Contain => "contain",
+            Self::Cover => "cover",
+            Self::Fill => "fill",
+            Self::Inside => "inside",
+        }
+    }
+}
+
 impl FromStr for Fit {
     type Err = String;
 
@@ -347,6 +359,23 @@ pub enum Position {
     BottomRight,
 }
 
+impl Position {
+    /// Returns the canonical option name used by the API and CLI.
+    pub const fn as_name(self) -> &'static str {
+        match self {
+            Self::Center => "center",
+            Self::Top => "top",
+            Self::Right => "right",
+            Self::Bottom => "bottom",
+            Self::Left => "left",
+            Self::TopLeft => "top-left",
+            Self::TopRight => "top-right",
+            Self::BottomLeft => "bottom-left",
+            Self::BottomRight => "bottom-right",
+        }
+    }
+}
+
 impl FromStr for Position {
     type Err = String;
 
@@ -377,6 +406,18 @@ pub enum Rotation {
     Deg180,
     /// Rotate 270 degrees clockwise.
     Deg270,
+}
+
+impl Rotation {
+    /// Returns the canonical degree value used by the API and CLI.
+    pub const fn as_degrees(self) -> u16 {
+        match self {
+            Self::Deg0 => 0,
+            Self::Deg90 => 90,
+            Self::Deg180 => 180,
+            Self::Deg270 => 270,
+        }
+    }
 }
 
 impl FromStr for Rotation {

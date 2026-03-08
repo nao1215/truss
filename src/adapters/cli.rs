@@ -1,4 +1,4 @@
-use crate::adapters::server::{self, ServerConfig};
+use crate::adapters::server::{self, sign_public_url, ServerConfig, SignedUrlSource};
 use crate::{
     sniff_artifact, transform_raster, Fit, MediaType, Position, RawArtifact, Rgba8, Rotation,
     TransformOptions, TransformRequest,
@@ -25,6 +25,7 @@ USAGE:
   truss inspect --url <URL>
   truss convert <INPUT> -o <OUTPUT> [OPTIONS]
   truss convert --url <URL> -o <OUTPUT> [OPTIONS]
+  truss sign --base-url <URL> (--path <PATH> | --url <URL>) --key-id <KEY_ID> --secret <SECRET> --expires <UNIX_SECS> [OPTIONS]
   truss --help
 
 OPTIONS FOR SERVE:
@@ -51,9 +52,32 @@ OPTIONS FOR CONVERT:
       --keep-metadata
       --preserve-exif
 
+OPTIONS FOR SIGN:
+      --base-url <URL>
+      --path <PATH>
+      --url <URL>
+      --version <VALUE>
+      --key-id <KEY_ID>
+      --secret <SECRET>
+      --expires <UNIX_SECS>
+      --width <PX>
+      --height <PX>
+      --fit <contain|cover|fill|inside>
+      --position <center|top|right|bottom|left|top-left|top-right|bottom-left|bottom-right>
+      --format <jpeg|png|webp|avif>
+      --quality <1-100>
+      --background <RRGGBB|RRGGBBAA>
+      --rotate <0|90|180|270>
+      --auto-orient
+      --no-auto-orient
+      --strip-metadata
+      --keep-metadata
+      --preserve-exif
+
 NOTES:
   Omitting `convert` enters implicit convert mode.
   The server starts when `serve` or a server runtime flag is used.
+  `sign` builds a public signed GET URL for `/images/by-path` or `/images/by-url`.
   `inspect` currently supports local files, `-` for stdin, and `--url`.
   `convert` currently supports local files, `-` for stdin, and `--url`.
 ";
@@ -106,6 +130,7 @@ enum Command {
     Serve(ServeCommand),
     Inspect(InspectCommand),
     Convert(ConvertCommand),
+    Sign(SignCommand),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -127,6 +152,16 @@ struct InspectCommand {
 struct ConvertCommand {
     input: InputSource,
     output: OutputTarget,
+    options: TransformOptions,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SignCommand {
+    base_url: String,
+    source: SignedUrlSource,
+    key_id: String,
+    secret: String,
+    expires: u64,
     options: TransformOptions,
 }
 
@@ -173,6 +208,10 @@ where
             Ok(()) => 0,
             Err(error) => write_error(stderr, error),
         },
+        Ok(Command::Sign(command)) => match execute_sign(command, stdout) {
+            Ok(()) => 0,
+            Err(error) => write_error(stderr, error),
+        },
         Err(error) => write_error(stderr, error),
     }
 }
@@ -193,6 +232,7 @@ where
         "serve" => parse_serve_args(remaining[1..].to_vec()),
         "inspect" => parse_inspect_args(remaining[1..].to_vec()),
         "convert" => parse_convert_args(remaining[1..].to_vec()),
+        "sign" => parse_sign_args(remaining[1..].to_vec()),
         value if is_serve_flag(value) => parse_serve_args(remaining),
         _ => parse_convert_args(remaining),
     }
@@ -389,6 +429,141 @@ fn parse_convert_args(args: Vec<String>) -> Result<Command, CliError> {
     }))
 }
 
+fn parse_sign_args(args: Vec<String>) -> Result<Command, CliError> {
+    if args.is_empty() {
+        return Err(usage_error(
+            "`sign` requires `--base-url`, a source flag, credentials, and `--expires`",
+        ));
+    }
+
+    let mut index = 0;
+    let mut base_url = None;
+    let mut path = None;
+    let mut url = None;
+    let mut version = None;
+    let mut key_id = None;
+    let mut secret = None;
+    let mut expires = None;
+    let mut options = TransformOptions::default();
+
+    while index < args.len() {
+        match args[index].as_str() {
+            "-h" | "--help" => return Ok(Command::Help),
+            "--base-url" => {
+                index += 1;
+                base_url = Some(parse_url_arg(required_arg(args.get(index), "--base-url")?, "--base-url")?);
+            }
+            "--path" => {
+                index += 1;
+                if path.is_some() || url.is_some() {
+                    return Err(usage_error("`sign` accepts exactly one of `--path` or `--url`"));
+                }
+                path = Some(required_arg(args.get(index), "--path")?.to_string());
+            }
+            "--url" => {
+                index += 1;
+                if path.is_some() || url.is_some() {
+                    return Err(usage_error("`sign` accepts exactly one of `--path` or `--url`"));
+                }
+                url = Some(parse_url_arg(required_arg(args.get(index), "--url")?, "--url")?);
+            }
+            "--version" => {
+                index += 1;
+                version = Some(required_arg(args.get(index), "--version")?.to_string());
+            }
+            "--key-id" => {
+                index += 1;
+                key_id = Some(required_arg(args.get(index), "--key-id")?.to_string());
+            }
+            "--secret" => {
+                index += 1;
+                secret = Some(required_arg(args.get(index), "--secret")?.to_string());
+            }
+            "--expires" => {
+                index += 1;
+                expires = Some(parse_u64_arg(args.get(index), "--expires")?);
+            }
+            "--width" => {
+                index += 1;
+                options.width = Some(parse_u32_arg(args.get(index), "--width")?);
+            }
+            "--height" => {
+                index += 1;
+                options.height = Some(parse_u32_arg(args.get(index), "--height")?);
+            }
+            "--fit" => {
+                index += 1;
+                let value = required_arg(args.get(index), "--fit")?;
+                options.fit = Some(parse_named(value, "--fit", Fit::from_str)?);
+            }
+            "--position" => {
+                index += 1;
+                let value = required_arg(args.get(index), "--position")?;
+                options.position = Some(parse_named(value, "--position", Position::from_str)?);
+            }
+            "--format" => {
+                index += 1;
+                let value = required_arg(args.get(index), "--format")?;
+                options.format = Some(parse_named(value, "--format", MediaType::from_str)?);
+            }
+            "--quality" => {
+                index += 1;
+                options.quality = Some(parse_u8_arg(args.get(index), "--quality")?);
+            }
+            "--background" => {
+                index += 1;
+                let value = required_arg(args.get(index), "--background")?;
+                options.background = Some(parse_named(value, "--background", Rgba8::from_hex)?);
+            }
+            "--rotate" => {
+                index += 1;
+                let value = required_arg(args.get(index), "--rotate")?;
+                options.rotate = parse_named(value, "--rotate", Rotation::from_str)?;
+            }
+            "--auto-orient" => options.auto_orient = true,
+            "--no-auto-orient" => options.auto_orient = false,
+            "--strip-metadata" => options.strip_metadata = true,
+            "--keep-metadata" => options.strip_metadata = false,
+            "--preserve-exif" => options.preserve_exif = true,
+            value => {
+                return Err(usage_error(&format!(
+                    "unknown argument for `sign`: `{value}`"
+                )));
+            }
+        }
+
+        index += 1;
+    }
+
+    let base_url = base_url.ok_or_else(|| usage_error("`sign` requires `--base-url`"))?;
+    let source = match (path, url) {
+        (Some(path), None) => SignedUrlSource::Path { path, version },
+        (None, Some(url)) => SignedUrlSource::Url { url, version },
+        (None, None) => {
+            return Err(usage_error(
+                "`sign` requires exactly one of `--path` or `--url`",
+            ))
+        }
+        (Some(_), Some(_)) => {
+            return Err(usage_error(
+                "`sign` accepts exactly one of `--path` or `--url`",
+            ))
+        }
+    };
+    let key_id = key_id.ok_or_else(|| usage_error("`sign` requires `--key-id`"))?;
+    let secret = secret.ok_or_else(|| usage_error("`sign` requires `--secret`"))?;
+    let expires = expires.ok_or_else(|| usage_error("`sign` requires `--expires`"))?;
+
+    Ok(Command::Sign(SignCommand {
+        base_url,
+        source,
+        key_id,
+        secret,
+        expires,
+        options,
+    }))
+}
+
 fn execute_serve(command: ServeCommand) -> Result<(), CliError> {
     let bind_addr = command.bind_addr.clone().unwrap_or_else(server::bind_addr);
     let config = resolve_server_config(command)?;
@@ -506,6 +681,26 @@ where
         .map_err(|error| map_transform_error(error))?;
 
     write_output_bytes(command.output, &output.bytes, stdout)
+}
+
+fn execute_sign<W>(command: SignCommand, stdout: &mut W) -> Result<(), CliError>
+where
+    W: Write,
+{
+    let url = sign_public_url(
+        &command.base_url,
+        command.source,
+        &command.options,
+        &command.key_id,
+        &command.secret,
+        command.expires,
+    )
+    .map_err(|reason| runtime_error(4, &reason))?;
+
+    writeln!(stdout, "{url}")
+        .map_err(|error| runtime_error(5, &format!("failed to write output: {error}")))?;
+
+    Ok(())
 }
 
 fn map_transform_error(error: crate::TransformError) -> CliError {
@@ -661,6 +856,13 @@ fn parse_u8_arg(value: Option<&String>, flag: &str) -> Result<u8, CliError> {
         .map_err(|_| usage_error(&format!("`{flag}` requires an integer")))
 }
 
+fn parse_u64_arg(value: Option<&String>, flag: &str) -> Result<u64, CliError> {
+    let value = required_arg(value, flag)?;
+    value
+        .parse::<u64>()
+        .map_err(|_| usage_error(&format!("`{flag}` requires an integer")))
+}
+
 fn required_arg<'a>(value: Option<&'a String>, flag: &str) -> Result<&'a str, CliError> {
     value
         .map(String::as_str)
@@ -744,9 +946,9 @@ where
 mod tests {
     use super::{
         parse_args, resolve_server_config, run_with_io, Command, ConvertCommand, InputSource,
-        OutputTarget, ServeCommand,
+        OutputTarget, ServeCommand, SignCommand,
     };
-    use crate::{sniff_artifact, Fit, MediaType, RawArtifact, TransformOptions};
+    use crate::{sniff_artifact, Fit, MediaType, RawArtifact, SignedUrlSource, TransformOptions};
     use image::codecs::png::PngEncoder;
     use image::{ColorType, ImageEncoder, Rgba, RgbaImage};
     use std::env;
@@ -1077,6 +1279,86 @@ mod tests {
     }
 
     #[test]
+    fn parse_args_supports_sign_for_path_sources() {
+        let command = parse_args(vec![
+            "truss".to_string(),
+            "sign".to_string(),
+            "--base-url".to_string(),
+            "https://cdn.example.com".to_string(),
+            "--path".to_string(),
+            "/image.png".to_string(),
+            "--key-id".to_string(),
+            "public-dev".to_string(),
+            "--secret".to_string(),
+            "secret-value".to_string(),
+            "--expires".to_string(),
+            "4102444800".to_string(),
+            "--format".to_string(),
+            "jpeg".to_string(),
+        ])
+        .expect("parse sign path");
+
+        assert_eq!(
+            command,
+            Command::Sign(SignCommand {
+                base_url: "https://cdn.example.com".to_string(),
+                source: SignedUrlSource::Path {
+                    path: "/image.png".to_string(),
+                    version: None
+                },
+                key_id: "public-dev".to_string(),
+                secret: "secret-value".to_string(),
+                expires: 4_102_444_800,
+                options: TransformOptions {
+                    format: Some(MediaType::Jpeg),
+                    ..TransformOptions::default()
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn parse_args_supports_sign_for_url_sources() {
+        let command = parse_args(vec![
+            "truss".to_string(),
+            "sign".to_string(),
+            "--base-url".to_string(),
+            "https://cdn.example.com".to_string(),
+            "--url".to_string(),
+            "https://origin.example.com/image.png".to_string(),
+            "--version".to_string(),
+            "v2".to_string(),
+            "--key-id".to_string(),
+            "public-dev".to_string(),
+            "--secret".to_string(),
+            "secret-value".to_string(),
+            "--expires".to_string(),
+            "4102444800".to_string(),
+            "--width".to_string(),
+            "120".to_string(),
+        ])
+        .expect("parse sign url");
+
+        assert_eq!(
+            command,
+            Command::Sign(SignCommand {
+                base_url: "https://cdn.example.com".to_string(),
+                source: SignedUrlSource::Url {
+                    url: "https://origin.example.com/image.png".to_string(),
+                    version: Some("v2".to_string())
+                },
+                key_id: "public-dev".to_string(),
+                secret: "secret-value".to_string(),
+                expires: 4_102_444_800,
+                options: TransformOptions {
+                    width: Some(120),
+                    ..TransformOptions::default()
+                }
+            })
+        );
+    }
+
+    #[test]
     fn parse_args_rejects_missing_convert_output() {
         let error = parse_args(vec![
             "truss".to_string(),
@@ -1140,6 +1422,7 @@ mod tests {
         assert!(stderr.is_empty());
         let output = String::from_utf8(stdout).expect("utf8 stdout");
         assert!(output.contains("truss convert <INPUT> -o <OUTPUT>"));
+        assert!(output.contains("truss sign --base-url <URL>"));
         assert!(output.contains("truss <INPUT> -o <OUTPUT> [OPTIONS]"));
         assert!(output.contains("--storage-root <PATH>"));
         assert!(output.contains("--public-base-url <URL>"));

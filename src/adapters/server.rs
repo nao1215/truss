@@ -232,6 +232,115 @@ impl ServerConfig {
     }
 }
 
+/// Source selector used when generating a signed public transform URL.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SignedUrlSource {
+    /// Generates a signed `GET /images/by-path` URL.
+    Path {
+        /// The storage-relative source path.
+        path: String,
+        /// An optional source version token.
+        version: Option<String>,
+    },
+    /// Generates a signed `GET /images/by-url` URL.
+    Url {
+        /// The remote source URL.
+        url: String,
+        /// An optional source version token.
+        version: Option<String>,
+    },
+}
+
+/// Builds a signed public transform URL for the server adapter.
+///
+/// The resulting URL targets either `GET /images/by-path` or `GET /images/by-url` depending on
+/// `source`. `base_url` must be an absolute `http` or `https` URL that points at the externally
+/// visible server origin. The helper applies the same canonical query and HMAC-SHA256 signature
+/// scheme that the server adapter verifies at request time.
+///
+/// The helper serializes only explicitly requested transform options and omits fields that would
+/// resolve to the documented defaults on the server side.
+///
+/// # Errors
+///
+/// Returns an error string when `base_url` is not an absolute `http` or `https` URL, when the
+/// visible authority cannot be determined, or when the HMAC state cannot be initialized.
+///
+/// # Examples
+///
+/// ```
+/// use truss::adapters::server::{sign_public_url, SignedUrlSource};
+/// use truss::{MediaType, TransformOptions};
+///
+/// let url = sign_public_url(
+///     "https://cdn.example.com",
+///     SignedUrlSource::Path {
+///         path: "/image.png".to_string(),
+///         version: None,
+///     },
+///     &TransformOptions {
+///         format: Some(MediaType::Jpeg),
+///         ..TransformOptions::default()
+///     },
+///     "public-dev",
+///     "secret-value",
+///     4_102_444_800,
+/// )
+/// .unwrap();
+///
+/// assert!(url.starts_with("https://cdn.example.com/images/by-path?"));
+/// assert!(url.contains("keyId=public-dev"));
+/// assert!(url.contains("signature="));
+/// ```
+pub fn sign_public_url(
+    base_url: &str,
+    source: SignedUrlSource,
+    options: &TransformOptions,
+    key_id: &str,
+    secret: &str,
+    expires: u64,
+) -> Result<String, String> {
+    let base_url = Url::parse(base_url).map_err(|error| format!("base URL is invalid: {error}"))?;
+    match base_url.scheme() {
+        "http" | "https" => {}
+        _ => return Err("base URL must use the http or https scheme".to_string()),
+    }
+
+    let route_path = match source {
+        SignedUrlSource::Path { .. } => "/images/by-path",
+        SignedUrlSource::Url { .. } => "/images/by-url",
+    };
+    let mut endpoint = base_url
+        .join(route_path)
+        .map_err(|error| format!("failed to resolve the public endpoint URL: {error}"))?;
+    let authority = url_authority(&endpoint)?;
+    let mut query = signed_source_query(source);
+    extend_transform_query(&mut query, options);
+    query.insert("keyId".to_string(), key_id.to_string());
+    query.insert("expires".to_string(), expires.to_string());
+
+    let canonical = format!(
+        "GET\n{}\n{}\n{}",
+        authority,
+        endpoint.path(),
+        canonical_query_without_signature(&query)
+    );
+    let mut mac = HmacSha256::new_from_slice(secret.as_bytes())
+        .map_err(|error| format!("failed to initialize signed URL HMAC: {error}"))?;
+    mac.update(canonical.as_bytes());
+    query.insert(
+        "signature".to_string(),
+        hex::encode(mac.finalize().into_bytes()),
+    );
+
+    let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+    for (name, value) in query {
+        serializer.append_pair(&name, &value);
+    }
+    endpoint.set_query(Some(&serializer.finish()));
+    Ok(endpoint.into())
+}
+
 /// Returns the bind address for the HTTP server adapter.
 ///
 /// The adapter reads `TRUSS_BIND_ADDR` when it is present. Otherwise it falls back to
@@ -1042,13 +1151,7 @@ fn canonical_request_authority(
                 "configured public base URL is invalid at runtime: {error}"
             ))
         })?;
-        let host = parsed.host_str().ok_or_else(|| {
-            internal_error_response("configured public base URL must include a host")
-        })?;
-        return Ok(match parsed.port() {
-            Some(port) => format!("{host}:{port}"),
-            None => host.to_string(),
-        });
+        return url_authority(&parsed).map_err(|message| internal_error_response(&message));
     }
 
     request
@@ -1059,6 +1162,16 @@ fn canonical_request_authority(
         .ok_or_else(|| bad_request_response("public GET requests require a Host header"))
 }
 
+fn url_authority(url: &Url) -> Result<String, String> {
+    let host = url
+        .host_str()
+        .ok_or_else(|| "configured public base URL must include a host".to_string())?;
+    Ok(match url.port() {
+        Some(port) => format!("{host}:{port}"),
+        None => host.to_string(),
+    })
+}
+
 fn canonical_query_without_signature(query: &BTreeMap<String, String>) -> String {
     let mut serializer = url::form_urlencoded::Serializer::new(String::new());
     for (name, value) in query {
@@ -1067,6 +1180,72 @@ fn canonical_query_without_signature(query: &BTreeMap<String, String>) -> String
         }
     }
     serializer.finish()
+}
+
+fn signed_source_query(source: SignedUrlSource) -> BTreeMap<String, String> {
+    let mut query = BTreeMap::new();
+    match source {
+        SignedUrlSource::Path { path, version } => {
+            query.insert("path".to_string(), path);
+            if let Some(version) = version {
+                query.insert("version".to_string(), version);
+            }
+        }
+        SignedUrlSource::Url { url, version } => {
+            query.insert("url".to_string(), url);
+            if let Some(version) = version {
+                query.insert("version".to_string(), version);
+            }
+        }
+    }
+    query
+}
+
+fn extend_transform_query(query: &mut BTreeMap<String, String>, options: &TransformOptions) {
+    if let Some(width) = options.width {
+        query.insert("width".to_string(), width.to_string());
+    }
+    if let Some(height) = options.height {
+        query.insert("height".to_string(), height.to_string());
+    }
+    if let Some(fit) = options.fit {
+        query.insert("fit".to_string(), fit.as_name().to_string());
+    }
+    if let Some(position) = options.position {
+        query.insert("position".to_string(), position.as_name().to_string());
+    }
+    if let Some(format) = options.format {
+        query.insert("format".to_string(), format.as_name().to_string());
+    }
+    if let Some(quality) = options.quality {
+        query.insert("quality".to_string(), quality.to_string());
+    }
+    if let Some(background) = options.background {
+        query.insert("background".to_string(), encode_background(background));
+    }
+    if options.rotate != Rotation::Deg0 {
+        query.insert("rotate".to_string(), options.rotate.as_degrees().to_string());
+    }
+    if !options.auto_orient {
+        query.insert("autoOrient".to_string(), "false".to_string());
+    }
+    if !options.strip_metadata {
+        query.insert("stripMetadata".to_string(), "false".to_string());
+    }
+    if options.preserve_exif {
+        query.insert("preserveExif".to_string(), "true".to_string());
+    }
+}
+
+fn encode_background(color: Rgba8) -> String {
+    if color.a == u8::MAX {
+        format!("{:02X}{:02X}{:02X}", color.r, color.g, color.b)
+    } else {
+        format!(
+            "{:02X}{:02X}{:02X}{:02X}",
+            color.r, color.g, color.b, color.a
+        )
+    }
 }
 
 fn validate_public_query_names(
@@ -2159,7 +2338,8 @@ mod tests {
         build_image_etag, build_image_response_headers, canonical_query_without_signature,
         negotiate_output_format, parse_public_get_request, prepare_remote_fetch_target,
         read_request, resolve_storage_path, route_request, serve_once_with_config, HttpRequest,
-        ImageResponsePolicy, PinnedResolver, PublicSourceKind, ServerConfig, DEFAULT_BIND_ADDR,
+        sign_public_url, ImageResponsePolicy, PinnedResolver, PublicSourceKind, ServerConfig,
+        SignedUrlSource, DEFAULT_BIND_ADDR,
     };
     use crate::{sniff_artifact, Artifact, ArtifactMetadata, MediaType, RawArtifact};
     use hmac::{Hmac, Mac};
@@ -2465,6 +2645,35 @@ mod tests {
             "Content-Disposition".to_string(),
             "inline; filename=\"truss.webp\"".to_string()
         )));
+    }
+
+    #[test]
+    fn sign_public_url_builds_a_signed_path_url() {
+        let url = sign_public_url(
+            "https://cdn.example.com",
+            SignedUrlSource::Path {
+                path: "/image.png".to_string(),
+                version: Some("v1".to_string()),
+            },
+            &crate::TransformOptions {
+                format: Some(MediaType::Jpeg),
+                width: Some(320),
+                ..crate::TransformOptions::default()
+            },
+            "public-dev",
+            "secret-value",
+            4_102_444_800,
+        )
+        .expect("sign public URL");
+
+        assert!(url.starts_with("https://cdn.example.com/images/by-path?"));
+        assert!(url.contains("path=%2Fimage.png"));
+        assert!(url.contains("version=v1"));
+        assert!(url.contains("width=320"));
+        assert!(url.contains("format=jpeg"));
+        assert!(url.contains("keyId=public-dev"));
+        assert!(url.contains("expires=4102444800"));
+        assert!(url.contains("signature="));
     }
 
     #[test]

@@ -37,7 +37,7 @@
 
 ## Active Plan
 
-1. Improve HTTP image response semantics with adapter-level `Accept` negotiation, `ETag`, cache headers, and related response metadata.
+1. Add a signed public URL generation helper and CLI entry point so the implemented public GET API is directly usable.
 2. Decide how far metadata retention should go beyond the current EXIF + ICC path, especially XMP / IPTC handling and whether unsupported metadata should stay as hard errors.
 3. Revisit AVIF decode only after the runtime dependency strategy for `dav1d` is decided.
 4. Reconcile the remaining documented API gaps, especially `svg` and any behavior that is still stricter than `doc/openapi.yaml`.
@@ -170,3 +170,11 @@
 - 2026-03-08: Current coverage summary from `cargo llvm-cov` is 84.07% regions, 72.12% functions, and 83.69% lines across all targets.
 - 2026-03-08: Current automated verification covers 93 unit tests, 20 integration tests, and 12 doc tests.
 - 2026-03-08: Started phase 13 planning to improve HTTP image response semantics with adapter-side output negotiation and response headers for cacheability and content safety.
+- 2026-03-08: Implemented adapter-side HTTP output negotiation for supported raster formats when `format` is absent, using the request `Accept` header before the Core layer defaults the output type.
+- 2026-03-08: Added image response headers for transformed HTTP outputs: strong SHA-256 `ETag`, public/private `Cache-Control`, `X-Content-Type-Options: nosniff`, and `Content-Disposition`, plus `Vary: Accept` when negotiation is used.
+- 2026-03-08: Public signed GET requests now honor `If-None-Match` and can return `304 Not Modified` with the corresponding cache metadata.
+- 2026-03-08: Added unit coverage for negotiation and image-response header generation, plus integration coverage for public Accept negotiation, public conditional requests, and private no-store responses.
+- 2026-03-08: Ran `cargo fmt`, `cargo test`, and `./scripts/coverage.sh` after the HTTP response-semantics changes.
+- 2026-03-08: Current coverage summary from `cargo llvm-cov` is 84.44% regions, 73.15% functions, and 84.25% lines across all targets.
+- 2026-03-08: Current automated verification covers 96 unit tests, 23 integration tests, and 12 doc tests.
+- 2026-03-08: Started phase 14 planning to add signed public URL generation in the library and CLI so public GET transforms can be produced without reimplementing the HMAC contract externally.
