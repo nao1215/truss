@@ -725,3 +725,429 @@ fn serve_once_rejects_oversized_output_with_413() {
     assert!(body.contains("output image"));
     assert!(body.contains("limit"));
 }
+
+// ---------------------------------------------------------------------------
+// A. Signed public GET failure cases
+// ---------------------------------------------------------------------------
+
+#[test]
+fn serve_once_rejects_expired_signed_public_request() {
+    let storage_root = temp_dir("expired-sig");
+    fs::write(storage_root.join("image.png"), png_bytes()).expect("write source fixture");
+    let (addr, handle) = spawn_server(
+        ServerConfig::new(storage_root, Some("secret".to_string()))
+            .with_signed_url_credentials("public-dev", "secret-value"),
+    );
+    let target = signed_target(
+        "/images/by-path",
+        BTreeMap::from([
+            ("path".to_string(), "/image.png".to_string()),
+            ("keyId".to_string(), "public-dev".to_string()),
+            ("expires".to_string(), "1".to_string()),
+            ("format".to_string(), "jpeg".to_string()),
+        ]),
+        "cdn.example.com",
+        "secret-value",
+    );
+    let response = send_public_get_request(addr, &target, "cdn.example.com");
+
+    handle
+        .join()
+        .expect("join server thread")
+        .expect("serve one request");
+
+    let (header, _content_type, body) = split_response(&response);
+    let body = String::from_utf8(body).expect("utf8 response body");
+
+    assert!(header.starts_with("HTTP/1.1 401 Unauthorized"));
+    assert!(body.to_lowercase().contains("expired"));
+}
+
+#[test]
+fn serve_once_rejects_signed_public_request_with_wrong_secret() {
+    let storage_root = temp_dir("wrong-sig");
+    fs::write(storage_root.join("image.png"), png_bytes()).expect("write source fixture");
+    let (addr, handle) = spawn_server(
+        ServerConfig::new(storage_root, Some("secret".to_string()))
+            .with_signed_url_credentials("public-dev", "secret-value"),
+    );
+    let target = signed_target(
+        "/images/by-path",
+        BTreeMap::from([
+            ("path".to_string(), "/image.png".to_string()),
+            ("keyId".to_string(), "public-dev".to_string()),
+            ("expires".to_string(), "4102444800".to_string()),
+            ("format".to_string(), "jpeg".to_string()),
+        ]),
+        "cdn.example.com",
+        "wrong-secret",
+    );
+    let response = send_public_get_request(addr, &target, "cdn.example.com");
+
+    handle
+        .join()
+        .expect("join server thread")
+        .expect("serve one request");
+
+    let (header, _content_type, _body) = split_response(&response);
+
+    assert!(header.starts_with("HTTP/1.1 401 Unauthorized"));
+}
+
+#[test]
+fn serve_once_rejects_signed_public_request_with_accept_json() {
+    let storage_root = temp_dir("accept-json");
+    fs::write(storage_root.join("image.png"), png_bytes()).expect("write source fixture");
+    let (addr, handle) = spawn_server(
+        ServerConfig::new(storage_root, Some("secret".to_string()))
+            .with_signed_url_credentials("public-dev", "secret-value"),
+    );
+    let target = signed_target(
+        "/images/by-path",
+        BTreeMap::from([
+            ("path".to_string(), "/image.png".to_string()),
+            ("keyId".to_string(), "public-dev".to_string()),
+            ("expires".to_string(), "4102444800".to_string()),
+        ]),
+        "cdn.example.com",
+        "secret-value",
+    );
+    let response = send_public_get_request_with_headers(
+        addr,
+        &target,
+        "cdn.example.com",
+        &[("Accept", "application/json")],
+    );
+
+    handle
+        .join()
+        .expect("join server thread")
+        .expect("serve one request");
+
+    let (header, _content_type, _body) = split_response(&response);
+
+    assert!(header.starts_with("HTTP/1.1 406 Not Acceptable"));
+}
+
+#[test]
+fn serve_once_rejects_signed_public_request_with_unknown_query_parameter() {
+    let storage_root = temp_dir("unknown-param");
+    fs::write(storage_root.join("image.png"), png_bytes()).expect("write source fixture");
+    let (addr, handle) = spawn_server(
+        ServerConfig::new(storage_root, Some("secret".to_string()))
+            .with_signed_url_credentials("public-dev", "secret-value"),
+    );
+    let target = signed_target(
+        "/images/by-path",
+        BTreeMap::from([
+            ("path".to_string(), "/image.png".to_string()),
+            ("keyId".to_string(), "public-dev".to_string()),
+            ("expires".to_string(), "4102444800".to_string()),
+            ("format".to_string(), "jpeg".to_string()),
+            ("unknown".to_string(), "value".to_string()),
+        ]),
+        "cdn.example.com",
+        "secret-value",
+    );
+    let response = send_public_get_request(addr, &target, "cdn.example.com");
+
+    handle
+        .join()
+        .expect("join server thread")
+        .expect("serve one request");
+
+    let (header, _content_type, body) = split_response(&response);
+    let body = String::from_utf8(body).expect("utf8 response body");
+
+    assert!(header.starts_with("HTTP/1.1 400 Bad Request"));
+    assert!(body.to_lowercase().contains("is not supported"));
+}
+
+// ---------------------------------------------------------------------------
+// B. Multipart/upload failure cases
+// ---------------------------------------------------------------------------
+
+#[test]
+fn serve_once_rejects_upload_with_empty_file_field() {
+    let storage_root = temp_dir("upload-empty-file");
+    let (addr, handle) = spawn_server(ServerConfig::new(storage_root, Some("secret".to_string())));
+    let boundary = "truss-integration-boundary";
+    let body = format!(
+        "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"image.png\"\r\nContent-Type: image/png\r\n\r\n\r\n--{boundary}--\r\n"
+    )
+    .into_bytes();
+    let response = send_upload_request(addr, &body, boundary, Some("secret"));
+
+    handle
+        .join()
+        .expect("join server thread")
+        .expect("serve one request");
+
+    let (header, content_type, body) = split_response(&response);
+    let body = String::from_utf8(body).expect("utf8 response body");
+
+    assert!(header.starts_with("HTTP/1.1 400 Bad Request"));
+    assert_eq!(content_type, "application/problem+json");
+    assert!(body.to_lowercase().contains("empty"));
+}
+
+#[test]
+fn serve_once_rejects_upload_with_duplicate_file_field() {
+    let storage_root = temp_dir("upload-dup-file");
+    let (addr, handle) = spawn_server(ServerConfig::new(storage_root, Some("secret".to_string())));
+    let boundary = "truss-integration-boundary";
+    let png = png_bytes();
+    let mut body = Vec::new();
+    body.extend_from_slice(
+        format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"image.png\"\r\nContent-Type: image/png\r\n\r\n"
+        )
+        .as_bytes(),
+    );
+    body.extend_from_slice(&png);
+    body.extend_from_slice(b"\r\n");
+    body.extend_from_slice(
+        format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"image2.png\"\r\nContent-Type: image/png\r\n\r\n"
+        )
+        .as_bytes(),
+    );
+    body.extend_from_slice(&png);
+    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+    let response = send_upload_request(addr, &body, boundary, Some("secret"));
+
+    handle
+        .join()
+        .expect("join server thread")
+        .expect("serve one request");
+
+    let (header, content_type, body) = split_response(&response);
+    let body = String::from_utf8(body).expect("utf8 response body");
+
+    assert!(header.starts_with("HTTP/1.1 400 Bad Request"));
+    assert_eq!(content_type, "application/problem+json");
+    assert!(body.to_lowercase().contains("multiple"));
+}
+
+#[test]
+fn serve_once_rejects_upload_with_duplicate_options_field() {
+    let storage_root = temp_dir("upload-dup-options");
+    let (addr, handle) = spawn_server(ServerConfig::new(storage_root, Some("secret".to_string())));
+    let boundary = "truss-integration-boundary";
+    let png = png_bytes();
+    let mut body = Vec::new();
+    body.extend_from_slice(
+        format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"image.png\"\r\nContent-Type: image/png\r\n\r\n"
+        )
+        .as_bytes(),
+    );
+    body.extend_from_slice(&png);
+    body.extend_from_slice(b"\r\n");
+    body.extend_from_slice(
+        format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"options\"\r\nContent-Type: application/json\r\n\r\n{{\"format\":\"jpeg\"}}\r\n"
+        )
+        .as_bytes(),
+    );
+    body.extend_from_slice(
+        format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"options\"\r\nContent-Type: application/json\r\n\r\n{{\"format\":\"png\"}}\r\n"
+        )
+        .as_bytes(),
+    );
+    body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+    let response = send_upload_request(addr, &body, boundary, Some("secret"));
+
+    handle
+        .join()
+        .expect("join server thread")
+        .expect("serve one request");
+
+    let (header, content_type, body) = split_response(&response);
+    let body = String::from_utf8(body).expect("utf8 response body");
+
+    assert!(header.starts_with("HTTP/1.1 400 Bad Request"));
+    assert_eq!(content_type, "application/problem+json");
+    assert!(body.to_lowercase().contains("multiple"));
+}
+
+#[test]
+fn serve_once_rejects_upload_with_invalid_json_in_options() {
+    let storage_root = temp_dir("upload-bad-json");
+    let (addr, handle) = spawn_server(ServerConfig::new(storage_root, Some("secret".to_string())));
+    let boundary = "truss-integration-boundary";
+    let png = png_bytes();
+    let mut body = Vec::new();
+    body.extend_from_slice(
+        format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"image.png\"\r\nContent-Type: image/png\r\n\r\n"
+        )
+        .as_bytes(),
+    );
+    body.extend_from_slice(&png);
+    body.extend_from_slice(b"\r\n");
+    body.extend_from_slice(
+        format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"options\"\r\nContent-Type: application/json\r\n\r\n{{invalid json\r\n"
+        )
+        .as_bytes(),
+    );
+    body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+    let response = send_upload_request(addr, &body, boundary, Some("secret"));
+
+    handle
+        .join()
+        .expect("join server thread")
+        .expect("serve one request");
+
+    let (header, content_type, body) = split_response(&response);
+    let body = String::from_utf8(body).expect("utf8 response body");
+
+    assert!(header.starts_with("HTTP/1.1 400 Bad Request"));
+    assert_eq!(content_type, "application/problem+json");
+    assert!(body.contains("JSON"));
+}
+
+#[test]
+fn serve_once_rejects_upload_with_wrong_content_type_on_options() {
+    let storage_root = temp_dir("upload-wrong-ct");
+    let (addr, handle) = spawn_server(ServerConfig::new(storage_root, Some("secret".to_string())));
+    let boundary = "truss-integration-boundary";
+    let png = png_bytes();
+    let mut body = Vec::new();
+    body.extend_from_slice(
+        format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"image.png\"\r\nContent-Type: image/png\r\n\r\n"
+        )
+        .as_bytes(),
+    );
+    body.extend_from_slice(&png);
+    body.extend_from_slice(b"\r\n");
+    body.extend_from_slice(
+        format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"options\"\r\nContent-Type: text/plain\r\n\r\n{{\"format\":\"jpeg\"}}\r\n"
+        )
+        .as_bytes(),
+    );
+    body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+    let response = send_upload_request(addr, &body, boundary, Some("secret"));
+
+    handle
+        .join()
+        .expect("join server thread")
+        .expect("serve one request");
+
+    let (header, content_type, body) = split_response(&response);
+    let body = String::from_utf8(body).expect("utf8 response body");
+
+    assert!(header.starts_with("HTTP/1.1 400 Bad Request"));
+    assert_eq!(content_type, "application/problem+json");
+    assert!(body.contains("application/json"));
+}
+
+#[test]
+fn serve_once_rejects_upload_with_unknown_field_name() {
+    let storage_root = temp_dir("upload-unknown-field");
+    let (addr, handle) = spawn_server(ServerConfig::new(storage_root, Some("secret".to_string())));
+    let boundary = "truss-integration-boundary";
+    let png = png_bytes();
+    let mut body = Vec::new();
+    body.extend_from_slice(
+        format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"image.png\"\r\nContent-Type: image/png\r\n\r\n"
+        )
+        .as_bytes(),
+    );
+    body.extend_from_slice(&png);
+    body.extend_from_slice(b"\r\n");
+    body.extend_from_slice(
+        format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"extra\"\r\nContent-Type: text/plain\r\n\r\nsome data\r\n"
+        )
+        .as_bytes(),
+    );
+    body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+    let response = send_upload_request(addr, &body, boundary, Some("secret"));
+
+    handle
+        .join()
+        .expect("join server thread")
+        .expect("serve one request");
+
+    let (header, content_type, body) = split_response(&response);
+    let body = String::from_utf8(body).expect("utf8 response body");
+
+    assert!(header.starts_with("HTTP/1.1 400 Bad Request"));
+    assert_eq!(content_type, "application/problem+json");
+    assert!(body.to_lowercase().contains("unsupported field"));
+}
+
+// ---------------------------------------------------------------------------
+// C. Remote redirect failure cases
+// ---------------------------------------------------------------------------
+
+#[test]
+fn serve_once_rejects_redirect_without_location_header() {
+    let storage_root = temp_dir("redirect-no-location");
+    let (url, fixture) = spawn_fixture_server(vec![("302 Found".to_string(), vec![], Vec::new())]);
+    let (addr, handle) = spawn_server(
+        ServerConfig::new(storage_root, Some("secret".to_string())).with_insecure_url_sources(true),
+    );
+    let body = format!(
+        "{{\"source\":{{\"kind\":\"url\",\"url\":\"{url}\"}},\"options\":{{\"format\":\"jpeg\"}}}}"
+    );
+    let response = send_transform_request(addr, &body, Some("secret"));
+
+    handle
+        .join()
+        .expect("join server thread")
+        .expect("serve one request");
+    fixture.join().expect("join fixture server");
+
+    let (header, content_type, body) = split_response(&response);
+    let body = String::from_utf8(body).expect("utf8 response body");
+
+    assert!(header.starts_with("HTTP/1.1 502 Bad Gateway"));
+    assert_eq!(content_type, "application/problem+json");
+    assert!(body.contains("Location"));
+}
+
+#[test]
+fn serve_once_rejects_redirect_limit_exceeded() {
+    let storage_root = temp_dir("redirect-limit");
+    let mut responses: Vec<FixtureResponse> = Vec::new();
+    for _ in 0..6 {
+        responses.push((
+            "302 Found".to_string(),
+            vec![("Location".to_string(), "/image".to_string())],
+            Vec::new(),
+        ));
+    }
+    responses.push((
+        "200 OK".to_string(),
+        vec![("Content-Type".to_string(), "image/png".to_string())],
+        png_bytes(),
+    ));
+    let (url, fixture) = spawn_fixture_server(responses);
+    let (addr, handle) = spawn_server(
+        ServerConfig::new(storage_root, Some("secret".to_string())).with_insecure_url_sources(true),
+    );
+    let body = format!(
+        "{{\"source\":{{\"kind\":\"url\",\"url\":\"{url}\"}},\"options\":{{\"format\":\"jpeg\"}}}}"
+    );
+    let response = send_transform_request(addr, &body, Some("secret"));
+
+    handle
+        .join()
+        .expect("join server thread")
+        .expect("serve one request");
+    fixture.join().expect("join fixture server");
+
+    let (header, content_type, body) = split_response(&response);
+    let body = String::from_utf8(body).expect("utf8 response body");
+
+    assert!(header.starts_with("HTTP/1.1 508 Loop Detected"));
+    assert_eq!(content_type, "application/problem+json");
+    assert!(body.to_lowercase().contains("redirect"));
+}
