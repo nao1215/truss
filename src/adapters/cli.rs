@@ -1,7 +1,7 @@
 use crate::adapters::server::{self, sign_public_url, ServerConfig, SignedUrlSource};
 use crate::{
-    sniff_artifact, transform_raster, Fit, MediaType, Position, RawArtifact, Rgba8, Rotation,
-    TransformOptions, TransformRequest,
+    sniff_artifact, transform_raster, transform_svg, Fit, MediaType, Position, RawArtifact, Rgba8,
+    Rotation, TransformOptions, TransformRequest,
 };
 use std::fs;
 use std::io::{self, Read, Write};
@@ -42,7 +42,7 @@ OPTIONS FOR CONVERT:
       --height <PX>
       --fit <contain|cover|fill|inside>
       --position <center|top|right|bottom|left|top-left|top-right|bottom-left|bottom-right>
-      --format <jpeg|png|webp|avif>
+      --format <jpeg|png|webp|avif|svg>
       --quality <1-100>
       --background <RRGGBB|RRGGBBAA>
       --rotate <0|90|180|270>
@@ -64,7 +64,7 @@ OPTIONS FOR SIGN:
       --height <PX>
       --fit <contain|cover|fill|inside>
       --position <center|top|right|bottom|left|top-left|top-right|bottom-left|bottom-right>
-      --format <jpeg|png|webp|avif>
+      --format <jpeg|png|webp|avif|svg>
       --quality <1-100>
       --background <RRGGBB|RRGGBBAA>
       --rotate <0|90|180|270>
@@ -687,8 +687,12 @@ where
         options.format = infer_output_format(&command.output).or(Some(input.media_type));
     }
 
-    let result = transform_raster(TransformRequest::new(input, options))
-        .map_err(map_transform_error)?;
+    let result = if input.media_type == MediaType::Svg {
+        transform_svg(TransformRequest::new(input, options))
+    } else {
+        transform_raster(TransformRequest::new(input, options))
+    }
+    .map_err(map_transform_error)?;
 
     for warning in &result.warnings {
         eprintln!("warning: {warning}");

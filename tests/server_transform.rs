@@ -38,8 +38,10 @@ fn spawn_server(config: ServerConfig) -> (SocketAddr, thread::JoinHandle<std::io
     (addr, handle)
 }
 
+type FixtureResponse = (String, Vec<(String, String)>, Vec<u8>);
+
 fn spawn_fixture_server(
-    responses: Vec<(String, Vec<(String, String)>, Vec<u8>)>,
+    responses: Vec<FixtureResponse>,
 ) -> (String, thread::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind fixture server");
     listener

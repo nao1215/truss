@@ -39,8 +39,7 @@
 
 ## Active Plan
 
-1. Reconcile the remaining documented API gaps, especially `svg` and any behavior that is still stricter than `doc/openapi.yaml`.
-2. XMP/IPTC Phase 2: byte-level insertion into encoded output (JPEG APP1/APP13, PNG iTXt). Deferred until Phase 1 usage demonstrates demand.
+1. XMP/IPTC Phase 2: byte-level insertion into encoded output (JPEG APP1/APP13, PNG iTXt). Deferred until Phase 1 usage demonstrates demand.
 
 ## Work Log
 
@@ -200,3 +199,9 @@
 - 2026-03-08: Investigated codec dependency options for AVIF decode and WebP lossy encode. Documented findings in `doc/runtime-architecture.md` section 9.2. Selected `rav1d-safe` (pure Rust) for AVIF decode and `webp` crate (`libwebp-sys` vendored C) for WebP lossy encode.
 - 2026-03-08: Implemented AVIF decode using `rav1d-safe` + `mp4parse` + `yuvutils-rs`. Pipeline: AVIF container → mp4parse → rav1d AV1 decode → YUV-to-RGBA conversion → DynamicImage. Supports 8/10/12-bit depth, I420/I422/I444/I400 layouts, alpha plane decode. Pure Rust, no C dependencies. 3 new unit tests (round-trip, resize, invalid data). Total tests: 155.
 - 2026-03-08: Implemented WebP lossy encoding using `webp` crate (wraps `libwebp-sys` with vendored C source). Quality 0-100 now works for WebP output. Lossless encoding (no quality specified) still uses the pure-Rust `image-webp` encoder with metadata retention. 2 new unit tests (lossy encode, quality-size relationship). Total tests: 155.
+- 2026-03-08: Implemented SVG support as a new codec module (`src/codecs/svg.rs`). Added `MediaType::Svg` variant to Core types with `is_raster()` helper, `is_svg()` content sniffing (handles BOM, XML declaration, DOCTYPE, comments), and `sniff_svg()` metadata extraction.
+- 2026-03-08: SVG sanitization uses streaming `quick-xml` reader/writer to remove `<script>`, `<foreignObject>`, event handlers (`onclick`, `onload`, etc.), external `href`/`xlink:href` references, and dangerous `data:` URLs while preserving `data:image/*` and internal `#fragment` references.
+- 2026-03-08: SVG rasterization uses `resvg` (which re-exports `usvg` and `tiny_skia`) to render sanitized SVG to RGBA pixel buffer with premultiplied-to-straight alpha conversion, then encodes to JPEG/PNG/WebP/AVIF via shared encode helpers.
+- 2026-03-08: SVG dispatch integrated into CLI (`src/adapters/cli.rs`) and server (`src/adapters/server.rs`) adapters. Server adds `Content-Security-Policy: sandbox` header for SVG responses. Help text updated to include `svg` format.
+- 2026-03-08: Added `transform_svg` to public API exports in `src/lib.rs`. Added validation: `preserveExif + format=svg` returns `InvalidOptions`.
+- 2026-03-08: 16 new SVG unit tests (8 sanitization, 2 sniffing, 6 transform), 1 new doc test. All 129 unit tests, 25 integration tests, and 18 doc tests pass. Clippy clean with `-D warnings`. `cargo doc` clean with `-D warnings` on RUSTDOCFLAGS.

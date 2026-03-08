@@ -12,6 +12,7 @@ pub use adapters::server::{
     ServerConfig, SignedUrlSource, DEFAULT_BIND_ADDR, DEFAULT_STORAGE_ROOT,
 };
 pub use codecs::raster::transform_raster;
+pub use codecs::svg::transform_svg;
 pub use core::{
     sniff_artifact, Artifact, ArtifactMetadata, Fit, MediaType, MetadataPolicy,
     NormalizedTransformOptions, NormalizedTransformRequest, Position, RawArtifact, Rgba8, Rotation,

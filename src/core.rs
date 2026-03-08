@@ -104,6 +104,8 @@ pub enum MediaType {
     Webp,
     /// AVIF image data.
     Avif,
+    /// SVG image data.
+    Svg,
 }
 
 impl MediaType {
@@ -114,6 +116,7 @@ impl MediaType {
             Self::Png => "png",
             Self::Webp => "webp",
             Self::Avif => "avif",
+            Self::Svg => "svg",
         }
     }
 
@@ -124,12 +127,18 @@ impl MediaType {
             Self::Png => "image/png",
             Self::Webp => "image/webp",
             Self::Avif => "image/avif",
+            Self::Svg => "image/svg+xml",
         }
     }
 
     /// Reports whether the media type is typically encoded with lossy quality controls.
     pub const fn is_lossy(self) -> bool {
         matches!(self, Self::Jpeg | Self::Webp | Self::Avif)
+    }
+
+    /// Returns `true` if this is a raster (bitmap) format, `false` for vector formats.
+    pub const fn is_raster(self) -> bool {
+        !matches!(self, Self::Svg)
     }
 }
 
@@ -148,6 +157,7 @@ impl FromStr for MediaType {
             "png" => Ok(Self::Png),
             "webp" => Ok(Self::Webp),
             "avif" => Ok(Self::Avif),
+            "svg" => Ok(Self::Svg),
             _ => Err(format!("unsupported media type `{value}`")),
         }
     }
@@ -272,6 +282,12 @@ impl TransformOptions {
         }
 
         let format = self.format.unwrap_or(input_media_type);
+
+        if self.preserve_exif && format == MediaType::Svg {
+            return Err(TransformError::InvalidOptions(
+                "preserveExif is not supported with SVG output".to_string(),
+            ));
+        }
 
         if self.quality.is_some() && !format.is_lossy() {
             return Err(TransformError::InvalidOptions(
@@ -752,6 +768,12 @@ fn detect_artifact(bytes: &[u8]) -> Result<(MediaType, ArtifactMetadata), Transf
         return Ok((MediaType::Avif, sniff_avif(bytes)?));
     }
 
+    // SVG check goes last: it relies on text scanning which is slower than binary
+    // magic-number checks and could produce false positives on non-SVG XML.
+    if is_svg(bytes) {
+        return Ok((MediaType::Svg, sniff_svg(bytes)));
+    }
+
     Err(TransformError::UnsupportedInputMediaType(
         "unknown file signature".to_string(),
     ))
@@ -771,6 +793,65 @@ fn is_webp(bytes: &[u8]) -> bool {
 
 fn is_avif(bytes: &[u8]) -> bool {
     bytes.len() >= 16 && &bytes[4..8] == b"ftyp" && has_avif_brand(&bytes[8..])
+}
+
+/// Detects SVG by scanning for a `<svg` root element, skipping XML declarations,
+/// doctypes, comments, and whitespace.
+fn is_svg(bytes: &[u8]) -> bool {
+    let text = match std::str::from_utf8(bytes) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+
+    let mut remaining = text.trim_start();
+
+    // Skip UTF-8 BOM if present.
+    remaining = remaining.strip_prefix('\u{FEFF}').unwrap_or(remaining);
+    remaining = remaining.trim_start();
+
+    // Skip XML declaration: <?xml ... ?>
+    if let Some(rest) = remaining.strip_prefix("<?xml") {
+        if let Some(end) = rest.find("?>") {
+            remaining = rest[end + 2..].trim_start();
+        } else {
+            return false;
+        }
+    }
+
+    // Skip DOCTYPE: <!DOCTYPE ... >
+    if let Some(rest) = remaining.strip_prefix("<!DOCTYPE") {
+        if let Some(end) = rest.find('>') {
+            remaining = rest[end + 1..].trim_start();
+        } else {
+            return false;
+        }
+    }
+
+    // Skip comments: <!-- ... -->
+    while let Some(rest) = remaining.strip_prefix("<!--") {
+        if let Some(end) = rest.find("-->") {
+            remaining = rest[end + 3..].trim_start();
+        } else {
+            return false;
+        }
+    }
+
+    remaining.starts_with("<svg") && remaining.as_bytes().get(4).is_some_and(|&b| {
+        b == b' ' || b == b'\t' || b == b'\n' || b == b'\r' || b == b'>'
+    })
+}
+
+/// Extracts basic SVG metadata. SVGs inherently support transparency.
+/// Width and height are left unknown because SVGs may define dimensions via
+/// `viewBox`, percentage-based attributes, or not at all.
+fn sniff_svg(_bytes: &[u8]) -> ArtifactMetadata {
+    ArtifactMetadata {
+        width: None,
+        height: None,
+        frame_count: 1,
+        duration: None,
+        has_alpha: Some(true),
+    }
 }
 
 fn sniff_png(bytes: &[u8]) -> Result<ArtifactMetadata, TransformError> {

@@ -1,6 +1,6 @@
 use crate::{
-    sniff_artifact, transform_raster, Artifact, Fit, MediaType, Position, RawArtifact, Rgba8,
-    Rotation, TransformError, TransformOptions, TransformRequest,
+    sniff_artifact, transform_raster, transform_svg, Artifact, Fit, MediaType, Position,
+    RawArtifact, Rgba8, Rotation, TransformError, TransformOptions, TransformRequest,
 };
 use hmac::{Hmac, Mac};
 use serde::Deserialize;
@@ -856,9 +856,17 @@ fn transform_source_bytes(
     } else {
         false
     };
-    let result = match transform_raster(TransformRequest::new(artifact, options)) {
-        Ok(result) => result,
-        Err(error) => return transform_error_response(error),
+    let is_svg = artifact.media_type == MediaType::Svg;
+    let result = if is_svg {
+        match transform_svg(TransformRequest::new(artifact, options)) {
+            Ok(result) => result,
+            Err(error) => return transform_error_response(error),
+        }
+    } else {
+        match transform_raster(TransformRequest::new(artifact, options)) {
+            Ok(result) => result,
+            Err(error) => return transform_error_response(error),
+        }
     };
 
     for warning in &result.warnings {
@@ -1064,6 +1072,15 @@ fn build_image_response_headers(
 
     if negotiation_used {
         headers.push(("Vary".to_string(), "Accept".to_string()));
+    }
+
+    // SVG outputs get a Content-Security-Policy sandbox to prevent script execution
+    // when served inline. This mitigates XSS risk from user-supplied SVG content.
+    if media_type == MediaType::Svg {
+        headers.push((
+            "Content-Security-Policy".to_string(),
+            "sandbox".to_string(),
+        ));
     }
 
     headers
@@ -2429,8 +2446,10 @@ mod tests {
         hex::encode(mac.finalize().into_bytes())
     }
 
+    type FixtureResponse = (String, Vec<(String, String)>, Vec<u8>);
+
     fn spawn_http_server(
-        responses: Vec<(String, Vec<(String, String)>, Vec<u8>)>,
+        responses: Vec<FixtureResponse>,
     ) -> (String, thread::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind fixture server");
         listener

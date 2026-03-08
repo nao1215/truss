@@ -17,3 +17,5 @@ rav1d-safe = { version = "0.3", default-features = false, features = ["bitdepth_
 mp4parse = "0.17"
 yuvutils-rs = "0.8"
 webp = "0.3"
+quick-xml = "0.37"
+resvg = "0.45"

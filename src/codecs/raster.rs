@@ -258,6 +258,11 @@ fn decode_input(input: &Artifact) -> Result<DynamicImage, TransformError> {
         MediaType::Png => ImageFormat::Png,
         MediaType::Webp => ImageFormat::WebP,
         MediaType::Avif => return decode_avif(&input.bytes),
+        MediaType::Svg => {
+            return Err(TransformError::UnsupportedInputMediaType(
+                "SVG input should be routed to transform_svg, not transform_raster".into(),
+            ));
+        }
     };
 
     image::load_from_memory_with_format(&input.bytes, image_format)
@@ -526,7 +531,7 @@ fn merge_alpha_plane(
 /// Called at pipeline stage boundaries when a deadline is configured. Accepts the elapsed
 /// time and limit as separate values so the function can be tested without depending on
 /// real wall-clock time.
-fn check_deadline(
+pub(crate) fn check_deadline(
     elapsed: Duration,
     limit: Duration,
     stage: &str,
@@ -888,6 +893,11 @@ fn encode_output(
                 .write_image(&rgba, rgba.width(), rgba.height(), ColorType::Rgba8.into())
                 .map_err(|error| TransformError::EncodeFailed(error.to_string()))?;
         }
+        MediaType::Svg => {
+            return Err(TransformError::EncodeFailed(
+                "SVG encoding should be handled by transform_svg".into(),
+            ));
+        }
     }
 
     Ok(bytes)
@@ -1025,14 +1035,16 @@ fn read_input_metadata(input: &Artifact) -> Result<RetainedMetadata, TransformEr
                     .map_err(|error| TransformError::DecodeFailed(error.to_string()))?,
             })
         }
-        MediaType::Avif => Ok(RetainedMetadata::default()),
+        MediaType::Avif | MediaType::Svg => Ok(RetainedMetadata::default()),
     }
 }
 
 fn output_has_alpha(image: &DynamicImage, media_type: MediaType) -> bool {
     match media_type {
         MediaType::Jpeg => false,
-        MediaType::Png | MediaType::Webp | MediaType::Avif => image.color().has_alpha(),
+        MediaType::Png | MediaType::Webp | MediaType::Avif | MediaType::Svg => {
+            image.color().has_alpha()
+        }
     }
 }
 
