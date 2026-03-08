@@ -18,12 +18,13 @@
 - The CLI adapter now supports `serve` and `inspect`.
 - The CLI adapter now supports local-file and stdin-based `convert`.
 - The CLI adapter now supports `inspect --url` and `convert --url` over HTTP(S).
-- A raster backend now performs resize, rotate, and format conversion for local JPEG, PNG, and WebP workflows.
+- A raster backend now performs resize, rotate, format conversion, best-effort `preserve_exif` retention, and common-case `keep-metadata` retention for EXIF + ICC on local JPEG, PNG, and WebP workflows, with AVIF output support.
 - Core media sniffing currently supports `jpeg`, `png`, `webp`, and brand-level `avif` detection.
 - The repository now has unit tests, integration tests, and doc tests for the implemented CLI and Core slices.
-- `gif` and `svg` support are still out of scope for the current implementation phase.
+- GIF support is explicitly out of scope for the current product direction, and SVG remains deferred for a future phase.
+- The server adapter now supports signed public GET transforms at `GET /images/by-path` and `GET /images/by-url`.
 - The server adapter now supports a minimal private `POST /images:transform` flow for Bearer-authenticated `path` sources.
-- The server adapter now supports `source.kind=url` with scheme validation, redirect limits, response-size limits, resolved-IP checks, and an opt-in insecure allowance for local testing.
+- The server adapter now supports `source.kind=url` with scheme validation, redirect limits, response-size limits, resolved-IP checks, pinned outbound socket targets, and an opt-in insecure allowance for local testing.
 - The server adapter now supports the private multipart upload API at `POST /images` with `file` and optional JSON `options` parts.
 - The server adapter now exposes an authenticated `/metrics` endpoint with minimal Prometheus-compatible counters.
 - Coverage can now be measured with `./scripts/coverage.sh`, which wraps `cargo llvm-cov --workspace --all-targets --summary-only`.
@@ -36,9 +37,9 @@
 
 ## Active Plan
 
-1. Deepen server-side URL source hardening where the current adapter still relies on best-effort checks, especially connect-time peer revalidation.
-2. Revisit public signed GET endpoints once the private server pipeline is more complete.
-3. Keep the CLI aligned as new server runtime settings and public-endpoint flows are added.
+1. Decide how far metadata retention should go beyond the current EXIF + ICC path, especially XMP / IPTC handling and whether unsupported metadata should stay as hard errors.
+2. Revisit AVIF decode only after the runtime dependency strategy for `dav1d` is decided.
+3. Reconcile the remaining documented API gaps, especially `svg` and any behavior that is still stricter than `doc/openapi.yaml`.
 
 ## Work Log
 
@@ -48,7 +49,7 @@
 - 2026-03-08: Added `src/core.rs` with documented Core types for artifacts, requests, options, normalization, and errors.
 - 2026-03-08: Added `src/adapters/server.rs` and moved the minimal health server into an adapter-oriented module.
 - 2026-03-08: Phase 1 validation rules currently treat `fit` and `position` as requiring both `width` and `height`.
-- 2026-03-08: Phase 1 media types are limited to `jpeg`, `png`, `webp`, and `avif`; `gif` and `svg` remain future work.
+- 2026-03-08: Phase 1 media types are limited to `jpeg`, `png`, `webp`, and `avif`; at that stage both `gif` and `svg` were deferred.
 - 2026-03-08: Normalized metadata handling uses `MetadataPolicy` instead of carrying contradictory booleans into the backend pipeline.
 - 2026-03-08: Installed `rustfmt`, ran `cargo fmt`, and verified the implementation with `cargo test` (18 tests passed).
 - 2026-03-08: Started phase 2 implementation for Core media sniffing and a real CLI `inspect` command.
@@ -63,7 +64,7 @@
 - 2026-03-08: Added `image` and `kamadak-exif` dependencies for raster decode/encode and JPEG EXIF orientation handling.
 - 2026-03-08: Added `src/codecs/raster.rs` with local raster transform support for resize, contain/cover/fill/inside handling, background padding, rotation, and encoding.
 - 2026-03-08: Added CLI `convert` support for local files and stdin/stdout, including strict option parsing and output-format inference from the output extension.
-- 2026-03-08: Current raster conversion supports JPEG, PNG, and lossless WebP output; AVIF encode/decode is still unimplemented.
+- 2026-03-08: Current raster conversion supports JPEG, PNG, lossless WebP, and AVIF output; AVIF decode is still unimplemented.
 - 2026-03-08: Current raster conversion does not retain metadata; `--keep-metadata` and `--preserve-exif` fail with a capability error.
 - 2026-03-08: Current raster conversion does not support `convert --url` or `inspect --url`.
 - 2026-03-08: WebP quality control is still unimplemented; requesting it currently fails with a capability error.
@@ -117,3 +118,46 @@
 - 2026-03-08: Ran `cargo fmt`, `cargo test`, and `./scripts/coverage.sh` after the CLI `serve` alignment changes.
 - 2026-03-08: Current coverage summary from `cargo llvm-cov` is 82.64% regions, 75.73% functions, and 82.28% lines across all targets.
 - 2026-03-08: Current automated verification covers 74 unit tests, 12 integration tests, and 4 doc tests.
+- 2026-03-08: Changed the CLI dispatch so implicit invocation is convert-oriented; `truss <INPUT> -o <OUTPUT>` and `truss --url <URL> -o <OUTPUT>` now route to convert without the `convert` subcommand.
+- 2026-03-08: Server startup no longer happens on an empty invocation; the server now starts through `truss serve` or top-level server runtime flags such as `--bind` and `--storage-root`.
+- 2026-03-08: Added unit, integration, and doc coverage for the new dispatch rules, including bare-invocation failure, implicit convert, and implicit server startup through top-level runtime flags.
+- 2026-03-08: Ran `cargo fmt`, `cargo test`, and `./scripts/coverage.sh` after the default-dispatch change.
+- 2026-03-08: Current coverage summary from `cargo llvm-cov` is 83.10% regions, 76.01% functions, and 82.66% lines across all targets.
+- 2026-03-08: Current automated verification covers 77 unit tests, 13 integration tests, and 6 doc tests.
+- 2026-03-08: Reworked server-side remote fetches so each request pins outbound socket addresses to the already-validated DNS resolution instead of resolving again at connect time.
+- 2026-03-08: Added a `PinnedResolver` in the server adapter, disabled proxy-from-env for remote source fetches, and kept redirect handling by re-resolving and revalidating each redirect target.
+- 2026-03-08: Added unit coverage for pinned remote-target preparation and unexpected-netloc rejection, plus integration coverage for redirected URL sources through the HTTP server adapter.
+- 2026-03-08: Added a compile-checked documentation example for `ServerConfig::from_env`.
+- 2026-03-08: Ran `cargo fmt`, `cargo test`, and `./scripts/coverage.sh` after the remote-fetch pinning changes.
+- 2026-03-08: Current coverage summary from `cargo llvm-cov` is 83.67% regions, 76.77% functions, and 83.40% lines across all targets.
+- 2026-03-08: Current automated verification covers 79 unit tests, 14 integration tests, and 7 doc tests.
+- 2026-03-08: Implemented signed public GET endpoints at `GET /images/by-path` and `GET /images/by-url` using HMAC-SHA256 over the documented canonical request form.
+- 2026-03-08: Added signed-URL server configuration via `TRUSS_SIGNED_URL_KEY_ID` / `TRUSS_SIGNED_URL_SECRET`, plus CLI `serve` overrides for those settings.
+- 2026-03-08: `TRUSS_PUBLIC_BASE_URL` is now used as the canonical signed-URL authority override when the server runs behind a proxy; otherwise the incoming `Host` header is used.
+- 2026-03-08: Added unit coverage for signed request verification and public query validation, integration coverage for signed public path/url requests, and doc coverage for `ServerConfig::with_signed_url_credentials`.
+- 2026-03-08: Ran `cargo fmt`, `cargo test`, and `./scripts/coverage.sh` after the signed public GET changes.
+- 2026-03-08: Current coverage summary from `cargo llvm-cov` is 83.58% regions, 74.81% functions, and 83.27% lines across all targets.
+- 2026-03-08: Current automated verification covers 83 unit tests, 16 integration tests, and 8 doc tests.
+- 2026-03-08: Started phase 9 planning to add real AVIF encode support while keeping AVIF decode explicitly capability-gated.
+- 2026-03-08: Enabled AVIF encode in `src/codecs/raster.rs` through `image`'s `AvifEncoder`, keeping AVIF input decode explicitly capability-gated.
+- 2026-03-08: Added unit coverage for successful AVIF output and continued AVIF-decode rejection, integration coverage for CLI AVIF output inference from `.avif`, and an additional runnable `transform_raster` doc test for AVIF output.
+- 2026-03-08: Ran `cargo fmt`, `cargo test`, and `./scripts/coverage.sh` after the AVIF encode changes.
+- 2026-03-08: Current coverage summary from `cargo llvm-cov` is 83.54% regions, 74.69% functions, and 83.33% lines across all targets.
+- 2026-03-08: Current automated verification covers 84 unit tests, 17 integration tests, and 9 doc tests.
+- 2026-03-08: Started phase 10 planning to evaluate and, if viable, enable AVIF input decode in the raster backend.
+- 2026-03-08: Attempted to enable AVIF input decode through `image`'s `avif-native` feature, but the current environment lacks the required system `dav1d` library, so AVIF decode remains capability-gated.
+- 2026-03-08: Implemented best-effort `preserve_exif` support in `src/codecs/raster.rs` for JPEG, PNG, and WebP output, including EXIF orientation normalization after auto-orient is applied.
+- 2026-03-08: `strip_metadata=false` without `preserve_exif=true` still returns a capability error because full metadata retention is not implemented yet.
+- 2026-03-08: Added unit coverage for EXIF preservation, EXIF normalization, unsupported AVIF EXIF retention, and continued AVIF-decode rejection; added CLI integration coverage for `--keep-metadata --preserve-exif`; added a runnable `transform_raster` doc test for EXIF preservation.
+- 2026-03-08: Ran `cargo fmt`, `cargo test`, and `./scripts/coverage.sh` after the EXIF preservation changes.
+- 2026-03-08: Current coverage summary from `cargo llvm-cov` is 83.39% regions, 73.79% functions, and 83.34% lines across all targets.
+- 2026-03-08: Current automated verification covers 86 unit tests, 18 integration tests, and 10 doc tests.
+- 2026-03-08: Started phase 11 planning to broaden `keep-metadata` beyond `preserve_exif`, while still rejecting metadata types the current encoders cannot round-trip.
+- 2026-03-08: Implemented the common `keep-metadata` path in `src/codecs/raster.rs`, which now preserves EXIF and ICC profiles for JPEG, PNG, and WebP output when the input metadata is limited to fields those encoders can write.
+- 2026-03-08: `preserve_exif` now strips ICC on purpose, and EXIF orientation is only normalized when auto-orient actually runs on JPEG input.
+- 2026-03-08: `keep-metadata` still rejects metadata types the current encoders cannot round-trip, specifically XMP and IPTC, and AVIF output still rejects retained metadata.
+- 2026-03-08: Added unit coverage for JPEG/PNG/WebP metadata round-trips, empty-metadata success, and `preserve_exif` versus `keep-metadata` behavior; added CLI integration coverage for ICC preservation; added a runnable `transform_raster` doc test for ICC retention.
+- 2026-03-08: Ran `cargo fmt`, `cargo test`, and `./scripts/coverage.sh` after the `keep-metadata` changes.
+- 2026-03-08: Current coverage summary from `cargo llvm-cov` is 84.20% regions, 72.31% functions, and 83.99% lines across all targets.
+- 2026-03-08: Current automated verification covers 91 unit tests, 19 integration tests, and 11 doc tests.
+- 2026-03-08: Dropped GIF support from the planned product scope and aligned repository guidance and documentation to stop advertising GIF as a current or future target.

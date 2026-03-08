@@ -196,12 +196,11 @@ METHOD + "\n" + AUTHORITY + "\n" + REQUEST_PATH + "\n" + CANONICAL_QUERY_WITHOUT
 - magic number で実 media type を判定する
 - 宣言型と実データ型が違えば拒否する
 
-### 7.6 SVG / GIF
+### 7.6 SVG
 
 - SVG は sanitize 必須
 - `script`、外部参照、`foreignObject`、イベント属性を除去
 - `data:` URL 経由の script 実行も除去
-- GIF decompression bomb 対策として frame 数と総ピクセル数を制限する
 
 ---
 

@@ -156,7 +156,7 @@ curl -X POST http://localhost:8080/images \
 - `height`
 - `fit`: `contain`, `cover`, `fill`, `inside`
 - `position`: `center`, `top`, `right`, `bottom`, `left`, `top-left`, `top-right`, `bottom-left`, `bottom-right`
-- `format`: `jpeg`, `png`, `webp`, `avif`, `svg`, `gif`
+- `format`: `jpeg`, `png`, `webp`, `avif`, `svg`
 - `quality`: `1` から `100`
 - `background`: `RRGGBB` または `RRGGBBAA`
 - `rotate`: `0`, `90`, `180`, `270`
@@ -172,7 +172,7 @@ curl -X POST http://localhost:8080/images \
 - `format` がない場合だけ `Accept` negotiation を使ってよい
 - `quality` は `jpeg` / `webp` / `avif` に対してのみ有効
 - `preserveExif=true` は `stripMetadata=false` を必須とする
-- `preserveExif=true` と `format=svg|gif` の組み合わせは `400`
+- `preserveExif=true` と `format=svg` の組み合わせは `400`
 
 ### 5.3 SVG の扱い
 
@@ -196,6 +196,8 @@ curl -X POST http://localhost:8080/images \
 - `keyId`
 - `expires`
 - `signature`
+
+`signature` は canonical form に対する HMAC-SHA256 を lowercase hex で表現する。
 
 canonical form:
 
@@ -245,12 +247,11 @@ Authorization: Bearer <token>
 - magic number で実 media type を判定する
 - 宣言型と実 media type が不一致なら拒否する
 
-### 7.4 SVG / GIF
+### 7.4 SVG
 
 - SVG は sanitize 必須
 - `script`、外部参照、`foreignObject`、イベント属性を除去
 - `data:` URL 経由の script 実行も除去対象
-- GIF decompression bomb 対策として frame 数と総ピクセル数を制限する
 
 ---
 
@@ -303,7 +304,6 @@ TTL:
 - `image/webp`
 - `image/avif`
 - `image/svg+xml`
-- `image/gif`
 
 共通ヘッダ:
 
@@ -328,8 +328,6 @@ SVG 出力時のみ:
 - `max_output_pixels = 67108864`
 - `max_decoded_pixels = 100000000`
 - `max_decode_cpu_seconds = 30`
-- `gif.max_frames = 1000`
-- `gif.max_total_pixels = 200000000`
 
 ---
 

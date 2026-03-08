@@ -25,20 +25,36 @@ fn help_lists_serve_runtime_options() {
     let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
     assert!(stdout.contains("--storage-root <PATH>"));
     assert!(stdout.contains("--public-base-url <URL>"));
+    assert!(stdout.contains("--signed-url-key-id <KEY_ID>"));
+    assert!(stdout.contains("--signed-url-secret <SECRET>"));
     assert!(stdout.contains("--allow-insecure-url-sources"));
 }
 
 #[test]
-fn serve_prints_runtime_configuration_on_startup() {
+fn bare_invocation_reports_convert_usage() {
+    let output = Command::new(env!("CARGO_BIN_EXE_truss"))
+        .output()
+        .expect("run bare truss");
+
+    assert!(!output.status.success(), "{output:?}");
+    let stderr = String::from_utf8(output.stderr).expect("utf8 stderr");
+    assert!(stderr.contains("`convert` requires an input path or `-`"));
+}
+
+#[test]
+fn top_level_server_flags_start_the_server() {
     let storage_root = temp_dir("serve-startup");
     let mut child = Command::new(env!("CARGO_BIN_EXE_truss"))
-        .arg("serve")
         .arg("--bind")
         .arg("127.0.0.1:0")
         .arg("--storage-root")
         .arg(&storage_root)
         .arg("--public-base-url")
         .arg("https://assets.example.com")
+        .arg("--signed-url-key-id")
+        .arg("public-dev")
+        .arg("--signed-url-secret")
+        .arg("secret-value")
         .arg("--allow-insecure-url-sources")
         .env("TRUSS_BEARER_TOKEN", "secret")
         .stdout(Stdio::piped())
@@ -50,7 +66,7 @@ fn serve_prints_runtime_configuration_on_startup() {
     let mut stdout = BufReader::new(stdout);
     let mut lines = Vec::new();
 
-    for _ in 0..4 {
+    for _ in 0..5 {
         let mut line = String::new();
         let read = stdout.read_line(&mut line).expect("read startup line");
         assert!(read > 0, "server exited before printing expected output");
@@ -76,6 +92,10 @@ fn serve_prints_runtime_configuration_on_startup() {
     );
     assert!(
         combined_stdout.contains("public base URL: https://assets.example.com"),
+        "{combined_stdout}"
+    );
+    assert!(
+        combined_stdout.contains("signed URL key ID: public-dev"),
         "{combined_stdout}"
     );
     assert!(

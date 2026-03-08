@@ -12,6 +12,13 @@ CLI は `Truss` ライブラリの基準 adapter である。
 ### 2.1 1 つの主要コマンドに寄せる
 
 変換の主入口は `convert` に統一する。  
+実際の CLI では `convert` を省略できるようにし、
+
+```sh
+truss input.jpg -o output.webp
+```
+
+を標準形として扱う。  
 画像変換のたびに別 subcommand を増やさない。
 
 ### 2.2 API と同じ概念を同じ名前で出す
@@ -50,13 +57,15 @@ CLI flag は HTTP API の option 名を `kebab-case` に変換したものに揃
 
 入力:
 
+- `truss <INPUT>`: `convert` を省略した標準形
+- `truss --url <URL>`: `convert` を省略した標準形
 - `truss convert <INPUT>`: ローカルファイルまたは `-`（stdin）
 - `truss convert --url <URL>`: リモート URL
 
 基本形:
 
 ```sh
-truss convert input.jpg -o output.webp --width 1200 --format webp
+truss input.jpg -o output.webp --width 1200 --format webp
 ```
 
 推奨オプション:
@@ -65,7 +74,7 @@ truss convert input.jpg -o output.webp --width 1200 --format webp
 - `--height <PX>`
 - `--fit <contain|cover|fill|inside>`
 - `--position <center|top|right|bottom|left|top-left|top-right|bottom-left|bottom-right>`
-- `--format <jpeg|png|webp|avif|svg|gif>`
+- `--format <jpeg|png|webp|avif|svg>`
 - `--quality <1-100>`
 - `--background <RRGGBB|RRGGBBAA>`
 - `--rotate <0|90|180|270>`
@@ -110,11 +119,18 @@ truss convert input.jpg -o output.webp --width 1200 --format webp
 
 server runtime を起動する。
 
+起動方法:
+
+- `truss serve`
+- `truss --bind <ADDR>` のように server runtime 用 option を直接指定する
+
 初期オプション:
 
 - `--bind <ADDR>`
 - `--storage-root <PATH>`
 - `--public-base-url <URL>`
+- `--signed-url-key-id <KEY_ID>`
+- `--signed-url-secret <SECRET>`
 - `--allow-insecure-url-sources`
 
 変換オプションを `serve` に直接持ち込まない。  
@@ -122,6 +138,9 @@ server runtime を起動する。
 
 `--allow-insecure-url-sources` はローカル開発や integration test 向けの escape hatch であり、
 本番向け設定では使わない前提とする。
+
+public GET を使う場合は、signed URL 検証のために
+`--signed-url-key-id` と `--signed-url-secret` を組で与える。
 
 ---
 

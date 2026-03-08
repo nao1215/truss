@@ -11,4 +11,5 @@
 - Prefer documentation comments (`///`) over casual inline comments unless the code is private and the explanation is genuinely necessary.
 - Write thorough tests for new behavior and keep coverage high.
 - Add unit tests for local logic, integration tests for externally visible behavior, and doc tests for public APIs when adding or changing functionality.
+- GIF support is out of scope. Do not add, document, or reintroduce GIF behavior unless the user explicitly asks for it again.
 - Do not merge incomplete work silently; record known gaps and follow-up tasks in `doc/implementation-log.md`.

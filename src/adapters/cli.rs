@@ -16,7 +16,11 @@ const HELP_TEXT: &str = "\
 truss
 
 USAGE:
-  truss serve [--bind <ADDR>] [--storage-root <PATH>] [--public-base-url <URL>] [--allow-insecure-url-sources]
+  truss <INPUT> -o <OUTPUT> [OPTIONS]
+  truss --url <URL> -o <OUTPUT> [OPTIONS]
+  truss -o <OUTPUT> [OPTIONS] <INPUT>
+  truss serve [--bind <ADDR>] [--storage-root <PATH>] [--public-base-url <URL>] [--signed-url-key-id <KEY_ID>] [--signed-url-secret <SECRET>] [--allow-insecure-url-sources]
+  truss [--bind <ADDR>] [--storage-root <PATH>] [--public-base-url <URL>] [--signed-url-key-id <KEY_ID>] [--signed-url-secret <SECRET>] [--allow-insecure-url-sources]
   truss inspect <INPUT>
   truss inspect --url <URL>
   truss convert <INPUT> -o <OUTPUT> [OPTIONS]
@@ -27,6 +31,8 @@ OPTIONS FOR SERVE:
       --bind <ADDR>
       --storage-root <PATH>
       --public-base-url <URL>
+      --signed-url-key-id <KEY_ID>
+      --signed-url-secret <SECRET>
       --allow-insecure-url-sources
 
 OPTIONS FOR CONVERT:
@@ -46,7 +52,8 @@ OPTIONS FOR CONVERT:
       --preserve-exif
 
 NOTES:
-  Running without a subcommand starts the server for now.
+  Omitting `convert` enters implicit convert mode.
+  The server starts when `serve` or a server runtime flag is used.
   `inspect` currently supports local files, `-` for stdin, and `--url`.
   `convert` currently supports local files, `-` for stdin, and `--url`.
 ";
@@ -56,6 +63,29 @@ NOTES:
 /// This function is the stable entry point for the CLI adapter. It parses command-line
 /// arguments, dispatches the selected subcommand, writes output to the process streams,
 /// and converts adapter-specific failures into the documented numeric exit codes.
+///
+/// # Examples
+///
+/// ```no_run
+/// use truss::adapters::cli;
+///
+/// let _ = cli::run(vec![
+///     "truss".to_string(),
+///     "input.png".to_string(),
+///     "-o".to_string(),
+///     "output.jpg".to_string(),
+/// ]);
+/// ```
+///
+/// ```no_run
+/// use truss::adapters::cli;
+///
+/// let _ = cli::run(vec![
+///     "truss".to_string(),
+///     "--bind".to_string(),
+///     "127.0.0.1:8080".to_string(),
+/// ]);
+/// ```
 pub fn run<I>(args: I) -> ExitCode
 where
     I: IntoIterator<Item = String>,
@@ -83,6 +113,8 @@ struct ServeCommand {
     bind_addr: Option<String>,
     storage_root: Option<PathBuf>,
     public_base_url: Option<String>,
+    signed_url_key_id: Option<String>,
+    signed_url_secret: Option<String>,
     allow_insecure_url_sources: bool,
 }
 
@@ -151,28 +183,39 @@ where
 {
     let mut args = args.into_iter();
     let _program_name = args.next();
-    let Some(command) = args.next() else {
-        return Ok(Command::Serve(ServeCommand {
-            bind_addr: None,
-            storage_root: None,
-            public_base_url: None,
-            allow_insecure_url_sources: false,
-        }));
+    let remaining: Vec<String> = args.collect();
+    let Some(command) = remaining.first() else {
+        return Err(usage_error("`convert` requires an input path or `-`"));
     };
 
     match command.as_str() {
         "-h" | "--help" | "help" => Ok(Command::Help),
-        "serve" => parse_serve_args(args.collect()),
-        "inspect" => parse_inspect_args(args.collect()),
-        "convert" => parse_convert_args(args.collect()),
-        unknown => Err(usage_error(&format!("unknown command `{unknown}`"))),
+        "serve" => parse_serve_args(remaining[1..].to_vec()),
+        "inspect" => parse_inspect_args(remaining[1..].to_vec()),
+        "convert" => parse_convert_args(remaining[1..].to_vec()),
+        value if is_serve_flag(value) => parse_serve_args(remaining),
+        _ => parse_convert_args(remaining),
     }
+}
+
+fn is_serve_flag(value: &str) -> bool {
+    matches!(
+        value,
+        "--bind"
+            | "--storage-root"
+            | "--public-base-url"
+            | "--signed-url-key-id"
+            | "--signed-url-secret"
+            | "--allow-insecure-url-sources"
+    )
 }
 
 fn parse_serve_args(args: Vec<String>) -> Result<Command, CliError> {
     let mut bind_addr = None;
     let mut storage_root = None;
     let mut public_base_url = None;
+    let mut signed_url_key_id = None;
+    let mut signed_url_secret = None;
     let mut allow_insecure_url_sources = false;
     let mut index = 0;
 
@@ -197,6 +240,16 @@ fn parse_serve_args(args: Vec<String>) -> Result<Command, CliError> {
                 let value = required_arg(args.get(index), "--public-base-url")?;
                 public_base_url = Some(parse_url_arg(value, "--public-base-url")?);
             }
+            "--signed-url-key-id" => {
+                index += 1;
+                signed_url_key_id =
+                    Some(required_arg(args.get(index), "--signed-url-key-id")?.to_string());
+            }
+            "--signed-url-secret" => {
+                index += 1;
+                signed_url_secret =
+                    Some(required_arg(args.get(index), "--signed-url-secret")?.to_string());
+            }
             "--allow-insecure-url-sources" => allow_insecure_url_sources = true,
             unknown => {
                 return Err(usage_error(&format!(
@@ -212,6 +265,8 @@ fn parse_serve_args(args: Vec<String>) -> Result<Command, CliError> {
         bind_addr,
         storage_root,
         public_base_url,
+        signed_url_key_id,
+        signed_url_secret,
         allow_insecure_url_sources,
     }))
 }
@@ -352,6 +407,10 @@ fn execute_serve(command: ServeCommand) -> Result<(), CliError> {
         writeln!(stdout, "public base URL: {public_base_url}")
             .map_err(|error| runtime_error(5, &format!("failed to write stdout: {error}")))?;
     }
+    if let Some(signed_url_key_id) = &config.signed_url_key_id {
+        writeln!(stdout, "signed URL key ID: {signed_url_key_id}")
+            .map_err(|error| runtime_error(5, &format!("failed to write stdout: {error}")))?;
+    }
     if config.allow_insecure_url_sources {
         writeln!(stdout, "insecure URL sources: enabled")
             .map_err(|error| runtime_error(5, &format!("failed to write stdout: {error}")))?;
@@ -383,6 +442,18 @@ fn resolve_server_config(command: ServeCommand) -> Result<ServerConfig, CliError
 
     if let Some(public_base_url) = command.public_base_url {
         config.public_base_url = Some(public_base_url);
+    }
+
+    match (command.signed_url_key_id, command.signed_url_secret) {
+        (Some(key_id), Some(secret)) => {
+            config = config.with_signed_url_credentials(key_id, secret);
+        }
+        (Some(_), None) | (None, Some(_)) => {
+            return Err(usage_error(
+                "`--signed-url-key-id` and `--signed-url-secret` must be provided together",
+            ));
+        }
+        (None, None) => {}
     }
 
     if command.allow_insecure_url_sources {
@@ -738,18 +809,12 @@ mod tests {
     }
 
     #[test]
-    fn parse_args_defaults_to_serve() {
-        let command = parse_args(vec!["truss".to_string()]).expect("parse default command");
+    fn parse_args_rejects_empty_invocation() {
+        let error =
+            parse_args(vec!["truss".to_string()]).expect_err("empty invocation should fail");
 
-        assert_eq!(
-            command,
-            Command::Serve(ServeCommand {
-                bind_addr: None,
-                storage_root: None,
-                public_base_url: None,
-                allow_insecure_url_sources: false,
-            })
-        );
+        assert_eq!(error.exit_code, 2);
+        assert_eq!(error.message, "`convert` requires an input path or `-`");
     }
 
     #[test]
@@ -768,7 +833,34 @@ mod tests {
                 bind_addr: Some("127.0.0.1:9000".to_string()),
                 storage_root: None,
                 public_base_url: None,
+                signed_url_key_id: None,
+                signed_url_secret: None,
                 allow_insecure_url_sources: false,
+            })
+        );
+    }
+
+    #[test]
+    fn parse_args_supports_server_flags_without_subcommand() {
+        let command = parse_args(vec![
+            "truss".to_string(),
+            "--storage-root".to_string(),
+            "fixtures".to_string(),
+            "--public-base-url".to_string(),
+            "https://assets.example.com".to_string(),
+            "--allow-insecure-url-sources".to_string(),
+        ])
+        .expect("parse implicit serve");
+
+        assert_eq!(
+            command,
+            Command::Serve(ServeCommand {
+                bind_addr: None,
+                storage_root: Some(PathBuf::from("fixtures")),
+                public_base_url: Some("https://assets.example.com".to_string()),
+                signed_url_key_id: None,
+                signed_url_secret: None,
+                allow_insecure_url_sources: true,
             })
         );
     }
@@ -782,6 +874,10 @@ mod tests {
             "fixtures".to_string(),
             "--public-base-url".to_string(),
             "https://assets.example.com".to_string(),
+            "--signed-url-key-id".to_string(),
+            "public-dev".to_string(),
+            "--signed-url-secret".to_string(),
+            "secret-value".to_string(),
             "--allow-insecure-url-sources".to_string(),
         ])
         .expect("parse serve runtime options");
@@ -792,8 +888,34 @@ mod tests {
                 bind_addr: None,
                 storage_root: Some(PathBuf::from("fixtures")),
                 public_base_url: Some("https://assets.example.com".to_string()),
+                signed_url_key_id: Some("public-dev".to_string()),
+                signed_url_secret: Some("secret-value".to_string()),
                 allow_insecure_url_sources: true,
             })
+        );
+    }
+
+    #[test]
+    fn parse_args_rejects_partial_signed_url_credentials() {
+        let error = parse_args(vec![
+            "truss".to_string(),
+            "serve".to_string(),
+            "--signed-url-key-id".to_string(),
+            "public-dev".to_string(),
+        ])
+        .expect("parse serve args first");
+
+        let error = match error {
+            Command::Serve(command) => {
+                resolve_server_config(command).expect_err("partial credentials should fail")
+            }
+            _ => panic!("expected serve command"),
+        };
+
+        assert_eq!(error.exit_code, 2);
+        assert_eq!(
+            error.message,
+            "`--signed-url-key-id` and `--signed-url-secret` must be provided together"
         );
     }
 
@@ -822,6 +944,8 @@ mod tests {
             bind_addr: Some("127.0.0.1:0".to_string()),
             storage_root: Some(storage_root.clone()),
             public_base_url: Some("https://assets.example.com".to_string()),
+            signed_url_key_id: Some("public-dev".to_string()),
+            signed_url_secret: Some("secret-value".to_string()),
             allow_insecure_url_sources: true,
         })
         .expect("resolve server config");
@@ -833,7 +957,37 @@ mod tests {
             config.public_base_url.as_deref(),
             Some("https://assets.example.com")
         );
+        assert_eq!(config.signed_url_key_id.as_deref(), Some("public-dev"));
+        assert_eq!(config.signed_url_secret.as_deref(), Some("secret-value"));
         assert!(config.allow_insecure_url_sources);
+    }
+
+    #[test]
+    fn parse_args_supports_implicit_convert_path_and_output() {
+        let command = parse_args(vec![
+            "truss".to_string(),
+            "input.png".to_string(),
+            "-o".to_string(),
+            "output.jpg".to_string(),
+            "--width".to_string(),
+            "100".to_string(),
+            "--fit".to_string(),
+            "contain".to_string(),
+        ])
+        .expect("parse implicit convert");
+
+        assert_eq!(
+            command,
+            Command::Convert(ConvertCommand {
+                input: InputSource::Path(PathBuf::from("input.png")),
+                output: OutputTarget::Path(PathBuf::from("output.jpg")),
+                options: TransformOptions {
+                    width: Some(100),
+                    fit: Some(Fit::Contain),
+                    ..TransformOptions::default()
+                }
+            })
+        );
     }
 
     #[test]
@@ -986,9 +1140,46 @@ mod tests {
         assert!(stderr.is_empty());
         let output = String::from_utf8(stdout).expect("utf8 stdout");
         assert!(output.contains("truss convert <INPUT> -o <OUTPUT>"));
+        assert!(output.contains("truss <INPUT> -o <OUTPUT> [OPTIONS]"));
         assert!(output.contains("--storage-root <PATH>"));
         assert!(output.contains("--public-base-url <URL>"));
+        assert!(output.contains("--signed-url-key-id <KEY_ID>"));
+        assert!(output.contains("--signed-url-secret <SECRET>"));
         assert!(output.contains("--allow-insecure-url-sources"));
+    }
+
+    #[test]
+    fn run_with_io_converts_without_explicit_subcommand() {
+        let input_path = temp_file_path("implicit-convert-input");
+        let output_path = temp_file_path("implicit-convert-output").with_extension("jpg");
+        fs::write(&input_path, png_bytes()).expect("write input file");
+
+        let mut stdin = Cursor::new(Vec::<u8>::new());
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let exit_code = run_with_io(
+            vec![
+                "truss".to_string(),
+                input_path.display().to_string(),
+                "-o".to_string(),
+                output_path.display().to_string(),
+            ],
+            &mut stdin,
+            &mut stdout,
+            &mut stderr,
+        );
+
+        let output_bytes = fs::read(&output_path).expect("read output file");
+        let artifact = sniff_artifact(RawArtifact::new(output_bytes, None)).expect("sniff output");
+
+        let _ = fs::remove_file(&input_path);
+        let _ = fs::remove_file(&output_path);
+
+        assert_eq!(exit_code, 0);
+        assert!(stdout.is_empty());
+        assert!(stderr.is_empty());
+        assert_eq!(artifact.media_type, MediaType::Jpeg);
     }
 
     #[test]

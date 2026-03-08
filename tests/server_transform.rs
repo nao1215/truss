@@ -1,5 +1,8 @@
+use hmac::{Hmac, Mac};
 use image::codecs::png::PngEncoder;
 use image::{ColorType, ImageEncoder, Rgba, RgbaImage};
+use sha2::Sha256;
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -139,6 +142,17 @@ fn send_metrics_request(addr: SocketAddr, authorization: Option<&str>) -> Vec<u8
     response
 }
 
+fn send_public_get_request(addr: SocketAddr, target: &str, host: &str) -> Vec<u8> {
+    let mut stream = TcpStream::connect(addr).expect("connect to test server");
+    let request = format!("GET {target} HTTP/1.1\r\nHost: {host}\r\n\r\n");
+    stream.write_all(request.as_bytes()).expect("write request");
+    stream.flush().expect("flush request");
+
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response).expect("read response");
+    response
+}
+
 fn upload_body(file_bytes: &[u8], options_json: Option<&str>) -> (String, Vec<u8>) {
     let boundary = "truss-integration-boundary".to_string();
     let mut body = Vec::new();
@@ -179,6 +193,41 @@ fn split_response(response: &[u8]) -> (String, String, Vec<u8>) {
     (header, content_type, response[(header_end + 4)..].to_vec())
 }
 
+fn sign_public_query(
+    method: &str,
+    authority: &str,
+    path: &str,
+    query: &BTreeMap<String, String>,
+    secret: &str,
+) -> String {
+    let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+    for (name, value) in query {
+        if name != "signature" {
+            serializer.append_pair(name, value);
+        }
+    }
+    let canonical = format!("{method}\n{authority}\n{path}\n{}", serializer.finish());
+    let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).expect("create hmac");
+    mac.update(canonical.as_bytes());
+    hex::encode(mac.finalize().into_bytes())
+}
+
+fn signed_target(
+    path: &str,
+    query: BTreeMap<String, String>,
+    authority: &str,
+    secret: &str,
+) -> String {
+    let mut query = query;
+    let signature = sign_public_query("GET", authority, path, &query, secret);
+    query.insert("signature".to_string(), signature);
+    let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+    for (name, value) in query {
+        serializer.append_pair(&name, &value);
+    }
+    format!("{path}?{}", serializer.finish())
+}
+
 #[test]
 fn serve_once_transforms_a_path_source_over_http() {
     let storage_root = temp_dir("success");
@@ -203,6 +252,80 @@ fn serve_once_transforms_a_path_source_over_http() {
     assert_eq!(artifact.media_type, MediaType::Jpeg);
     assert_eq!(artifact.metadata.width, Some(4));
     assert_eq!(artifact.metadata.height, Some(3));
+}
+
+#[test]
+fn serve_once_transforms_a_signed_public_path_request() {
+    let storage_root = temp_dir("public-path");
+    fs::write(storage_root.join("image.png"), png_bytes()).expect("write source fixture");
+    let (addr, handle) = spawn_server(
+        ServerConfig::new(storage_root, Some("secret".to_string()))
+            .with_signed_url_credentials("public-dev", "secret-value"),
+    );
+    let target = signed_target(
+        "/images/by-path",
+        BTreeMap::from([
+            ("path".to_string(), "/image.png".to_string()),
+            ("keyId".to_string(), "public-dev".to_string()),
+            ("expires".to_string(), "4102444800".to_string()),
+            ("format".to_string(), "jpeg".to_string()),
+        ]),
+        "cdn.example.com",
+        "secret-value",
+    );
+    let response = send_public_get_request(addr, &target, "cdn.example.com");
+
+    handle
+        .join()
+        .expect("join server thread")
+        .expect("serve one request");
+
+    let (header, content_type, body) = split_response(&response);
+    let artifact = sniff_artifact(RawArtifact::new(body, None)).expect("sniff transformed output");
+
+    assert!(header.starts_with("HTTP/1.1 200 OK"));
+    assert_eq!(content_type, "image/jpeg");
+    assert_eq!(artifact.media_type, MediaType::Jpeg);
+}
+
+#[test]
+fn serve_once_transforms_a_signed_public_url_request() {
+    let storage_root = temp_dir("public-url");
+    let (url, fixture) = spawn_fixture_server(vec![(
+        "200 OK".to_string(),
+        vec![("Content-Type".to_string(), "image/png".to_string())],
+        png_bytes(),
+    )]);
+    let (addr, handle) = spawn_server(
+        ServerConfig::new(storage_root, Some("secret".to_string()))
+            .with_signed_url_credentials("public-dev", "secret-value")
+            .with_insecure_url_sources(true),
+    );
+    let target = signed_target(
+        "/images/by-url",
+        BTreeMap::from([
+            ("url".to_string(), url),
+            ("keyId".to_string(), "public-dev".to_string()),
+            ("expires".to_string(), "4102444800".to_string()),
+            ("format".to_string(), "jpeg".to_string()),
+        ]),
+        "cdn.example.com",
+        "secret-value",
+    );
+    let response = send_public_get_request(addr, &target, "cdn.example.com");
+
+    handle
+        .join()
+        .expect("join server thread")
+        .expect("serve one request");
+    fixture.join().expect("join fixture server");
+
+    let (header, content_type, body) = split_response(&response);
+    let artifact = sniff_artifact(RawArtifact::new(body, None)).expect("sniff transformed output");
+
+    assert!(header.starts_with("HTTP/1.1 200 OK"));
+    assert_eq!(content_type, "image/jpeg");
+    assert_eq!(artifact.media_type, MediaType::Jpeg);
 }
 
 #[test]
@@ -267,6 +390,44 @@ fn serve_once_transforms_a_url_source_when_insecure_allowance_is_enabled() {
         "{{\"source\":{{\"kind\":\"url\",\"url\":\"{url}\"}},\"options\":{{\"format\":\"jpeg\"}}}}"
     );
     let response = send_transform_request(addr, &body, Some("secret"));
+
+    handle
+        .join()
+        .expect("join server thread")
+        .expect("serve one request");
+    fixture.join().expect("join fixture server");
+
+    let (header, content_type, body) = split_response(&response);
+    let artifact = sniff_artifact(RawArtifact::new(body, None)).expect("sniff transformed output");
+
+    assert!(header.starts_with("HTTP/1.1 200 OK"));
+    assert_eq!(content_type, "image/jpeg");
+    assert_eq!(artifact.media_type, MediaType::Jpeg);
+}
+
+#[test]
+fn serve_once_follows_remote_redirects_for_url_sources() {
+    let storage_root = temp_dir("url-redirect");
+    let (url, fixture) = spawn_fixture_server(vec![
+        (
+            "302 Found".to_string(),
+            vec![("Location".to_string(), "/final-image".to_string())],
+            Vec::new(),
+        ),
+        (
+            "200 OK".to_string(),
+            vec![("Content-Type".to_string(), "image/png".to_string())],
+            png_bytes(),
+        ),
+    ]);
+    let (addr, handle) = spawn_server(
+        ServerConfig::new(storage_root, Some("secret".to_string())).with_insecure_url_sources(true),
+    );
+    let response = send_transform_request(
+        addr,
+        &format!(r#"{{"source":{{"kind":"url","url":"{url}"}},"options":{{"format":"jpeg"}}}}"#),
+        Some("secret"),
+    );
 
     handle
         .join()

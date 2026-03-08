@@ -2,12 +2,15 @@ use crate::{
     sniff_artifact, transform_raster, Fit, MediaType, Position, RawArtifact, Rgba8, Rotation,
     TransformError, TransformOptions, TransformRequest,
 };
+use hmac::{Hmac, Mac};
 use serde::Deserialize;
 use serde_json::json;
+use sha2::Sha256;
+use std::collections::BTreeMap;
 use std::env;
 use std::fs;
 use std::io::{self, Read, Write};
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, TcpListener, TcpStream};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener, TcpStream};
 use std::path::{Component, Path, PathBuf};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -26,11 +29,14 @@ const MAX_HEADER_BYTES: usize = 16 * 1024;
 const MAX_REQUEST_BODY_BYTES: usize = 1024 * 1024;
 const MAX_SOURCE_BYTES: u64 = 100 * 1024 * 1024;
 const MAX_REMOTE_REDIRECTS: usize = 5;
+type HmacSha256 = Hmac<Sha256>;
 
 static HTTP_REQUESTS_TOTAL: AtomicU64 = AtomicU64::new(0);
 static HTTP_REQUESTS_HEALTH_TOTAL: AtomicU64 = AtomicU64::new(0);
 static HTTP_REQUESTS_HEALTH_LIVE_TOTAL: AtomicU64 = AtomicU64::new(0);
 static HTTP_REQUESTS_HEALTH_READY_TOTAL: AtomicU64 = AtomicU64::new(0);
+static HTTP_REQUESTS_PUBLIC_BY_PATH_TOTAL: AtomicU64 = AtomicU64::new(0);
+static HTTP_REQUESTS_PUBLIC_BY_URL_TOTAL: AtomicU64 = AtomicU64::new(0);
 static HTTP_REQUESTS_TRANSFORM_TOTAL: AtomicU64 = AtomicU64::new(0);
 static HTTP_REQUESTS_UPLOAD_TOTAL: AtomicU64 = AtomicU64::new(0);
 static HTTP_REQUESTS_METRICS_TOTAL: AtomicU64 = AtomicU64::new(0);
@@ -62,11 +68,17 @@ pub struct ServerConfig {
     pub storage_root: PathBuf,
     /// The expected Bearer token for private endpoints.
     pub bearer_token: Option<String>,
-    /// The externally visible base URL for future public endpoint generation.
+    /// The externally visible base URL used for public signed-URL authority.
     ///
-    /// The current runtime stores this value for configuration completeness, but it does not yet
-    /// emit public URLs because the signed public GET endpoints are still unimplemented.
+    /// When this value is set, public signed GET requests use its authority component when
+    /// reconstructing the canonical signature payload. This is primarily useful when the server
+    /// runs behind a reverse proxy and the incoming `Host` header is not the externally visible
+    /// authority that clients sign.
     pub public_base_url: Option<String>,
+    /// The expected key identifier for public signed GET requests.
+    pub signed_url_key_id: Option<String>,
+    /// The shared secret used to verify public signed GET requests.
+    pub signed_url_secret: Option<String>,
     /// Whether server-side URL sources may bypass private-network and port restrictions.
     ///
     /// This flag is intended for local development and automated tests where fixture servers
@@ -95,8 +107,37 @@ impl ServerConfig {
             storage_root,
             bearer_token,
             public_base_url: None,
+            signed_url_key_id: None,
+            signed_url_secret: None,
             allow_insecure_url_sources: false,
         }
+    }
+
+    /// Returns a copy of the configuration with signed-URL verification credentials attached.
+    ///
+    /// Public GET endpoints require both a key identifier and a shared secret. Tests and local
+    /// development setups can use this helper to attach those values directly without going
+    /// through environment variables.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use truss::adapters::server::ServerConfig;
+    ///
+    /// let config = ServerConfig::new(std::env::temp_dir(), None)
+    ///     .with_signed_url_credentials("public-dev", "top-secret");
+    ///
+    /// assert_eq!(config.signed_url_key_id.as_deref(), Some("public-dev"));
+    /// assert_eq!(config.signed_url_secret.as_deref(), Some("top-secret"));
+    /// ```
+    pub fn with_signed_url_credentials(
+        mut self,
+        key_id: impl Into<String>,
+        secret: impl Into<String>,
+    ) -> Self {
+        self.signed_url_key_id = Some(key_id.into());
+        self.signed_url_secret = Some(secret.into());
+        self
     }
 
     /// Returns a copy of the configuration with insecure URL source allowances toggled.
@@ -129,7 +170,9 @@ impl ServerConfig {
     /// - `TRUSS_BEARER_TOKEN`: private API Bearer token. When this value is missing, private
     ///   endpoints remain unavailable and return `503 Service Unavailable`.
     /// - `TRUSS_PUBLIC_BASE_URL`: externally visible base URL reserved for future public endpoint
-    ///   generation. When set, it must parse as an absolute `http` or `https` URL.
+    ///   signing. When set, it must parse as an absolute `http` or `https` URL.
+    /// - `TRUSS_SIGNED_URL_KEY_ID`: key identifier accepted by public signed GET endpoints.
+    /// - `TRUSS_SIGNED_URL_SECRET`: shared secret used to verify public signed GET signatures.
     /// - `TRUSS_ALLOW_INSECURE_URL_SOURCES`: when set to `1`, `true`, `yes`, or `on`, URL
     ///   sources may target loopback or private-network addresses and non-standard ports.
     ///
@@ -137,6 +180,18 @@ impl ServerConfig {
     ///
     /// Returns an [`io::Error`] when the configured storage root does not exist or cannot be
     /// canonicalized.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// std::env::set_var("TRUSS_STORAGE_ROOT", ".");
+    /// std::env::set_var("TRUSS_ALLOW_INSECURE_URL_SOURCES", "true");
+    ///
+    /// let config = truss::adapters::server::ServerConfig::from_env().unwrap();
+    ///
+    /// assert!(config.storage_root.is_absolute());
+    /// assert!(config.allow_insecure_url_sources);
+    /// ```
     pub fn from_env() -> io::Result<Self> {
         let storage_root =
             env::var("TRUSS_STORAGE_ROOT").unwrap_or_else(|_| DEFAULT_STORAGE_ROOT.to_string());
@@ -149,11 +204,26 @@ impl ServerConfig {
             .filter(|value| !value.is_empty())
             .map(validate_public_base_url)
             .transpose()?;
+        let signed_url_key_id = env::var("TRUSS_SIGNED_URL_KEY_ID")
+            .ok()
+            .filter(|value| !value.is_empty());
+        let signed_url_secret = env::var("TRUSS_SIGNED_URL_SECRET")
+            .ok()
+            .filter(|value| !value.is_empty());
+
+        if signed_url_key_id.is_some() != signed_url_secret.is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "TRUSS_SIGNED_URL_KEY_ID and TRUSS_SIGNED_URL_SECRET must be set together",
+            ));
+        }
 
         Ok(Self {
             storage_root,
             bearer_token,
             public_base_url,
+            signed_url_key_id,
+            signed_url_secret,
             allow_insecure_url_sources: env_flag("TRUSS_ALLOW_INSECURE_URL_SOURCES"),
         })
     }
@@ -253,6 +323,10 @@ impl HttpRequest {
             .split('?')
             .next()
             .unwrap_or(self.target.as_str())
+    }
+
+    fn query(&self) -> Option<&str> {
+        self.target.split_once('?').map(|(_, query)| query)
     }
 }
 
@@ -389,6 +463,8 @@ enum RouteMetric {
     Health,
     HealthLive,
     HealthReady,
+    PublicByPath,
+    PublicByUrl,
     Transform,
     Upload,
     Metrics,
@@ -401,6 +477,8 @@ impl RouteMetric {
             Self::Health => "/health",
             Self::HealthLive => "/health/live",
             Self::HealthReady => "/health/ready",
+            Self::PublicByPath => "/images/by-path",
+            Self::PublicByUrl => "/images/by-url",
             Self::Transform => "/images:transform",
             Self::Upload => "/images",
             Self::Metrics => "/metrics",
@@ -429,6 +507,8 @@ fn route_request(request: HttpRequest, config: &ServerConfig) -> HttpResponse {
         ("GET", "/health") | ("GET", "/health/live") | ("GET", "/health/ready") => {
             HttpResponse::json("200 OK", HEALTH_BODY.as_bytes().to_vec())
         }
+        ("GET", "/images/by-path") => handle_public_path_request(request, config),
+        ("GET", "/images/by-url") => handle_public_url_request(request, config),
         ("POST", "/images:transform") => handle_transform_request(request, config),
         ("POST", "/images") => handle_upload_request(request, config),
         ("GET", "/metrics") => handle_metrics_request(request, config),
@@ -441,6 +521,8 @@ fn classify_route(request: &HttpRequest) -> RouteMetric {
         ("GET", "/health") => RouteMetric::Health,
         ("GET", "/health/live") => RouteMetric::HealthLive,
         ("GET", "/health/ready") => RouteMetric::HealthReady,
+        ("GET", "/images/by-path") => RouteMetric::PublicByPath,
+        ("GET", "/images/by-url") => RouteMetric::PublicByUrl,
         ("POST", "/images:transform") => RouteMetric::Transform,
         ("POST", "/images") => RouteMetric::Upload,
         ("GET", "/metrics") => RouteMetric::Metrics,
@@ -474,6 +556,44 @@ fn handle_transform_request(request: HttpRequest, config: &ServerConfig) -> Http
     transform_source_bytes(source_bytes, options)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PublicSourceKind {
+    Path,
+    Url,
+}
+
+fn handle_public_path_request(request: HttpRequest, config: &ServerConfig) -> HttpResponse {
+    handle_public_get_request(request, config, PublicSourceKind::Path)
+}
+
+fn handle_public_url_request(request: HttpRequest, config: &ServerConfig) -> HttpResponse {
+    handle_public_get_request(request, config, PublicSourceKind::Url)
+}
+
+fn handle_public_get_request(
+    request: HttpRequest,
+    config: &ServerConfig,
+    source_kind: PublicSourceKind,
+) -> HttpResponse {
+    let query = match parse_query_params(&request) {
+        Ok(query) => query,
+        Err(response) => return response,
+    };
+    if let Err(response) = authorize_signed_request(&request, &query, config) {
+        return response;
+    }
+    let (source, options) = match parse_public_get_request(&query, source_kind) {
+        Ok(parsed) => parsed,
+        Err(response) => return response,
+    };
+    let source_bytes = match resolve_source_bytes(source, config) {
+        Ok(bytes) => bytes,
+        Err(response) => return response,
+    };
+
+    transform_source_bytes(source_bytes, options)
+}
+
 fn handle_upload_request(request: HttpRequest, config: &ServerConfig) -> HttpResponse {
     if let Err(response) = authorize_request(&request, config) {
         return response;
@@ -502,6 +622,59 @@ fn handle_metrics_request(request: HttpRequest, config: &ServerConfig) -> HttpRe
     )
 }
 
+fn parse_public_get_request(
+    query: &BTreeMap<String, String>,
+    source_kind: PublicSourceKind,
+) -> Result<(TransformSourcePayload, TransformOptions), HttpResponse> {
+    validate_public_query_names(query, source_kind)?;
+
+    let source = match source_kind {
+        PublicSourceKind::Path => TransformSourcePayload::Path {
+            path: required_query_param(query, "path")?.to_string(),
+            version: query.get("version").cloned(),
+        },
+        PublicSourceKind::Url => TransformSourcePayload::Url {
+            url: required_query_param(query, "url")?.to_string(),
+            version: query.get("version").cloned(),
+        },
+    };
+
+    let defaults = TransformOptions::default();
+    let options = TransformOptions {
+        width: parse_optional_integer_query(query, "width")?,
+        height: parse_optional_integer_query(query, "height")?,
+        fit: parse_optional_named(query.get("fit").map(String::as_str), "fit", Fit::from_str)?,
+        position: parse_optional_named(
+            query.get("position").map(String::as_str),
+            "position",
+            Position::from_str,
+        )?,
+        format: parse_optional_named(
+            query.get("format").map(String::as_str),
+            "format",
+            MediaType::from_str,
+        )?,
+        quality: parse_optional_u8_query(query, "quality")?,
+        background: parse_optional_named(
+            query.get("background").map(String::as_str),
+            "background",
+            Rgba8::from_hex,
+        )?,
+        rotate: match query.get("rotate") {
+            Some(value) => parse_named(value, "rotate", Rotation::from_str)?,
+            None => defaults.rotate,
+        },
+        auto_orient: parse_optional_bool_query(query, "autoOrient")?
+            .unwrap_or(defaults.auto_orient),
+        strip_metadata: parse_optional_bool_query(query, "stripMetadata")?
+            .unwrap_or(defaults.strip_metadata),
+        preserve_exif: parse_optional_bool_query(query, "preserveExif")?
+            .unwrap_or(defaults.preserve_exif),
+    };
+
+    Ok((source, options))
+}
+
 fn transform_source_bytes(source_bytes: Vec<u8>, options: TransformOptions) -> HttpResponse {
     let artifact = match sniff_artifact(RawArtifact::new(source_bytes, None)) {
         Ok(artifact) => artifact,
@@ -513,6 +686,218 @@ fn transform_source_bytes(source_bytes: Vec<u8>, options: TransformOptions) -> H
     };
 
     HttpResponse::binary("200 OK", output.media_type.as_mime(), output.bytes)
+}
+
+fn parse_query_params(request: &HttpRequest) -> Result<BTreeMap<String, String>, HttpResponse> {
+    let Some(query) = request.query() else {
+        return Ok(BTreeMap::new());
+    };
+
+    let mut params = BTreeMap::new();
+    for (name, value) in url::form_urlencoded::parse(query.as_bytes()) {
+        let name = name.into_owned();
+        let value = value.into_owned();
+        if params.insert(name.clone(), value).is_some() {
+            return Err(bad_request_response(&format!(
+                "query parameter `{name}` must not be repeated"
+            )));
+        }
+    }
+
+    Ok(params)
+}
+
+fn authorize_signed_request(
+    request: &HttpRequest,
+    query: &BTreeMap<String, String>,
+    config: &ServerConfig,
+) -> Result<(), HttpResponse> {
+    let expected_key_id = config
+        .signed_url_key_id
+        .as_deref()
+        .ok_or_else(|| service_unavailable_response("public signed URL key is not configured"))?;
+    let secret = config.signed_url_secret.as_deref().ok_or_else(|| {
+        service_unavailable_response("public signed URL secret is not configured")
+    })?;
+    let key_id = required_auth_query_param(query, "keyId")?;
+    let expires = required_auth_query_param(query, "expires")?;
+    let signature = required_auth_query_param(query, "signature")?;
+
+    if key_id != expected_key_id {
+        return Err(signed_url_unauthorized_response(
+            "signed URL is invalid or expired",
+        ));
+    }
+
+    let expires = expires.parse::<u64>().map_err(|_| {
+        bad_request_response("query parameter `expires` must be a positive integer")
+    })?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| {
+            internal_error_response(&format!("failed to read the current time: {error}"))
+        })?
+        .as_secs();
+    if expires < now {
+        return Err(signed_url_unauthorized_response(
+            "signed URL is invalid or expired",
+        ));
+    }
+
+    let authority = canonical_request_authority(request, config)?;
+    let canonical_query = canonical_query_without_signature(query);
+    let canonical = format!(
+        "{}\n{}\n{}\n{}",
+        request.method,
+        authority,
+        request.path(),
+        canonical_query
+    );
+
+    let provided_signature = hex::decode(signature)
+        .map_err(|_| signed_url_unauthorized_response("signed URL is invalid or expired"))?;
+    let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).map_err(|error| {
+        internal_error_response(&format!(
+            "failed to initialize signed URL verification: {error}"
+        ))
+    })?;
+    mac.update(canonical.as_bytes());
+    mac.verify_slice(&provided_signature)
+        .map_err(|_| signed_url_unauthorized_response("signed URL is invalid or expired"))
+}
+
+fn canonical_request_authority(
+    request: &HttpRequest,
+    config: &ServerConfig,
+) -> Result<String, HttpResponse> {
+    if let Some(public_base_url) = &config.public_base_url {
+        let parsed = Url::parse(public_base_url).map_err(|error| {
+            internal_error_response(&format!(
+                "configured public base URL is invalid at runtime: {error}"
+            ))
+        })?;
+        let host = parsed.host_str().ok_or_else(|| {
+            internal_error_response("configured public base URL must include a host")
+        })?;
+        return Ok(match parsed.port() {
+            Some(port) => format!("{host}:{port}"),
+            None => host.to_string(),
+        });
+    }
+
+    request
+        .header("host")
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| bad_request_response("public GET requests require a Host header"))
+}
+
+fn canonical_query_without_signature(query: &BTreeMap<String, String>) -> String {
+    let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+    for (name, value) in query {
+        if name != "signature" {
+            serializer.append_pair(name, value);
+        }
+    }
+    serializer.finish()
+}
+
+fn validate_public_query_names(
+    query: &BTreeMap<String, String>,
+    source_kind: PublicSourceKind,
+) -> Result<(), HttpResponse> {
+    for name in query.keys() {
+        let allowed = matches!(
+            name.as_str(),
+            "keyId"
+                | "expires"
+                | "signature"
+                | "version"
+                | "width"
+                | "height"
+                | "fit"
+                | "position"
+                | "format"
+                | "quality"
+                | "background"
+                | "rotate"
+                | "autoOrient"
+                | "stripMetadata"
+                | "preserveExif"
+        ) || matches!(
+            (source_kind, name.as_str()),
+            (PublicSourceKind::Path, "path") | (PublicSourceKind::Url, "url")
+        );
+
+        if !allowed {
+            return Err(bad_request_response(&format!(
+                "query parameter `{name}` is not supported for this endpoint"
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+fn required_query_param<'a>(
+    query: &'a BTreeMap<String, String>,
+    name: &str,
+) -> Result<&'a str, HttpResponse> {
+    query
+        .get(name)
+        .map(String::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| bad_request_response(&format!("query parameter `{name}` is required")))
+}
+
+fn required_auth_query_param<'a>(
+    query: &'a BTreeMap<String, String>,
+    name: &str,
+) -> Result<&'a str, HttpResponse> {
+    query
+        .get(name)
+        .map(String::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| signed_url_unauthorized_response("signed URL is invalid or expired"))
+}
+
+fn parse_optional_integer_query(
+    query: &BTreeMap<String, String>,
+    name: &str,
+) -> Result<Option<u32>, HttpResponse> {
+    match query.get(name) {
+        Some(value) => value.parse::<u32>().map(Some).map_err(|_| {
+            bad_request_response(&format!("query parameter `{name}` must be an integer"))
+        }),
+        None => Ok(None),
+    }
+}
+
+fn parse_optional_u8_query(
+    query: &BTreeMap<String, String>,
+    name: &str,
+) -> Result<Option<u8>, HttpResponse> {
+    match query.get(name) {
+        Some(value) => value.parse::<u8>().map(Some).map_err(|_| {
+            bad_request_response(&format!("query parameter `{name}` must be an integer"))
+        }),
+        None => Ok(None),
+    }
+}
+
+fn parse_optional_bool_query(
+    query: &BTreeMap<String, String>,
+    name: &str,
+) -> Result<Option<bool>, HttpResponse> {
+    match query.get(name).map(String::as_str) {
+        Some("true") => Ok(Some(true)),
+        Some("false") => Ok(Some(false)),
+        Some(_) => Err(bad_request_response(&format!(
+            "query parameter `{name}` must be `true` or `false`"
+        ))),
+        None => Ok(None),
+    }
 }
 
 fn parse_upload_request(
@@ -607,6 +992,8 @@ fn render_metrics_text() -> String {
         RouteMetric::Health,
         RouteMetric::HealthLive,
         RouteMetric::HealthReady,
+        RouteMetric::PublicByPath,
+        RouteMetric::PublicByUrl,
         RouteMetric::Transform,
         RouteMetric::Upload,
         RouteMetric::Metrics,
@@ -640,6 +1027,8 @@ fn route_counter(route: RouteMetric) -> &'static AtomicU64 {
         RouteMetric::Health => &HTTP_REQUESTS_HEALTH_TOTAL,
         RouteMetric::HealthLive => &HTTP_REQUESTS_HEALTH_LIVE_TOTAL,
         RouteMetric::HealthReady => &HTTP_REQUESTS_HEALTH_READY_TOTAL,
+        RouteMetric::PublicByPath => &HTTP_REQUESTS_PUBLIC_BY_PATH_TOTAL,
+        RouteMetric::PublicByUrl => &HTTP_REQUESTS_PUBLIC_BY_URL_TOTAL,
         RouteMetric::Transform => &HTTP_REQUESTS_TRANSFORM_TOTAL,
         RouteMetric::Upload => &HTTP_REQUESTS_UPLOAD_TOTAL,
         RouteMetric::Metrics => &HTTP_REQUESTS_METRICS_TOTAL,
@@ -874,24 +1263,19 @@ fn resolve_source_bytes(
 }
 
 fn read_remote_source_bytes(url: &str, config: &ServerConfig) -> Result<Vec<u8>, HttpResponse> {
-    let agent = ureq::AgentBuilder::new()
-        .redirects(0)
-        .timeout_connect(Duration::from_secs(10))
-        .timeout_read(Duration::from_secs(30))
-        .build();
     let mut current_url = url.to_string();
 
     for redirect_index in 0..=MAX_REMOTE_REDIRECTS {
-        let parsed = parse_remote_url(&current_url)?;
-        validate_remote_url(&parsed, config)?;
+        let target = prepare_remote_fetch_target(&current_url, config)?;
+        let agent = build_remote_agent(&target);
 
-        match agent.get(parsed.as_str()).call() {
+        match agent.get(target.url.as_str()).call() {
             Ok(response) if is_redirect_status(response.status()) => {
-                current_url = next_redirect_url(&parsed, &response, redirect_index)?;
+                current_url = next_redirect_url(&target.url, &response, redirect_index)?;
             }
-            Ok(response) => return read_remote_response_body(parsed.as_str(), response),
+            Ok(response) => return read_remote_response_body(target.url.as_str(), response),
             Err(ureq::Error::Status(status, response)) if is_redirect_status(status) => {
-                current_url = next_redirect_url(&parsed, &response, redirect_index)?;
+                current_url = next_redirect_url(&target.url, &response, redirect_index)?;
             }
             Err(ureq::Error::Status(status, _)) => {
                 return Err(bad_gateway_response(&format!(
@@ -909,6 +1293,70 @@ fn read_remote_source_bytes(url: &str, config: &ServerConfig) -> Result<Vec<u8>,
     Err(too_many_redirects_response(
         "remote URL exceeded the redirect limit",
     ))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RemoteFetchTarget {
+    url: Url,
+    netloc: String,
+    addrs: Vec<SocketAddr>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PinnedResolver {
+    expected_netloc: String,
+    addrs: Vec<SocketAddr>,
+}
+
+impl ureq::Resolver for PinnedResolver {
+    fn resolve(&self, requested_netloc: &str) -> io::Result<Vec<SocketAddr>> {
+        if requested_netloc == self.expected_netloc {
+            Ok(self.addrs.clone())
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!("unexpected remote netloc `{requested_netloc}`"),
+            ))
+        }
+    }
+}
+
+fn prepare_remote_fetch_target(
+    value: &str,
+    config: &ServerConfig,
+) -> Result<RemoteFetchTarget, HttpResponse> {
+    let url = parse_remote_url(value)?;
+    let addrs = validate_remote_url(&url, config)?;
+    let host = url
+        .host_str()
+        .ok_or_else(|| bad_request_response("remote URL must include a host"))?
+        .to_string();
+    let port = url
+        .port_or_known_default()
+        .ok_or_else(|| bad_request_response("remote URL must resolve to a known port"))?;
+
+    Ok(RemoteFetchTarget {
+        url,
+        netloc: format!("{host}:{port}"),
+        addrs,
+    })
+}
+
+fn build_remote_agent(target: &RemoteFetchTarget) -> ureq::Agent {
+    ureq::AgentBuilder::new()
+        .redirects(0)
+        .timeout_connect(Duration::from_secs(10))
+        .timeout_read(Duration::from_secs(30))
+        .try_proxy_from_env(false)
+        .max_idle_connections(0)
+        .max_idle_connections_per_host(0)
+        // Pin the connection target to the validated resolution for this request so
+        // the outbound fetch cannot race to a different DNS answer after validation.
+        .resolver(PinnedResolver {
+            expected_netloc: target.netloc.clone(),
+            addrs: target.addrs.clone(),
+        })
+        .build()
 }
 
 fn next_redirect_url(
@@ -941,7 +1389,7 @@ fn parse_remote_url(value: &str) -> Result<Url, HttpResponse> {
         .map_err(|error| bad_request_response(&format!("remote URL is invalid: {error}")))
 }
 
-fn validate_remote_url(url: &Url, config: &ServerConfig) -> Result<(), HttpResponse> {
+fn validate_remote_url(url: &Url, config: &ServerConfig) -> Result<Vec<SocketAddr>, HttpResponse> {
     match url.scheme() {
         "http" | "https" => {}
         _ => {
@@ -992,7 +1440,7 @@ fn validate_remote_url(url: &Url, config: &ServerConfig) -> Result<(), HttpRespo
         ));
     }
 
-    Ok(())
+    Ok(addrs)
 }
 
 fn read_remote_response_body(url: &str, response: ureq::Response) -> Result<Vec<u8>, HttpResponse> {
@@ -1380,6 +1828,10 @@ fn auth_required_response(message: &str) -> HttpResponse {
     )
 }
 
+fn signed_url_unauthorized_response(message: &str) -> HttpResponse {
+    HttpResponse::json("401 Unauthorized", json_error_body(message))
+}
+
 fn not_found_response(message: &str) -> HttpResponse {
     error_response("404 Not Found", message)
 }
@@ -1430,19 +1882,24 @@ fn json_error_body(message: &str) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::{
-        auth_required_response, bad_request_response, bind_addr, read_request,
-        resolve_storage_path, route_request, serve_once_with_config, HttpRequest, ServerConfig,
-        DEFAULT_BIND_ADDR,
+        auth_required_response, authorize_signed_request, bad_request_response, bind_addr,
+        canonical_query_without_signature, parse_public_get_request, prepare_remote_fetch_target,
+        read_request, resolve_storage_path, route_request, serve_once_with_config, HttpRequest,
+        PinnedResolver, PublicSourceKind, ServerConfig, DEFAULT_BIND_ADDR,
     };
     use crate::{sniff_artifact, MediaType, RawArtifact};
+    use hmac::{Hmac, Mac};
     use image::codecs::png::PngEncoder;
     use image::{ColorType, ImageEncoder, Rgba, RgbaImage};
+    use sha2::Sha256;
+    use std::collections::BTreeMap;
     use std::fs;
     use std::io::{Cursor, Read, Write};
-    use std::net::{TcpListener, TcpStream};
+    use std::net::{SocketAddr, TcpListener, TcpStream};
     use std::path::{Path, PathBuf};
     use std::thread;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    use ureq::Resolver;
 
     fn png_bytes() -> Vec<u8> {
         let image = RgbaImage::from_pixel(4, 3, Rgba([10, 20, 30, 255]));
@@ -1465,6 +1922,22 @@ mod tests {
 
     fn write_png(path: &Path) {
         fs::write(path, png_bytes()).expect("write png fixture");
+    }
+
+    fn sign_public_query(
+        method: &str,
+        authority: &str,
+        path: &str,
+        query: &BTreeMap<String, String>,
+        secret: &str,
+    ) -> String {
+        let canonical = format!(
+            "{method}\n{authority}\n{path}\n{}",
+            canonical_query_without_signature(query)
+        );
+        let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).expect("create hmac");
+        mac.update(canonical.as_bytes());
+        hex::encode(mac.finalize().into_bytes())
     }
 
     fn spawn_http_server(
@@ -1607,10 +2080,112 @@ mod tests {
         String::from_utf8(response.body.clone()).expect("utf8 response body")
     }
 
+    fn signed_public_request(target: &str, host: &str, secret: &str) -> HttpRequest {
+        let (path, query) = target.split_once('?').expect("target has query");
+        let mut query = url::form_urlencoded::parse(query.as_bytes())
+            .into_owned()
+            .collect::<BTreeMap<_, _>>();
+        let signature = sign_public_query("GET", host, path, &query, secret);
+        query.insert("signature".to_string(), signature);
+        let final_query = url::form_urlencoded::Serializer::new(String::new())
+            .extend_pairs(
+                query
+                    .iter()
+                    .map(|(name, value)| (name.as_str(), value.as_str())),
+            )
+            .finish();
+
+        HttpRequest {
+            method: "GET".to_string(),
+            target: format!("{path}?{final_query}"),
+            version: "HTTP/1.1".to_string(),
+            headers: vec![("host".to_string(), host.to_string())],
+            body: Vec::new(),
+        }
+    }
+
     #[test]
     fn uses_default_bind_addr_when_env_is_missing() {
         std::env::remove_var("TRUSS_BIND_ADDR");
         assert_eq!(bind_addr(), DEFAULT_BIND_ADDR);
+    }
+
+    #[test]
+    fn authorize_signed_request_accepts_a_valid_signature() {
+        let request = signed_public_request(
+            "/images/by-path?path=%2Fimage.png&keyId=public-dev&expires=4102444800&format=jpeg",
+            "assets.example.com",
+            "secret-value",
+        );
+        let query = super::parse_query_params(&request).expect("parse query");
+        let config = ServerConfig::new(temp_dir("public-auth"), None)
+            .with_signed_url_credentials("public-dev", "secret-value");
+
+        authorize_signed_request(&request, &query, &config).expect("signed auth should pass");
+    }
+
+    #[test]
+    fn authorize_signed_request_uses_public_base_url_authority() {
+        let request = signed_public_request(
+            "/images/by-path?path=%2Fimage.png&keyId=public-dev&expires=4102444800&format=jpeg",
+            "cdn.example.com",
+            "secret-value",
+        );
+        let query = super::parse_query_params(&request).expect("parse query");
+        let mut config = ServerConfig::new(temp_dir("public-authority"), None)
+            .with_signed_url_credentials("public-dev", "secret-value");
+        config.public_base_url = Some("https://cdn.example.com".to_string());
+
+        authorize_signed_request(&request, &query, &config).expect("signed auth should pass");
+    }
+
+    #[test]
+    fn parse_public_get_request_rejects_unknown_query_parameters() {
+        let query = BTreeMap::from([
+            ("path".to_string(), "/image.png".to_string()),
+            ("keyId".to_string(), "public-dev".to_string()),
+            ("expires".to_string(), "4102444800".to_string()),
+            ("signature".to_string(), "deadbeef".to_string()),
+            ("unexpected".to_string(), "value".to_string()),
+        ]);
+
+        let response = parse_public_get_request(&query, PublicSourceKind::Path)
+            .expect_err("unknown query should fail");
+
+        assert_eq!(response.status, "400 Bad Request");
+        assert!(response_body(&response).contains("is not supported"));
+    }
+
+    #[test]
+    fn prepare_remote_fetch_target_pins_the_validated_netloc() {
+        let target = prepare_remote_fetch_target(
+            "http://1.1.1.1/image.png",
+            &ServerConfig::new(temp_dir("pin"), Some("secret".to_string())),
+        )
+        .expect("prepare remote target");
+
+        assert_eq!(target.netloc, "1.1.1.1:80");
+        assert_eq!(target.addrs, vec![SocketAddr::from(([1, 1, 1, 1], 80))]);
+    }
+
+    #[test]
+    fn pinned_resolver_rejects_unexpected_netlocs() {
+        let resolver = PinnedResolver {
+            expected_netloc: "example.com:443".to_string(),
+            addrs: vec![SocketAddr::from(([93, 184, 216, 34], 443))],
+        };
+
+        assert_eq!(
+            resolver
+                .resolve("example.com:443")
+                .expect("resolve expected netloc"),
+            vec![SocketAddr::from(([93, 184, 216, 34], 443))]
+        );
+
+        let error = resolver
+            .resolve("proxy.example:8080")
+            .expect_err("unexpected netloc should fail");
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
     }
 
     #[test]

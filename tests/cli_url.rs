@@ -74,7 +74,6 @@ fn convert_url_writes_a_local_output_file() {
     let (url, handle) = spawn_http_server(png_bytes(), "image/png");
     let output_path = temp_file_path("convert-url-output").with_extension("jpg");
     let output = Command::new(env!("CARGO_BIN_EXE_truss"))
-        .arg("convert")
         .arg("--url")
         .arg(url)
         .arg("-o")
@@ -91,4 +90,27 @@ fn convert_url_writes_a_local_output_file() {
     let _ = fs::remove_file(&output_path);
 
     assert_eq!(artifact.media_type, MediaType::Jpeg);
+}
+
+#[test]
+fn convert_url_can_infer_avif_output_from_the_file_extension() {
+    let (url, handle) = spawn_http_server(png_bytes(), "image/png");
+    let output_path = temp_file_path("convert-url-output-avif").with_extension("avif");
+    let output = Command::new(env!("CARGO_BIN_EXE_truss"))
+        .arg("--url")
+        .arg(url)
+        .arg("-o")
+        .arg(&output_path)
+        .output()
+        .expect("run truss convert");
+
+    handle.join().expect("join server thread");
+
+    assert!(output.status.success(), "{output:?}");
+
+    let bytes = fs::read(&output_path).expect("read converted output");
+    let artifact = sniff_artifact(RawArtifact::new(bytes, None)).expect("sniff converted output");
+    let _ = fs::remove_file(&output_path);
+
+    assert_eq!(artifact.media_type, MediaType::Avif);
 }
