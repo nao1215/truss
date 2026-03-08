@@ -427,13 +427,46 @@ a {
 
 @media (max-width: 720px) {
   .page-shell {
-    width: min(100% - 1rem, 100%);
-    padding-top: 0.75rem;
+    width: min(100% - 0.75rem, 100%);
+    padding-top: 0.5rem;
   }
 
-  .hero,
-  .stack {
+  .hero {
     padding: 1rem;
+  }
+
+  .hero h1 {
+    font-size: 1.75rem;
+    max-width: none;
+  }
+
+  .hero-note {
+    padding: 0.75rem;
+  }
+
+  .stack {
+    padding: 0.85rem;
+  }
+
+  .panel {
+    border-radius: 16px;
+  }
+
+  .layout {
+    gap: 0.75rem;
+  }
+
+  .section-head h2 {
+    font-size: 1.15rem;
+  }
+
+  .dropzone {
+    padding: 1rem;
+  }
+
+  .preview-frame {
+    min-height: 180px;
+    padding: 0.65rem;
   }
 
   .form-grid,
@@ -441,8 +474,30 @@ a {
     grid-template-columns: 1fr;
   }
 
+  .form-grid input[type="text"],
+  .form-grid input[type="number"],
+  .form-grid select {
+    min-height: 44px;
+    font-size: 16px;
+  }
+
   .quality-pair {
-    grid-template-columns: 1fr;
+    grid-template-columns: 1fr 80px;
+  }
+
+  .action-button,
+  .download-link {
+    min-height: 48px;
+    font-size: 1rem;
+  }
+
+  .capability-strip {
+    gap: 0.45rem;
+  }
+
+  .capability-pill {
+    font-size: 0.8rem;
+    padding: 0.4rem 0.65rem;
   }
 }
 

@@ -49,7 +49,7 @@
 
           <div class="preview-block">
             <div class="preview-frame">
-              <img id="input-preview" alt="Input preview" hidden />
+              <img id="input-preview" alt="" hidden />
               <p id="input-placeholder" class="placeholder">
                 Input preview will appear here.
               </p>
@@ -102,6 +102,11 @@
             <label>
               <span>Height</span>
               <input id="height" name="height" type="number" min="1" inputmode="numeric" />
+            </label>
+
+            <label class="checkbox">
+              <input id="lock-aspect" name="lockAspect" type="checkbox" checked />
+              <span>Lock aspect ratio</span>
             </label>
 
             <label>
@@ -208,7 +213,7 @@
 
           <div class="preview-block">
             <div class="preview-frame">
-              <img id="output-preview" alt="Output preview" hidden />
+              <img id="output-preview" alt="" hidden />
               <p id="output-placeholder" class="placeholder">
                 Transform output will appear here.
               </p>
