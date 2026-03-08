@@ -115,9 +115,13 @@ server runtime を起動する。
 - `--bind <ADDR>`
 - `--storage-root <PATH>`
 - `--public-base-url <URL>`
+- `--allow-insecure-url-sources`
 
 変換オプションを `serve` に直接持ち込まない。  
 `serve` は transport と設定だけを扱う。
+
+`--allow-insecure-url-sources` はローカル開発や integration test 向けの escape hatch であり、
+本番向け設定では使わない前提とする。
 
 ---
 

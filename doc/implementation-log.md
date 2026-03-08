@@ -23,6 +23,10 @@
 - The repository now has unit tests, integration tests, and doc tests for the implemented CLI and Core slices.
 - `gif` and `svg` support are still out of scope for the current implementation phase.
 - The server adapter now supports a minimal private `POST /images:transform` flow for Bearer-authenticated `path` sources.
+- The server adapter now supports `source.kind=url` with scheme validation, redirect limits, response-size limits, resolved-IP checks, and an opt-in insecure allowance for local testing.
+- The server adapter now supports the private multipart upload API at `POST /images` with `file` and optional JSON `options` parts.
+- The server adapter now exposes an authenticated `/metrics` endpoint with minimal Prometheus-compatible counters.
+- Coverage can now be measured with `./scripts/coverage.sh`, which wraps `cargo llvm-cov --workspace --all-targets --summary-only`.
 
 ## Initial Plan
 
@@ -32,9 +36,9 @@
 
 ## Active Plan
 
-1. Extend the server adapter from `path`-only private transforms to URL sources with explicit SSRF controls.
-2. Implement the upload-based private API at `POST /images`.
-3. Revisit public signed GET endpoints and metrics once the private server pipeline is more complete.
+1. Deepen server-side URL source hardening where the current adapter still relies on best-effort checks, especially connect-time peer revalidation.
+2. Revisit public signed GET endpoints once the private server pipeline is more complete.
+3. Keep the CLI aligned as new server runtime settings and public-endpoint flows are added.
 
 ## Work Log
 
@@ -81,3 +85,35 @@
 - 2026-03-08: Added integration tests in `tests/server_transform.rs` for authenticated and unauthorized HTTP transform requests.
 - 2026-03-08: Added a runnable doc test for `ServerConfig::new`.
 - 2026-03-08: Ran `cargo fmt` and `cargo test` after the server adapter changes; 62 unit tests, 4 integration tests, and 3 doc tests passed.
+- 2026-03-08: Started phase 5 planning for repeatable coverage measurement and server-side URL source support.
+- 2026-03-08: Installed `llvm-tools-preview` and `cargo-llvm-cov` so coverage can be measured with `cargo llvm-cov`.
+- 2026-03-08: Added `url` as a direct dependency so the server adapter can parse, validate, and join remote URLs explicitly.
+- 2026-03-08: Added `ServerConfig::with_insecure_url_sources` and `TRUSS_ALLOW_INSECURE_URL_SOURCES` for local development and test environments that need loopback or non-standard-port URL sources.
+- 2026-03-08: `POST /images:transform` now supports `source.kind=url` with explicit `http`/`https` scheme checks, host resolution, redirect following up to 5 hops, remote response-size limits, and private-network blocking by default.
+- 2026-03-08: The current URL-source implementation is still best-effort: it validates resolved IPs before each fetch, but it does not yet revalidate the final connected peer IP or enforce the documented compression-response policy.
+- 2026-03-08: Added `scripts/coverage.sh` as the shared coverage entry point for future work.
+- 2026-03-08: Added unit and integration coverage for private-URL rejection, insecure test allowances, and remote redirect handling.
+- 2026-03-08: Added a runnable doc test for `ServerConfig::with_insecure_url_sources`.
+- 2026-03-08: Ran `cargo fmt`, `cargo test`, and `./scripts/coverage.sh` after the URL-source server changes.
+- 2026-03-08: Current coverage summary from `cargo llvm-cov` is 81.23% regions, 74.65% functions, and 82.01% lines across all targets.
+- 2026-03-08: Started phase 6 planning for the private multipart upload API at `POST /images`.
+- 2026-03-08: `POST /images` now accepts `multipart/form-data` with a required `file` part and an optional JSON `options` part.
+- 2026-03-08: Added strict multipart validation for boundary parsing, part headers, supported field names, duplicate fields, and JSON parsing for the `options` part.
+- 2026-03-08: Reused the existing transform pipeline for uploaded bytes so upload, path-based transform, and URL-based transform all converge after source resolution.
+- 2026-03-08: Added unit and integration coverage for successful uploads, missing file fields, non-multipart requests, and multipart option parsing.
+- 2026-03-08: Ran `cargo fmt`, `cargo test`, and `./scripts/coverage.sh` after the multipart upload changes.
+- 2026-03-08: Current coverage summary from `cargo llvm-cov` is 82.18% regions, 75.48% functions, and 81.49% lines across all targets.
+- 2026-03-08: Started phase 7 planning for `/metrics` and the remaining URL-source compression policy.
+- 2026-03-08: Added a minimal authenticated `/metrics` endpoint that exposes Prometheus-compatible counters for parsed requests, per-route request totals, response-status totals, and a simple `truss_process_up` gauge.
+- 2026-03-08: The current metrics implementation uses process-local atomic counters in the server adapter; it is sufficient for the current single-process runtime but not yet pluggable or persistent.
+- 2026-03-08: Added remote response `Content-Encoding` validation so URL sources now reject encodings other than `gzip`, `br`, or `identity`.
+- 2026-03-08: Added unit and integration coverage for `/metrics` authentication and payload format, plus rejection of unsupported remote content encodings.
+- 2026-03-08: Ran `cargo fmt`, `cargo test`, and `./scripts/coverage.sh` after the metrics and compression-policy changes.
+- 2026-03-08: Current coverage summary from `cargo llvm-cov` is 82.94% regions, 76.99% functions, and 82.40% lines across all targets.
+- 2026-03-08: Started phase 8 planning to align the CLI with the current server runtime configuration surface.
+- 2026-03-08: Extended `truss serve` to accept `--storage-root`, `--public-base-url`, and `--allow-insecure-url-sources`, with CLI-side config resolution layered on top of `ServerConfig::from_env`.
+- 2026-03-08: `truss serve` now prints the resolved storage root, optional public base URL, and the actual listener address, including the real ephemeral port when `--bind 127.0.0.1:0` is used.
+- 2026-03-08: Added unit coverage for `serve` argument parsing and config override resolution, plus integration coverage for help output and `serve` startup logging.
+- 2026-03-08: Ran `cargo fmt`, `cargo test`, and `./scripts/coverage.sh` after the CLI `serve` alignment changes.
+- 2026-03-08: Current coverage summary from `cargo llvm-cov` is 82.64% regions, 75.73% functions, and 82.28% lines across all targets.
+- 2026-03-08: Current automated verification covers 74 unit tests, 12 integration tests, and 4 doc tests.

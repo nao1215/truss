@@ -1,4 +1,4 @@
-use crate::adapters::server;
+use crate::adapters::server::{self, ServerConfig};
 use crate::{
     sniff_artifact, transform_raster, Fit, MediaType, Position, RawArtifact, Rgba8, Rotation,
     TransformOptions, TransformRequest,
@@ -16,12 +16,18 @@ const HELP_TEXT: &str = "\
 truss
 
 USAGE:
-  truss serve [--bind <ADDR>]
+  truss serve [--bind <ADDR>] [--storage-root <PATH>] [--public-base-url <URL>] [--allow-insecure-url-sources]
   truss inspect <INPUT>
   truss inspect --url <URL>
   truss convert <INPUT> -o <OUTPUT> [OPTIONS]
   truss convert --url <URL> -o <OUTPUT> [OPTIONS]
   truss --help
+
+OPTIONS FOR SERVE:
+      --bind <ADDR>
+      --storage-root <PATH>
+      --public-base-url <URL>
+      --allow-insecure-url-sources
 
 OPTIONS FOR CONVERT:
   -o, --output <OUTPUT>
@@ -75,6 +81,9 @@ enum Command {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ServeCommand {
     bind_addr: Option<String>,
+    storage_root: Option<PathBuf>,
+    public_base_url: Option<String>,
+    allow_insecure_url_sources: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -143,7 +152,12 @@ where
     let mut args = args.into_iter();
     let _program_name = args.next();
     let Some(command) = args.next() else {
-        return Ok(Command::Serve(ServeCommand { bind_addr: None }));
+        return Ok(Command::Serve(ServeCommand {
+            bind_addr: None,
+            storage_root: None,
+            public_base_url: None,
+            allow_insecure_url_sources: false,
+        }));
     };
 
     match command.as_str() {
@@ -157,6 +171,9 @@ where
 
 fn parse_serve_args(args: Vec<String>) -> Result<Command, CliError> {
     let mut bind_addr = None;
+    let mut storage_root = None;
+    let mut public_base_url = None;
+    let mut allow_insecure_url_sources = false;
     let mut index = 0;
 
     while index < args.len() {
@@ -170,6 +187,17 @@ fn parse_serve_args(args: Vec<String>) -> Result<Command, CliError> {
                     .ok_or_else(|| usage_error("`--bind` requires an address"))?;
                 bind_addr = Some(value);
             }
+            "--storage-root" => {
+                index += 1;
+                let value = required_arg(args.get(index), "--storage-root")?;
+                storage_root = Some(PathBuf::from(value));
+            }
+            "--public-base-url" => {
+                index += 1;
+                let value = required_arg(args.get(index), "--public-base-url")?;
+                public_base_url = Some(parse_url_arg(value, "--public-base-url")?);
+            }
+            "--allow-insecure-url-sources" => allow_insecure_url_sources = true,
             unknown => {
                 return Err(usage_error(&format!(
                     "unknown argument for `serve`: `{unknown}`"
@@ -180,7 +208,12 @@ fn parse_serve_args(args: Vec<String>) -> Result<Command, CliError> {
         index += 1;
     }
 
-    Ok(Command::Serve(ServeCommand { bind_addr }))
+    Ok(Command::Serve(ServeCommand {
+        bind_addr,
+        storage_root,
+        public_base_url,
+        allow_insecure_url_sources,
+    }))
 }
 
 fn parse_inspect_args(args: Vec<String>) -> Result<Command, CliError> {
@@ -302,14 +335,61 @@ fn parse_convert_args(args: Vec<String>) -> Result<Command, CliError> {
 }
 
 fn execute_serve(command: ServeCommand) -> Result<(), CliError> {
-    let bind_addr = command.bind_addr.unwrap_or_else(server::bind_addr);
+    let bind_addr = command.bind_addr.clone().unwrap_or_else(server::bind_addr);
+    let config = resolve_server_config(command)?;
     let listener = TcpListener::bind(&bind_addr)
         .map_err(|error| runtime_error(5, &format!("failed to bind {bind_addr}: {error}")))?;
+    let listen_addr = listener
+        .local_addr()
+        .map_err(|error| runtime_error(5, &format!("failed to read listener address: {error}")))?;
+    let mut stdout = io::stdout().lock();
 
-    println!("truss listening on http://{bind_addr}");
+    writeln!(stdout, "truss listening on http://{listen_addr}")
+        .map_err(|error| runtime_error(5, &format!("failed to write stdout: {error}")))?;
+    writeln!(stdout, "storage root: {}", config.storage_root.display())
+        .map_err(|error| runtime_error(5, &format!("failed to write stdout: {error}")))?;
+    if let Some(public_base_url) = &config.public_base_url {
+        writeln!(stdout, "public base URL: {public_base_url}")
+            .map_err(|error| runtime_error(5, &format!("failed to write stdout: {error}")))?;
+    }
+    if config.allow_insecure_url_sources {
+        writeln!(stdout, "insecure URL sources: enabled")
+            .map_err(|error| runtime_error(5, &format!("failed to write stdout: {error}")))?;
+    }
+    stdout
+        .flush()
+        .map_err(|error| runtime_error(5, &format!("failed to flush stdout: {error}")))?;
 
-    server::serve(listener)
+    server::serve_with_config(listener, &config)
         .map_err(|error| runtime_error(5, &format!("server runtime failed: {error}")))
+}
+
+fn resolve_server_config(command: ServeCommand) -> Result<ServerConfig, CliError> {
+    let mut config = ServerConfig::from_env().map_err(|error| {
+        runtime_error(5, &format!("failed to load server configuration: {error}"))
+    })?;
+
+    if let Some(storage_root) = command.storage_root {
+        config.storage_root = storage_root.canonicalize().map_err(|error| {
+            runtime_error(
+                5,
+                &format!(
+                    "failed to resolve storage root {}: {error}",
+                    storage_root.display()
+                ),
+            )
+        })?;
+    }
+
+    if let Some(public_base_url) = command.public_base_url {
+        config.public_base_url = Some(public_base_url);
+    }
+
+    if command.allow_insecure_url_sources {
+        config.allow_insecure_url_sources = true;
+    }
+
+    Ok(config)
 }
 
 fn execute_inspect<R, W>(
@@ -592,7 +672,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_args, run_with_io, Command, ConvertCommand, InputSource, OutputTarget, ServeCommand,
+        parse_args, resolve_server_config, run_with_io, Command, ConvertCommand, InputSource,
+        OutputTarget, ServeCommand,
     };
     use crate::{sniff_artifact, Fit, MediaType, RawArtifact, TransformOptions};
     use image::codecs::png::PngEncoder;
@@ -620,6 +701,16 @@ mod tests {
             .expect("current time")
             .as_nanos();
         env::temp_dir().join(format!("truss-{name}-{unique}.bin"))
+    }
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("current time")
+            .as_nanos();
+        let path = env::temp_dir().join(format!("truss-{name}-{unique}"));
+        fs::create_dir_all(&path).expect("create temp dir");
+        path
     }
 
     fn spawn_http_server(
@@ -650,7 +741,15 @@ mod tests {
     fn parse_args_defaults_to_serve() {
         let command = parse_args(vec!["truss".to_string()]).expect("parse default command");
 
-        assert_eq!(command, Command::Serve(ServeCommand { bind_addr: None }));
+        assert_eq!(
+            command,
+            Command::Serve(ServeCommand {
+                bind_addr: None,
+                storage_root: None,
+                public_base_url: None,
+                allow_insecure_url_sources: false,
+            })
+        );
     }
 
     #[test]
@@ -666,9 +765,75 @@ mod tests {
         assert_eq!(
             command,
             Command::Serve(ServeCommand {
-                bind_addr: Some("127.0.0.1:9000".to_string())
+                bind_addr: Some("127.0.0.1:9000".to_string()),
+                storage_root: None,
+                public_base_url: None,
+                allow_insecure_url_sources: false,
             })
         );
+    }
+
+    #[test]
+    fn parse_args_supports_serve_runtime_options() {
+        let command = parse_args(vec![
+            "truss".to_string(),
+            "serve".to_string(),
+            "--storage-root".to_string(),
+            "fixtures".to_string(),
+            "--public-base-url".to_string(),
+            "https://assets.example.com".to_string(),
+            "--allow-insecure-url-sources".to_string(),
+        ])
+        .expect("parse serve runtime options");
+
+        assert_eq!(
+            command,
+            Command::Serve(ServeCommand {
+                bind_addr: None,
+                storage_root: Some(PathBuf::from("fixtures")),
+                public_base_url: Some("https://assets.example.com".to_string()),
+                allow_insecure_url_sources: true,
+            })
+        );
+    }
+
+    #[test]
+    fn parse_args_rejects_invalid_public_base_url() {
+        let error = parse_args(vec![
+            "truss".to_string(),
+            "serve".to_string(),
+            "--public-base-url".to_string(),
+            "ftp://assets.example.com".to_string(),
+        ])
+        .expect_err("invalid public base URL should fail");
+
+        assert_eq!(error.exit_code, 2);
+        assert_eq!(
+            error.message,
+            "`--public-base-url` requires an http:// or https:// URL"
+        );
+    }
+
+    #[test]
+    fn resolve_server_config_applies_serve_overrides() {
+        let storage_root = temp_dir("serve-config");
+        let expected_storage_root = storage_root.canonicalize().expect("canonicalize temp dir");
+        let config = resolve_server_config(ServeCommand {
+            bind_addr: Some("127.0.0.1:0".to_string()),
+            storage_root: Some(storage_root.clone()),
+            public_base_url: Some("https://assets.example.com".to_string()),
+            allow_insecure_url_sources: true,
+        })
+        .expect("resolve server config");
+
+        let _ = fs::remove_dir_all(storage_root);
+
+        assert_eq!(config.storage_root, expected_storage_root);
+        assert_eq!(
+            config.public_base_url.as_deref(),
+            Some("https://assets.example.com")
+        );
+        assert!(config.allow_insecure_url_sources);
     }
 
     #[test]
@@ -819,9 +984,11 @@ mod tests {
 
         assert_eq!(exit_code, 0);
         assert!(stderr.is_empty());
-        assert!(String::from_utf8(stdout)
-            .expect("utf8 stdout")
-            .contains("truss convert <INPUT> -o <OUTPUT>"));
+        let output = String::from_utf8(stdout).expect("utf8 stdout");
+        assert!(output.contains("truss convert <INPUT> -o <OUTPUT>"));
+        assert!(output.contains("--storage-root <PATH>"));
+        assert!(output.contains("--public-base-url <URL>"));
+        assert!(output.contains("--allow-insecure-url-sources"));
     }
 
     #[test]
