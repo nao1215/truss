@@ -39,10 +39,10 @@
 
 ## Active Plan
 
-1. Decide how far metadata retention should go beyond the current EXIF + ICC path, especially XMP / IPTC handling and whether unsupported metadata should stay as hard errors.
-2. Revisit AVIF decode only after the runtime dependency strategy for `dav1d` is decided.
-3. Reconcile the remaining documented API gaps, especially `svg` and any behavior that is still stricter than `doc/openapi.yaml`.
-4. WebP lossy quality control requires a dependency beyond the current `image` crate (v0.25.8), which only provides lossless WebP encoding through `image-webp`. A native binding such as `libwebp` would be needed, with implications for the planned WASM target.
+1. Revisit AVIF decode only after the runtime dependency strategy for `dav1d` is decided.
+2. Reconcile the remaining documented API gaps, especially `svg` and any behavior that is still stricter than `doc/openapi.yaml`.
+3. WebP lossy quality control requires a dependency beyond the current `image` crate (v0.25.8), which only provides lossless WebP encoding through `image-webp`. A native binding such as `libwebp` would be needed, with implications for the planned WASM target.
+4. XMP/IPTC Phase 2: byte-level insertion into encoded output (JPEG APP1/APP13, PNG iTXt). Deferred until Phase 1 usage demonstrates demand.
 
 ## Work Log
 
@@ -196,3 +196,5 @@
 - 2026-03-08: Created `compose.yml` with environment-based configuration, read-only filesystem, and `no-new-privileges` security hardening.
 - 2026-03-08: Verified Docker build and runtime: image size 49MB (content 12.6MB), `/health` endpoint responds correctly from `distroless/cc-debian12:nonroot` container.
 - 2026-03-08: Implemented transform pixel limits: `MAX_DECODED_PIXELS` (100M) checked before decode using sniffed metadata, `MAX_OUTPUT_PIXELS` (67M) checked before resize allocation. Added `TransformError::LimitExceeded` variant, HTTP 413 mapping, 4 unit tests, 1 integration test, 2 doc tests. Total tests: 144.
+- 2026-03-08: Design decision: XMP/IPTC metadata retention uses best-effort (silent drop + warning) in Phase 1. Phase 2 will implement byte-level insertion into encoded output. Documented in `doc/runtime-architecture.md` section 11.2.
+- 2026-03-08: Implemented XMP/IPTC best-effort handling. `--keep-metadata` now silently drops XMP/IPTC and returns `TransformWarning::MetadataDropped` warnings. Added `MetadataKind`, `TransformWarning`, `TransformResult` to public API. Changed `transform_raster` return type to `Result<TransformResult, TransformError>`. CLI prints warnings to stderr, server logs to stderr. 3 new unit tests, 2 new doc tests. Total tests: 149.

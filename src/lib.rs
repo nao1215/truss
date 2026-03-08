@@ -15,5 +15,6 @@ pub use codecs::raster::transform_raster;
 pub use core::{
     sniff_artifact, Artifact, ArtifactMetadata, Fit, MediaType, MetadataPolicy,
     NormalizedTransformOptions, NormalizedTransformRequest, Position, RawArtifact, Rgba8, Rotation,
-    TransformError, TransformOptions, TransformRequest, MAX_DECODED_PIXELS, MAX_OUTPUT_PIXELS,
+    TransformError, TransformOptions, TransformRequest, TransformResult, TransformWarning,
+    MetadataKind, MAX_DECODED_PIXELS, MAX_OUTPUT_PIXELS,
 };

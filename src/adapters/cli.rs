@@ -687,10 +687,14 @@ where
         options.format = infer_output_format(&command.output).or(Some(input.media_type));
     }
 
-    let output = transform_raster(TransformRequest::new(input, options))
+    let result = transform_raster(TransformRequest::new(input, options))
         .map_err(map_transform_error)?;
 
-    write_output_bytes(command.output, &output.bytes, stdout)
+    for warning in &result.warnings {
+        eprintln!("warning: {warning}");
+    }
+
+    write_output_bytes(command.output, &result.artifact.bytes, stdout)
 }
 
 fn execute_sign<W>(command: SignCommand, stdout: &mut W) -> Result<(), CliError>

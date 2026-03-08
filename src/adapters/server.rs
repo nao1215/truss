@@ -844,10 +844,16 @@ fn transform_source_bytes(
     } else {
         false
     };
-    let output = match transform_raster(TransformRequest::new(artifact, options)) {
-        Ok(output) => output,
+    let result = match transform_raster(TransformRequest::new(artifact, options)) {
+        Ok(result) => result,
         Err(error) => return transform_error_response(error),
     };
+
+    for warning in &result.warnings {
+        eprintln!("truss: {warning}");
+    }
+
+    let output = result.artifact;
     let etag = build_image_etag(&output.bytes);
     let headers =
         build_image_response_headers(output.media_type, &etag, response_policy, negotiation_used);

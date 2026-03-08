@@ -1,6 +1,7 @@
 use crate::core::{
-    Artifact, ArtifactMetadata, Fit, MediaType, MetadataPolicy, Position, Rotation, TransformError,
-    TransformRequest, MAX_DECODED_PIXELS, MAX_OUTPUT_PIXELS,
+    Artifact, ArtifactMetadata, Fit, MediaType, MetadataKind, MetadataPolicy, Position, Rotation,
+    TransformError, TransformRequest, TransformResult, TransformWarning, MAX_DECODED_PIXELS,
+    MAX_OUTPUT_PIXELS,
 };
 use crate::Rgba8;
 use exif::{In, Reader, Tag, Value};
@@ -26,16 +27,16 @@ use std::io::Cursor;
 /// for JPEG input, explicit rotation, resize handling, and encoding into the requested output
 /// format. Metadata stripping remains the default, while `preserve_exif` retains EXIF and
 /// `keep-metadata` retains EXIF plus ICC profiles for JPEG, PNG, and WebP output. Metadata types
-/// that the current encoders cannot round-trip, such as XMP or IPTC, still raise a capability
-/// error instead of being silently dropped.
+/// that the current encoders cannot round-trip, such as XMP or IPTC, are silently dropped and
+/// reported as [`TransformWarning::MetadataDropped`] warnings in the returned
+/// [`TransformResult`].
 ///
 /// # Errors
 ///
 /// Returns [`TransformError::InvalidOptions`] when the request fails Core validation,
 /// [`TransformError::DecodeFailed`] or [`TransformError::EncodeFailed`] when image processing
 /// fails, and [`TransformError::CapabilityMissing`] for features that are intentionally not
-/// implemented yet, such as AVIF input decode or metadata types that the current encoders cannot
-/// preserve.
+/// implemented yet, such as AVIF input decode.
 ///
 /// # Examples
 ///
@@ -60,9 +61,9 @@ use std::io::Cursor;
 /// ))
 /// .unwrap();
 ///
-/// assert_eq!(output.media_type, MediaType::Jpeg);
-/// assert_eq!(output.metadata.width, Some(2));
-/// assert_eq!(output.metadata.height, Some(2));
+/// assert_eq!(output.artifact.media_type, MediaType::Jpeg);
+/// assert_eq!(output.artifact.metadata.width, Some(2));
+/// assert_eq!(output.artifact.metadata.height, Some(2));
 /// ```
 ///
 /// ```
@@ -86,9 +87,9 @@ use std::io::Cursor;
 ///     },
 /// ))
 /// .unwrap();
-/// let sniffed = sniff_artifact(RawArtifact::new(output.bytes.clone(), None)).unwrap();
+/// let sniffed = sniff_artifact(RawArtifact::new(output.artifact.bytes.clone(), None)).unwrap();
 ///
-/// assert_eq!(output.media_type, MediaType::Avif);
+/// assert_eq!(output.artifact.media_type, MediaType::Avif);
 /// assert_eq!(sniffed.media_type, MediaType::Avif);
 /// ```
 ///
@@ -126,11 +127,11 @@ use std::io::Cursor;
 /// ))
 /// .unwrap();
 ///
-/// let mut decoder = JpegDecoder::new(Cursor::new(&output.bytes)).unwrap();
+/// let mut decoder = JpegDecoder::new(Cursor::new(&output.artifact.bytes)).unwrap();
 /// let exif = decoder.exif_metadata().unwrap().unwrap();
 ///
-/// assert_eq!(output.metadata.width, Some(1));
-/// assert_eq!(output.metadata.height, Some(2));
+/// assert_eq!(output.artifact.metadata.width, Some(1));
+/// assert_eq!(output.artifact.metadata.height, Some(2));
 /// assert_eq!(Orientation::from_exif_chunk(&exif), Some(Orientation::NoTransforms));
 /// ```
 ///
@@ -160,13 +161,13 @@ use std::io::Cursor;
 /// ))
 /// .unwrap();
 ///
-/// let mut decoder = JpegDecoder::new(Cursor::new(&output.bytes)).unwrap();
+/// let mut decoder = JpegDecoder::new(Cursor::new(&output.artifact.bytes)).unwrap();
 /// assert_eq!(decoder.icc_profile().unwrap(), Some(b"demo-icc-profile".to_vec()));
 /// ```
-pub fn transform_raster(request: TransformRequest) -> Result<Artifact, TransformError> {
+pub fn transform_raster(request: TransformRequest) -> Result<TransformResult, TransformError> {
     let normalized = request.normalize()?;
 
-    let retained_metadata = extract_retained_metadata(
+    let (retained_metadata, warnings) = extract_retained_metadata(
         &normalized.input,
         normalized.options.metadata_policy,
         normalized.options.auto_orient,
@@ -205,17 +206,20 @@ pub fn transform_raster(request: TransformRequest) -> Result<Artifact, Transform
     )?;
     let (width, height) = image.dimensions();
 
-    Ok(Artifact::new(
-        bytes,
-        normalized.options.format,
-        ArtifactMetadata {
-            width: Some(width),
-            height: Some(height),
-            frame_count: 1,
-            duration: None,
-            has_alpha: Some(output_has_alpha(&image, normalized.options.format)),
-        },
-    ))
+    Ok(TransformResult {
+        artifact: Artifact::new(
+            bytes,
+            normalized.options.format,
+            ArtifactMetadata {
+                width: Some(width),
+                height: Some(height),
+                frame_count: 1,
+                duration: None,
+                has_alpha: Some(output_has_alpha(&image, normalized.options.format)),
+            },
+        ),
+        warnings,
+    })
 }
 
 fn decode_input(input: &Artifact) -> Result<DynamicImage, TransformError> {
@@ -596,10 +600,6 @@ impl RetainedMetadata {
             && self.iptc_metadata.is_none()
     }
 
-    fn has_unsupported_fields(&self) -> bool {
-        self.xmp_metadata.is_some() || self.iptc_metadata.is_some()
-    }
-
     fn retain_exif_only(mut self) -> Self {
         self.icc_profile = None;
         self.xmp_metadata = None;
@@ -619,9 +619,11 @@ fn extract_retained_metadata(
     metadata_policy: MetadataPolicy,
     auto_orient: bool,
     output_format: MediaType,
-) -> Result<Option<RetainedMetadata>, TransformError> {
+) -> Result<(Option<RetainedMetadata>, Vec<TransformWarning>), TransformError> {
+    let mut warnings = Vec::new();
+
     if matches!(metadata_policy, MetadataPolicy::StripAll) {
-        return Ok(None);
+        return Ok((None, warnings));
     }
 
     let mut metadata = read_input_metadata(input)?;
@@ -632,13 +634,14 @@ fn extract_retained_metadata(
     }
 
     let metadata = match metadata_policy {
-        MetadataPolicy::StripAll => return Ok(None),
+        MetadataPolicy::StripAll => return Ok((None, warnings)),
         MetadataPolicy::PreserveExif => metadata.retain_exif_only(),
         MetadataPolicy::KeepAll => {
-            if metadata.has_unsupported_fields() {
-                return Err(TransformError::CapabilityMissing(
-                    "xmp and iptc retention is not implemented yet".to_string(),
-                ));
+            if metadata.xmp_metadata.is_some() {
+                warnings.push(TransformWarning::MetadataDropped(MetadataKind::Xmp));
+            }
+            if metadata.iptc_metadata.is_some() {
+                warnings.push(TransformWarning::MetadataDropped(MetadataKind::Iptc));
             }
             metadata.retain_supported_keep_all()
         }
@@ -651,10 +654,10 @@ fn extract_retained_metadata(
     }
 
     if metadata.is_empty() {
-        return Ok(None);
+        return Ok((None, warnings));
     }
 
-    Ok(Some(metadata))
+    Ok((Some(metadata), warnings))
 }
 
 fn read_input_metadata(input: &Artifact) -> Result<RetainedMetadata, TransformError> {
@@ -728,8 +731,8 @@ fn output_has_alpha(image: &DynamicImage, media_type: MediaType) -> bool {
 mod tests {
     use super::{apply_exif_orientation, transform_raster};
     use crate::core::{
-        Artifact, ArtifactMetadata, Fit, MediaType, Position, Rotation, TransformOptions,
-        TransformRequest,
+        Artifact, ArtifactMetadata, Fit, MediaType, MetadataPolicy, Position, Rotation,
+        TransformOptions, TransformRequest,
     };
     use crate::{sniff_artifact, RawArtifact, Rgba8, TransformError};
     use image::codecs::jpeg::JpegDecoder;
@@ -976,10 +979,10 @@ mod tests {
         ))
         .expect("convert png to jpeg");
 
-        assert_eq!(result.media_type, MediaType::Jpeg);
-        assert_eq!(result.metadata.width, Some(4));
-        assert_eq!(result.metadata.height, Some(3));
-        assert_eq!(result.metadata.has_alpha, Some(false));
+        assert_eq!(result.artifact.media_type, MediaType::Jpeg);
+        assert_eq!(result.artifact.metadata.width, Some(4));
+        assert_eq!(result.artifact.metadata.height, Some(3));
+        assert_eq!(result.artifact.metadata.has_alpha, Some(false));
     }
 
     #[test]
@@ -994,8 +997,8 @@ mod tests {
         ))
         .expect("resize with width");
 
-        assert_eq!(result.metadata.width, Some(8));
-        assert_eq!(result.metadata.height, Some(4));
+        assert_eq!(result.artifact.metadata.width, Some(8));
+        assert_eq!(result.artifact.metadata.height, Some(4));
     }
 
     #[test]
@@ -1019,10 +1022,10 @@ mod tests {
         ))
         .expect("contain with background");
 
-        assert_eq!(result.metadata.width, Some(8));
-        assert_eq!(result.metadata.height, Some(8));
+        assert_eq!(result.artifact.metadata.width, Some(8));
+        assert_eq!(result.artifact.metadata.height, Some(8));
         assert_eq!(
-            top_left_pixel(&result.bytes, ImageFormat::Png),
+            top_left_pixel(&result.artifact.bytes, ImageFormat::Png),
             [10, 20, 30, 255]
         );
     }
@@ -1041,8 +1044,8 @@ mod tests {
         ))
         .expect("cover resize");
 
-        assert_eq!(result.metadata.width, Some(2));
-        assert_eq!(result.metadata.height, Some(2));
+        assert_eq!(result.artifact.metadata.width, Some(2));
+        assert_eq!(result.artifact.metadata.height, Some(2));
     }
 
     #[test]
@@ -1057,8 +1060,8 @@ mod tests {
         ))
         .expect("rotate image");
 
-        assert_eq!(result.metadata.width, Some(2));
-        assert_eq!(result.metadata.height, Some(4));
+        assert_eq!(result.artifact.metadata.width, Some(2));
+        assert_eq!(result.artifact.metadata.height, Some(4));
     }
 
     #[test]
@@ -1075,14 +1078,14 @@ mod tests {
         ))
         .expect("preserve exif");
 
-        let mut decoder = JpegDecoder::new(Cursor::new(&result.bytes)).expect("decode jpeg");
+        let mut decoder = JpegDecoder::new(Cursor::new(&result.artifact.bytes)).expect("decode jpeg");
         let exif = decoder
             .exif_metadata()
             .expect("read jpeg exif")
             .expect("retained exif");
 
-        assert_eq!(result.metadata.width, Some(2));
-        assert_eq!(result.metadata.height, Some(4));
+        assert_eq!(result.artifact.metadata.width, Some(2));
+        assert_eq!(result.artifact.metadata.height, Some(4));
         assert_eq!(
             Orientation::from_exif_chunk(&exif),
             Some(Orientation::NoTransforms)
@@ -1103,7 +1106,7 @@ mod tests {
         ))
         .expect("preserve exif only");
 
-        let mut decoder = JpegDecoder::new(Cursor::new(&result.bytes)).expect("decode jpeg");
+        let mut decoder = JpegDecoder::new(Cursor::new(&result.artifact.bytes)).expect("decode jpeg");
 
         assert_eq!(decoder.icc_profile().expect("read jpeg icc profile"), None);
     }
@@ -1122,14 +1125,14 @@ mod tests {
         ))
         .expect("preserve png exif");
 
-        let mut decoder = PngDecoder::new(Cursor::new(&result.bytes)).expect("decode png");
+        let mut decoder = PngDecoder::new(Cursor::new(&result.artifact.bytes)).expect("decode png");
         let exif = decoder
             .exif_metadata()
             .expect("read png exif")
             .expect("retained png exif");
 
-        assert_eq!(result.metadata.width, Some(4));
-        assert_eq!(result.metadata.height, Some(2));
+        assert_eq!(result.artifact.metadata.width, Some(4));
+        assert_eq!(result.artifact.metadata.height, Some(2));
         assert_eq!(
             Orientation::from_exif_chunk(&exif),
             Some(Orientation::Rotate90)
@@ -1149,7 +1152,7 @@ mod tests {
         ))
         .expect("keep metadata");
 
-        let mut decoder = JpegDecoder::new(Cursor::new(&result.bytes)).expect("decode jpeg");
+        let mut decoder = JpegDecoder::new(Cursor::new(&result.artifact.bytes)).expect("decode jpeg");
         let exif = decoder
             .exif_metadata()
             .expect("read jpeg exif")
@@ -1159,8 +1162,8 @@ mod tests {
             .expect("read jpeg icc")
             .expect("retained icc");
 
-        assert_eq!(result.metadata.width, Some(2));
-        assert_eq!(result.metadata.height, Some(4));
+        assert_eq!(result.artifact.metadata.width, Some(2));
+        assert_eq!(result.artifact.metadata.height, Some(4));
         assert_eq!(
             Orientation::from_exif_chunk(&exif),
             Some(Orientation::NoTransforms)
@@ -1181,7 +1184,7 @@ mod tests {
         ))
         .expect("keep metadata in png output");
 
-        let mut decoder = PngDecoder::new(Cursor::new(&result.bytes)).expect("decode png");
+        let mut decoder = PngDecoder::new(Cursor::new(&result.artifact.bytes)).expect("decode png");
         let icc_profile = decoder
             .icc_profile()
             .expect("read png icc")
@@ -1203,7 +1206,7 @@ mod tests {
         ))
         .expect("keep metadata from webp input");
 
-        let mut decoder = WebPDecoder::new(Cursor::new(&result.bytes)).expect("decode webp");
+        let mut decoder = WebPDecoder::new(Cursor::new(&result.artifact.bytes)).expect("decode webp");
         let icc_profile = decoder
             .icc_profile()
             .expect("read webp icc")
@@ -1224,9 +1227,9 @@ mod tests {
         ))
         .expect("keep metadata should succeed when nothing is present");
 
-        assert_eq!(result.media_type, MediaType::Png);
-        assert_eq!(result.metadata.width, Some(4));
-        assert_eq!(result.metadata.height, Some(3));
+        assert_eq!(result.artifact.media_type, MediaType::Png);
+        assert_eq!(result.artifact.metadata.width, Some(4));
+        assert_eq!(result.artifact.metadata.height, Some(3));
     }
 
     #[test]
@@ -1284,12 +1287,12 @@ mod tests {
             },
         ))
         .expect("avif encode should succeed");
-        let sniffed = sniff_artifact(RawArtifact::new(result.bytes.clone(), None))
+        let sniffed = sniff_artifact(RawArtifact::new(result.artifact.bytes.clone(), None))
             .expect("sniff avif output");
 
-        assert_eq!(result.media_type, MediaType::Avif);
-        assert_eq!(result.metadata.width, Some(4));
-        assert_eq!(result.metadata.height, Some(3));
+        assert_eq!(result.artifact.media_type, MediaType::Avif);
+        assert_eq!(result.artifact.metadata.width, Some(4));
+        assert_eq!(result.artifact.metadata.height, Some(3));
         assert_eq!(sniffed.media_type, MediaType::Avif);
     }
 
@@ -1396,5 +1399,120 @@ mod tests {
         .unwrap_err();
         assert!(matches!(err, TransformError::LimitExceeded(_)));
         assert!(err.to_string().contains("output image"));
+    }
+
+    #[test]
+    fn keep_metadata_drops_xmp_iptc_with_warnings() {
+        use super::extract_retained_metadata;
+        use crate::core::{MetadataKind, TransformWarning};
+
+        // Build a JPEG with EXIF + ICC + XMP + IPTC by encoding a basic image first,
+        // then calling extract_retained_metadata with a hand-crafted RetainedMetadata
+        // is not possible since that function reads from the artifact bytes. Instead,
+        // test via a JPEG fixture that has XMP injected.
+        //
+        // For a reliable test, construct a valid JPEG and manually inject APP1 (XMP)
+        // and APP13 (IPTC) segments.
+        let image = image::RgbImage::from_pixel(2, 2, image::Rgb([10, 20, 30]));
+        let mut base_bytes = Vec::new();
+        JpegEncoder::new_with_quality(&mut base_bytes, 80)
+            .write_image(&image, 2, 2, ColorType::Rgb8.into())
+            .expect("encode jpeg");
+
+        // Insert XMP APP1 marker: FF E1 <len> "http://ns.adobe.com/xap/1.0/\0" <payload>
+        let xmp_ns = b"http://ns.adobe.com/xap/1.0/\0";
+        let xmp_payload = b"<x:xmpmeta>test</x:xmpmeta>";
+        let xmp_data_len = xmp_ns.len() + xmp_payload.len();
+        let xmp_segment_len = (xmp_data_len + 2) as u16;
+        let mut xmp_segment = vec![0xFF, 0xE1];
+        xmp_segment.extend_from_slice(&xmp_segment_len.to_be_bytes());
+        xmp_segment.extend_from_slice(xmp_ns);
+        xmp_segment.extend_from_slice(xmp_payload);
+
+        // Insert IPTC APP13 marker: FF ED <len> "Photoshop 3.0\0" <payload>
+        let iptc_ns = b"Photoshop 3.0\0";
+        let iptc_payload = b"\x1c\x02\x00\x00\x02OK";
+        let iptc_data_len = iptc_ns.len() + iptc_payload.len();
+        let iptc_segment_len = (iptc_data_len + 2) as u16;
+        let mut iptc_segment = vec![0xFF, 0xED];
+        iptc_segment.extend_from_slice(&iptc_segment_len.to_be_bytes());
+        iptc_segment.extend_from_slice(iptc_ns);
+        iptc_segment.extend_from_slice(iptc_payload);
+
+        // Insert both segments after the SOI marker (first 2 bytes: FF D8)
+        let mut jpeg_with_metadata = Vec::new();
+        jpeg_with_metadata.extend_from_slice(&base_bytes[..2]); // SOI
+        jpeg_with_metadata.extend_from_slice(&xmp_segment);
+        jpeg_with_metadata.extend_from_slice(&iptc_segment);
+        jpeg_with_metadata.extend_from_slice(&base_bytes[2..]); // rest of JPEG
+
+        let artifact = Artifact::new(
+            jpeg_with_metadata,
+            MediaType::Jpeg,
+            ArtifactMetadata {
+                width: Some(2),
+                height: Some(2),
+                ..ArtifactMetadata::default()
+            },
+        );
+
+        let (retained, warnings) = extract_retained_metadata(
+            &artifact,
+            MetadataPolicy::KeepAll,
+            false,
+            MediaType::Jpeg,
+        )
+        .expect("should not error");
+
+        // XMP and IPTC should have been dropped, producing warnings
+        assert_eq!(warnings.len(), 2);
+        assert_eq!(
+            warnings[0],
+            TransformWarning::MetadataDropped(MetadataKind::Xmp)
+        );
+        assert_eq!(
+            warnings[1],
+            TransformWarning::MetadataDropped(MetadataKind::Iptc)
+        );
+
+        // Retained metadata should still exist (at minimum the encoder-supported fields)
+        // but should not contain XMP or IPTC
+        if let Some(metadata) = &retained {
+            assert!(metadata.xmp_metadata.is_none());
+            assert!(metadata.iptc_metadata.is_none());
+        }
+    }
+
+    #[test]
+    fn keep_metadata_no_warnings_when_no_xmp_iptc() {
+        use super::extract_retained_metadata;
+
+        let artifact = jpeg_artifact_with_metadata(4, 3, Some(6), None);
+        let (_, warnings) = extract_retained_metadata(
+            &artifact,
+            MetadataPolicy::KeepAll,
+            false,
+            MediaType::Jpeg,
+        )
+        .expect("should succeed");
+
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn strip_metadata_produces_no_warnings() {
+        use super::extract_retained_metadata;
+
+        let artifact = jpeg_artifact_with_metadata(4, 3, Some(6), None);
+        let (retained, warnings) = extract_retained_metadata(
+            &artifact,
+            MetadataPolicy::StripAll,
+            false,
+            MediaType::Jpeg,
+        )
+        .expect("should succeed");
+
+        assert!(retained.is_none());
+        assert!(warnings.is_empty());
     }
 }

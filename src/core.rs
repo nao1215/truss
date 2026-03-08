@@ -544,6 +544,79 @@ impl fmt::Display for TransformError {
 
 impl Error for TransformError {}
 
+/// Categories of image metadata that may be present in an artifact.
+///
+/// Used by [`TransformWarning::MetadataDropped`] to identify which metadata type
+/// was silently dropped during a transform operation.
+///
+/// ```
+/// use truss::MetadataKind;
+///
+/// assert_eq!(format!("{}", MetadataKind::Xmp), "XMP");
+/// assert_eq!(format!("{}", MetadataKind::Iptc), "IPTC");
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MetadataKind {
+    /// XMP (Extensible Metadata Platform) metadata.
+    Xmp,
+    /// IPTC/IIM (International Press Telecommunications Council) metadata.
+    Iptc,
+}
+
+impl fmt::Display for MetadataKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Xmp => f.write_str("XMP"),
+            Self::Iptc => f.write_str("IPTC"),
+        }
+    }
+}
+
+/// A non-fatal warning emitted during a transform operation.
+///
+/// Warnings indicate that the transform completed successfully but some aspect of
+/// the request could not be fully honored. Adapters should surface these to operators
+/// (e.g. CLI prints to stderr, server logs to stderr).
+///
+/// ```
+/// use truss::{MetadataKind, TransformWarning};
+///
+/// let warning = TransformWarning::MetadataDropped(MetadataKind::Xmp);
+/// assert_eq!(
+///     format!("{warning}"),
+///     "XMP metadata was present in the input but could not be preserved by the output encoder"
+/// );
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TransformWarning {
+    /// Metadata of the given kind was present in the input but could not be preserved
+    /// by the output encoder and was silently dropped.
+    MetadataDropped(MetadataKind),
+}
+
+impl fmt::Display for TransformWarning {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MetadataDropped(kind) => write!(
+                f,
+                "{kind} metadata was present in the input but could not be preserved by the output encoder"
+            ),
+        }
+    }
+}
+
+/// The result of a successful transform, containing the output artifact and any warnings.
+///
+/// Warnings indicate aspects of the request that could not be fully honored, such as
+/// metadata types that were silently dropped because the output encoder does not support them.
+#[derive(Debug)]
+pub struct TransformResult {
+    /// The transformed output artifact.
+    pub artifact: Artifact,
+    /// Non-fatal warnings emitted during the transform.
+    pub warnings: Vec<TransformWarning>,
+}
+
 /// Inspects raw bytes, detects the media type, and extracts best-effort metadata.
 ///
 /// The caller is expected to pass bytes that have already been resolved by an adapter
