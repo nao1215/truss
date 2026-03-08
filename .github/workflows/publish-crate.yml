@@ -86,39 +86,19 @@ jobs:
             exit 1
           fi
 
-      - name: Check whether this version is already published
-        id: published
-        run: |
-          pkgid="$(cargo pkgid)"
-          crate_version="${pkgid##*@}"
-          crate_name_version="${pkgid##*#}"
-          crate_name="${crate_name_version%@*}"
-          url="https://crates.io/api/v1/crates/${crate_name}/${crate_version}"
-          status="$(curl -sS -o /tmp/crate-version.json -w '%{http_code}' "${url}")"
-
-          if [ "${status}" = "200" ]; then
-            echo "published=true" >> "$GITHUB_OUTPUT"
-            echo "crate ${crate_name} ${crate_version} is already published; skipping publish"
-          elif [ "${status}" = "404" ]; then
-            echo "published=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "::error title=crates.io check failed::Unexpected status ${status} while checking ${url}."
-            exit 1
-          fi
-
       - name: Authenticate to crates.io with trusted publishing
-        if: env.HAS_CARGO_REGISTRY_TOKEN == 'false' && steps.published.outputs.published != 'true'
+        if: env.HAS_CARGO_REGISTRY_TOKEN == 'false'
         id: crates-auth
         uses: rust-lang/crates-io-auth-action@v1
 
       - name: Publish crate with API token
-        if: env.HAS_CARGO_REGISTRY_TOKEN == 'true' && steps.published.outputs.published != 'true'
+        if: env.HAS_CARGO_REGISTRY_TOKEN == 'true'
         run: cargo publish --locked
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
       - name: Publish crate with trusted publishing
-        if: env.HAS_CARGO_REGISTRY_TOKEN == 'false' && steps.published.outputs.published != 'true'
+        if: env.HAS_CARGO_REGISTRY_TOKEN == 'false'
         run: cargo publish --locked
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.crates-auth.outputs.token }}
