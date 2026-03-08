@@ -5,6 +5,26 @@ use std::fmt;
 use std::str::FromStr;
 use std::time::Duration;
 
+/// Maximum number of pixels in the output image (width × height).
+///
+/// This limit prevents resize operations from producing excessively large
+/// output buffers. The value matches the API specification in `doc/api.md`.
+///
+/// ```
+/// assert_eq!(truss::MAX_OUTPUT_PIXELS, 67_108_864);
+/// ```
+pub const MAX_OUTPUT_PIXELS: u64 = 67_108_864;
+
+/// Maximum number of decoded pixels allowed for an input image (width × height).
+///
+/// This limit prevents decompression bombs from consuming unbounded memory.
+/// The value matches the API specification in `doc/api.md`.
+///
+/// ```
+/// assert_eq!(truss::MAX_DECODED_PIXELS, 100_000_000);
+/// ```
+pub const MAX_DECODED_PIXELS: u64 = 100_000_000;
+
 /// Raw input bytes before media-type detection has completed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RawArtifact {
@@ -499,6 +519,8 @@ pub enum TransformError {
     EncodeFailed(String),
     /// The current runtime does not provide a required capability.
     CapabilityMissing(String),
+    /// The image exceeds a processing limit such as maximum pixel count.
+    LimitExceeded(String),
 }
 
 impl fmt::Display for TransformError {
@@ -515,6 +537,7 @@ impl fmt::Display for TransformError {
             Self::DecodeFailed(reason) => write!(f, "decode failed: {reason}"),
             Self::EncodeFailed(reason) => write!(f, "encode failed: {reason}"),
             Self::CapabilityMissing(reason) => write!(f, "missing capability: {reason}"),
+            Self::LimitExceeded(reason) => write!(f, "limit exceeded: {reason}"),
         }
     }
 }

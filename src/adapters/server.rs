@@ -2189,6 +2189,7 @@ fn transform_error_response(error: TransformError) -> HttpResponse {
             internal_error_response(&format!("failed to encode transformed artifact: {reason}"))
         }
         TransformError::CapabilityMissing(reason) => not_implemented_response(&reason),
+        TransformError::LimitExceeded(reason) => payload_too_large_response(&reason),
     }
 }
 

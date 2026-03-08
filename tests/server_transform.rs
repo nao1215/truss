@@ -687,3 +687,29 @@ fn serve_once_rejects_unsupported_remote_content_encoding() {
     assert_eq!(content_type, "application/json");
     assert!(body.contains("unsupported content-encoding"));
 }
+
+#[test]
+fn serve_once_rejects_oversized_output_with_413() {
+    let storage_root = temp_dir("limit-exceeded");
+    fs::write(storage_root.join("image.png"), png_bytes()).expect("write source fixture");
+    let (addr, handle) = spawn_server(ServerConfig::new(storage_root, Some("secret".to_string())));
+    // 8193 * 8192 = 67_116_032 > MAX_OUTPUT_PIXELS (67_108_864)
+    let response = send_transform_request(
+        addr,
+        r#"{"source":{"kind":"path","path":"/image.png"},"options":{"width":8193,"height":8192}}"#,
+        Some("secret"),
+    );
+
+    handle
+        .join()
+        .expect("join server thread")
+        .expect("serve one request");
+
+    let (header, content_type, body) = split_response(&response);
+    let body = String::from_utf8(body).expect("utf8 response body");
+
+    assert!(header.starts_with("HTTP/1.1 413 Payload Too Large"));
+    assert_eq!(content_type, "application/json");
+    assert!(body.contains("output image"));
+    assert!(body.contains("limit"));
+}

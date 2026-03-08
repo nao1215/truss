@@ -319,11 +319,123 @@ library は最も安定した契約である。
 
 ---
 
-## 9. 機能の適用範囲
+## 9. クロスプラットフォーム方針
+
+### 9.1 C 言語依存の方針
+
+`Truss` はシステムへの C ライブラリのインストールを要求しない。ただし、self-contained なビルド時 C 依存（ソースコードを同梱し、ビルド時に `cc` crate で自動コンパイルするもの）は許容する。
+
+許容する C 依存:
+
+- `ring`（`ureq` → `rustls` → `ring`）: TLS の暗号処理に C とアセンブリを含む。ソースを同梱しており、`cc` crate が各プラットフォームのコンパイラを自動検出してビルドする。Windows（MSVC）、macOS、Linux、ARM すべてで動作実績がある
+
+禁止する C 依存:
+
+- システムに事前インストールが必要な C ライブラリ（`dav1d`、`libwebp` など）
+- `pkg-config` や `cmake` でシステムライブラリを探索する `-sys` crate
+
+この区別の理由:
+
+- self-contained なビルド時依存は `cargo build` だけで完結し、クロスコンパイルや Windows 対応を妨げない
+- システムライブラリの事前インストールを要求すると、プラットフォームごとのセットアップ手順が増え、特に Windows での開発体験が悪化する
+
+新しい依存を追加するときの判断基準:
+
+1. 純粋 Rust の代替を優先する
+2. 純粋 Rust の代替がない場合、self-contained なビルド時 C 依存を許容する
+3. システムライブラリが必要な場合は feature flag で分離し、デフォルトでは無効にする
+
+### 9.2 対象プラットフォーム
+
+| プラットフォーム | Tier | 備考 |
+| --- | --- | --- |
+| `x86_64-unknown-linux-gnu` | 1 | サーバー主要ターゲット、Docker イメージ |
+| `x86_64-unknown-linux-musl` | 1 | 静的リンクバイナリ、Alpine Docker |
+| `aarch64-unknown-linux-gnu` | 1 | ARM サーバー、Graviton |
+| `x86_64-apple-darwin` | 1 | macOS 開発環境 |
+| `aarch64-apple-darwin` | 1 | Apple Silicon |
+| `x86_64-pc-windows-msvc` | 2 | Windows 開発環境 |
+| `wasm32-unknown-unknown` | 2 | ブラウザ UI |
+
+Tier 1 は CI でビルドとテストを実行する。Tier 2 はビルドのみ確認する。
+
+### 9.3 リリース成果物
+
+各プラットフォーム向けに以下を提供する。
+
+- **バイナリ**: GitHub Releases にプラットフォーム別の静的リンクバイナリを配置する
+- **Docker イメージ**: `linux/amd64` と `linux/arm64` のマルチアーキテクチャイメージ
+- **WASM パッケージ**: npm パッケージとして配布する
+
+---
+
+## 10. Docker 配信
+
+### 10.1 方針
+
+サーバーランタイムは Docker イメージとして配信する。純粋 Rust で C 依存がないため、最小限のベースイメージを使用できる。
+
+### 10.2 イメージ構成
+
+```dockerfile
+FROM rust:1-slim AS builder
+WORKDIR /build
+COPY Cargo.toml Cargo.lock ./
+COPY src/ src/
+COPY tests/ tests/
+RUN cargo build --release --locked
+
+FROM gcr.io/distroless/cc-debian12:nonroot
+COPY --from=builder /build/target/release/truss /truss
+EXPOSE 8080
+ENTRYPOINT ["/truss", "serve"]
+```
+
+設計方針:
+
+- マルチステージビルドでビルド環境とランタイムを分離する
+- ランタイムは `distroless/cc-debian12` を使用する（`ring` が libc に動的リンクするため `static` は使用できない）
+- `nonroot` ユーザーで実行する
+- `linux/amd64` と `linux/arm64` のマルチアーキテクチャビルドを提供する
+
+### 10.3 設定
+
+Docker 実行時の設定は環境変数で行う（`ServerConfig::from_env` と同じ体系）。
+
+```sh
+docker run -p 8080:8080 \
+  -e TRUSS_BIND_ADDR=0.0.0.0:8080 \
+  -e TRUSS_BEARER_TOKEN=secret \
+  -e TRUSS_STORAGE_ROOT=/data \
+  -v /host/images:/data:ro \
+  truss
+```
+
+`TRUSS_BIND_ADDR` はコンテナ内で `0.0.0.0` にバインドする必要がある。デフォルトの `127.0.0.1` ではホストからアクセスできない。
+
+### 10.4 ヘルスチェック
+
+distroless イメージにはシェルも HTTP クライアントも含まれないため、ヘルスチェックは orchestrator 側で設定する。
+
+Kubernetes:
+
+```yaml
+livenessProbe:
+  httpGet:
+    path: /health/live
+    port: 8080
+  periodSeconds: 30
+```
+
+Docker Compose では外部からのヘルスチェックか、ヘルスチェック専用のサイドカーコンテナを使用する。`CMD-SHELL` は distroless では動作しない。
+
+---
+
+## 11. 機能の適用範囲
 
 実装時に迷わないよう、初期スコープを以下に固定する。
 
-### 9.1 画像系
+### 11.1 画像系
 
 最優先で共通化する。
 
@@ -336,7 +448,7 @@ library は最も安定した契約である。
 - format conversion
 - metadata 制御
 
-### 9.2 SVG
+### 11.2 SVG
 
 方針:
 
@@ -344,7 +456,7 @@ library は最も安定した契約である。
 - `format=svg` のときは sanitize 済み SVG を返せるようにする
 - browser 制約が強い場合、WASM では機能縮小を許可する
 
-### 9.3 初期スコープ外
+### 11.3 初期スコープ外
 
 以下は初期設計から外す。
 
@@ -358,7 +470,7 @@ library は最も安定した契約である。
 
 ---
 
-## 10. 実装順序
+## 12. 実装順序
 
 実装は以下の順序を推奨する。
 
@@ -374,7 +486,7 @@ library は最も安定した契約である。
 
 ---
 
-## 11. LLM 実装ルール
+## 13. LLM 実装ルール
 
 LLM が実装する際は、以下を守ること。
 

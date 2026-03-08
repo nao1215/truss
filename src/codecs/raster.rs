@@ -1,6 +1,6 @@
 use crate::core::{
     Artifact, ArtifactMetadata, Fit, MediaType, MetadataPolicy, Position, Rotation, TransformError,
-    TransformRequest,
+    TransformRequest, MAX_DECODED_PIXELS, MAX_OUTPUT_PIXELS,
 };
 use crate::Rgba8;
 use exif::{In, Reader, Tag, Value};
@@ -173,6 +173,8 @@ pub fn transform_raster(request: TransformRequest) -> Result<Artifact, Transform
         normalized.options.format,
     )?;
 
+    check_input_pixel_limit(&normalized.input)?;
+
     let mut image = decode_input(&normalized.input)?;
 
     if normalized.options.auto_orient {
@@ -180,6 +182,11 @@ pub fn transform_raster(request: TransformRequest) -> Result<Artifact, Transform
     }
 
     image = apply_rotation(image, normalized.options.rotate);
+    check_output_pixel_limit(
+        &image,
+        normalized.options.width,
+        normalized.options.height,
+    )?;
     image = apply_resize(
         image,
         normalized.options.width,
@@ -225,6 +232,46 @@ fn decode_input(input: &Artifact) -> Result<DynamicImage, TransformError> {
 
     image::load_from_memory_with_format(&input.bytes, image_format)
         .map_err(|error| TransformError::DecodeFailed(error.to_string()))
+}
+
+/// Checks the input artifact dimensions against [`MAX_DECODED_PIXELS`] before decoding.
+///
+/// This uses the dimensions extracted by [`crate::sniff_artifact`] during media-type detection,
+/// so the check runs without allocating the full decoded pixel buffer. If the artifact metadata
+/// does not contain dimensions (e.g. a truncated header), the check is skipped and the decoder
+/// will handle the error downstream.
+fn check_input_pixel_limit(input: &Artifact) -> Result<(), TransformError> {
+    if let (Some(w), Some(h)) = (input.metadata.width, input.metadata.height) {
+        let pixels = u64::from(w) * u64::from(h);
+        if pixels > MAX_DECODED_PIXELS {
+            return Err(TransformError::LimitExceeded(format!(
+                "decoded image has {pixels} pixels, limit is {MAX_DECODED_PIXELS}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Checks the output dimensions against [`MAX_OUTPUT_PIXELS`] before resize allocation.
+///
+/// Computes the effective output pixel count from the requested dimensions and the current
+/// image size. The check runs before `apply_resize` so that oversized output buffers are
+/// never allocated.
+fn check_output_pixel_limit(
+    image: &DynamicImage,
+    width: Option<u32>,
+    height: Option<u32>,
+) -> Result<(), TransformError> {
+    let (current_w, current_h) = image.dimensions();
+    let out_w = width.unwrap_or(current_w);
+    let out_h = height.unwrap_or(current_h);
+    let pixels = u64::from(out_w) * u64::from(out_h);
+    if pixels > MAX_OUTPUT_PIXELS {
+        return Err(TransformError::LimitExceeded(format!(
+            "output image would have {pixels} pixels, limit is {MAX_OUTPUT_PIXELS}"
+        )));
+    }
+    Ok(())
 }
 
 fn apply_auto_orientation(image: DynamicImage, input: &Artifact) -> DynamicImage {
@@ -1275,5 +1322,79 @@ mod tests {
         let rotated = apply_exif_orientation(image, 6);
 
         assert_eq!(rotated.dimensions(), (2, 4));
+    }
+
+    #[test]
+    fn input_pixel_limit_accepts_boundary() {
+        use super::check_input_pixel_limit;
+        // 10000 * 10000 = 100_000_000 == MAX_DECODED_PIXELS
+        let input = Artifact::new(
+            vec![],
+            MediaType::Png,
+            ArtifactMetadata {
+                width: Some(10000),
+                height: Some(10000),
+                ..ArtifactMetadata::default()
+            },
+        );
+        check_input_pixel_limit(&input).unwrap();
+    }
+
+    #[test]
+    fn input_pixel_limit_rejects_oversized() {
+        use super::check_input_pixel_limit;
+        // 10001 * 10000 = 100_010_000 > MAX_DECODED_PIXELS
+        let input = Artifact::new(
+            vec![],
+            MediaType::Png,
+            ArtifactMetadata {
+                width: Some(10001),
+                height: Some(10000),
+                ..ArtifactMetadata::default()
+            },
+        );
+        let err = check_input_pixel_limit(&input).unwrap_err();
+        assert!(matches!(err, TransformError::LimitExceeded(_)));
+    }
+
+    #[test]
+    fn output_pixel_limit_accepts_boundary() {
+        use super::check_output_pixel_limit;
+        // 8192 * 8192 = 67_108_864 == MAX_OUTPUT_PIXELS
+        let image = image::DynamicImage::ImageRgba8(RgbaImage::from_pixel(
+            8192,
+            8192,
+            Rgba([0, 0, 0, 255]),
+        ));
+        check_output_pixel_limit(&image, Some(8192), Some(8192)).unwrap();
+    }
+
+    #[test]
+    fn output_pixel_limit_rejects_oversized() {
+        use super::check_output_pixel_limit;
+        // 8193 * 8192 = 67_116_032 > MAX_OUTPUT_PIXELS (67_108_864)
+        let image = image::DynamicImage::ImageRgba8(RgbaImage::from_pixel(
+            1,
+            1,
+            Rgba([0, 0, 0, 255]),
+        ));
+        let err = check_output_pixel_limit(&image, Some(8193), Some(8192)).unwrap_err();
+        assert!(matches!(err, TransformError::LimitExceeded(_)));
+    }
+
+    #[test]
+    fn transform_rejects_oversized_output() {
+        let input = png_artifact(100, 100, Rgba([10, 20, 30, 255]));
+        let err = transform_raster(TransformRequest::new(
+            input,
+            TransformOptions {
+                width: Some(8193),
+                height: Some(8192),
+                ..TransformOptions::default()
+            },
+        ))
+        .unwrap_err();
+        assert!(matches!(err, TransformError::LimitExceeded(_)));
+        assert!(err.to_string().contains("output image"));
     }
 }

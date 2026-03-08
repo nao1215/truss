@@ -720,7 +720,8 @@ fn map_transform_error(error: crate::TransformError) -> CliError {
         crate::TransformError::UnsupportedInputMediaType(reason)
         | crate::TransformError::DecodeFailed(reason)
         | crate::TransformError::EncodeFailed(reason)
-        | crate::TransformError::CapabilityMissing(reason) => runtime_error(4, &reason),
+        | crate::TransformError::CapabilityMissing(reason)
+        | crate::TransformError::LimitExceeded(reason) => runtime_error(4, &reason),
         crate::TransformError::UnsupportedOutputMediaType(media_type) => {
             runtime_error(4, &format!("unsupported output media type: {media_type}"))
         }

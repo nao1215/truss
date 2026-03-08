@@ -187,3 +187,12 @@
 - 2026-03-08: Current coverage summary from `cargo llvm-cov` is 82.79% regions, 71.49% functions, and 83.30% lines across all targets.
 - 2026-03-08: Current automated verification covers 99 unit tests, 24 integration tests, and 13 doc tests.
 - 2026-03-08: Phase 14 is complete. The signed public URL generation helper and CLI entry point are now fully usable.
+- 2026-03-08: Fixed 3 clippy warnings: redundant closure in `cli.rs`, collapsible if in `server.rs`, and needless lifetime in `core.rs`.
+- 2026-03-08: Added Docker deployment design, cross-platform policy, and pure-Rust dependency principle to `doc/runtime-architecture.md` (sections 9, 10).
+- 2026-03-08: Identified `ring` (via `ureq` → `rustls`) as the only C dependency. Self-contained build-time C dependency (source bundled, compiled via `cc` crate) is acceptable. System-installed C libraries are prohibited.
+- 2026-03-08: Updated `doc/runtime-architecture.md` with C dependency policy: self-contained build-time C deps are allowed, system-installed C libraries requiring `pkg-config`/`cmake` are prohibited.
+- 2026-03-08: Created `Dockerfile` with multi-stage build using `rust:1-slim` builder and `distroless/cc-debian12:nonroot` runtime. Used `cc-debian12` instead of `static-debian12` because `ring` dynamically links libc.
+- 2026-03-08: Created `.dockerignore` to exclude `target/`, `.git/`, `.claude/`, `doc/`, and documentation files from the Docker build context.
+- 2026-03-08: Created `compose.yml` with environment-based configuration, read-only filesystem, and `no-new-privileges` security hardening.
+- 2026-03-08: Verified Docker build and runtime: image size 49MB (content 12.6MB), `/health` endpoint responds correctly from `distroless/cc-debian12:nonroot` container.
+- 2026-03-08: Implemented transform pixel limits: `MAX_DECODED_PIXELS` (100M) checked before decode using sniffed metadata, `MAX_OUTPUT_PIXELS` (67M) checked before resize allocation. Added `TransformError::LimitExceeded` variant, HTTP 413 mapping, 4 unit tests, 1 integration test, 2 doc tests. Total tests: 144.
