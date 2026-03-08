@@ -34,9 +34,17 @@ CLI、server、WASM はすべてライブラリを呼び出す薄い adapter と
 
 この判断により、以下を最初から除外する。
 
-- 時刻ベースのオプション
+- 時刻ベースのオプション（※ 下記補足参照）
 - Range Request 前提の出力
 - 高コスト変換を前提にした job queue
+
+**補足: deadline について**
+
+`TransformOptions::deadline` は時刻ベースのオプションだが、core は「与えられた制限時間内に処理を完了する」というシンプルな契約のみを持ち、具体的な秒数は決めない。server adapter が 30 秒を注入し、CLI は制限なし（`None`）とする。これは library-first 原則（2.1）に沿った設計であり、以下の理由で許容される:
+
+- core の API は `Option<Duration>` であり、`None` の場合は制限なし。core がポリシーを決めない
+- `Instant::now()` は deadline が `Some` のときのみ呼ばれるため、WASM 互換性を壊さない
+- 高コスト変換の job queue を導入するのではなく、既存のパイプライン内で制限するだけの軽量な仕組みである
 
 ### 2.3 server-first に戻さない
 

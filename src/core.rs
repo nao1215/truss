@@ -213,6 +213,13 @@ pub struct TransformOptions {
     pub strip_metadata: bool,
     /// Whether EXIF metadata should be preserved.
     pub preserve_exif: bool,
+    /// Optional wall-clock deadline for the transform pipeline.
+    ///
+    /// When set, the transform checks elapsed time at each pipeline stage and returns
+    /// [`TransformError::LimitExceeded`] if the deadline is exceeded. Adapters inject
+    /// this value based on their operational requirements — for example, the HTTP server
+    /// sets a 30-second deadline while the CLI leaves it as `None` (unlimited).
+    pub deadline: Option<Duration>,
 }
 
 impl Default for TransformOptions {
@@ -229,6 +236,7 @@ impl Default for TransformOptions {
             auto_orient: true,
             strip_metadata: true,
             preserve_exif: false,
+            deadline: None,
         }
     }
 }
@@ -288,6 +296,7 @@ impl TransformOptions {
             rotate: self.rotate,
             auto_orient: self.auto_orient,
             metadata_policy: normalize_metadata_policy(self.strip_metadata, self.preserve_exif),
+            deadline: self.deadline,
         })
     }
 }
@@ -315,6 +324,8 @@ pub struct NormalizedTransformOptions {
     pub auto_orient: bool,
     /// The normalized metadata handling strategy.
     pub metadata_policy: MetadataPolicy,
+    /// Optional wall-clock deadline for the transform pipeline.
+    pub deadline: Option<Duration>,
 }
 
 /// Resize behavior for bounded transforms.

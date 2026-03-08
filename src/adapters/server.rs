@@ -573,6 +573,7 @@ impl TransformOptionsPayload {
             auto_orient: self.auto_orient.unwrap_or(defaults.auto_orient),
             strip_metadata: self.strip_metadata.unwrap_or(defaults.strip_metadata),
             preserve_exif: self.preserve_exif.unwrap_or(defaults.preserve_exif),
+            deadline: defaults.deadline,
         })
     }
 }
@@ -817,10 +818,18 @@ fn parse_public_get_request(
             .unwrap_or(defaults.strip_metadata),
         preserve_exif: parse_optional_bool_query(query, "preserveExif")?
             .unwrap_or(defaults.preserve_exif),
+        deadline: defaults.deadline,
     };
 
     Ok((source, options))
 }
+
+/// Default wall-clock deadline for server-side transforms.
+///
+/// The server injects this deadline into every transform request to prevent individual
+/// requests from consuming unbounded wall-clock time. Library and CLI consumers are not subject
+/// to this limit by default.
+const SERVER_TRANSFORM_DEADLINE: Duration = Duration::from_secs(30);
 
 fn transform_source_bytes(
     source_bytes: Vec<u8>,
@@ -828,6 +837,9 @@ fn transform_source_bytes(
     request: &HttpRequest,
     response_policy: ImageResponsePolicy,
 ) -> HttpResponse {
+    if options.deadline.is_none() {
+        options.deadline = Some(SERVER_TRANSFORM_DEADLINE);
+    }
     let artifact = match sniff_artifact(RawArtifact::new(source_bytes, None)) {
         Ok(artifact) => artifact,
         Err(error) => return transform_error_response(error),

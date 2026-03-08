@@ -19,6 +19,7 @@ use image::{
     RgbaImage,
 };
 use std::io::Cursor;
+use std::time::{Duration, Instant};
 
 /// Transforms a raster artifact using the current backend implementation.
 ///
@@ -166,6 +167,8 @@ use std::io::Cursor;
 /// ```
 pub fn transform_raster(request: TransformRequest) -> Result<TransformResult, TransformError> {
     let normalized = request.normalize()?;
+    let deadline = normalized.options.deadline;
+    let start = deadline.map(|_| Instant::now());
 
     let (retained_metadata, warnings) = extract_retained_metadata(
         &normalized.input,
@@ -177,12 +180,19 @@ pub fn transform_raster(request: TransformRequest) -> Result<TransformResult, Tr
     check_input_pixel_limit(&normalized.input)?;
 
     let mut image = decode_input(&normalized.input)?;
+    if let (Some(start), Some(limit)) = (start, deadline) {
+        check_deadline(start.elapsed(), limit, "decode")?;
+    }
 
     if normalized.options.auto_orient {
         image = apply_auto_orientation(image, &normalized.input);
     }
 
     image = apply_rotation(image, normalized.options.rotate);
+    if let (Some(start), Some(limit)) = (start, deadline) {
+        check_deadline(start.elapsed(), limit, "rotate")?;
+    }
+
     check_output_pixel_limit(
         &image,
         normalized.options.width,
@@ -197,6 +207,9 @@ pub fn transform_raster(request: TransformRequest) -> Result<TransformResult, Tr
         normalized.options.background,
         normalized.options.format,
     );
+    if let (Some(start), Some(limit)) = (start, deadline) {
+        check_deadline(start.elapsed(), limit, "resize")?;
+    }
 
     let bytes = encode_output(
         &image,
@@ -204,6 +217,9 @@ pub fn transform_raster(request: TransformRequest) -> Result<TransformResult, Tr
         normalized.options.quality,
         retained_metadata.as_ref(),
     )?;
+    if let (Some(start), Some(limit)) = (start, deadline) {
+        check_deadline(start.elapsed(), limit, "encode")?;
+    }
     let (width, height) = image.dimensions();
 
     Ok(TransformResult {
@@ -236,6 +252,26 @@ fn decode_input(input: &Artifact) -> Result<DynamicImage, TransformError> {
 
     image::load_from_memory_with_format(&input.bytes, image_format)
         .map_err(|error| TransformError::DecodeFailed(error.to_string()))
+}
+
+/// Checks whether the elapsed time exceeds the given deadline.
+///
+/// Called at pipeline stage boundaries when a deadline is configured. Accepts the elapsed
+/// time and limit as separate values so the function can be tested without depending on
+/// real wall-clock time.
+fn check_deadline(
+    elapsed: Duration,
+    limit: Duration,
+    stage: &str,
+) -> Result<(), TransformError> {
+    if elapsed > limit {
+        return Err(TransformError::LimitExceeded(format!(
+            "transform exceeded {:.0}s deadline after {stage} (elapsed: {:.1}s)",
+            limit.as_secs_f64(),
+            elapsed.as_secs_f64()
+        )));
+    }
+    Ok(())
 }
 
 /// Checks the input artifact dimensions against [`MAX_DECODED_PIXELS`] before decoding.
@@ -1514,5 +1550,51 @@ mod tests {
 
         assert!(retained.is_none());
         assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn check_deadline_accepts_within_limit() {
+        use super::check_deadline;
+        use std::time::Duration;
+
+        check_deadline(
+            Duration::from_secs(29),
+            Duration::from_secs(30),
+            "decode",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn check_deadline_rejects_exceeded() {
+        use super::check_deadline;
+        use std::time::Duration;
+
+        let err = check_deadline(
+            Duration::from_secs(31),
+            Duration::from_secs(30),
+            "decode",
+        )
+        .unwrap_err();
+        assert!(matches!(err, TransformError::LimitExceeded(_)));
+        assert!(err.to_string().contains("decode"));
+        assert!(err.to_string().contains("30s"));
+    }
+
+    #[test]
+    fn transform_with_deadline_succeeds_for_small_image() {
+        use std::time::Duration;
+
+        let input = png_artifact(2, 2, Rgba([10, 20, 30, 255]));
+        let result = transform_raster(TransformRequest::new(
+            input,
+            TransformOptions {
+                format: Some(MediaType::Jpeg),
+                deadline: Some(Duration::from_secs(30)),
+                ..TransformOptions::default()
+            },
+        ))
+        .unwrap();
+        assert_eq!(result.artifact.media_type, MediaType::Jpeg);
     }
 }
