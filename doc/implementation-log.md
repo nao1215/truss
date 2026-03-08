@@ -27,6 +27,8 @@
 - The server adapter now supports `source.kind=url` with scheme validation, redirect limits, response-size limits, resolved-IP checks, pinned outbound socket targets, and an opt-in insecure allowance for local testing.
 - The server adapter now supports the private multipart upload API at `POST /images` with `file` and optional JSON `options` parts.
 - The server adapter now exposes an authenticated `/metrics` endpoint with minimal Prometheus-compatible counters.
+- The CLI adapter now supports `truss sign` for generating signed public GET URLs using the same HMAC-SHA256 canonical request form that the server adapter verifies.
+- The `sign_public_url` library function and `SignedUrlSource` enum are part of the public API.
 - Coverage can now be measured with `./scripts/coverage.sh`, which wraps `cargo llvm-cov --workspace --all-targets --summary-only`.
 
 ## Initial Plan
@@ -37,10 +39,10 @@
 
 ## Active Plan
 
-1. Add a signed public URL generation helper and CLI entry point so the implemented public GET API is directly usable.
-2. Decide how far metadata retention should go beyond the current EXIF + ICC path, especially XMP / IPTC handling and whether unsupported metadata should stay as hard errors.
-3. Revisit AVIF decode only after the runtime dependency strategy for `dav1d` is decided.
-4. Reconcile the remaining documented API gaps, especially `svg` and any behavior that is still stricter than `doc/openapi.yaml`.
+1. Decide how far metadata retention should go beyond the current EXIF + ICC path, especially XMP / IPTC handling and whether unsupported metadata should stay as hard errors.
+2. Revisit AVIF decode only after the runtime dependency strategy for `dav1d` is decided.
+3. Reconcile the remaining documented API gaps, especially `svg` and any behavior that is still stricter than `doc/openapi.yaml`.
+4. WebP lossy quality control requires a dependency beyond the current `image` crate (v0.25.8), which only provides lossless WebP encoding through `image-webp`. A native binding such as `libwebp` would be needed, with implications for the planned WASM target.
 
 ## Work Log
 
@@ -178,3 +180,10 @@
 - 2026-03-08: Current coverage summary from `cargo llvm-cov` is 84.44% regions, 73.15% functions, and 84.25% lines across all targets.
 - 2026-03-08: Current automated verification covers 96 unit tests, 23 integration tests, and 12 doc tests.
 - 2026-03-08: Started phase 14 planning to add signed public URL generation in the library and CLI so public GET transforms can be produced without reimplementing the HMAC contract externally.
+- 2026-03-08: Implemented `sign_public_url` library function and `SignedUrlSource` enum in `src/adapters/server.rs`, reusing the same HMAC-SHA256 canonical request form that the server verifies at request time.
+- 2026-03-08: Implemented `truss sign` CLI command accepting `--base-url`, `--path`, `--url`, `--version`, `--key-id`, `--secret`, `--expires`, and all transform options. The generated URL is written to stdout for scripting and piping.
+- 2026-03-08: Added unit tests for `sign` argument parsing (path and URL sources, transform option forwarding, error cases) and an end-to-end integration test in `tests/cli_sign.rs` that generates a signed URL, fetches it from a test server, and verifies the transformed output.
+- 2026-03-08: Ran `cargo fmt`, `cargo test`, and `./scripts/coverage.sh` after phase 14 changes.
+- 2026-03-08: Current coverage summary from `cargo llvm-cov` is 82.79% regions, 71.49% functions, and 83.30% lines across all targets.
+- 2026-03-08: Current automated verification covers 99 unit tests, 24 integration tests, and 13 doc tests.
+- 2026-03-08: Phase 14 is complete. The signed public URL generation helper and CLI entry point are now fully usable.

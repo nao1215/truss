@@ -451,21 +451,31 @@ fn parse_sign_args(args: Vec<String>) -> Result<Command, CliError> {
             "-h" | "--help" => return Ok(Command::Help),
             "--base-url" => {
                 index += 1;
-                base_url = Some(parse_url_arg(required_arg(args.get(index), "--base-url")?, "--base-url")?);
+                base_url = Some(parse_url_arg(
+                    required_arg(args.get(index), "--base-url")?,
+                    "--base-url",
+                )?);
             }
             "--path" => {
                 index += 1;
                 if path.is_some() || url.is_some() {
-                    return Err(usage_error("`sign` accepts exactly one of `--path` or `--url`"));
+                    return Err(usage_error(
+                        "`sign` accepts exactly one of `--path` or `--url`",
+                    ));
                 }
                 path = Some(required_arg(args.get(index), "--path")?.to_string());
             }
             "--url" => {
                 index += 1;
                 if path.is_some() || url.is_some() {
-                    return Err(usage_error("`sign` accepts exactly one of `--path` or `--url`"));
+                    return Err(usage_error(
+                        "`sign` accepts exactly one of `--path` or `--url`",
+                    ));
                 }
-                url = Some(parse_url_arg(required_arg(args.get(index), "--url")?, "--url")?);
+                url = Some(parse_url_arg(
+                    required_arg(args.get(index), "--url")?,
+                    "--url",
+                )?);
             }
             "--version" => {
                 index += 1;
@@ -678,7 +688,7 @@ where
     }
 
     let output = transform_raster(TransformRequest::new(input, options))
-        .map_err(|error| map_transform_error(error))?;
+        .map_err(map_transform_error)?;
 
     write_output_bytes(command.output, &output.bytes, stdout)
 }

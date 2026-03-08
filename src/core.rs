@@ -989,10 +989,10 @@ fn inspect_avif_boxes(bytes: &[u8], inspection: &mut AvifInspection) -> Result<(
     Ok(())
 }
 
-fn parse_mp4_box<'a>(
-    bytes: &'a [u8],
+fn parse_mp4_box(
+    bytes: &[u8],
     offset: usize,
-) -> Result<(&'a [u8; 4], &'a [u8], usize), TransformError> {
+) -> Result<(&[u8; 4], &[u8], usize), TransformError> {
     if offset + 8 > bytes.len() {
         return Err(TransformError::DecodeFailed(
             "mp4 box header is truncated".to_string(),

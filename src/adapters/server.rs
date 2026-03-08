@@ -988,13 +988,12 @@ fn match_accept_preferences(media_type: MediaType, preferences: &[AcceptPreferen
     let mut best_specificity = 0_u8;
 
     for preference in preferences {
-        if accept_range_matches(preference.range, media_type) {
-            if preference.q_millis > best_q
-                || (preference.q_millis == best_q && preference.specificity > best_specificity)
-            {
-                best_q = preference.q_millis;
-                best_specificity = preference.specificity;
-            }
+        if accept_range_matches(preference.range, media_type)
+            && (preference.q_millis > best_q
+                || (preference.q_millis == best_q && preference.specificity > best_specificity))
+        {
+            best_q = preference.q_millis;
+            best_specificity = preference.specificity;
         }
     }
 
@@ -1224,7 +1223,10 @@ fn extend_transform_query(query: &mut BTreeMap<String, String>, options: &Transf
         query.insert("background".to_string(), encode_background(background));
     }
     if options.rotate != Rotation::Deg0 {
-        query.insert("rotate".to_string(), options.rotate.as_degrees().to_string());
+        query.insert(
+            "rotate".to_string(),
+            options.rotate.as_degrees().to_string(),
+        );
     }
     if !options.auto_orient {
         query.insert("autoOrient".to_string(), "false".to_string());
@@ -2337,8 +2339,8 @@ mod tests {
         auth_required_response, authorize_signed_request, bad_request_response, bind_addr,
         build_image_etag, build_image_response_headers, canonical_query_without_signature,
         negotiate_output_format, parse_public_get_request, prepare_remote_fetch_target,
-        read_request, resolve_storage_path, route_request, serve_once_with_config, HttpRequest,
-        sign_public_url, ImageResponsePolicy, PinnedResolver, PublicSourceKind, ServerConfig,
+        read_request, resolve_storage_path, route_request, serve_once_with_config, sign_public_url,
+        HttpRequest, ImageResponsePolicy, PinnedResolver, PublicSourceKind, ServerConfig,
         SignedUrlSource, DEFAULT_BIND_ADDR,
     };
     use crate::{sniff_artifact, Artifact, ArtifactMetadata, MediaType, RawArtifact};
