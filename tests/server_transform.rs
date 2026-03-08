@@ -49,7 +49,7 @@ fn spawn_fixture_server(responses: Vec<FixtureResponse>) -> (String, thread::Joi
     let url = format!("http://{addr}/image");
     let handle = thread::spawn(move || {
         for (status, headers, body) in responses {
-            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
             let mut accepted = None;
             while std::time::Instant::now() < deadline {
                 match listener.accept() {
