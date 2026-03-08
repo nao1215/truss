@@ -11,7 +11,7 @@ kamadak-exif = "0.6.1"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 sha2 = "0.10.9"
-ureq = "2.12.1"
+ureq = "3.2.0"
 url = "2.5.8"
 rav1d-safe = { version = "0.3", default-features = false, features = ["bitdepth_8", "bitdepth_16"] }
 mp4parse = "0.17"
