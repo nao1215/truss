@@ -1831,9 +1831,29 @@ mod tests {
         assert!(!headers.iter().any(|(k, _)| k == "Content-Security-Policy"));
     }
 
+    /// RAII guard that restores `TRANSFORMS_IN_FLIGHT` to its previous value
+    /// on drop, even if the test panics.
+    struct InFlightGuard {
+        previous: u64,
+    }
+
+    impl InFlightGuard {
+        fn set(value: u64) -> Self {
+            let previous = TRANSFORMS_IN_FLIGHT.load(Ordering::Relaxed);
+            TRANSFORMS_IN_FLIGHT.store(value, Ordering::Relaxed);
+            Self { previous }
+        }
+    }
+
+    impl Drop for InFlightGuard {
+        fn drop(&mut self) {
+            TRANSFORMS_IN_FLIGHT.store(self.previous, Ordering::Relaxed);
+        }
+    }
+
     #[test]
     fn backpressure_rejects_when_at_capacity() {
-        TRANSFORMS_IN_FLIGHT.store(MAX_CONCURRENT_TRANSFORMS, Ordering::Relaxed);
+        let _guard = InFlightGuard::set(MAX_CONCURRENT_TRANSFORMS);
 
         let request = HttpRequest {
             method: "POST".to_string(),
@@ -1868,8 +1888,6 @@ mod tests {
             TRANSFORMS_IN_FLIGHT.load(Ordering::Relaxed),
             MAX_CONCURRENT_TRANSFORMS
         );
-
-        TRANSFORMS_IN_FLIGHT.store(0, Ordering::Relaxed);
     }
 
     #[test]
