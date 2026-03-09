@@ -2869,7 +2869,7 @@ fn parse_multipart_form_data(
         let headers = parse_part_headers(header_bytes)?;
         cursor += header_end + 4;
 
-        let body_end = find_subslice(&body[cursor..], &delimiter).ok_or_else(|| {
+        let body_end = find_valid_boundary(&body[cursor..], &delimiter).ok_or_else(|| {
             bad_request_response("multipart part is missing the next boundary delimiter")
         })?;
         let body_range = cursor..(cursor + body_end);
@@ -3645,6 +3645,32 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         .position(|window| window == needle)
 }
 
+/// Finds a multipart boundary delimiter in `haystack`, verifying that the
+/// bytes immediately following the match are either `\r\n` (next part) or
+/// `--` (closing boundary).  This prevents false matches when the boundary
+/// string appears inside binary payload data.
+fn find_valid_boundary(haystack: &[u8], delimiter: &[u8]) -> Option<usize> {
+    let mut start = 0;
+    while start + delimiter.len() <= haystack.len() {
+        if let Some(pos) = find_subslice(&haystack[start..], delimiter) {
+            let abs = start + pos;
+            let after = abs + delimiter.len();
+            // A valid boundary must be followed by CRLF (next part) or "--" (closing).
+            if after + 2 <= haystack.len() {
+                let suffix = &haystack[after..after + 2];
+                if suffix == b"\r\n" || suffix == b"--" {
+                    return Some(abs);
+                }
+            }
+            // Not a valid boundary; skip past this match and keep searching.
+            start = abs + 1;
+        } else {
+            break;
+        }
+    }
+    None
+}
+
 fn find_header_terminator(buffer: &[u8]) -> Option<usize> {
     buffer.windows(4).position(|window| window == b"\r\n\r\n")
 }
@@ -3784,9 +3810,9 @@ mod tests {
         TRANSFORMS_IN_FLIGHT, TransformSourcePayload, auth_required_response,
         authorize_signed_request, bad_request_response, bind_addr, build_image_etag,
         build_image_response_headers, canonical_query_without_signature, find_header_terminator,
-        negotiate_output_format, parse_public_get_request, prepare_remote_fetch_target,
-        read_request_body, read_request_headers, resolve_storage_path, route_request,
-        serve_once_with_config, sign_public_url,
+        negotiate_output_format, parse_multipart_form_data, parse_public_get_request,
+        prepare_remote_fetch_target, read_request_body, read_request_headers,
+        resolve_storage_path, route_request, serve_once_with_config, sign_public_url,
         transform_source_bytes,
     };
     use crate::{
@@ -5253,5 +5279,55 @@ mod tests {
             result.is_ok(),
             "multipart upload over 1 MiB should be accepted"
         );
+    }
+
+    // --- Fix: multipart boundary collision in payload ---
+
+    #[test]
+    fn multipart_boundary_in_payload_does_not_split_part() {
+        let boundary = "abc123";
+        // Build a body where the boundary string appears inside the part payload,
+        // but without the required CRLF/-- suffix.  The parser must skip the
+        // false match and find the real delimiter.
+        let fake_boundary_in_payload = format!("\r\n--{boundary}NOTREAL");
+        let part_body = format!("before{fake_boundary_in_payload}after");
+        let body = format!(
+            "--{boundary}\r\n\
+             Content-Disposition: form-data; name=\"file\"\r\n\
+             Content-Type: application/octet-stream\r\n\r\n\
+             {part_body}\r\n\
+             --{boundary}--\r\n"
+        );
+
+        let parts = parse_multipart_form_data(body.as_bytes(), boundary)
+            .expect("should parse despite boundary-like string in payload");
+        assert_eq!(parts.len(), 1, "should have exactly one part");
+
+        let part_data = &body.as_bytes()[parts[0].body_range.clone()];
+        let part_text = std::str::from_utf8(part_data).unwrap();
+        assert!(
+            part_text.contains("NOTREAL"),
+            "part body should contain the full fake boundary string"
+        );
+    }
+
+    #[test]
+    fn multipart_normal_two_parts_still_works() {
+        let boundary = "testboundary";
+        let body = format!(
+            "--{boundary}\r\n\
+             Content-Disposition: form-data; name=\"field1\"\r\n\r\n\
+             value1\r\n\
+             --{boundary}\r\n\
+             Content-Disposition: form-data; name=\"field2\"\r\n\r\n\
+             value2\r\n\
+             --{boundary}--\r\n"
+        );
+
+        let parts = parse_multipart_form_data(body.as_bytes(), boundary)
+            .expect("should parse two normal parts");
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0].name, "field1");
+        assert_eq!(parts[1].name, "field2");
     }
 }
