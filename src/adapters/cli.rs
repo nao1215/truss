@@ -74,6 +74,7 @@ EXIT CODES:
   2  I/O error (file not found, permission denied, network failure)
   3  Input error (unsupported format, corrupt file)
   4  Transform error (encode failure, size limit exceeded, deadline)
+  5  Runtime error (bind failure, stdout write failure)
 
 Sponsor: https://github.com/sponsors/nao1215
 ",
@@ -1276,8 +1277,8 @@ where
 
 fn map_transform_error(error: crate::TransformError) -> CliError {
     match error {
-        crate::TransformError::InvalidInput(reason)
-        | crate::TransformError::InvalidOptions(reason) => runtime_error(EXIT_IO, &reason),
+        crate::TransformError::InvalidOptions(reason) => runtime_error(EXIT_USAGE, &reason),
+        crate::TransformError::InvalidInput(reason) => runtime_error(EXIT_INPUT, &reason),
         crate::TransformError::UnsupportedInputMediaType(reason)
         | crate::TransformError::DecodeFailed(reason)
         | crate::TransformError::EncodeFailed(reason)
@@ -1383,7 +1384,7 @@ where
         }),
         OutputTarget::Path(path) => fs::write(&path, bytes).map_err(|error| {
             runtime_error(
-                EXIT_RUNTIME,
+                EXIT_IO,
                 &format!("failed to write {}: {error}", path.display()),
             )
         }),
