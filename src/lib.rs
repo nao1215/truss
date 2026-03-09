@@ -19,5 +19,5 @@ pub use core::{
     Artifact, ArtifactMetadata, Fit, MAX_DECODED_PIXELS, MAX_OUTPUT_PIXELS, MediaType,
     MetadataKind, MetadataPolicy, NormalizedTransformOptions, NormalizedTransformRequest, Position,
     RawArtifact, Rgba8, Rotation, TransformError, TransformOptions, TransformRequest,
-    TransformResult, TransformWarning, resolve_metadata_flags, sniff_artifact,
+    TransformResult, TransformWarning, WatermarkInput, resolve_metadata_flags, sniff_artifact,
 };

@@ -21,7 +21,7 @@ use wasm_bindgen::prelude::*;
 /// The fields intentionally use strings for enum-like values so JavaScript callers do not
 /// need to understand the Rust enum layout. The adapter validates and converts these fields
 /// before calling the shared Core transformation pipeline.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WasmTransformOptions {
     /// The requested output width in pixels.
@@ -46,6 +46,8 @@ pub struct WasmTransformOptions {
     pub keep_metadata: Option<bool>,
     /// Whether only EXIF metadata should be retained.
     pub preserve_exif: Option<bool>,
+    /// Gaussian blur sigma (0.1–100.0).
+    pub blur: Option<f32>,
 }
 
 /// Build-time capabilities exposed by the WASM adapter.
@@ -217,6 +219,7 @@ fn parse_wasm_options(options: WasmTransformOptions) -> Result<TransformOptions,
         auto_orient: options.auto_orient.unwrap_or(true),
         strip_metadata,
         preserve_exif,
+        blur: options.blur,
         deadline: None,
     })
 }

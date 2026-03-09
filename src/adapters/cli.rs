@@ -1,7 +1,7 @@
 use crate::adapters::server::{self, ServerConfig, SignedUrlSource, sign_public_url};
 use crate::{
     Fit, MediaType, Position, RawArtifact, Rgba8, Rotation, TransformOptions, TransformRequest,
-    sniff_artifact, transform_raster, transform_svg,
+    WatermarkInput, sniff_artifact, transform_raster, transform_svg,
 };
 use clap::{CommandFactory, Parser, Subcommand};
 use std::fs;
@@ -121,6 +121,13 @@ OPTIONS:
       --strip-metadata     Remove all metadata (default)
       --keep-metadata      Preserve EXIF, ICC, and other supported metadata
       --preserve-exif      Preserve EXIF only (strip ICC and others)
+      --blur <SIGMA>       Gaussian blur sigma (0.1-100.0; raster-only, not supported for SVG inputs)
+      --watermark <FILE>   Watermark image to composite onto the output (raster-only, not supported for SVG inputs)
+      --watermark-position <POS>  Watermark placement (default: bottom-right; raster-only)
+                           center, top, right, bottom, left,
+                           top-left, top-right, bottom-left, bottom-right
+      --watermark-opacity <1-100> Watermark opacity percentage (default: 50; raster-only)
+      --watermark-margin <PX>     Margin from edge in pixels (default: 10; raster-only)
 
 EXAMPLES:
   truss photo.png -o photo.jpg --width 800
@@ -204,7 +211,7 @@ OPTIONAL:
       --version <VALUE>    Cache-busting version tag
       --width, --height, --fit, --position, --format, --quality,
       --background, --rotate, --auto-orient, --no-auto-orient,
-      --strip-metadata, --keep-metadata, --preserve-exif
+      --strip-metadata, --keep-metadata, --preserve-exif, --blur
 
 EXAMPLES:
   truss sign --base-url https://cdn.example.com \\
@@ -332,6 +339,21 @@ struct ClapConvertArgs {
     /// Preserve EXIF only (strip ICC and others)
     #[arg(long)]
     preserve_exif: bool,
+    /// Apply Gaussian blur (sigma: 0.1-100.0)
+    #[arg(long, value_parser = parse_blur)]
+    blur: Option<f32>,
+    /// Watermark image file path
+    #[arg(long)]
+    watermark: Option<PathBuf>,
+    /// Watermark position (default: bottom-right)
+    #[arg(long, value_parser = parse_position)]
+    watermark_position: Option<Position>,
+    /// Watermark opacity 1-100 (default: 50)
+    #[arg(long, value_parser = parse_watermark_opacity)]
+    watermark_opacity: Option<u8>,
+    /// Watermark margin in pixels (default: 10)
+    #[arg(long)]
+    watermark_margin: Option<u32>,
     /// Show help for convert
     #[arg(short = 'h', long = "help")]
     help: bool,
@@ -437,6 +459,9 @@ struct ClapSignArgs {
     /// Preserve EXIF only
     #[arg(long)]
     preserve_exif: bool,
+    /// Apply Gaussian blur (sigma: 0.1-100.0)
+    #[arg(long, value_parser = parse_blur)]
+    blur: Option<f32>,
     /// Show help for sign
     #[arg(short = 'h', long = "help")]
     help: bool,
@@ -464,6 +489,26 @@ fn parse_rotation(s: &str) -> Result<Rotation, String> {
 
 fn parse_background(s: &str) -> Result<Rgba8, String> {
     Rgba8::from_hex(s)
+}
+
+fn parse_blur(s: &str) -> Result<f32, String> {
+    let v: f32 = s
+        .parse()
+        .map_err(|_| format!("invalid blur value: '{s}'"))?;
+    if !v.is_finite() || !(0.1..=100.0).contains(&v) {
+        return Err("blur must be between 0.1 and 100.0".to_string());
+    }
+    Ok(v)
+}
+
+fn parse_watermark_opacity(s: &str) -> Result<u8, String> {
+    let v: u8 = s
+        .parse()
+        .map_err(|_| format!("invalid watermark opacity: '{s}'"))?;
+    if !(1..=100).contains(&v) {
+        return Err("watermark opacity must be between 1 and 100".to_string());
+    }
+    Ok(v)
 }
 
 fn parse_url_value(s: &str) -> Result<String, String> {
@@ -555,7 +600,7 @@ enum HelpTopic {
     Version,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 enum Command {
     Help(HelpTopic),
     Version,
@@ -581,14 +626,18 @@ struct InspectCommand {
     input: InputSource,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 struct ConvertCommand {
     input: InputSource,
     output: OutputTarget,
     options: TransformOptions,
+    watermark_path: Option<PathBuf>,
+    watermark_position: Option<Position>,
+    watermark_opacity: Option<u8>,
+    watermark_margin: Option<u32>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 struct SignCommand {
     base_url: String,
     source: SignedUrlSource,
@@ -898,6 +947,23 @@ fn convert_from_clap(args: ClapConvertArgs) -> Result<Command, CliError> {
         }
     };
 
+    let watermark_path = args.watermark.clone();
+    if watermark_path.is_none()
+        && (args.watermark_position.is_some()
+            || args.watermark_opacity.is_some()
+            || args.watermark_margin.is_some())
+    {
+        return Err(CliError {
+            exit_code: EXIT_USAGE,
+            message: "--watermark-position, --watermark-opacity, and --watermark-margin require --watermark".to_string(),
+            usage: Some(convert_usage().to_string()),
+            hint: Some("provide --watermark <path> when using watermark options".to_string()),
+        });
+    }
+    let watermark_position = args.watermark_position;
+    let watermark_opacity = args.watermark_opacity;
+    let watermark_margin = args.watermark_margin;
+
     let options = TransformFields {
         width: args.width,
         height: args.height,
@@ -912,6 +978,7 @@ fn convert_from_clap(args: ClapConvertArgs) -> Result<Command, CliError> {
         strip_metadata: args.strip_metadata,
         keep_metadata: args.keep_metadata,
         preserve_exif: args.preserve_exif,
+        blur: args.blur,
     }
     .into_options()
     .map_err(map_transform_error)?;
@@ -920,6 +987,10 @@ fn convert_from_clap(args: ClapConvertArgs) -> Result<Command, CliError> {
         input,
         output,
         options,
+        watermark_path,
+        watermark_position,
+        watermark_opacity,
+        watermark_margin,
     }))
 }
 
@@ -1024,6 +1095,7 @@ fn sign_from_clap(args: ClapSignArgs) -> Result<Command, CliError> {
         strip_metadata: args.strip_metadata,
         keep_metadata: args.keep_metadata,
         preserve_exif: args.preserve_exif,
+        blur: args.blur,
     }
     .into_options()
     .map_err(map_transform_error)?;
@@ -1053,6 +1125,7 @@ struct TransformFields {
     strip_metadata: bool,
     keep_metadata: bool,
     preserve_exif: bool,
+    blur: Option<f32>,
 }
 
 impl TransformFields {
@@ -1086,6 +1159,7 @@ impl TransformFields {
             auto_orient,
             strip_metadata,
             preserve_exif,
+            blur: self.blur,
             deadline: None,
         })
     }
@@ -1319,10 +1393,37 @@ where
         options.format = infer_output_format(&command.output).or(Some(input.media_type));
     }
 
-    let result = if input.media_type == MediaType::Svg {
-        transform_svg(TransformRequest::new(input, options))
+    let watermark = if let Some(ref wm_path) = command.watermark_path {
+        let wm_bytes = fs::read(wm_path).map_err(|error| {
+            runtime_error(EXIT_IO, &format!("failed to read watermark file: {error}"))
+        })?;
+        let wm_artifact = sniff_artifact(RawArtifact::new(wm_bytes, None)).map_err(|error| {
+            runtime_error(
+                EXIT_INPUT,
+                &format!(
+                    "failed to decode watermark '{}': {error}",
+                    wm_path.display()
+                ),
+            )
+        })?;
+        Some(WatermarkInput {
+            image: wm_artifact,
+            position: command.watermark_position.unwrap_or(Position::BottomRight),
+            opacity: command.watermark_opacity.unwrap_or(50),
+            margin: command.watermark_margin.unwrap_or(10),
+        })
     } else {
-        transform_raster(TransformRequest::new(input, options))
+        None
+    };
+
+    let result = if input.media_type == MediaType::Svg {
+        let mut request = TransformRequest::new(input, options);
+        request.watermark = watermark;
+        transform_svg(request)
+    } else {
+        let mut request = TransformRequest::new(input, options);
+        request.watermark = watermark;
+        transform_raster(request)
     }
     .map_err(map_transform_error)?;
 
@@ -1907,6 +2008,10 @@ mod tests {
                 input: InputSource::Path(PathBuf::from("-foo.png")),
                 output: OutputTarget::Path(PathBuf::from("out.jpg")),
                 options: TransformOptions::default(),
+                watermark_path: None,
+                watermark_position: None,
+                watermark_opacity: None,
+                watermark_margin: None,
             })
         );
     }
@@ -1967,7 +2072,11 @@ mod tests {
                     width: Some(100),
                     fit: Some(Fit::Contain),
                     ..TransformOptions::default()
-                }
+                },
+                watermark_path: None,
+                watermark_position: None,
+                watermark_opacity: None,
+                watermark_margin: None,
             })
         );
     }
@@ -2316,7 +2425,11 @@ mod tests {
                     width: Some(100),
                     fit: Some(Fit::Contain),
                     ..TransformOptions::default()
-                }
+                },
+                watermark_path: None,
+                watermark_position: None,
+                watermark_opacity: None,
+                watermark_margin: None,
             })
         );
     }
@@ -2339,6 +2452,10 @@ mod tests {
                 input: InputSource::Url("http://example.com/image.png".to_string()),
                 output: OutputTarget::Path(PathBuf::from("output.jpg")),
                 options: TransformOptions::default(),
+                watermark_path: None,
+                watermark_position: None,
+                watermark_opacity: None,
+                watermark_margin: None,
             })
         );
     }
@@ -2753,7 +2870,11 @@ mod tests {
                 options: TransformOptions {
                     width: Some(100),
                     ..TransformOptions::default()
-                }
+                },
+                watermark_path: None,
+                watermark_position: None,
+                watermark_opacity: None,
+                watermark_margin: None,
             })
         );
     }

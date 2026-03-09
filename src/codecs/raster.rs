@@ -2,7 +2,7 @@ use crate::Rgba8;
 use crate::core::{
     Artifact, ArtifactMetadata, Fit, MAX_DECODED_PIXELS, MAX_OUTPUT_PIXELS, MediaType,
     MetadataKind, MetadataPolicy, Position, Rotation, TransformError, TransformRequest,
-    TransformResult, TransformWarning,
+    TransformResult, TransformWarning, WatermarkInput,
 };
 use exif::{In, Reader, Tag, Value};
 use image::codecs::avif::AvifEncoder;
@@ -208,6 +208,20 @@ pub fn transform_raster(request: TransformRequest) -> Result<TransformResult, Tr
     );
     if let (Some(start), Some(limit)) = (start, deadline) {
         check_deadline(start.elapsed(), limit, "resize")?;
+    }
+
+    if let Some(sigma) = normalized.options.blur {
+        image = image.blur(sigma);
+        if let (Some(start), Some(limit)) = (start, deadline) {
+            check_deadline(start.elapsed(), limit, "blur")?;
+        }
+    }
+
+    if let Some(ref wm) = normalized.watermark {
+        image = apply_watermark(image, wm)?;
+        if let (Some(start), Some(limit)) = (start, deadline) {
+            check_deadline(start.elapsed(), limit, "watermark")?;
+        }
     }
 
     let bytes = encode_output(
@@ -693,6 +707,109 @@ fn apply_resize(
                 output_format,
             ),
         },
+    }
+}
+
+/// Composites a watermark image onto the main image at the given position,
+/// opacity, and margin.
+fn apply_watermark(
+    image: DynamicImage,
+    watermark: &WatermarkInput,
+) -> Result<DynamicImage, TransformError> {
+    // Early rejection using metadata dimensions (before allocating/decoding).
+    let (main_w, main_h) = image.dimensions();
+    if let (Some(meta_w), Some(meta_h)) = (
+        watermark.image.metadata.width,
+        watermark.image.metadata.height,
+    ) {
+        let margin = watermark.margin;
+        let (mx, my) = match watermark.position {
+            Position::Center => (0, 0),
+            Position::Top | Position::Bottom => (0, margin),
+            Position::Left | Position::Right => (margin, 0),
+            _ => (margin, margin),
+        };
+        if u64::from(meta_w) + u64::from(mx) > u64::from(main_w)
+            || u64::from(meta_h) + u64::from(my) > u64::from(main_h)
+        {
+            return Err(TransformError::InvalidOptions(
+                "watermark image is too large for the output dimensions".to_string(),
+            ));
+        }
+    }
+
+    check_input_pixel_limit(&watermark.image)?;
+    let wm_image = decode_input(&watermark.image)?;
+    let mut wm_rgba = wm_image.to_rgba8();
+
+    // Apply opacity by scaling the alpha channel of the watermark.
+    let opacity_scale = f32::from(watermark.opacity) / 100.0;
+    for pixel in wm_rgba.pixels_mut() {
+        pixel.0[3] = (f32::from(pixel.0[3]) * opacity_scale) as u8;
+    }
+
+    let (main_w, main_h) = image.dimensions();
+    let (wm_w, wm_h) = wm_rgba.dimensions();
+    let margin = watermark.margin;
+
+    // Determine which axes actually use the margin based on position.
+    let (margin_x, margin_y) = match watermark.position {
+        Position::Center => (0, 0),
+        Position::Top | Position::Bottom => (0, margin),
+        Position::Left | Position::Right => (margin, 0),
+        _ => (margin, margin), // corners: TopLeft, TopRight, BottomLeft, BottomRight
+    };
+
+    // If the watermark (plus applicable margin) exceeds the main image, reject it.
+    // Use u64 arithmetic to avoid u32 overflow with large margin values.
+    if u64::from(wm_w) + u64::from(margin_x) > u64::from(main_w)
+        || u64::from(wm_h) + u64::from(margin_y) > u64::from(main_h)
+    {
+        return Err(TransformError::InvalidOptions(
+            "watermark image is too large for the output dimensions".to_string(),
+        ));
+    }
+
+    let (x, y) = watermark_offset(main_w, main_h, wm_w, wm_h, watermark.position, margin);
+
+    let mut canvas = image.to_rgba8();
+    imageops::overlay(&mut canvas, &wm_rgba, i64::from(x), i64::from(y));
+
+    Ok(DynamicImage::ImageRgba8(canvas))
+}
+
+/// Calculates the top-left offset for a watermark given the main image dimensions,
+/// watermark dimensions, position, and margin.
+fn watermark_offset(
+    main_w: u32,
+    main_h: u32,
+    wm_w: u32,
+    wm_h: u32,
+    position: Position,
+    margin: u32,
+) -> (u32, u32) {
+    match position {
+        Position::TopLeft => (margin, margin),
+        Position::Top => ((main_w.saturating_sub(wm_w)) / 2, margin),
+        Position::TopRight => (main_w.saturating_sub(wm_w).saturating_sub(margin), margin),
+        Position::Left => (margin, (main_h.saturating_sub(wm_h)) / 2),
+        Position::Center => (
+            (main_w.saturating_sub(wm_w)) / 2,
+            (main_h.saturating_sub(wm_h)) / 2,
+        ),
+        Position::Right => (
+            main_w.saturating_sub(wm_w).saturating_sub(margin),
+            (main_h.saturating_sub(wm_h)) / 2,
+        ),
+        Position::BottomLeft => (margin, main_h.saturating_sub(wm_h).saturating_sub(margin)),
+        Position::Bottom => (
+            (main_w.saturating_sub(wm_w)) / 2,
+            main_h.saturating_sub(wm_h).saturating_sub(margin),
+        ),
+        Position::BottomRight => (
+            main_w.saturating_sub(wm_w).saturating_sub(margin),
+            main_h.saturating_sub(wm_h).saturating_sub(margin),
+        ),
     }
 }
 
@@ -1313,7 +1430,7 @@ mod tests {
     use super::{apply_exif_orientation, transform_raster};
     use crate::core::{
         Artifact, ArtifactMetadata, Fit, MediaType, MetadataPolicy, Position, Rotation,
-        TransformOptions, TransformRequest,
+        TransformOptions, TransformRequest, WatermarkInput,
     };
     use crate::{RawArtifact, Rgba8, TransformError, sniff_artifact};
     use image::codecs::jpeg::JpegDecoder;
@@ -2516,5 +2633,173 @@ mod tests {
 
         assert_eq!(result.artifact.metadata.width, Some(4));
         assert_eq!(result.artifact.metadata.height, Some(2));
+    }
+
+    #[test]
+    fn transform_raster_applies_blur() {
+        // Use a non-uniform image so blur actually changes pixel values.
+        let mut image = RgbaImage::from_pixel(8, 8, Rgba([255, 255, 255, 255]));
+        for y in 0..4 {
+            for x in 0..4 {
+                image.put_pixel(x, y, Rgba([0, 0, 0, 255]));
+            }
+        }
+        let mut bytes = Vec::new();
+        PngEncoder::new(&mut bytes)
+            .write_image(&image, 8, 8, ColorType::Rgba8.into())
+            .expect("encode png");
+        let artifact = Artifact::new(
+            bytes,
+            MediaType::Png,
+            ArtifactMetadata {
+                width: Some(8),
+                height: Some(8),
+                frame_count: 1,
+                duration: None,
+                has_alpha: Some(false),
+            },
+        );
+
+        let result = transform_raster(TransformRequest::new(
+            artifact,
+            TransformOptions {
+                blur: Some(2.0),
+                ..TransformOptions::default()
+            },
+        ))
+        .expect("blur transform");
+
+        assert_eq!(result.artifact.metadata.width, Some(8));
+        assert_eq!(result.artifact.metadata.height, Some(8));
+
+        // After blur, the sharp edge should be smoothed: a pixel near the
+        // boundary is neither pure black nor pure white.
+        let output = image::load_from_memory_with_format(&result.artifact.bytes, ImageFormat::Png)
+            .expect("decode output");
+        let edge_pixel = output.get_pixel(4, 4);
+        assert!(
+            edge_pixel[0] > 0 && edge_pixel[0] < 255,
+            "expected blurred edge pixel to be a mid-tone, got r={}",
+            edge_pixel[0]
+        );
+    }
+
+    #[test]
+    fn transform_raster_applies_watermark() {
+        let main = png_artifact(10, 10, Rgba([255, 255, 255, 255]));
+        let wm = png_artifact(3, 3, Rgba([0, 0, 0, 128]));
+
+        let mut request = TransformRequest::new(main, TransformOptions::default());
+        request.watermark = Some(WatermarkInput {
+            image: wm,
+            position: Position::BottomRight,
+            opacity: 100,
+            margin: 0,
+        });
+
+        let result = transform_raster(request).expect("watermark transform");
+        assert_eq!(result.artifact.metadata.width, Some(10));
+        assert_eq!(result.artifact.metadata.height, Some(10));
+
+        // Verify watermark composited by checking a pixel in the watermark region.
+        let output_image =
+            image::load_from_memory_with_format(&result.artifact.bytes, ImageFormat::Png)
+                .expect("decode output");
+        // Bottom-right corner (9,9) should be affected by the black watermark.
+        let pixel = output_image.get_pixel(9, 9);
+        assert!(
+            pixel[0] < 255,
+            "expected watermark to darken the pixel, got r={}",
+            pixel[0]
+        );
+    }
+
+    #[test]
+    fn transform_raster_rejects_oversized_watermark() {
+        let main = png_artifact(4, 4, Rgba([255, 255, 255, 255]));
+        let wm = png_artifact(5, 5, Rgba([0, 0, 0, 128]));
+
+        let mut request = TransformRequest::new(main, TransformOptions::default());
+        request.watermark = Some(WatermarkInput {
+            image: wm,
+            position: Position::Center,
+            opacity: 50,
+            margin: 0,
+        });
+
+        let err = transform_raster(request).expect_err("oversized watermark should fail");
+        assert_eq!(
+            err,
+            TransformError::InvalidOptions(
+                "watermark image is too large for the output dimensions".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn watermark_full_width_at_top_with_margin_succeeds() {
+        // A watermark as wide as the main image should be accepted at Top
+        // because Top only applies margin on the Y axis.
+        let main = png_artifact(10, 10, Rgba([255, 255, 255, 255]));
+        let wm = png_artifact(10, 3, Rgba([0, 0, 0, 128]));
+
+        let mut request = TransformRequest::new(main, TransformOptions::default());
+        request.watermark = Some(WatermarkInput {
+            image: wm,
+            position: Position::Top,
+            opacity: 50,
+            margin: 2,
+        });
+
+        let result = transform_raster(request).expect("full-width watermark at Top should succeed");
+        assert_eq!(result.artifact.metadata.width, Some(10));
+    }
+
+    #[test]
+    fn watermark_full_height_at_left_with_margin_succeeds() {
+        // A watermark as tall as the main image should be accepted at Left
+        // because Left only applies margin on the X axis.
+        let main = png_artifact(10, 10, Rgba([255, 255, 255, 255]));
+        let wm = png_artifact(3, 10, Rgba([0, 0, 0, 128]));
+
+        let mut request = TransformRequest::new(main, TransformOptions::default());
+        request.watermark = Some(WatermarkInput {
+            image: wm,
+            position: Position::Left,
+            opacity: 50,
+            margin: 2,
+        });
+
+        let result =
+            transform_raster(request).expect("full-height watermark at Left should succeed");
+        assert_eq!(result.artifact.metadata.height, Some(10));
+    }
+
+    #[test]
+    fn watermark_pixel_limit_enforced() {
+        // Create a watermark artifact with fake dimensions exceeding MAX_DECODED_PIXELS.
+        // We use a valid but tiny PNG, then override the metadata to claim huge dimensions.
+        let main = png_artifact(4, 4, Rgba([255, 255, 255, 255]));
+        let mut wm = png_artifact(2, 2, Rgba([0, 0, 0, 128]));
+        // Override metadata to simulate a decompression bomb watermark.
+        wm.metadata.width = Some(100_000);
+        wm.metadata.height = Some(100_000);
+
+        let mut request = TransformRequest::new(main, TransformOptions::default());
+        request.watermark = Some(WatermarkInput {
+            image: wm,
+            position: Position::Center,
+            opacity: 50,
+            margin: 0,
+        });
+
+        let err = transform_raster(request).expect_err("huge watermark should be rejected");
+        // The early metadata size check rejects the watermark before decode,
+        // so we may get InvalidOptions (too large) instead of LimitExceeded.
+        assert!(
+            matches!(err, TransformError::InvalidOptions(ref msg) if msg.contains("too large"))
+                || matches!(err, TransformError::LimitExceeded(ref msg) if msg.contains("pixels")),
+            "expected InvalidOptions or LimitExceeded, got: {err}"
+        );
     }
 }

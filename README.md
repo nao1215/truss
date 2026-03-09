@@ -79,6 +79,18 @@ Rasterize SVG:
 truss diagram.svg -o diagram.png --width 1024
 ```
 
+Apply Gaussian blur:
+
+```sh
+truss photo.png -o blurred.jpg --blur 5.0
+```
+
+Add a watermark:
+
+```sh
+truss photo.png -o watermarked.jpg --watermark logo.png --watermark-position bottom-right --watermark-opacity 50 --watermark-margin 10
+```
+
 Inspect image metadata:
 
 ```sh
@@ -236,7 +248,7 @@ CDN cache keys must vary by the signed-URL authentication inputs and any transfo
 
 - Authentication: `keyId`, `expires`, `signature`
 - Source: `path` or `url`, `version`
-- Transform: `width`, `height`, `fit`, `position`, `format`, `quality`, `background`, `rotate`, `autoOrient`, `stripMetadata`, `preserveExif`
+- Transform: `width`, `height`, `fit`, `position`, `format`, `quality`, `background`, `rotate`, `autoOrient`, `stripMetadata`, `preserveExif`, `blur`, `watermark`, `watermarkPosition`, `watermarkOpacity`, `watermarkMargin`
 
 This ensures that a cached response for one signed URL is not served to requests with different or expired signatures, and different transform options produce separate cache entries.
 

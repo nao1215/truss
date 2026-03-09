@@ -168,43 +168,97 @@ impl FromStr for MediaType {
     }
 }
 
-/// A complete transform request for the Core layer.
+/// A watermark image to composite onto the output.
+///
+/// The watermark is alpha-composited onto the main image after all other
+/// transforms (resize, blur) and before encoding.
+///
+/// ```
+/// use truss::{Artifact, ArtifactMetadata, MediaType, Position, WatermarkInput};
+///
+/// let wm = WatermarkInput {
+///     image: Artifact::new(vec![0], MediaType::Png, ArtifactMetadata::default()),
+///     position: Position::BottomRight,
+///     opacity: 50,
+///     margin: 10,
+/// };
+/// assert_eq!(wm.opacity, 50);
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WatermarkInput {
+    /// The watermark image (already classified via [`sniff_artifact`]).
+    pub image: Artifact,
+    /// Where to place the watermark on the main image.
+    pub position: Position,
+    /// Opacity of the watermark (1–100). Default: 50.
+    pub opacity: u8,
+    /// Margin in pixels from the nearest edge. Default: 10.
+    pub margin: u32,
+}
+
+/// A complete transform request for the Core layer.
+#[derive(Debug, Clone, PartialEq)]
 pub struct TransformRequest {
     /// The already-resolved input artifact.
     pub input: Artifact,
     /// Raw transform options as provided by an adapter.
     pub options: TransformOptions,
+    /// Optional watermark image to composite onto the output.
+    pub watermark: Option<WatermarkInput>,
 }
 
 impl TransformRequest {
     /// Creates a new transform request.
     pub fn new(input: Artifact, options: TransformOptions) -> Self {
-        Self { input, options }
+        Self {
+            input,
+            options,
+            watermark: None,
+        }
+    }
+
+    /// Creates a new transform request with a watermark.
+    pub fn with_watermark(
+        input: Artifact,
+        options: TransformOptions,
+        watermark: WatermarkInput,
+    ) -> Self {
+        Self {
+            input,
+            options,
+            watermark: Some(watermark),
+        }
     }
 
     /// Normalizes the request into a form that does not require adapter-specific defaults.
     pub fn normalize(self) -> Result<NormalizedTransformRequest, TransformError> {
         let options = self.options.normalize(self.input.media_type)?;
 
+        if let Some(ref wm) = self.watermark {
+            validate_watermark(wm)?;
+        }
+
         Ok(NormalizedTransformRequest {
             input: self.input,
             options,
+            watermark: self.watermark,
         })
     }
 }
 
 /// A fully normalized transform request.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct NormalizedTransformRequest {
     /// The normalized input artifact.
     pub input: Artifact,
     /// Fully normalized transform options.
     pub options: NormalizedTransformOptions,
+    /// Optional watermark to composite onto the output.
+    pub watermark: Option<WatermarkInput>,
 }
 
 /// Raw transform options before defaulting and validation has completed.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TransformOptions {
     /// The desired output width in pixels.
     pub width: Option<u32>,
@@ -228,6 +282,11 @@ pub struct TransformOptions {
     pub strip_metadata: bool,
     /// Whether EXIF metadata should be preserved.
     pub preserve_exif: bool,
+    /// Gaussian blur sigma.
+    ///
+    /// When set, a Gaussian blur with the given sigma is applied after resizing
+    /// and before encoding. Valid range is 0.1–100.0.
+    pub blur: Option<f32>,
     /// Optional wall-clock deadline for the transform pipeline.
     ///
     /// When set, the transform checks elapsed time at each pipeline stage and returns
@@ -251,6 +310,7 @@ impl Default for TransformOptions {
             auto_orient: true,
             strip_metadata: true,
             preserve_exif: false,
+            blur: None,
             deadline: None,
         }
     }
@@ -265,6 +325,7 @@ impl TransformOptions {
         validate_dimension("width", self.width)?;
         validate_dimension("height", self.height)?;
         validate_quality(self.quality)?;
+        validate_blur(self.blur)?;
 
         let has_bounded_resize = self.width.is_some() && self.height.is_some();
 
@@ -317,13 +378,14 @@ impl TransformOptions {
             rotate: self.rotate,
             auto_orient: self.auto_orient,
             metadata_policy: normalize_metadata_policy(self.strip_metadata, self.preserve_exif),
+            blur: self.blur,
             deadline: self.deadline,
         })
     }
 }
 
 /// Fully normalized transform options ready for a backend pipeline.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct NormalizedTransformOptions {
     /// The desired output width in pixels.
     pub width: Option<u32>,
@@ -345,6 +407,8 @@ pub struct NormalizedTransformOptions {
     pub auto_orient: bool,
     /// The normalized metadata handling strategy.
     pub metadata_policy: MetadataPolicy,
+    /// Gaussian blur sigma, when requested.
+    pub blur: Option<f32>,
     /// Optional wall-clock deadline for the transform pipeline.
     pub deadline: Option<Duration>,
 }
@@ -805,6 +869,34 @@ fn validate_quality(value: Option<u8>) -> Result<(), TransformError> {
     if matches!(value, Some(0) | Some(101..=u8::MAX)) {
         return Err(TransformError::InvalidOptions(
             "quality must be between 1 and 100".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
+fn validate_blur(value: Option<f32>) -> Result<(), TransformError> {
+    if let Some(sigma) = value
+        && !(0.1..=100.0).contains(&sigma)
+    {
+        return Err(TransformError::InvalidOptions(
+            "blur sigma must be between 0.1 and 100.0".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
+fn validate_watermark(wm: &WatermarkInput) -> Result<(), TransformError> {
+    if wm.opacity == 0 || wm.opacity > 100 {
+        return Err(TransformError::InvalidOptions(
+            "watermark opacity must be between 1 and 100".to_string(),
+        ));
+    }
+
+    if !wm.image.media_type.is_raster() {
+        return Err(TransformError::InvalidOptions(
+            "watermark image must be a raster format".to_string(),
         ));
     }
 
@@ -1952,5 +2044,114 @@ mod tests {
             err,
             TransformError::DecodeFailed("bmp file is too short".to_string())
         );
+    }
+
+    #[test]
+    fn normalize_rejects_blur_sigma_below_minimum() {
+        let err = TransformOptions {
+            blur: Some(0.0),
+            ..TransformOptions::default()
+        }
+        .normalize(MediaType::Jpeg)
+        .expect_err("blur sigma 0.0 should be rejected");
+
+        assert_eq!(
+            err,
+            TransformError::InvalidOptions("blur sigma must be between 0.1 and 100.0".to_string())
+        );
+    }
+
+    #[test]
+    fn normalize_rejects_blur_sigma_above_maximum() {
+        let err = TransformOptions {
+            blur: Some(100.1),
+            ..TransformOptions::default()
+        }
+        .normalize(MediaType::Jpeg)
+        .expect_err("blur sigma 100.1 should be rejected");
+
+        assert_eq!(
+            err,
+            TransformError::InvalidOptions("blur sigma must be between 0.1 and 100.0".to_string())
+        );
+    }
+
+    #[test]
+    fn normalize_accepts_blur_sigma_at_boundaries() {
+        let opts_min = TransformOptions {
+            blur: Some(0.1),
+            ..TransformOptions::default()
+        }
+        .normalize(MediaType::Jpeg)
+        .expect("blur sigma 0.1 should be accepted");
+        assert_eq!(opts_min.blur, Some(0.1));
+
+        let opts_max = TransformOptions {
+            blur: Some(100.0),
+            ..TransformOptions::default()
+        }
+        .normalize(MediaType::Jpeg)
+        .expect("blur sigma 100.0 should be accepted");
+        assert_eq!(opts_max.blur, Some(100.0));
+    }
+
+    #[test]
+    fn validate_watermark_rejects_zero_opacity() {
+        let wm = super::WatermarkInput {
+            image: jpeg_artifact(),
+            position: Position::BottomRight,
+            opacity: 0,
+            margin: 10,
+        };
+        let err = super::validate_watermark(&wm).expect_err("opacity 0 should be rejected");
+        assert_eq!(
+            err,
+            TransformError::InvalidOptions(
+                "watermark opacity must be between 1 and 100".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn validate_watermark_rejects_opacity_above_100() {
+        let wm = super::WatermarkInput {
+            image: jpeg_artifact(),
+            position: Position::BottomRight,
+            opacity: 101,
+            margin: 10,
+        };
+        let err = super::validate_watermark(&wm).expect_err("opacity 101 should be rejected");
+        assert_eq!(
+            err,
+            TransformError::InvalidOptions(
+                "watermark opacity must be between 1 and 100".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn validate_watermark_rejects_svg_image() {
+        let wm = super::WatermarkInput {
+            image: Artifact::new(vec![1], MediaType::Svg, ArtifactMetadata::default()),
+            position: Position::BottomRight,
+            opacity: 50,
+            margin: 10,
+        };
+        let err = super::validate_watermark(&wm).expect_err("SVG watermark should be rejected");
+        assert_eq!(
+            err,
+            TransformError::InvalidOptions("watermark image must be a raster format".to_string())
+        );
+    }
+
+    #[test]
+    fn validate_watermark_accepts_valid_input() {
+        let wm = super::WatermarkInput {
+            image: jpeg_artifact(),
+            position: Position::BottomRight,
+            opacity: 50,
+            margin: 10,
+        };
+        super::validate_watermark(&wm).expect("valid watermark should be accepted");
     }
 }

@@ -71,6 +71,17 @@ use std::time::Instant;
 /// assert_eq!(result.artifact.media_type, MediaType::Png);
 /// ```
 pub fn transform_svg(request: TransformRequest) -> Result<TransformResult, TransformError> {
+    if request.options.blur.is_some() {
+        return Err(TransformError::InvalidOptions(
+            "blur is not supported for SVG inputs".to_string(),
+        ));
+    }
+    if request.watermark.is_some() {
+        return Err(TransformError::InvalidOptions(
+            "watermark is not supported for SVG inputs".to_string(),
+        ));
+    }
+
     let normalized = request.normalize()?;
     let deadline = normalized.options.deadline;
     let start = deadline.map(|_| Instant::now());
@@ -1186,5 +1197,47 @@ mod tests {
     #[test]
     fn is_dangerous_css_url_allows_data_image() {
         assert!(!is_dangerous_css_url("data:image/png;base64,abc"));
+    }
+
+    #[test]
+    fn svg_rejects_blur() {
+        let input = sniff_artifact(RawArtifact::new(simple_svg(), None)).unwrap();
+        let request = TransformRequest::new(
+            input,
+            TransformOptions {
+                format: Some(MediaType::Png),
+                blur: Some(2.0),
+                ..TransformOptions::default()
+            },
+        );
+        let err = transform_svg(request).unwrap_err();
+        assert!(
+            matches!(err, TransformError::InvalidOptions(ref msg) if msg.contains("blur")),
+            "expected InvalidOptions about blur, got: {err}"
+        );
+    }
+
+    #[test]
+    fn svg_rejects_watermark() {
+        let input = sniff_artifact(RawArtifact::new(simple_svg(), None)).unwrap();
+        let wm_input = sniff_artifact(RawArtifact::new(simple_svg(), None)).unwrap();
+        let mut request = TransformRequest::new(
+            input,
+            TransformOptions {
+                format: Some(MediaType::Png),
+                ..TransformOptions::default()
+            },
+        );
+        request.watermark = Some(crate::core::WatermarkInput {
+            image: wm_input,
+            position: crate::core::Position::Center,
+            opacity: 50,
+            margin: 0,
+        });
+        let err = transform_svg(request).unwrap_err();
+        assert!(
+            matches!(err, TransformError::InvalidOptions(ref msg) if msg.contains("watermark")),
+            "expected InvalidOptions about watermark, got: {err}"
+        );
     }
 }

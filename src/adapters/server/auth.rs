@@ -200,6 +200,9 @@ pub(super) fn extend_transform_query(
     if options.preserve_exif {
         query.insert("preserveExif".to_string(), "true".to_string());
     }
+    if let Some(blur) = options.blur {
+        query.insert("blur".to_string(), format!("{blur}"));
+    }
 }
 
 pub(super) fn encode_background(color: Rgba8) -> String {
@@ -235,6 +238,7 @@ pub(super) fn validate_public_query_names(
                 | "autoOrient"
                 | "stripMetadata"
                 | "preserveExif"
+                | "blur"
         ) || matches!(
             (source_kind, name.as_str()),
             (PublicSourceKind::Path, "path") | (PublicSourceKind::Url, "url")
@@ -312,6 +316,18 @@ pub(super) fn parse_optional_u8_query(
     match query.get(name) {
         Some(value) => value.parse::<u8>().map(Some).map_err(|_| {
             bad_request_response(&format!("query parameter `{name}` must be an integer"))
+        }),
+        None => Ok(None),
+    }
+}
+
+pub(super) fn parse_optional_float_query(
+    query: &BTreeMap<String, String>,
+    name: &str,
+) -> Result<Option<f32>, HttpResponse> {
+    match query.get(name) {
+        Some(value) => value.parse::<f32>().map(Some).map_err(|_| {
+            bad_request_response(&format!("query parameter `{name}` must be a number"))
         }),
         None => Ok(None),
     }

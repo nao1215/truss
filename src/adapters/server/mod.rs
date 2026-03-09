@@ -10,8 +10,9 @@ mod response;
 use auth::{
     authorize_request, authorize_request_headers, authorize_signed_request,
     canonical_query_without_signature, extend_transform_query, parse_optional_bool_query,
-    parse_optional_integer_query, parse_optional_u8_query, parse_query_params,
-    required_query_param, signed_source_query, url_authority, validate_public_query_names,
+    parse_optional_float_query, parse_optional_integer_query, parse_optional_u8_query,
+    parse_query_params, required_query_param, signed_source_query, url_authority,
+    validate_public_query_names,
 };
 use cache::{CacheLookup, TransformCache, compute_cache_key, try_versioned_cache_lookup};
 use http_parse::{
@@ -714,6 +715,7 @@ struct TransformOptionsPayload {
     auto_orient: Option<bool>,
     strip_metadata: Option<bool>,
     preserve_exif: Option<bool>,
+    blur: Option<f32>,
 }
 
 impl TransformOptionsPayload {
@@ -743,6 +745,7 @@ impl TransformOptionsPayload {
             auto_orient: self.auto_orient.unwrap_or(defaults.auto_orient),
             strip_metadata: self.strip_metadata.unwrap_or(defaults.strip_metadata),
             preserve_exif: self.preserve_exif.unwrap_or(defaults.preserve_exif),
+            blur: self.blur,
             deadline: defaults.deadline,
         })
     }
@@ -1137,6 +1140,7 @@ fn parse_public_get_request(
             .unwrap_or(defaults.strip_metadata),
         preserve_exif: parse_optional_bool_query(query, "preserveExif")?
             .unwrap_or(defaults.preserve_exif),
+        blur: parse_optional_float_query(query, "blur")?,
         deadline: defaults.deadline,
     };
 
