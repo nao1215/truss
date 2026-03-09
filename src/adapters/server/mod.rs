@@ -242,6 +242,8 @@ fn cfg_s3_eq(_this: &ServerConfig, _other: &ServerConfig) -> bool {
     #[cfg(feature = "s3")]
     {
         _this.storage_backend == _other.storage_backend
+            && _this.s3_context.as_ref().map(|c| &c.default_bucket)
+                == _other.s3_context.as_ref().map(|c| &c.default_bucket)
     }
     #[cfg(not(feature = "s3"))]
     {

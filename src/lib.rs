@@ -8,7 +8,7 @@ pub mod codecs;
 pub mod core;
 
 #[cfg(feature = "s3")]
-pub use adapters::server::s3::{S3Context, StorageBackend};
+pub use adapters::server::s3::{S3Context, StorageBackend, build_s3_context};
 #[cfg(feature = "server")]
 pub use adapters::server::{
     DEFAULT_BIND_ADDR, DEFAULT_STORAGE_ROOT, ServerConfig, SignedUrlSource, bind_addr, serve,

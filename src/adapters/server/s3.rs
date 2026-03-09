@@ -51,7 +51,7 @@ impl StorageBackend {
 /// Builds the S3 client from the default AWS SDK environment (`AWS_REGION`,
 /// `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and optionally
 /// `AWS_ENDPOINT_URL` for S3-compatible services like MinIO).
-pub(super) fn build_s3_context(default_bucket: String) -> Result<S3Context, std::io::Error> {
+pub fn build_s3_context(default_bucket: String) -> Result<S3Context, std::io::Error> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(1)
         .enable_all()
