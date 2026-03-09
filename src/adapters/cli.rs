@@ -121,13 +121,13 @@ OPTIONS:
       --strip-metadata     Remove all metadata (default)
       --keep-metadata      Preserve EXIF, ICC, and other supported metadata
       --preserve-exif      Preserve EXIF only (strip ICC and others)
-      --blur <SIGMA>       Gaussian blur sigma (0.1-100.0)
-      --watermark <FILE>   Watermark image to composite onto the output
-      --watermark-position <POS>  Watermark placement (default: bottom-right)
+      --blur <SIGMA>       Gaussian blur sigma (0.1-100.0; raster-only, not supported for SVG inputs)
+      --watermark <FILE>   Watermark image to composite onto the output (raster-only, not supported for SVG inputs)
+      --watermark-position <POS>  Watermark placement (default: bottom-right; raster-only)
                            center, top, right, bottom, left,
                            top-left, top-right, bottom-left, bottom-right
-      --watermark-opacity <1-100> Watermark opacity percentage (default: 50)
-      --watermark-margin <PX>     Margin from edge in pixels (default: 10)
+      --watermark-opacity <1-100> Watermark opacity percentage (default: 50; raster-only)
+      --watermark-margin <PX>     Margin from edge in pixels (default: 10; raster-only)
 
 EXAMPLES:
   truss photo.png -o photo.jpg --width 800
@@ -340,7 +340,7 @@ struct ClapConvertArgs {
     #[arg(long)]
     preserve_exif: bool,
     /// Apply Gaussian blur (sigma: 0.1-100.0)
-    #[arg(long)]
+    #[arg(long, value_parser = parse_blur)]
     blur: Option<f32>,
     /// Watermark image file path
     #[arg(long)]
@@ -349,7 +349,7 @@ struct ClapConvertArgs {
     #[arg(long, value_parser = parse_position)]
     watermark_position: Option<Position>,
     /// Watermark opacity 1-100 (default: 50)
-    #[arg(long)]
+    #[arg(long, value_parser = parse_watermark_opacity)]
     watermark_opacity: Option<u8>,
     /// Watermark margin in pixels (default: 10)
     #[arg(long)]
@@ -460,7 +460,7 @@ struct ClapSignArgs {
     #[arg(long)]
     preserve_exif: bool,
     /// Apply Gaussian blur (sigma: 0.1-100.0)
-    #[arg(long)]
+    #[arg(long, value_parser = parse_blur)]
     blur: Option<f32>,
     /// Show help for sign
     #[arg(short = 'h', long = "help")]
@@ -489,6 +489,26 @@ fn parse_rotation(s: &str) -> Result<Rotation, String> {
 
 fn parse_background(s: &str) -> Result<Rgba8, String> {
     Rgba8::from_hex(s)
+}
+
+fn parse_blur(s: &str) -> Result<f32, String> {
+    let v: f32 = s
+        .parse()
+        .map_err(|_| format!("invalid blur value: '{s}'"))?;
+    if !v.is_finite() || !(0.1..=100.0).contains(&v) {
+        return Err("blur must be between 0.1 and 100.0".to_string());
+    }
+    Ok(v)
+}
+
+fn parse_watermark_opacity(s: &str) -> Result<u8, String> {
+    let v: u8 = s
+        .parse()
+        .map_err(|_| format!("invalid watermark opacity: '{s}'"))?;
+    if !(1..=100).contains(&v) {
+        return Err("watermark opacity must be between 1 and 100".to_string());
+    }
+    Ok(v)
 }
 
 fn parse_url_value(s: &str) -> Result<String, String> {
@@ -928,6 +948,18 @@ fn convert_from_clap(args: ClapConvertArgs) -> Result<Command, CliError> {
     };
 
     let watermark_path = args.watermark.clone();
+    if watermark_path.is_none()
+        && (args.watermark_position.is_some()
+            || args.watermark_opacity.is_some()
+            || args.watermark_margin.is_some())
+    {
+        return Err(CliError {
+            exit_code: EXIT_USAGE,
+            message: "--watermark-position, --watermark-opacity, and --watermark-margin require --watermark".to_string(),
+            usage: Some(convert_usage().to_string()),
+            hint: Some("provide --watermark <path> when using watermark options".to_string()),
+        });
+    }
     let watermark_position = args.watermark_position;
     let watermark_opacity = args.watermark_opacity;
     let watermark_margin = args.watermark_margin;
@@ -1363,13 +1395,17 @@ where
 
     let watermark = if let Some(ref wm_path) = command.watermark_path {
         let wm_bytes = fs::read(wm_path).map_err(|error| {
+            runtime_error(EXIT_IO, &format!("failed to read watermark file: {error}"))
+        })?;
+        let wm_artifact = sniff_artifact(RawArtifact::new(wm_bytes, None)).map_err(|error| {
             runtime_error(
                 EXIT_INPUT,
-                &format!("failed to read watermark file: {error}"),
+                &format!(
+                    "failed to decode watermark '{}': {error}",
+                    wm_path.display()
+                ),
             )
         })?;
-        let wm_artifact = sniff_artifact(RawArtifact::new(wm_bytes, None))
-            .map_err(|error| runtime_error(EXIT_INPUT, &error.to_string()))?;
         Some(WatermarkInput {
             image: wm_artifact,
             position: command.watermark_position.unwrap_or(Position::BottomRight),

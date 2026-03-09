@@ -212,16 +212,16 @@ pub fn transform_raster(request: TransformRequest) -> Result<TransformResult, Tr
 
     if let Some(sigma) = normalized.options.blur {
         image = image.blur(sigma);
-    }
-    if let (Some(start), Some(limit)) = (start, deadline) {
-        check_deadline(start.elapsed(), limit, "blur")?;
+        if let (Some(start), Some(limit)) = (start, deadline) {
+            check_deadline(start.elapsed(), limit, "blur")?;
+        }
     }
 
     if let Some(ref wm) = normalized.watermark {
         image = apply_watermark(image, wm)?;
-    }
-    if let (Some(start), Some(limit)) = (start, deadline) {
-        check_deadline(start.elapsed(), limit, "watermark")?;
+        if let (Some(start), Some(limit)) = (start, deadline) {
+            check_deadline(start.elapsed(), limit, "watermark")?;
+        }
     }
 
     let bytes = encode_output(
@@ -716,6 +716,28 @@ fn apply_watermark(
     image: DynamicImage,
     watermark: &WatermarkInput,
 ) -> Result<DynamicImage, TransformError> {
+    // Early rejection using metadata dimensions (before allocating/decoding).
+    let (main_w, main_h) = image.dimensions();
+    if let (Some(meta_w), Some(meta_h)) = (
+        watermark.image.metadata.width,
+        watermark.image.metadata.height,
+    ) {
+        let margin = watermark.margin;
+        let (mx, my) = match watermark.position {
+            Position::Center => (0, 0),
+            Position::Top | Position::Bottom => (0, margin),
+            Position::Left | Position::Right => (margin, 0),
+            _ => (margin, margin),
+        };
+        if u64::from(meta_w) + u64::from(mx) > u64::from(main_w)
+            || u64::from(meta_h) + u64::from(my) > u64::from(main_h)
+        {
+            return Err(TransformError::InvalidOptions(
+                "watermark image is too large for the output dimensions".to_string(),
+            ));
+        }
+    }
+
     check_input_pixel_limit(&watermark.image)?;
     let wm_image = decode_input(&watermark.image)?;
     let mut wm_rgba = wm_image.to_rgba8();
@@ -739,7 +761,10 @@ fn apply_watermark(
     };
 
     // If the watermark (plus applicable margin) exceeds the main image, reject it.
-    if wm_w + margin_x > main_w || wm_h + margin_y > main_h {
+    // Use u64 arithmetic to avoid u32 overflow with large margin values.
+    if u64::from(wm_w) + u64::from(margin_x) > u64::from(main_w)
+        || u64::from(wm_h) + u64::from(margin_y) > u64::from(main_h)
+    {
         return Err(TransformError::InvalidOptions(
             "watermark image is too large for the output dimensions".to_string(),
         ));
@@ -2769,9 +2794,12 @@ mod tests {
         });
 
         let err = transform_raster(request).expect_err("huge watermark should be rejected");
+        // The early metadata size check rejects the watermark before decode,
+        // so we may get InvalidOptions (too large) instead of LimitExceeded.
         assert!(
-            matches!(err, TransformError::LimitExceeded(ref msg) if msg.contains("pixels")),
-            "expected LimitExceeded about pixels, got: {err}"
+            matches!(err, TransformError::InvalidOptions(ref msg) if msg.contains("too large"))
+                || matches!(err, TransformError::LimitExceeded(ref msg) if msg.contains("pixels")),
+            "expected InvalidOptions or LimitExceeded, got: {err}"
         );
     }
 }

@@ -4,7 +4,7 @@ This document describes the image transformation pipeline that `transform_raster
 
 ## Pipeline stages
 
-```
+```text
 decode → auto-orient → rotate → resize → blur → watermark → encode
 ```
 

@@ -746,7 +746,10 @@ components:
           format: float
           minimum: 0.1
           maximum: 100.0
-          description: Gaussian blur sigma. Higher values produce a stronger blur.
+          description: >-
+            Gaussian blur sigma (0.1–100.0). Higher values produce a stronger blur.
+            Not supported for SVG inputs; the server will reject the request
+            with an error if blur is specified for an SVG source.
       example:
         width: 1600
         height: 900
