@@ -343,7 +343,7 @@ fn is_dangerous_href(value: &str) -> bool {
     // to prevent embedded SVGs from bypassing sanitization.
     let lower = trimmed.to_ascii_lowercase();
     if lower.starts_with("data:image/") {
-        return !lower.starts_with("data:image/svg");
+        return lower.starts_with("data:image/svg");
     }
 
     // Everything else is dangerous.
@@ -502,7 +502,7 @@ fn is_dangerous_css_url(value: &str) -> bool {
     // to prevent embedded SVGs from bypassing sanitization.
     let lower = trimmed.to_ascii_lowercase();
     if lower.starts_with("data:image/") {
-        return !lower.starts_with("data:image/svg");
+        return lower.starts_with("data:image/svg");
     }
 
     // Everything else is dangerous.
