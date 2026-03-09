@@ -992,6 +992,30 @@ impl HttpRequest {
     }
 }
 
+/// Partially parsed HTTP request containing only the request line and headers.
+/// The body has not been read yet. Used to perform early authentication before
+/// consuming the (potentially large) request body.
+struct PartialHttpRequest {
+    method: String,
+    target: String,
+    version: String,
+    headers: Vec<(String, String)>,
+    /// Bytes already buffered beyond the header terminator during header reading.
+    /// These belong to the body and are passed to `read_request_body`.
+    overflow: Vec<u8>,
+    /// The validated Content-Length value.
+    content_length: usize,
+}
+
+impl PartialHttpRequest {
+    fn path(&self) -> &str {
+        self.target
+            .split('?')
+            .next()
+            .unwrap_or(self.target.as_str())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct HttpResponse {
     status: &'static str,
@@ -1218,7 +1242,27 @@ fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io::Result<()>
         config.log(&format!("failed to set socket write timeout: {err}"));
     }
 
-    let request = match read_request(&mut stream) {
+    // Phase 1: Read headers only — no body bytes are consumed yet.
+    let partial = match read_request_headers(&mut stream) {
+        Ok(partial) => partial,
+        Err(response) => return write_response(&mut stream, response),
+    };
+
+    // Phase 2: Authenticate private POST routes *before* reading the body.
+    // This prevents unauthenticated clients from forcing the server to buffer
+    // up to MAX_UPLOAD_BODY_BYTES of request body.
+    let requires_auth = matches!(
+        (partial.method.as_str(), partial.path()),
+        ("POST", "/images:transform") | ("POST", "/images")
+    );
+    if requires_auth {
+        if let Err(response) = authorize_request_headers(&partial.headers, config) {
+            return write_response(&mut stream, response);
+        }
+    }
+
+    // Phase 3: Read the body now that authentication has passed.
+    let request = match read_request_body(&mut stream, partial) {
         Ok(request) => request,
         Err(response) => return write_response(&mut stream, response),
     };
@@ -2547,11 +2591,22 @@ fn status_code(status: &str) -> Option<&str> {
 }
 
 fn authorize_request(request: &HttpRequest, config: &ServerConfig) -> Result<(), HttpResponse> {
+    authorize_request_headers(&request.headers, config)
+}
+
+/// Authenticates a request using only the parsed header list. This is used by
+/// `handle_stream` to reject unauthenticated requests *before* reading the
+/// (potentially large) request body.
+fn authorize_request_headers(
+    headers: &[(String, String)],
+    config: &ServerConfig,
+) -> Result<(), HttpResponse> {
     let expected = config.bearer_token.as_deref().ok_or_else(|| {
         service_unavailable_response("private API bearer token is not configured")
     })?;
-    let provided = request
-        .header("authorization")
+    let provided = headers
+        .iter()
+        .find_map(|(name, value)| (name == "authorization").then_some(value.as_str()))
         .and_then(|value| value.strip_prefix("Bearer "))
         .map(str::trim);
 
@@ -3153,16 +3208,20 @@ fn max_body_for_headers(headers: &[(String, String)]) -> usize {
     }
 }
 
-fn read_request<R>(stream: &mut R) -> Result<HttpRequest, HttpResponse>
+/// Reads only the HTTP request line and headers from `stream`, returning a
+/// [`PartialHttpRequest`]. Any bytes already buffered beyond the header
+/// terminator are stored in `overflow` so that `read_request_body` can
+/// continue from the right position.
+///
+/// This split allows callers to inspect the method, path, and headers (e.g.
+/// for authentication) *before* committing resources to read a potentially
+/// large request body.
+fn read_request_headers<R>(stream: &mut R) -> Result<PartialHttpRequest, HttpResponse>
 where
     R: Read,
 {
     let mut buffer = Vec::new();
     let mut chunk = [0_u8; 4096];
-    // During header reading we must accept up to the largest possible body
-    // because we do not yet know the content-type. The per-route body limit
-    // is enforced after headers are parsed.
-    let header_read_limit = MAX_HEADER_BYTES + MAX_UPLOAD_BODY_BYTES;
     let header_end = loop {
         let read = stream.read(&mut chunk).map_err(|error| {
             internal_error_response(&format!("failed to read request: {error}"))
@@ -3175,7 +3234,10 @@ where
 
         buffer.extend_from_slice(&chunk[..read]);
 
-        if buffer.len() > header_read_limit {
+        // While searching for the header terminator we only enforce the
+        // header-size limit.  Body-size limits are checked after headers are
+        // parsed (in `read_request_body`).
+        if buffer.len() > MAX_HEADER_BYTES + MAX_UPLOAD_BODY_BYTES {
             return Err(payload_too_large_response("request is too large"));
         }
 
@@ -3200,8 +3262,30 @@ where
         return Err(payload_too_large_response("request body is too large"));
     }
 
-    let mut body = buffer[(header_end + 4)..].to_vec();
-    while body.len() < content_length {
+    let overflow = buffer[(header_end + 4)..].to_vec();
+
+    Ok(PartialHttpRequest {
+        method,
+        target,
+        version,
+        headers,
+        overflow,
+        content_length,
+    })
+}
+
+/// Reads the remaining body bytes for a [`PartialHttpRequest`] and assembles
+/// the final [`HttpRequest`].
+fn read_request_body<R>(
+    stream: &mut R,
+    partial: PartialHttpRequest,
+) -> Result<HttpRequest, HttpResponse>
+where
+    R: Read,
+{
+    let mut body = partial.overflow;
+    let mut chunk = [0_u8; 4096];
+    while body.len() < partial.content_length {
         let read = stream.read(&mut chunk).map_err(|error| {
             internal_error_response(&format!("failed to read request: {error}"))
         })?;
@@ -3210,13 +3294,13 @@ where
         }
         body.extend_from_slice(&chunk[..read]);
     }
-    body.truncate(content_length);
+    body.truncate(partial.content_length);
 
     Ok(HttpRequest {
-        method,
-        target,
-        version,
-        headers,
+        method: partial.method,
+        target: partial.target,
+        version: partial.version,
+        headers: partial.headers,
         body,
     })
 }
@@ -3505,7 +3589,8 @@ mod tests {
         authorize_signed_request, bad_request_response, bind_addr, build_image_etag,
         build_image_response_headers, canonical_query_without_signature, find_header_terminator,
         negotiate_output_format, parse_public_get_request, prepare_remote_fetch_target,
-        read_request, resolve_storage_path, route_request, serve_once_with_config, sign_public_url,
+        read_request_body, read_request_headers, resolve_storage_path, route_request,
+        serve_once_with_config, sign_public_url,
         transform_source_bytes,
     };
     use crate::{
@@ -3523,6 +3608,13 @@ mod tests {
     use std::sync::atomic::Ordering;
     use std::thread;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    /// Test-only convenience wrapper that reads headers + body in one shot,
+    /// preserving the original `read_request` semantics for existing tests.
+    fn read_request<R: Read>(stream: &mut R) -> Result<super::HttpRequest, super::HttpResponse> {
+        let partial = read_request_headers(stream)?;
+        read_request_body(stream, partial)
+    }
 
     fn png_bytes() -> Vec<u8> {
         let image = RgbaImage::from_pixel(4, 3, Rgba([10, 20, 30, 255]));
@@ -4904,7 +4996,7 @@ mod tests {
         );
         let mut data = raw.into_bytes();
         data.extend_from_slice(&body);
-        let result = super::read_request(&mut data.as_slice());
+        let result = read_request(&mut data.as_slice());
         assert!(result.is_err());
     }
 
@@ -4926,7 +5018,7 @@ mod tests {
         );
         let mut data = raw.into_bytes();
         data.extend_from_slice(&body);
-        let result = super::read_request(&mut data.as_slice());
+        let result = read_request(&mut data.as_slice());
         assert!(
             result.is_ok(),
             "multipart upload over 1 MiB should be accepted"
