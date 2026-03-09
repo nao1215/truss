@@ -1173,6 +1173,7 @@ fn handle_health_ready(config: &ServerConfig) -> HttpResponse {
 
 /// Returns a comprehensive diagnostic health response.
 fn storage_health_check(config: &ServerConfig) -> Vec<(bool, &'static str)> {
+    #[allow(unused_mut)]
     let mut checks = vec![(config.storage_root.is_dir(), "storageRoot")];
     #[cfg(feature = "s3")]
     if config.storage_backend == s3::StorageBackend::S3 {
@@ -3058,6 +3059,35 @@ mod tests {
             source.versioned_source_hash(&cfg_fs).unwrap(),
             source.versioned_source_hash(&cfg_s3).unwrap()
         );
+    }
+
+    #[test]
+    #[cfg(feature = "s3")]
+    fn versioned_source_hash_storage_differs_by_endpoint() {
+        let mut cfg_a = make_test_config();
+        cfg_a.storage_backend = super::s3::StorageBackend::S3;
+        cfg_a.s3_context = Some(std::sync::Arc::new(super::s3::S3Context::for_test(
+            "shared",
+            Some("http://minio-a:9000"),
+        )));
+
+        let mut cfg_b = make_test_config();
+        cfg_b.storage_backend = super::s3::StorageBackend::S3;
+        cfg_b.s3_context = Some(std::sync::Arc::new(super::s3::S3Context::for_test(
+            "shared",
+            Some("http://minio-b:9000"),
+        )));
+
+        let source = TransformSourcePayload::Storage {
+            bucket: None,
+            key: "image.jpg".to_string(),
+            version: Some("v1".to_string()),
+        };
+        assert_ne!(
+            source.versioned_source_hash(&cfg_a).unwrap(),
+            source.versioned_source_hash(&cfg_b).unwrap(),
+        );
+        assert_ne!(cfg_a, cfg_b);
     }
 
     #[test]

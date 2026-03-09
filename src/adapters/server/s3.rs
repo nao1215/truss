@@ -31,6 +31,26 @@ impl std::fmt::Debug for S3Context {
     }
 }
 
+#[cfg(test)]
+impl S3Context {
+    pub(crate) fn for_test(default_bucket: &str, endpoint_url: Option<&str>) -> Self {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let sdk_config = runtime.block_on(aws_config::load_defaults(
+            aws_config::BehaviorVersion::latest(),
+        ));
+        let client = aws_sdk_s3::Client::new(&sdk_config);
+        S3Context {
+            client,
+            default_bucket: default_bucket.to_string(),
+            endpoint_url: endpoint_url.map(|s| s.to_string()),
+            runtime,
+        }
+    }
+}
+
 /// The storage backend that determines how `Path`-based public GET requests are
 /// resolved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
