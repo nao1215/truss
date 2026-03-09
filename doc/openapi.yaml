@@ -80,6 +80,7 @@ paths:
         - $ref: '#/components/parameters/AutoOrient'
         - $ref: '#/components/parameters/StripMetadata'
         - $ref: '#/components/parameters/PreserveExif'
+        - $ref: '#/components/parameters/Blur'
       responses:
         '200':
           $ref: '#/components/responses/ImageBinary'
@@ -146,6 +147,7 @@ paths:
         - $ref: '#/components/parameters/AutoOrient'
         - $ref: '#/components/parameters/StripMetadata'
         - $ref: '#/components/parameters/PreserveExif'
+        - $ref: '#/components/parameters/Blur'
       responses:
         '200':
           $ref: '#/components/responses/ImageBinary'
@@ -620,6 +622,20 @@ components:
         type: boolean
         default: false
       example: false
+    Blur:
+      name: blur
+      in: query
+      required: false
+      description: |
+        Apply Gaussian blur with the given sigma value.
+        Valid range is 0.1 to 100.0. Higher values produce a stronger blur.
+        Not supported when the output format is SVG.
+      schema:
+        type: number
+        format: float
+        minimum: 0.1
+        maximum: 100.0
+      example: 3.0
 
   schemas:
     PathImageSource:
@@ -725,6 +741,12 @@ components:
           type: boolean
           default: false
           description: Preserve EXIF only. Requires `stripMetadata=false`.
+        blur:
+          type: number
+          format: float
+          minimum: 0.1
+          maximum: 100.0
+          description: Gaussian blur sigma. Higher values produce a stronger blur.
       example:
         width: 1600
         height: 900

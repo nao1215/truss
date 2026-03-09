@@ -79,6 +79,18 @@ Rasterize SVG:
 truss diagram.svg -o diagram.png --width 1024
 ```
 
+Apply Gaussian blur:
+
+```sh
+truss photo.png -o blurred.jpg --blur 5.0
+```
+
+Add a watermark:
+
+```sh
+truss photo.png -o watermarked.jpg --watermark logo.png --watermark-position bottom-right --watermark-opacity 50 --watermark-margin 10
+```
+
 Inspect image metadata:
 
 ```sh

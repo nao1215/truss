@@ -331,6 +331,9 @@ pub(super) fn compute_cache_key(
             format!("{:02x}{:02x}{:02x}{:02x}", bg.r, bg.g, bg.b, bg.a),
         ));
     }
+    if let Some(blur) = options.blur {
+        params.push(("blur", format!("{blur:.1}")));
+    }
     if has_bounded_resize {
         let fit = options.fit.unwrap_or(Fit::Contain);
         params.push(("fit", fit.as_name().to_string()));

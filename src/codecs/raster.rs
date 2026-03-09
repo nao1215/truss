@@ -2,7 +2,7 @@ use crate::Rgba8;
 use crate::core::{
     Artifact, ArtifactMetadata, Fit, MAX_DECODED_PIXELS, MAX_OUTPUT_PIXELS, MediaType,
     MetadataKind, MetadataPolicy, Position, Rotation, TransformError, TransformRequest,
-    TransformResult, TransformWarning,
+    TransformResult, TransformWarning, WatermarkInput,
 };
 use exif::{In, Reader, Tag, Value};
 use image::codecs::avif::AvifEncoder;
@@ -208,6 +208,20 @@ pub fn transform_raster(request: TransformRequest) -> Result<TransformResult, Tr
     );
     if let (Some(start), Some(limit)) = (start, deadline) {
         check_deadline(start.elapsed(), limit, "resize")?;
+    }
+
+    if let Some(sigma) = normalized.options.blur {
+        image = image.blur(sigma);
+    }
+    if let (Some(start), Some(limit)) = (start, deadline) {
+        check_deadline(start.elapsed(), limit, "blur")?;
+    }
+
+    if let Some(ref wm) = normalized.watermark {
+        image = apply_watermark(image, wm)?;
+    }
+    if let (Some(start), Some(limit)) = (start, deadline) {
+        check_deadline(start.elapsed(), limit, "watermark")?;
     }
 
     let bytes = encode_output(
@@ -693,6 +707,75 @@ fn apply_resize(
                 output_format,
             ),
         },
+    }
+}
+
+/// Composites a watermark image onto the main image at the given position,
+/// opacity, and margin.
+fn apply_watermark(
+    image: DynamicImage,
+    watermark: &WatermarkInput,
+) -> Result<DynamicImage, TransformError> {
+    let wm_image = decode_input(&watermark.image)?;
+    let mut wm_rgba = wm_image.to_rgba8();
+
+    // Apply opacity by scaling the alpha channel of the watermark.
+    let opacity_scale = f32::from(watermark.opacity) / 100.0;
+    for pixel in wm_rgba.pixels_mut() {
+        pixel.0[3] = (f32::from(pixel.0[3]) * opacity_scale) as u8;
+    }
+
+    let (main_w, main_h) = image.dimensions();
+    let (wm_w, wm_h) = wm_rgba.dimensions();
+    let margin = watermark.margin;
+
+    // If the watermark is larger than the main image (after margin), skip it.
+    if wm_w + margin > main_w || wm_h + margin > main_h {
+        return Err(TransformError::InvalidOptions(
+            "watermark image is too large for the output dimensions".to_string(),
+        ));
+    }
+
+    let (x, y) = watermark_offset(main_w, main_h, wm_w, wm_h, watermark.position, margin);
+
+    let mut canvas = image.to_rgba8();
+    imageops::overlay(&mut canvas, &wm_rgba, i64::from(x), i64::from(y));
+
+    Ok(DynamicImage::ImageRgba8(canvas))
+}
+
+/// Calculates the top-left offset for a watermark given the main image dimensions,
+/// watermark dimensions, position, and margin.
+fn watermark_offset(
+    main_w: u32,
+    main_h: u32,
+    wm_w: u32,
+    wm_h: u32,
+    position: Position,
+    margin: u32,
+) -> (u32, u32) {
+    match position {
+        Position::TopLeft => (margin, margin),
+        Position::Top => ((main_w.saturating_sub(wm_w)) / 2, margin),
+        Position::TopRight => (main_w.saturating_sub(wm_w).saturating_sub(margin), margin),
+        Position::Left => (margin, (main_h.saturating_sub(wm_h)) / 2),
+        Position::Center => (
+            (main_w.saturating_sub(wm_w)) / 2,
+            (main_h.saturating_sub(wm_h)) / 2,
+        ),
+        Position::Right => (
+            main_w.saturating_sub(wm_w).saturating_sub(margin),
+            (main_h.saturating_sub(wm_h)) / 2,
+        ),
+        Position::BottomLeft => (margin, main_h.saturating_sub(wm_h).saturating_sub(margin)),
+        Position::Bottom => (
+            (main_w.saturating_sub(wm_w)) / 2,
+            main_h.saturating_sub(wm_h).saturating_sub(margin),
+        ),
+        Position::BottomRight => (
+            main_w.saturating_sub(wm_w).saturating_sub(margin),
+            main_h.saturating_sub(wm_h).saturating_sub(margin),
+        ),
     }
 }
 
