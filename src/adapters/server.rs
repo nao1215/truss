@@ -1253,6 +1253,11 @@ impl RouteMetric {
     }
 }
 
+/// Maximum number of requests served over a single keep-alive connection before
+/// the server closes it.  This prevents a single client from monopolising a
+/// worker thread indefinitely.
+const KEEP_ALIVE_MAX_REQUESTS: usize = 100;
+
 fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io::Result<()> {
     // Prevent slow or stalled clients from blocking the accept loop indefinitely.
     // Errors from set_*_timeout are non-fatal: the worst case is falling back to the
@@ -1264,35 +1269,77 @@ fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io::Result<()>
         config.log(&format!("failed to set socket write timeout: {err}"));
     }
 
-    // Phase 1: Read headers only — no body bytes are consumed yet.
-    let partial = match read_request_headers(&mut stream) {
-        Ok(partial) => partial,
-        Err(response) => return write_response(&mut stream, response),
-    };
+    let mut requests_served: usize = 0;
 
-    // Phase 2: Authenticate private POST routes *before* reading the body.
-    // This prevents unauthenticated clients from forcing the server to buffer
-    // up to MAX_UPLOAD_BODY_BYTES of request body.
-    let requires_auth = matches!(
-        (partial.method.as_str(), partial.path()),
-        ("POST", "/images:transform") | ("POST", "/images")
-    );
-    if requires_auth {
-        if let Err(response) = authorize_request_headers(&partial.headers, config) {
-            return write_response(&mut stream, response);
+    loop {
+        // Phase 1: Read headers only — no body bytes are consumed yet.
+        // On a keep-alive connection the client may close its end cleanly,
+        // which surfaces as an IO error (read returning 0 bytes) or a bad-
+        // request error.  After the first request has been served we treat
+        // any header-read failure as a clean close rather than writing an
+        // error response to a potentially half-closed socket.
+        let partial = match read_request_headers(&mut stream) {
+            Ok(partial) => partial,
+            Err(response) => {
+                if requests_served > 0 {
+                    // Client likely closed the connection — nothing to report.
+                    return Ok(());
+                }
+                // First request on this connection — report the error.
+                let _ = write_response(&mut stream, response, true);
+                return Ok(());
+            }
+        };
+
+        // Determine whether the client wants to keep the connection alive.
+        let client_wants_close = partial
+            .headers
+            .iter()
+            .any(|(name, value)| name == "connection" && value.eq_ignore_ascii_case("close"));
+
+        let is_head = partial.method == "HEAD";
+
+        // Phase 2: Authenticate private POST routes *before* reading the body.
+        // This prevents unauthenticated clients from forcing the server to buffer
+        // up to MAX_UPLOAD_BODY_BYTES of request body.
+        let requires_auth = matches!(
+            (partial.method.as_str(), partial.path()),
+            ("POST", "/images:transform") | ("POST", "/images")
+        );
+        if requires_auth {
+            if let Err(response) = authorize_request_headers(&partial.headers, config) {
+                let _ = write_response(&mut stream, response, true);
+                return Ok(());
+            }
+        }
+
+        // Phase 3: Read the body now that authentication has passed.
+        let request = match read_request_body(&mut stream, partial) {
+            Ok(request) => request,
+            Err(response) => {
+                let _ = write_response(&mut stream, response, true);
+                return Ok(());
+            }
+        };
+        let route = classify_route(&request);
+        let mut response = route_request(request, config);
+        record_http_metrics(route, response.status);
+
+        // For HEAD requests, strip the body while preserving headers and status.
+        if is_head {
+            response.body = Vec::new();
+        }
+
+        requests_served += 1;
+        let close_after =
+            client_wants_close || requests_served >= KEEP_ALIVE_MAX_REQUESTS;
+
+        write_response(&mut stream, response, close_after)?;
+
+        if close_after {
+            return Ok(());
         }
     }
-
-    // Phase 3: Read the body now that authentication has passed.
-    let request = match read_request_body(&mut stream, partial) {
-        Ok(request) => request,
-        Err(response) => return write_response(&mut stream, response),
-    };
-    let route = classify_route(&request);
-    let response = route_request(request, config);
-    record_http_metrics(route, response.status);
-
-    write_response(&mut stream, response)
 }
 
 fn route_request(request: HttpRequest, config: &ServerConfig) -> HttpResponse {
@@ -1300,28 +1347,28 @@ fn route_request(request: HttpRequest, config: &ServerConfig) -> HttpResponse {
     let path = request.path().to_string();
 
     match (method.as_str(), path.as_str()) {
-        ("GET", "/health") => handle_health(config),
-        ("GET", "/health/live") => handle_health_live(),
-        ("GET", "/health/ready") => handle_health_ready(config),
-        ("GET", "/images/by-path") => handle_public_path_request(request, config),
-        ("GET", "/images/by-url") => handle_public_url_request(request, config),
+        ("GET" | "HEAD", "/health") => handle_health(config),
+        ("GET" | "HEAD", "/health/live") => handle_health_live(),
+        ("GET" | "HEAD", "/health/ready") => handle_health_ready(config),
+        ("GET" | "HEAD", "/images/by-path") => handle_public_path_request(request, config),
+        ("GET" | "HEAD", "/images/by-url") => handle_public_url_request(request, config),
         ("POST", "/images:transform") => handle_transform_request(request, config),
         ("POST", "/images") => handle_upload_request(request, config),
-        ("GET", "/metrics") => handle_metrics_request(request, config),
+        ("GET" | "HEAD", "/metrics") => handle_metrics_request(request, config),
         _ => HttpResponse::problem("404 Not Found", NOT_FOUND_BODY.as_bytes().to_vec()),
     }
 }
 
 fn classify_route(request: &HttpRequest) -> RouteMetric {
     match (request.method.as_str(), request.path()) {
-        ("GET", "/health") => RouteMetric::Health,
-        ("GET", "/health/live") => RouteMetric::HealthLive,
-        ("GET", "/health/ready") => RouteMetric::HealthReady,
-        ("GET", "/images/by-path") => RouteMetric::PublicByPath,
-        ("GET", "/images/by-url") => RouteMetric::PublicByUrl,
+        ("GET" | "HEAD", "/health") => RouteMetric::Health,
+        ("GET" | "HEAD", "/health/live") => RouteMetric::HealthLive,
+        ("GET" | "HEAD", "/health/ready") => RouteMetric::HealthReady,
+        ("GET" | "HEAD", "/images/by-path") => RouteMetric::PublicByPath,
+        ("GET" | "HEAD", "/images/by-url") => RouteMetric::PublicByUrl,
         ("POST", "/images:transform") => RouteMetric::Transform,
         ("POST", "/images") => RouteMetric::Upload,
-        ("GET", "/metrics") => RouteMetric::Metrics,
+        ("GET" | "HEAD", "/metrics") => RouteMetric::Metrics,
         _ => RouteMetric::Unknown,
     }
 }
@@ -3499,9 +3546,14 @@ fn find_header_terminator(buffer: &[u8]) -> Option<usize> {
     buffer.windows(4).position(|window| window == b"\r\n\r\n")
 }
 
-fn write_response(stream: &mut TcpStream, response: HttpResponse) -> io::Result<()> {
+fn write_response(
+    stream: &mut TcpStream,
+    response: HttpResponse,
+    close: bool,
+) -> io::Result<()> {
+    let connection_value = if close { "close" } else { "keep-alive" };
     let mut header = format!(
-        "HTTP/1.1 {}\r\nContent-Length: {}\r\nConnection: close\r\n",
+        "HTTP/1.1 {}\r\nContent-Length: {}\r\nConnection: {connection_value}\r\n",
         response.status,
         response.body.len()
     );
