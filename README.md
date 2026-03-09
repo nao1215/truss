@@ -206,6 +206,37 @@ When truss runs behind CloudFront, set `TRUSS_PUBLIC_BASE_URL` to the public Clo
 TRUSS_PUBLIC_BASE_URL=https://images.example.com truss serve
 ```
 
+## Benchmark
+
+Measured with `doc/img/logo.png` (1536 x 1024 PNG, 1.6 MB) on AMD Ryzen 7 5800U. Each operation was run 10 times; the table shows min / avg / max wall-clock time.
+
+### Conversion speed
+
+| Operation | Avg | Min | Max |
+|---|---|---|---|
+| PNG → JPEG | 60 ms | 58 ms | 73 ms |
+| PNG → WebP | 46 ms | 45 ms | 50 ms |
+| PNG → AVIF | 6 956 ms | 6 427 ms | 8 092 ms |
+| PNG → BMP | 40 ms | 38 ms | 42 ms |
+| Resize 800w + JPEG | 69 ms | 67 ms | 75 ms |
+| Resize 400w + WebP | 46 ms | 44 ms | 51 ms |
+| Resize 200w + AVIF | 190 ms | 185 ms | 205 ms |
+| Resize 500x500 cover + JPEG | 64 ms | 63 ms | 66 ms |
+| JPEG quality 50 | 54 ms | 53 ms | 61 ms |
+| Inspect metadata | 5 ms | 5 ms | 6 ms |
+
+### Output file size
+
+| Output | Size |
+|---|---|
+| PNG → JPEG | 124 KB |
+| PNG → WebP | 1.2 MB |
+| PNG → AVIF | 32 KB |
+| PNG → BMP | 6.1 MB |
+| Resize 800w → JPEG | 44 KB |
+| Resize 400w → WebP | 108 KB |
+| Resize 200w → AVIF | 4.0 KB |
+
 ## Contributing
 
 Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for details.
