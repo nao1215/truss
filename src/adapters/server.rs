@@ -131,6 +131,14 @@ pub struct ServerConfig {
     /// are served from the cache instead of re-transforming. When `None`, caching is disabled
     /// and every request performs a fresh transform.
     pub cache_root: Option<PathBuf>,
+    /// Whether Accept-based content negotiation is disabled for public GET endpoints.
+    ///
+    /// When running behind a CDN such as CloudFront, Accept negotiation combined with
+    /// `Vary: Accept` can cause cache key mismatches or mis-served responses if the CDN
+    /// cache policy does not forward the `Accept` header.  Setting this flag to `true`
+    /// disables Accept negotiation entirely: public GET requests that omit the `format`
+    /// query parameter will preserve the input format instead of negotiating via Accept.
+    pub disable_accept_negotiation: bool,
     /// Optional logging callback for diagnostic messages.
     ///
     /// When set, the server routes all diagnostic messages (cache errors, connection
@@ -149,6 +157,7 @@ impl Clone for ServerConfig {
             signed_url_secret: self.signed_url_secret.clone(),
             allow_insecure_url_sources: self.allow_insecure_url_sources,
             cache_root: self.cache_root.clone(),
+            disable_accept_negotiation: self.disable_accept_negotiation,
             log_handler: self.log_handler.clone(),
         }
     }
@@ -167,6 +176,10 @@ impl fmt::Debug for ServerConfig {
                 &self.allow_insecure_url_sources,
             )
             .field("cache_root", &self.cache_root)
+            .field(
+                "disable_accept_negotiation",
+                &self.disable_accept_negotiation,
+            )
             .field("log_handler", &self.log_handler.as_ref().map(|_| ".."))
             .finish()
     }
@@ -181,6 +194,7 @@ impl PartialEq for ServerConfig {
             && self.signed_url_secret == other.signed_url_secret
             && self.allow_insecure_url_sources == other.allow_insecure_url_sources
             && self.cache_root == other.cache_root
+            && self.disable_accept_negotiation == other.disable_accept_negotiation
     }
 }
 
@@ -210,6 +224,7 @@ impl ServerConfig {
             signed_url_secret: None,
             allow_insecure_url_sources: false,
             cache_root: None,
+            disable_accept_negotiation: false,
             log_handler: None,
         }
     }
@@ -309,6 +324,9 @@ impl ServerConfig {
     /// - `TRUSS_CACHE_ROOT`: directory for the on-disk transform cache. When set, transformed
     ///   images are cached using a sharded `ab/cd/ef/<sha256>` layout. When absent, caching is
     ///   disabled.
+    /// - `TRUSS_DISABLE_ACCEPT_NEGOTIATION`: when set to `1`, `true`, `yes`, or `on`, disables
+    ///   Accept-based content negotiation on public GET endpoints. This is recommended when running
+    ///   behind a CDN that does not forward the `Accept` header in its cache key.
     ///
     /// # Errors
     ///
@@ -368,6 +386,7 @@ impl ServerConfig {
             signed_url_secret,
             allow_insecure_url_sources: env_flag("TRUSS_ALLOW_INSECURE_URL_SOURCES"),
             cache_root,
+            disable_accept_negotiation: env_flag("TRUSS_DISABLE_ACCEPT_NEGOTIATION"),
             log_handler: None,
         })
     }
@@ -1780,6 +1799,7 @@ fn transform_source_bytes(
         response_policy,
         cache.as_ref(),
         source_hash,
+        config.disable_accept_negotiation,
     );
     TRANSFORMS_IN_FLIGHT.fetch_sub(1, Ordering::Relaxed);
     response
@@ -1792,6 +1812,7 @@ fn transform_source_bytes_inner(
     response_policy: ImageResponsePolicy,
     cache: Option<&TransformCache>,
     source_hash: &str,
+    disable_accept_negotiation: bool,
 ) -> HttpResponse {
     if options.deadline.is_none() {
         options.deadline = Some(SERVER_TRANSFORM_DEADLINE);
@@ -1800,7 +1821,7 @@ fn transform_source_bytes_inner(
         Ok(artifact) => artifact,
         Err(error) => return transform_error_response(error),
     };
-    let negotiation_used = if options.format.is_none() {
+    let negotiation_used = if options.format.is_none() && !disable_accept_negotiation {
         match negotiate_output_format(request.header("accept"), &artifact) {
             Ok(Some(format)) => {
                 options.format = Some(format);
