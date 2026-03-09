@@ -2057,9 +2057,7 @@ mod tests {
 
         assert_eq!(
             err,
-            TransformError::InvalidOptions(
-                "blur sigma must be between 0.1 and 100.0".to_string()
-            )
+            TransformError::InvalidOptions("blur sigma must be between 0.1 and 100.0".to_string())
         );
     }
 
@@ -2074,9 +2072,7 @@ mod tests {
 
         assert_eq!(
             err,
-            TransformError::InvalidOptions(
-                "blur sigma must be between 0.1 and 100.0".to_string()
-            )
+            TransformError::InvalidOptions("blur sigma must be between 0.1 and 100.0".to_string())
         );
     }
 
@@ -2144,9 +2140,7 @@ mod tests {
         let err = super::validate_watermark(&wm).expect_err("SVG watermark should be rejected");
         assert_eq!(
             err,
-            TransformError::InvalidOptions(
-                "watermark image must be a raster format".to_string()
-            )
+            TransformError::InvalidOptions("watermark image must be a raster format".to_string())
         );
     }
 

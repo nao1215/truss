@@ -2649,9 +2649,8 @@ mod tests {
 
         // After blur, the sharp edge should be smoothed: a pixel near the
         // boundary is neither pure black nor pure white.
-        let output =
-            image::load_from_memory_with_format(&result.artifact.bytes, ImageFormat::Png)
-                .expect("decode output");
+        let output = image::load_from_memory_with_format(&result.artifact.bytes, ImageFormat::Png)
+            .expect("decode output");
         let edge_pixel = output.get_pixel(4, 4);
         assert!(
             edge_pixel[0] > 0 && edge_pixel[0] < 255,
