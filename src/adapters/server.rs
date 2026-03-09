@@ -662,6 +662,13 @@ fn compute_cache_key(
     canonical.push('\n');
 
     // Build sorted canonical transform parameters.
+    //
+    // Where the core `TransformOptions::normalize()` method fills in defaults
+    // (e.g. fit → Contain, position → Center when width+height are set), we
+    // replicate the same defaults here so that the omitted-vs-explicit-default
+    // distinction does not produce different cache keys for identical transforms.
+    let has_bounded_resize = options.width.is_some() && options.height.is_some();
+
     let mut params: Vec<(&str, String)> = Vec::new();
     if options.auto_orient {
         params.push(("autoOrient", "true".to_string()));
@@ -672,7 +679,8 @@ fn compute_cache_key(
             format!("{:02x}{:02x}{:02x}{:02x}", bg.r, bg.g, bg.b, bg.a),
         ));
     }
-    if let Some(fit) = options.fit {
+    if has_bounded_resize {
+        let fit = options.fit.unwrap_or(Fit::Contain);
         params.push(("fit", fit.as_name().to_string()));
     }
     if let Some(format) = options.format {
@@ -681,7 +689,8 @@ fn compute_cache_key(
     if let Some(h) = options.height {
         params.push(("height", h.to_string()));
     }
-    if let Some(pos) = options.position {
+    if has_bounded_resize {
+        let pos = options.position.unwrap_or(Position::Center);
         params.push(("position", pos.as_name().to_string()));
     }
     if options.preserve_exif {
