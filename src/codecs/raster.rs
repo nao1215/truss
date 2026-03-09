@@ -1396,7 +1396,7 @@ mod tests {
     use super::{apply_exif_orientation, transform_raster};
     use crate::core::{
         Artifact, ArtifactMetadata, Fit, MediaType, MetadataPolicy, Position, Rotation,
-        TransformOptions, TransformRequest,
+        TransformOptions, TransformRequest, WatermarkInput,
     };
     use crate::{RawArtifact, Rgba8, TransformError, sniff_artifact};
     use image::codecs::jpeg::JpegDecoder;
@@ -2599,5 +2599,107 @@ mod tests {
 
         assert_eq!(result.artifact.metadata.width, Some(4));
         assert_eq!(result.artifact.metadata.height, Some(2));
+    }
+
+    #[test]
+    fn transform_raster_applies_blur() {
+        // Use a non-uniform image so blur actually changes pixel values.
+        let mut image = RgbaImage::from_pixel(8, 8, Rgba([255, 255, 255, 255]));
+        for y in 0..4 {
+            for x in 0..4 {
+                image.put_pixel(x, y, Rgba([0, 0, 0, 255]));
+            }
+        }
+        let mut bytes = Vec::new();
+        PngEncoder::new(&mut bytes)
+            .write_image(&image, 8, 8, ColorType::Rgba8.into())
+            .expect("encode png");
+        let artifact = Artifact::new(
+            bytes,
+            MediaType::Png,
+            ArtifactMetadata {
+                width: Some(8),
+                height: Some(8),
+                frame_count: 1,
+                duration: None,
+                has_alpha: Some(false),
+            },
+        );
+
+        let result = transform_raster(TransformRequest::new(
+            artifact,
+            TransformOptions {
+                blur: Some(2.0),
+                ..TransformOptions::default()
+            },
+        ))
+        .expect("blur transform");
+
+        assert_eq!(result.artifact.metadata.width, Some(8));
+        assert_eq!(result.artifact.metadata.height, Some(8));
+
+        // After blur, the sharp edge should be smoothed: a pixel near the
+        // boundary is neither pure black nor pure white.
+        let output =
+            image::load_from_memory_with_format(&result.artifact.bytes, ImageFormat::Png)
+                .expect("decode output");
+        let edge_pixel = output.get_pixel(4, 4);
+        assert!(
+            edge_pixel[0] > 0 && edge_pixel[0] < 255,
+            "expected blurred edge pixel to be a mid-tone, got r={}",
+            edge_pixel[0]
+        );
+    }
+
+    #[test]
+    fn transform_raster_applies_watermark() {
+        let main = png_artifact(10, 10, Rgba([255, 255, 255, 255]));
+        let wm = png_artifact(3, 3, Rgba([0, 0, 0, 128]));
+
+        let mut request = TransformRequest::new(main, TransformOptions::default());
+        request.watermark = Some(WatermarkInput {
+            image: wm,
+            position: Position::BottomRight,
+            opacity: 100,
+            margin: 0,
+        });
+
+        let result = transform_raster(request).expect("watermark transform");
+        assert_eq!(result.artifact.metadata.width, Some(10));
+        assert_eq!(result.artifact.metadata.height, Some(10));
+
+        // Verify watermark composited by checking a pixel in the watermark region.
+        let output_image =
+            image::load_from_memory_with_format(&result.artifact.bytes, ImageFormat::Png)
+                .expect("decode output");
+        // Bottom-right corner (9,9) should be affected by the black watermark.
+        let pixel = output_image.get_pixel(9, 9);
+        assert!(
+            pixel[0] < 255,
+            "expected watermark to darken the pixel, got r={}",
+            pixel[0]
+        );
+    }
+
+    #[test]
+    fn transform_raster_rejects_oversized_watermark() {
+        let main = png_artifact(4, 4, Rgba([255, 255, 255, 255]));
+        let wm = png_artifact(5, 5, Rgba([0, 0, 0, 128]));
+
+        let mut request = TransformRequest::new(main, TransformOptions::default());
+        request.watermark = Some(WatermarkInput {
+            image: wm,
+            position: Position::Center,
+            opacity: 50,
+            margin: 0,
+        });
+
+        let err = transform_raster(request).expect_err("oversized watermark should fail");
+        assert_eq!(
+            err,
+            TransformError::InvalidOptions(
+                "watermark image is too large for the output dimensions".to_string()
+            )
+        );
     }
 }

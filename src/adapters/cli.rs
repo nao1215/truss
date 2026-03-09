@@ -1963,6 +1963,10 @@ mod tests {
                 input: InputSource::Path(PathBuf::from("-foo.png")),
                 output: OutputTarget::Path(PathBuf::from("out.jpg")),
                 options: TransformOptions::default(),
+                watermark_path: None,
+                watermark_position: None,
+                watermark_opacity: None,
+                watermark_margin: None,
             })
         );
     }
@@ -2023,7 +2027,11 @@ mod tests {
                     width: Some(100),
                     fit: Some(Fit::Contain),
                     ..TransformOptions::default()
-                }
+                },
+                watermark_path: None,
+                watermark_position: None,
+                watermark_opacity: None,
+                watermark_margin: None,
             })
         );
     }
@@ -2372,7 +2380,11 @@ mod tests {
                     width: Some(100),
                     fit: Some(Fit::Contain),
                     ..TransformOptions::default()
-                }
+                },
+                watermark_path: None,
+                watermark_position: None,
+                watermark_opacity: None,
+                watermark_margin: None,
             })
         );
     }
@@ -2395,6 +2407,10 @@ mod tests {
                 input: InputSource::Url("http://example.com/image.png".to_string()),
                 output: OutputTarget::Path(PathBuf::from("output.jpg")),
                 options: TransformOptions::default(),
+                watermark_path: None,
+                watermark_position: None,
+                watermark_opacity: None,
+                watermark_margin: None,
             })
         );
     }
@@ -2809,7 +2825,11 @@ mod tests {
                 options: TransformOptions {
                     width: Some(100),
                     ..TransformOptions::default()
-                }
+                },
+                watermark_path: None,
+                watermark_position: None,
+                watermark_opacity: None,
+                watermark_margin: None,
             })
         );
     }

@@ -2045,4 +2045,119 @@ mod tests {
             TransformError::DecodeFailed("bmp file is too short".to_string())
         );
     }
+
+    #[test]
+    fn normalize_rejects_blur_sigma_below_minimum() {
+        let err = TransformOptions {
+            blur: Some(0.0),
+            ..TransformOptions::default()
+        }
+        .normalize(MediaType::Jpeg)
+        .expect_err("blur sigma 0.0 should be rejected");
+
+        assert_eq!(
+            err,
+            TransformError::InvalidOptions(
+                "blur sigma must be between 0.1 and 100.0".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn normalize_rejects_blur_sigma_above_maximum() {
+        let err = TransformOptions {
+            blur: Some(100.1),
+            ..TransformOptions::default()
+        }
+        .normalize(MediaType::Jpeg)
+        .expect_err("blur sigma 100.1 should be rejected");
+
+        assert_eq!(
+            err,
+            TransformError::InvalidOptions(
+                "blur sigma must be between 0.1 and 100.0".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn normalize_accepts_blur_sigma_at_boundaries() {
+        let opts_min = TransformOptions {
+            blur: Some(0.1),
+            ..TransformOptions::default()
+        }
+        .normalize(MediaType::Jpeg)
+        .expect("blur sigma 0.1 should be accepted");
+        assert_eq!(opts_min.blur, Some(0.1));
+
+        let opts_max = TransformOptions {
+            blur: Some(100.0),
+            ..TransformOptions::default()
+        }
+        .normalize(MediaType::Jpeg)
+        .expect("blur sigma 100.0 should be accepted");
+        assert_eq!(opts_max.blur, Some(100.0));
+    }
+
+    #[test]
+    fn validate_watermark_rejects_zero_opacity() {
+        let wm = super::WatermarkInput {
+            image: jpeg_artifact(),
+            position: Position::BottomRight,
+            opacity: 0,
+            margin: 10,
+        };
+        let err = super::validate_watermark(&wm).expect_err("opacity 0 should be rejected");
+        assert_eq!(
+            err,
+            TransformError::InvalidOptions(
+                "watermark opacity must be between 1 and 100".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn validate_watermark_rejects_opacity_above_100() {
+        let wm = super::WatermarkInput {
+            image: jpeg_artifact(),
+            position: Position::BottomRight,
+            opacity: 101,
+            margin: 10,
+        };
+        let err = super::validate_watermark(&wm).expect_err("opacity 101 should be rejected");
+        assert_eq!(
+            err,
+            TransformError::InvalidOptions(
+                "watermark opacity must be between 1 and 100".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn validate_watermark_rejects_svg_image() {
+        let wm = super::WatermarkInput {
+            image: Artifact::new(vec![1], MediaType::Svg, ArtifactMetadata::default()),
+            position: Position::BottomRight,
+            opacity: 50,
+            margin: 10,
+        };
+        let err = super::validate_watermark(&wm).expect_err("SVG watermark should be rejected");
+        assert_eq!(
+            err,
+            TransformError::InvalidOptions(
+                "watermark image must be a raster format".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn validate_watermark_accepts_valid_input() {
+        let wm = super::WatermarkInput {
+            image: jpeg_artifact(),
+            position: Position::BottomRight,
+            opacity: 50,
+            margin: 10,
+        };
+        super::validate_watermark(&wm).expect("valid watermark should be accepted");
+    }
 }
