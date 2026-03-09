@@ -9,3 +9,8 @@ doc/
 scripts/
 *.md
 LICENSE
+work/
+tests/
+web/
+.github/
+integration/api/

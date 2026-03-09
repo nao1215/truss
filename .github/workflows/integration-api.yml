@@ -29,11 +29,28 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build truss image with cache
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./Dockerfile
+          load: true
+          tags: truss:local
+          cache-from: type=gha,scope=integration-api
+          cache-to: type=gha,mode=max,scope=integration-api
+
       - name: Run API integration tests
         run: |
           cd integration/api
-          docker compose up --build --abort-on-container-exit --exit-code-from runn
+          docker compose up --no-build --abort-on-container-exit --exit-code-from runn
         timeout-minutes: 10
+        env:
+          TRUSS_IMAGE: truss:local
+
       - name: Cleanup
         if: always()
         run: |

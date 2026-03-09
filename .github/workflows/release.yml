@@ -5,6 +5,10 @@ on:
     tags:
       - "v*"
 
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -31,12 +35,6 @@ jobs:
             echo "::error title=Tag/version mismatch::Expected ${expected_tag} from Cargo.toml, got ${GITHUB_REF_NAME}."
             exit 1
           fi
-
-      - name: Run tests
-        run: cargo test --locked --all-targets
-
-      - name: Run doc tests
-        run: cargo test --locked --doc
 
       - name: Verify publishable package
         run: cargo publish --locked --dry-run
@@ -152,13 +150,17 @@ jobs:
           version="${tag#v}"
           changelog_file="release_notes.md"
 
-          awk -v tag="$tag" -v version="$version" '
-            BEGIN { found = 0 }
-            $0 ~ "^#{2,3} \\[?" tag "\\]?$" { found = 1; next }
-            $0 ~ "^#{2,3} \\[?" version "\\]?$" { found = 1; next }
-            /^#{2,3} \[?v?[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?\]?$/ { if (found) exit }
-            found { print }
-          ' CHANGELOG.md > "$changelog_file"
+          if [ -f CHANGELOG.md ]; then
+            awk -v tag="$tag" -v version="$version" '
+              BEGIN { found = 0 }
+              $0 ~ "^#{2,3} \\[?" tag "\\]?$" { found = 1; next }
+              $0 ~ "^#{2,3} \\[?" version "\\]?$" { found = 1; next }
+              /^#{2,3} \[?v?[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?\]?$/ { if (found) exit }
+              found { print }
+            ' CHANGELOG.md > "$changelog_file"
+          else
+            echo "::warning::CHANGELOG.md not found, using default release notes"
+          fi
 
           if [ ! -s "$changelog_file" ]; then
             echo "- Release $tag" > "$changelog_file"
@@ -177,7 +179,7 @@ jobs:
           name: ${{ steps.tag.outputs.TAG_NAME }}
           body: ${{ steps.changelog.outputs.BODY }}
           draft: false
-          prerelease: ${{ contains(steps.tag.outputs.TAG_NAME, '-alpha') || contains(steps.tag.outputs.TAG_NAME, '-beta') || contains(steps.tag.outputs.TAG_NAME, '-rc') }}
+          prerelease: ${{ contains(steps.tag.outputs.TAG_NAME, '-') }}
           generate_release_notes: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -8,7 +8,6 @@ on:
       - "integration/fixtures/**"
       - "Cargo.toml"
       - "Cargo.lock"
-      - "Dockerfile"
       - ".github/workflows/integration-cli.yml"
   pull_request:
     paths:
@@ -17,19 +16,39 @@ on:
       - "integration/fixtures/**"
       - "Cargo.toml"
       - "Cargo.lock"
-      - "Dockerfile"
       - ".github/workflows/integration-cli.yml"
 
 concurrency:
   group: integration-cli-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
   cli-integration:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - name: Build and run ShellSpec CLI tests
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build truss
+        run: cargo build --release --locked
+
+      - name: Install truss to PATH
+        run: sudo cp target/release/truss /usr/local/bin/truss
+
+      - name: Install ShellSpec
         run: |
-          docker build -t truss-cli-test -f integration/cli/Dockerfile .
-          docker run --rm truss-cli-test
+          curl -fsSL https://raw.githubusercontent.com/shellspec/shellspec/master/install.sh | sh -s -- --yes
+          echo "${HOME}/.local/lib/shellspec" >> "$GITHUB_PATH"
+
+      - name: Run ShellSpec CLI tests
+        env:
+          FIXTURES_DIR: ${{ github.workspace }}/integration/fixtures
+        run: shellspec --chdir integration/cli
