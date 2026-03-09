@@ -46,7 +46,7 @@ yuvutils-rs = "0.8"
 wasm-bindgen = { version = "0.2.114", optional = true }
 webp = { version = "0.3", optional = true }
 quick-xml = { version = "0.37", optional = true }
-resvg = { version = "0.45", optional = true }
+resvg = { version = "0.47", optional = true }
 
 [dev-dependencies]
 tempfile = "3"
