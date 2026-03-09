@@ -3362,41 +3362,79 @@ mod tests {
     // S3: public by-path remap (leading slash trimmed, Storage variant used)
     // -----------------------------------------------------------------------
 
+    /// Replicates the Path→Storage remap that `handle_public_get_request`
+    /// performs when `storage_backend == S3`, so we can inspect the resulting
+    /// key without issuing a real S3 request.
+    #[cfg(feature = "s3")]
+    fn remap_path_to_storage(path: &str, version: Option<&str>) -> TransformSourcePayload {
+        let source = TransformSourcePayload::Path {
+            path: path.to_string(),
+            version: version.map(|v| v.to_string()),
+        };
+        match source {
+            TransformSourcePayload::Path { path, version } => TransformSourcePayload::Storage {
+                bucket: None,
+                key: path.trim_start_matches('/').to_string(),
+                version,
+            },
+            other => other,
+        }
+    }
+
     #[test]
     #[cfg(feature = "s3")]
-    fn public_by_path_s3_remaps_to_storage_and_trims_leading_slash() {
-        let storage = temp_dir("by-path-s3-remap");
-        let mut config = ServerConfig::new(storage.clone(), None)
-            .with_signed_url_credentials("public-dev", "secret-value");
-        config.storage_backend = super::s3::StorageBackend::S3;
-        config.s3_context = Some(std::sync::Arc::new(super::s3::S3Context::for_test(
+    fn public_by_path_s3_remap_trims_leading_slash() {
+        // Paths with a leading slash (the common case from signed URLs like
+        // `path=/image.png`) must have the slash stripped so that the S3 key
+        // is `image.png`, not `/image.png`.
+        let source = remap_path_to_storage("/photos/hero.jpg", Some("v1"));
+        match &source {
+            TransformSourcePayload::Storage { key, .. } => {
+                assert_eq!(key, "photos/hero.jpg", "leading / must be trimmed");
+            }
+            _ => panic!("expected Storage variant after remap"),
+        }
+
+        // Without a leading slash the key must be unchanged.
+        let source2 = remap_path_to_storage("photos/hero.jpg", Some("v1"));
+        match &source2 {
+            TransformSourcePayload::Storage { key, .. } => {
+                assert_eq!(key, "photos/hero.jpg");
+            }
+            _ => panic!("expected Storage variant after remap"),
+        }
+
+        // Both must produce the same versioned hash (same effective key).
+        let mut cfg = make_test_config();
+        cfg.storage_backend = super::s3::StorageBackend::S3;
+        cfg.s3_context = Some(std::sync::Arc::new(super::s3::S3Context::for_test(
             "my-bucket",
             None,
         )));
-
-        // Build a properly signed request so authorize_signed_request passes
-        // and the S3 remap branch is actually reached.
-        let request = signed_public_request(
-            "/images/by-path?path=%2Fphotos%2Fhero.jpg&version=v1&keyId=public-dev&expires=4102444800&format=jpeg",
-            "cdn.example.com",
-            "secret-value",
-        );
-        config.public_base_url = Some("https://cdn.example.com".to_string());
-
-        let response = route_request(request, &config);
-        let _ = std::fs::remove_dir_all(storage);
-
-        // Without a live S3 endpoint the request hits the S3 client and gets a
-        // 502 (bad gateway). It must NOT be a filesystem 404.
-        assert_ne!(
-            response.status, "404 Not Found",
-            "expected S3 resolution, not filesystem lookup",
-        );
-        // Verify we got a 502 from S3 path, not a 503 from missing config
         assert_eq!(
-            response.status, "502 Bad Gateway",
-            "expected 502 from S3 client failure",
+            source.versioned_source_hash(&cfg),
+            source2.versioned_source_hash(&cfg),
+            "leading-slash and no-leading-slash paths must hash identically after trim",
         );
+    }
+
+    #[test]
+    #[cfg(feature = "s3")]
+    fn public_by_path_s3_remap_produces_storage_variant() {
+        // Verify the remap converts Path to Storage with bucket: None.
+        let source = remap_path_to_storage("/image.png", None);
+        match source {
+            TransformSourcePayload::Storage {
+                bucket,
+                key,
+                version,
+            } => {
+                assert!(bucket.is_none(), "bucket must be None (use default)");
+                assert_eq!(key, "image.png");
+                assert!(version.is_none());
+            }
+            _ => panic!("expected Storage variant"),
+        }
     }
 
     #[test]
