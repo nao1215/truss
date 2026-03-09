@@ -24,6 +24,7 @@ const elements = {
   qualityRange: document.querySelector("#quality-range"),
   qualityNumber: document.querySelector("#quality-number"),
   qualityNote: document.querySelector("#quality-note"),
+  lockAspect: document.querySelector("#lock-aspect"),
   background: document.querySelector("#background"),
   metadataMode: document.querySelector("#metadata-mode"),
   autoOrient: document.querySelector("#auto-orient"),
@@ -43,6 +44,8 @@ const state = {
   inputArtifact: null,
   inputObjectUrl: null,
   outputObjectUrl: null,
+  aspectRatio: null,
+  updatingAspect: false,
 };
 
 boot().catch((error) => {
@@ -98,8 +101,28 @@ function wireEvents() {
     refreshMetadataState();
   });
 
-  [elements.width, elements.height].forEach((field) => {
-    field.addEventListener("input", refreshFormatState);
+  elements.width.addEventListener("input", () => {
+    if (elements.lockAspect.checked && state.aspectRatio && !state.updatingAspect) {
+      state.updatingAspect = true;
+      const w = parseInteger(elements.width.value);
+      if (w !== null) {
+        elements.height.value = Math.round(w / state.aspectRatio);
+      }
+      state.updatingAspect = false;
+    }
+    refreshFormatState();
+  });
+
+  elements.height.addEventListener("input", () => {
+    if (elements.lockAspect.checked && state.aspectRatio && !state.updatingAspect) {
+      state.updatingAspect = true;
+      const h = parseInteger(elements.height.value);
+      if (h !== null) {
+        elements.width.value = Math.round(h * state.aspectRatio);
+      }
+      state.updatingAspect = false;
+    }
+    refreshFormatState();
   });
 
   elements.qualityRange.addEventListener("input", () => {
@@ -111,11 +134,18 @@ function wireEvents() {
     elements.qualityRange.value = bounded;
   });
 
-  elements.outputPreview.addEventListener("error", () => {
-    elements.outputPreview.hidden = true;
-    elements.outputPlaceholder.hidden = false;
-    elements.outputPlaceholder.textContent =
-      "This browser cannot preview the transformed format, but the download is ready.";
+  [elements.inputPreview, elements.outputPreview].forEach((img) => {
+    img.addEventListener("error", () => {
+      if (!img.getAttribute("src")) return;
+      img.hidden = true;
+      const placeholder = img === elements.inputPreview
+        ? elements.inputPlaceholder
+        : elements.outputPlaceholder;
+      placeholder.hidden = false;
+      placeholder.textContent = img === elements.outputPreview
+        ? "This browser cannot preview the transformed format, but the download is ready."
+        : "Could not preview this image format.";
+    });
   });
 }
 
@@ -137,6 +167,15 @@ async function loadFile(file) {
   state.inputArtifact = response.artifact;
 
   renderArtifactMeta(elements.inputMeta, response.artifact);
+
+  if (response.artifact.width && response.artifact.height) {
+    elements.width.value = response.artifact.width;
+    elements.height.value = response.artifact.height;
+    state.aspectRatio = response.artifact.width / response.artifact.height;
+  } else {
+    state.aspectRatio = null;
+  }
+
   refreshFormatState();
   refreshMetadataState();
 

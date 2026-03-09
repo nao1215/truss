@@ -25,8 +25,8 @@
 //!   operations.
 
 use crate::core::{
-    Artifact, ArtifactMetadata, MAX_OUTPUT_PIXELS, MediaType, TransformError, TransformRequest,
-    TransformResult,
+    Artifact, ArtifactMetadata, MAX_OUTPUT_PIXELS, MediaType, Rotation, TransformError,
+    TransformRequest, TransformResult,
 };
 use image::codecs::jpeg::JpegEncoder;
 use image::codecs::png::PngEncoder;
@@ -119,6 +119,22 @@ pub fn transform_svg(request: TransformRequest) -> Result<TransformResult, Trans
         crate::codecs::raster::check_deadline(start.elapsed(), limit, "rasterize")?;
     }
 
+    // Apply rotation if requested.
+    let rgba_image = if normalized.options.rotate != Rotation::Deg0 {
+        let dynamic = image::DynamicImage::ImageRgba8(rgba_image);
+        let rotated = match normalized.options.rotate {
+            Rotation::Deg90 => dynamic.rotate90(),
+            Rotation::Deg180 => dynamic.rotate180(),
+            Rotation::Deg270 => dynamic.rotate270(),
+            Rotation::Deg0 => dynamic,
+        };
+        rotated.into_rgba8()
+    } else {
+        rgba_image
+    };
+
+    let (out_width, out_height) = (rgba_image.width(), rgba_image.height());
+
     let bytes = encode_raster_output(
         &rgba_image,
         normalized.options.format,
@@ -136,8 +152,8 @@ pub fn transform_svg(request: TransformRequest) -> Result<TransformResult, Trans
             bytes,
             format,
             ArtifactMetadata {
-                width: Some(width),
-                height: Some(height),
+                width: Some(out_width),
+                height: Some(out_height),
                 frame_count: 1,
                 duration: None,
                 has_alpha: Some(format != MediaType::Jpeg),
@@ -231,6 +247,32 @@ fn sanitize_svg(bytes: &[u8]) -> Result<String, TransformError> {
                     })?;
                 }
             }
+            Ok(Event::CData(ref e)) => {
+                if skip_depth > 0 {
+                    continue;
+                }
+                if in_style {
+                    // CDATA inside <style> can contain @import/url() that loads
+                    // external resources.  Sanitize the CSS content, then emit
+                    // as a regular Text event (the CDATA wrapper is unnecessary
+                    // after sanitization and would hide the content from further
+                    // processing by downstream parsers).
+                    let text = String::from_utf8_lossy(e.as_ref());
+                    let sanitized_css = sanitize_css_urls(&text);
+                    let text_event = quick_xml::events::BytesText::new(&sanitized_css);
+                    writer
+                        .write_event(Event::Text(text_event.into_owned()))
+                        .map_err(|e| {
+                            TransformError::DecodeFailed(format!("SVG write error: {e}"))
+                        })?;
+                } else {
+                    writer
+                        .write_event(Event::CData(e.to_owned()))
+                        .map_err(|e| {
+                            TransformError::DecodeFailed(format!("SVG write error: {e}"))
+                        })?;
+                }
+            }
             Ok(event) => {
                 if skip_depth > 0 {
                     continue;
@@ -278,35 +320,33 @@ fn is_event_handler(attr_name: &str) -> bool {
     lower.starts_with("on") && lower.len() > 2 && lower.as_bytes()[2].is_ascii_alphabetic()
 }
 
-/// Returns `true` if the href value is dangerous (external, javascript:, or non-image data:).
+/// Returns `true` if the href value is dangerous.
 ///
-/// Blocks `javascript:` URIs, external URLs (`http://`, `https://`, `//`), and
-/// `data:` URLs with non-image MIME types. Allows internal `#fragment` refs and
-/// `data:image/*` URLs. All checks are case-insensitive to prevent bypass.
+/// Uses an allowlist approach: only empty values, `#fragment` references, and
+/// `data:image/*` URLs are considered safe.  Everything else — including
+/// `file:`, `ftp:`, `javascript:`, `http://`, unknown schemes, and bare
+/// paths — is blocked.
 fn is_dangerous_href(value: &str) -> bool {
-    let lower = value.trim().to_ascii_lowercase();
+    let trimmed = value.trim();
 
-    // Block javascript: URIs (XSS vector).
-    if lower.starts_with("javascript:") {
-        return true;
+    // Allow empty hrefs (harmless).
+    if trimmed.is_empty() {
+        return false;
     }
 
-    // Block vbscript: URIs (legacy IE XSS vector, defense in depth).
-    if lower.starts_with("vbscript:") {
-        return true;
+    // Allow internal fragment references (#id).
+    if trimmed.starts_with('#') {
+        return false;
     }
 
-    if let Some(rest) = lower.strip_prefix("data:") {
-        // Allow data:image/* URLs.
-        if rest.starts_with("image/") {
-            return false;
-        }
-        // Block all other data: URLs (potential script injection).
-        return true;
+    // Allow data:image/* URLs.
+    let lower = trimmed.to_ascii_lowercase();
+    if lower.starts_with("data:image/") {
+        return false;
     }
 
-    // Block external URLs (http://, https://, //) in href attributes.
-    lower.starts_with("http://") || lower.starts_with("https://") || lower.starts_with("//")
+    // Everything else is dangerous.
+    true
 }
 
 /// Sanitizes attributes on an SVG element, removing dangerous attributes.
@@ -440,19 +480,31 @@ fn extract_css_url_value(s: &str) -> (&str, &str) {
     (s, "")
 }
 
-/// Returns `true` if a CSS `url()` value points to an external or dangerous resource.
+/// Returns `true` if a CSS `url()` value points to a dangerous resource.
+///
+/// Uses an allowlist approach: only `#fragment` references and `data:image/*`
+/// URLs are considered safe.  Everything else is blocked.
 fn is_dangerous_css_url(value: &str) -> bool {
-    let lower = value.to_ascii_lowercase();
-    if lower.starts_with("http://") || lower.starts_with("https://") || value.starts_with("//") {
-        return true;
+    let trimmed = value.trim();
+
+    // Allow empty url() (harmless, CSS treats it as invalid).
+    if trimmed.is_empty() {
+        return false;
     }
-    if let Some(rest) = lower.strip_prefix("data:") {
-        // Allow data:image/* but block other data: URLs.
-        if !rest.starts_with("image/") {
-            return true;
-        }
+
+    // Allow local fragment references (#id).
+    if trimmed.starts_with('#') {
+        return false;
     }
-    false
+
+    // Allow data:image/* URLs.
+    let lower = trimmed.to_ascii_lowercase();
+    if lower.starts_with("data:image/") {
+        return false;
+    }
+
+    // Everything else is dangerous.
+    true
 }
 
 /// Determines the render size for SVG rasterization from a pre-parsed tree.
@@ -610,7 +662,7 @@ fn encode_raster_output(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::{RawArtifact, TransformOptions, sniff_artifact};
+    use crate::core::{RawArtifact, Rotation, TransformOptions, sniff_artifact};
 
     fn svg_with_script() -> Vec<u8> {
         b"<svg xmlns=\"http://www.w3.org/2000/svg\"><script>alert('xss')</script><rect width=\"10\" height=\"10\"/></svg>".to_vec()
@@ -919,6 +971,51 @@ mod tests {
     }
 
     #[test]
+    fn transform_svg_to_png_with_rotate_90() {
+        // simple_svg() is 20x10.  Rotating 90 degrees should produce 10x20.
+        let input = sniff_artifact(RawArtifact::new(simple_svg(), None)).unwrap();
+        let result = transform_svg(TransformRequest::new(
+            input,
+            TransformOptions {
+                format: Some(MediaType::Png),
+                rotate: Rotation::Deg90,
+                ..TransformOptions::default()
+            },
+        ))
+        .expect("SVG to PNG with rotate 90 should succeed");
+
+        assert_eq!(result.artifact.media_type, MediaType::Png);
+        assert_eq!(
+            result.artifact.metadata.width,
+            Some(10),
+            "width should be swapped after 90 degree rotation"
+        );
+        assert_eq!(
+            result.artifact.metadata.height,
+            Some(20),
+            "height should be swapped after 90 degree rotation"
+        );
+    }
+
+    #[test]
+    fn transform_svg_to_png_with_rotate_180() {
+        // 180 degrees should preserve dimensions.
+        let input = sniff_artifact(RawArtifact::new(simple_svg(), None)).unwrap();
+        let result = transform_svg(TransformRequest::new(
+            input,
+            TransformOptions {
+                format: Some(MediaType::Png),
+                rotate: Rotation::Deg180,
+                ..TransformOptions::default()
+            },
+        ))
+        .expect("SVG to PNG with rotate 180 should succeed");
+
+        assert_eq!(result.artifact.metadata.width, Some(20));
+        assert_eq!(result.artifact.metadata.height, Some(10));
+    }
+
+    #[test]
     fn transform_svg_rejects_preserve_exif_with_svg_output() {
         let input = sniff_artifact(RawArtifact::new(simple_svg(), None)).unwrap();
         let err = transform_svg(TransformRequest::new(
@@ -966,5 +1063,126 @@ mod tests {
             matches!(err, TransformError::DecodeFailed(_)),
             "expected DecodeFailed, got {err:?}"
         );
+    }
+
+    // --- Allowlist href/url() tests ---
+
+    #[test]
+    fn sanitize_removes_file_scheme_href() {
+        let svg =
+            b"<svg xmlns=\"http://www.w3.org/2000/svg\"><image href=\"file:///etc/passwd\"/></svg>";
+        let result = sanitize_svg(svg).unwrap();
+        assert!(
+            !result.contains("file:///etc/passwd"),
+            "file: href should be removed"
+        );
+    }
+
+    #[test]
+    fn sanitize_removes_ftp_scheme_href() {
+        let svg =
+            b"<svg xmlns=\"http://www.w3.org/2000/svg\"><image href=\"ftp://evil.com/img.png\"/></svg>";
+        let result = sanitize_svg(svg).unwrap();
+        assert!(!result.contains("ftp://"), "ftp: href should be removed");
+    }
+
+    #[test]
+    fn sanitize_keeps_fragment_href() {
+        let svg = b"<svg xmlns=\"http://www.w3.org/2000/svg\"><use href=\"#myShape\"/></svg>";
+        let result = sanitize_svg(svg).unwrap();
+        assert!(
+            result.contains("#myShape"),
+            "fragment href should be preserved"
+        );
+    }
+
+    #[test]
+    fn sanitize_removes_cdata_import_in_style() {
+        let svg = b"<svg xmlns=\"http://www.w3.org/2000/svg\"><style><![CDATA[@import url(https://evil.example/a.css); rect { fill: red }]]></style></svg>";
+        let result = sanitize_svg(svg).unwrap();
+        assert!(
+            !result.contains("@import"),
+            "@import inside CDATA should be removed"
+        );
+        assert!(
+            !result.contains("evil.example"),
+            "external URL inside CDATA should be removed"
+        );
+        assert!(
+            result.contains("fill: red"),
+            "legitimate CSS should be preserved"
+        );
+    }
+
+    #[test]
+    fn sanitize_removes_cdata_external_url_in_style() {
+        let svg = b"<svg xmlns=\"http://www.w3.org/2000/svg\"><style><![CDATA[rect { background: url(https://evil.example/bg.png) }]]></style></svg>";
+        let result = sanitize_svg(svg).unwrap();
+        assert!(
+            !result.contains("evil.example"),
+            "external url() inside CDATA should be removed"
+        );
+    }
+
+    #[test]
+    fn sanitize_removes_file_scheme_in_css_url() {
+        let svg = b"<svg xmlns=\"http://www.w3.org/2000/svg\"><style>rect { fill: url(file:///etc/passwd) }</style></svg>";
+        let result = sanitize_svg(svg).unwrap();
+        assert!(
+            !result.contains("file:///etc/passwd"),
+            "file: url() in CSS should be removed"
+        );
+    }
+
+    #[test]
+    fn sanitize_keeps_local_css_url_fragment() {
+        let svg = b"<svg xmlns=\"http://www.w3.org/2000/svg\"><rect style=\"fill: url(#gradient1)\"/></svg>";
+        let result = sanitize_svg(svg).unwrap();
+        assert!(
+            result.contains("#gradient1"),
+            "local fragment url() should be preserved"
+        );
+    }
+
+    #[test]
+    fn is_dangerous_href_blocks_file_scheme() {
+        assert!(is_dangerous_href("file:///etc/passwd"));
+    }
+
+    #[test]
+    fn is_dangerous_href_blocks_ftp_scheme() {
+        assert!(is_dangerous_href("ftp://evil.com/file"));
+    }
+
+    #[test]
+    fn is_dangerous_href_allows_fragment() {
+        assert!(!is_dangerous_href("#myId"));
+    }
+
+    #[test]
+    fn is_dangerous_href_allows_data_image() {
+        assert!(!is_dangerous_href("data:image/png;base64,abc"));
+    }
+
+    #[test]
+    fn is_dangerous_href_blocks_data_text() {
+        assert!(is_dangerous_href(
+            "data:text/html,<script>alert(1)</script>"
+        ));
+    }
+
+    #[test]
+    fn is_dangerous_css_url_blocks_file_scheme() {
+        assert!(is_dangerous_css_url("file:///etc/passwd"));
+    }
+
+    #[test]
+    fn is_dangerous_css_url_allows_fragment() {
+        assert!(!is_dangerous_css_url("#gradientId"));
+    }
+
+    #[test]
+    fn is_dangerous_css_url_allows_data_image() {
+        assert!(!is_dangerous_css_url("data:image/png;base64,abc"));
     }
 }
