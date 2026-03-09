@@ -2850,21 +2850,28 @@ mod tests {
         let file_path = dir.join("image");
         fs::write(&file_path, png_bytes()).expect("write extensionless fixture");
 
+        // Use bare filename and set cwd to the temp dir so preprocess_args
+        // sees a relative name without path separators.
+        let original_dir = std::env::current_dir().expect("get cwd");
+        std::env::set_current_dir(&dir).expect("set cwd to temp dir");
+
         let args = vec![
             "truss".to_string(),
-            file_path.to_string_lossy().to_string(),
+            "image".to_string(),
             "-o".to_string(),
             "out.jpg".to_string(),
         ];
         let result = preprocess_args(args);
+
+        std::env::set_current_dir(&original_dir).expect("restore cwd");
+
         assert_eq!(
             result[1], "convert",
             "extensionless file should trigger implicit convert"
         );
         assert_eq!(
-            result[2],
-            file_path.to_string_lossy().to_string(),
-            "original file path should follow convert"
+            result[2], "image",
+            "bare file name should follow convert"
         );
 
         fs::remove_dir_all(&dir).ok();
