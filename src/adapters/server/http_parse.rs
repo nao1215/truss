@@ -136,7 +136,18 @@ pub(super) fn read_request_body<R>(
 where
     R: Read,
 {
-    let mut body = partial.overflow;
+    let mut body = if partial.overflow.len() > partial.content_length {
+        let mut overflow = partial.overflow;
+        let tail = overflow.split_off(partial.content_length);
+        // tail belongs to the next request on the kept-alive connection;
+        // currently we do not pipeline, so we discard it here, but at least
+        // we no longer lose the body bytes.
+        let _ = tail;
+        overflow
+    } else {
+        partial.overflow
+    };
+
     let mut chunk = [0_u8; 4096];
     while body.len() < partial.content_length {
         let read = stream.read(&mut chunk).map_err(|error| {
@@ -147,7 +158,10 @@ where
         }
         body.extend_from_slice(&chunk[..read]);
     }
-    body.truncate(partial.content_length);
+
+    if body.len() > partial.content_length {
+        body.truncate(partial.content_length);
+    }
 
     Ok(HttpRequest {
         method: partial.method,
