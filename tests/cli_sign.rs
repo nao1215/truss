@@ -48,7 +48,7 @@ fn send_get_request(url: &str) -> Vec<u8> {
         None => url.path().to_string(),
     };
     let mut stream = TcpStream::connect(host.as_str()).expect("connect to test server");
-    let request = format!("GET {target} HTTP/1.1\r\nHost: {host}\r\n\r\n");
+    let request = format!("GET {target} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
     stream.write_all(request.as_bytes()).expect("write request");
     stream.flush().expect("flush request");
 
