@@ -629,7 +629,7 @@ components:
       description: |
         Apply Gaussian blur with the given sigma value.
         Valid range is 0.1 to 100.0. Higher values produce a stronger blur.
-        Not supported when the output format is SVG.
+        Not supported for SVG inputs.
       schema:
         type: number
         format: float
