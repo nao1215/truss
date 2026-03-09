@@ -1,5 +1,28 @@
 # Changelog
 
+## v0.3.0
+
+### Added
+
+- Blur filter support (`blur` query parameter) for image transforms.
+- Watermark overlay support for image transforms.
+- Sample image and template for documentation.
+
+### Changed
+
+- Refactored README for clarity.
+- Optimized GitHub Actions workflows for faster CI.
+
+### Fixed
+
+- Blur cache key precision issue.
+- SVG blur/watermark rejection handling.
+- Watermark pixel limit validation.
+- Relaxed watermark size check to match position-based margin usage.
+- Pass watermark to `transform_svg` for proper SVG input rejection.
+- Updated help text and OpenAPI spec for blur/watermark options.
+- Update OpenAPI spec version from 0.2.0 to 0.3.0.
+
 ## v0.2.0
 
 ### Added

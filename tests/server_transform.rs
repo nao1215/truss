@@ -101,7 +101,7 @@ fn send_transform_request(addr: SocketAddr, body: &str, authorization: Option<&s
         .map(|value| format!("Authorization: Bearer {value}\r\n"))
         .unwrap_or_default();
     let request = format!(
-        "POST /images:transform HTTP/1.1\r\nHost: localhost\r\n{authorization_header}Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+        "POST /images:transform HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n{authorization_header}Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
         body.len()
     );
     stream.write_all(request.as_bytes()).expect("write request");
@@ -123,7 +123,7 @@ fn send_upload_request(
         .map(|value| format!("Authorization: Bearer {value}\r\n"))
         .unwrap_or_default();
     let request = format!(
-        "POST /images HTTP/1.1\r\nHost: localhost\r\n{authorization_header}Content-Type: multipart/form-data; boundary={boundary}\r\nContent-Length: {}\r\n\r\n",
+        "POST /images HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n{authorization_header}Content-Type: multipart/form-data; boundary={boundary}\r\nContent-Length: {}\r\n\r\n",
         body.len()
     );
     stream.write_all(request.as_bytes()).expect("write request");
@@ -140,7 +140,9 @@ fn send_metrics_request(addr: SocketAddr, authorization: Option<&str>) -> Vec<u8
     let authorization_header = authorization
         .map(|value| format!("Authorization: Bearer {value}\r\n"))
         .unwrap_or_default();
-    let request = format!("GET /metrics HTTP/1.1\r\nHost: localhost\r\n{authorization_header}\r\n");
+    let request = format!(
+        "GET /metrics HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n{authorization_header}\r\n"
+    );
     stream.write_all(request.as_bytes()).expect("write request");
     stream.flush().expect("flush request");
 
@@ -161,6 +163,7 @@ fn send_public_get_request_with_headers(
 ) -> Vec<u8> {
     let mut stream = TcpStream::connect(addr).expect("connect to test server");
     let mut request = format!("GET {target} HTTP/1.1\r\nHost: {host}\r\n");
+    request.push_str("Connection: close\r\n");
     for (name, value) in headers {
         request.push_str(&format!("{name}: {value}\r\n"));
     }

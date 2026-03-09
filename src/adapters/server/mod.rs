@@ -2613,7 +2613,7 @@ mod tests {
 
         let mut stream = TcpStream::connect(addr).expect("connect to test server");
         stream
-            .write_all(b"GET /health/live HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .write_all(b"GET /health/live HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
             .expect("write request");
 
         let mut response = String::new();
