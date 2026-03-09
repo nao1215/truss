@@ -25,8 +25,8 @@
 //!   operations.
 
 use crate::core::{
-    Artifact, ArtifactMetadata, MAX_OUTPUT_PIXELS, MediaType, TransformError, TransformRequest,
-    TransformResult,
+    Artifact, ArtifactMetadata, MAX_OUTPUT_PIXELS, MediaType, Rotation, TransformError,
+    TransformRequest, TransformResult,
 };
 use image::codecs::jpeg::JpegEncoder;
 use image::codecs::png::PngEncoder;
@@ -119,6 +119,22 @@ pub fn transform_svg(request: TransformRequest) -> Result<TransformResult, Trans
         crate::codecs::raster::check_deadline(start.elapsed(), limit, "rasterize")?;
     }
 
+    // Apply rotation if requested.
+    let rgba_image = if normalized.options.rotate != Rotation::Deg0 {
+        let dynamic = image::DynamicImage::ImageRgba8(rgba_image);
+        let rotated = match normalized.options.rotate {
+            Rotation::Deg90 => dynamic.rotate90(),
+            Rotation::Deg180 => dynamic.rotate180(),
+            Rotation::Deg270 => dynamic.rotate270(),
+            Rotation::Deg0 => dynamic,
+        };
+        rotated.into_rgba8()
+    } else {
+        rgba_image
+    };
+
+    let (out_width, out_height) = (rgba_image.width(), rgba_image.height());
+
     let bytes = encode_raster_output(
         &rgba_image,
         normalized.options.format,
@@ -136,8 +152,8 @@ pub fn transform_svg(request: TransformRequest) -> Result<TransformResult, Trans
             bytes,
             format,
             ArtifactMetadata {
-                width: Some(width),
-                height: Some(height),
+                width: Some(out_width),
+                height: Some(out_height),
                 frame_count: 1,
                 duration: None,
                 has_alpha: Some(format != MediaType::Jpeg),
@@ -646,7 +662,7 @@ fn encode_raster_output(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::{RawArtifact, TransformOptions, sniff_artifact};
+    use crate::core::{RawArtifact, Rotation, TransformOptions, sniff_artifact};
 
     fn svg_with_script() -> Vec<u8> {
         b"<svg xmlns=\"http://www.w3.org/2000/svg\"><script>alert('xss')</script><rect width=\"10\" height=\"10\"/></svg>".to_vec()
@@ -949,6 +965,51 @@ mod tests {
             },
         ))
         .expect("SVG to PNG with intrinsic size should succeed");
+
+        assert_eq!(result.artifact.metadata.width, Some(20));
+        assert_eq!(result.artifact.metadata.height, Some(10));
+    }
+
+    #[test]
+    fn transform_svg_to_png_with_rotate_90() {
+        // simple_svg() is 20x10.  Rotating 90 degrees should produce 10x20.
+        let input = sniff_artifact(RawArtifact::new(simple_svg(), None)).unwrap();
+        let result = transform_svg(TransformRequest::new(
+            input,
+            TransformOptions {
+                format: Some(MediaType::Png),
+                rotate: Rotation::Deg90,
+                ..TransformOptions::default()
+            },
+        ))
+        .expect("SVG to PNG with rotate 90 should succeed");
+
+        assert_eq!(result.artifact.media_type, MediaType::Png);
+        assert_eq!(
+            result.artifact.metadata.width,
+            Some(10),
+            "width should be swapped after 90 degree rotation"
+        );
+        assert_eq!(
+            result.artifact.metadata.height,
+            Some(20),
+            "height should be swapped after 90 degree rotation"
+        );
+    }
+
+    #[test]
+    fn transform_svg_to_png_with_rotate_180() {
+        // 180 degrees should preserve dimensions.
+        let input = sniff_artifact(RawArtifact::new(simple_svg(), None)).unwrap();
+        let result = transform_svg(TransformRequest::new(
+            input,
+            TransformOptions {
+                format: Some(MediaType::Png),
+                rotate: Rotation::Deg180,
+                ..TransformOptions::default()
+            },
+        ))
+        .expect("SVG to PNG with rotate 180 should succeed");
 
         assert_eq!(result.artifact.metadata.width, Some(20));
         assert_eq!(result.artifact.metadata.height, Some(10));
