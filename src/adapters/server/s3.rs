@@ -13,6 +13,11 @@ use super::response::{
 pub struct S3Context {
     pub client: aws_sdk_s3::Client,
     pub default_bucket: String,
+    /// The endpoint URL (e.g. `AWS_ENDPOINT_URL` for MinIO) used to construct
+    /// the client, or `None` when the default AWS endpoint is used. Stored for
+    /// cache-key isolation so that two S3-compatible services sharing a bucket
+    /// name cannot poison each other's cached artifacts.
+    pub endpoint_url: Option<String>,
     runtime: tokio::runtime::Runtime,
 }
 
@@ -20,6 +25,7 @@ impl std::fmt::Debug for S3Context {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("S3Context")
             .field("default_bucket", &self.default_bucket)
+            .field("endpoint_url", &self.endpoint_url)
             .field("client", &"..")
             .finish()
     }
@@ -59,10 +65,12 @@ pub fn build_s3_context(default_bucket: String) -> Result<S3Context, std::io::Er
     let sdk_config = runtime.block_on(aws_config::load_defaults(
         aws_config::BehaviorVersion::latest(),
     ));
+    let endpoint_url = sdk_config.endpoint_url().map(|s| s.to_string());
     let client = aws_sdk_s3::Client::new(&sdk_config);
     Ok(S3Context {
         client,
         default_bucket,
+        endpoint_url,
         runtime,
     })
 }

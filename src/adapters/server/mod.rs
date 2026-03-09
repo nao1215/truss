@@ -242,8 +242,14 @@ fn cfg_s3_eq(_this: &ServerConfig, _other: &ServerConfig) -> bool {
     #[cfg(feature = "s3")]
     {
         _this.storage_backend == _other.storage_backend
-            && _this.s3_context.as_ref().map(|c| &c.default_bucket)
-                == _other.s3_context.as_ref().map(|c| &c.default_bucket)
+            && _this
+                .s3_context
+                .as_ref()
+                .map(|c| (&c.default_bucket, &c.endpoint_url))
+                == _other
+                    .s3_context
+                    .as_ref()
+                    .map(|c| (&c.default_bucket, &c.endpoint_url))
     }
     #[cfg(not(feature = "s3"))]
     {
@@ -807,6 +813,12 @@ impl TransformSourcePayload {
                 s3::StorageBackend::S3 => "s3-backend",
                 s3::StorageBackend::Filesystem => "fs-backend",
             });
+            if let Some(ref ctx) = config.s3_context
+                && let Some(ref endpoint) = ctx.endpoint_url
+            {
+                id.push('\n');
+                id.push_str(endpoint);
+            }
         }
         Some(hex::encode(Sha256::digest(id.as_bytes())))
     }
