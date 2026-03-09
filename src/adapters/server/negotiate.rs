@@ -274,21 +274,18 @@ pub(super) fn if_none_match_matches(value: Option<&str>, etag: &str) -> bool {
         return false;
     };
 
-    value
-        .split(',')
-        .map(str::trim)
-        .any(|candidate| {
-            if candidate == "*" {
-                return true;
-            }
-            let normalized = candidate
-                .strip_prefix("W/")
-                .unwrap_or(candidate)
-                .trim()
-                .trim_matches('"');
-            let expected = etag.trim_matches('"');
-            normalized == expected
-        })
+    value.split(',').map(str::trim).any(|candidate| {
+        if candidate == "*" {
+            return true;
+        }
+        let normalized = candidate
+            .strip_prefix("W/")
+            .unwrap_or(candidate)
+            .trim()
+            .trim_matches('"');
+        let expected = etag.trim_matches('"');
+        normalized == expected
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

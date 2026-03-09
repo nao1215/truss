@@ -34,9 +34,7 @@ pub(super) fn authorize_request_headers(
             let mut parts = value.splitn(2, |c: char| c.is_whitespace());
             let scheme = parts.next()?;
             let token = parts.next()?;
-            scheme
-                .eq_ignore_ascii_case("Bearer")
-                .then(|| token.trim())
+            scheme.eq_ignore_ascii_case("Bearer").then(|| token.trim())
         });
 
     match provided {
