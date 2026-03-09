@@ -1889,7 +1889,7 @@ fn negotiate_output_format(
     let mut best_candidate = None;
     let mut best_q = 0_u16;
 
-    for candidate in preferred_output_media_types(artifact).iter().copied() {
+    for candidate in preferred_output_media_types(artifact) {
         let (candidate_q, _) = match_accept_preferences(candidate, &preferences);
         if candidate_q > best_q {
             best_q = candidate_q;
@@ -1961,6 +1961,7 @@ fn parse_accept_range(value: &str) -> Option<(AcceptRange, u8)> {
         "image/webp" => Some((AcceptRange::Exact("image/webp"), 2)),
         "image/avif" => Some((AcceptRange::Exact("image/avif"), 2)),
         "image/bmp" => Some((AcceptRange::Exact("image/bmp"), 2)),
+        "image/svg+xml" => Some((AcceptRange::Exact("image/svg+xml"), 2)),
         _ => None,
     }
 }
@@ -1974,8 +1975,14 @@ fn parse_accept_qvalue(value: &str) -> Option<u16> {
     Some((parsed * 1000.0).round() as u16)
 }
 
-fn preferred_output_media_types(artifact: &Artifact) -> &'static [MediaType] {
-    if artifact.metadata.has_alpha == Some(true) {
+/// Returns the list of candidate output media types for Accept negotiation,
+/// ordered by server preference.
+///
+/// The input format is always included so that "preserve the input format"
+/// is a valid negotiation outcome (matching the OpenAPI spec). SVG is included
+/// when the input is SVG.
+fn preferred_output_media_types(artifact: &Artifact) -> Vec<MediaType> {
+    let base: &[MediaType] = if artifact.metadata.has_alpha == Some(true) {
         &[
             MediaType::Avif,
             MediaType::Webp,
@@ -1989,6 +1996,17 @@ fn preferred_output_media_types(artifact: &Artifact) -> &'static [MediaType] {
             MediaType::Jpeg,
             MediaType::Png,
         ]
+    };
+
+    let input = artifact.media_type;
+    if base.contains(&input) {
+        base.to_vec()
+    } else {
+        // Input format (e.g. SVG, BMP) is not in the base list — prepend it
+        // so the client can request the original format via Accept negotiation.
+        let mut candidates = vec![input];
+        candidates.extend_from_slice(base);
+        candidates
     }
 }
 
