@@ -730,8 +730,16 @@ fn apply_watermark(
     let (wm_w, wm_h) = wm_rgba.dimensions();
     let margin = watermark.margin;
 
-    // If the watermark is larger than the main image (after margin), skip it.
-    if wm_w + margin > main_w || wm_h + margin > main_h {
+    // Determine which axes actually use the margin based on position.
+    let (margin_x, margin_y) = match watermark.position {
+        Position::Center => (0, 0),
+        Position::Top | Position::Bottom => (0, margin),
+        Position::Left | Position::Right => (margin, 0),
+        _ => (margin, margin), // corners: TopLeft, TopRight, BottomLeft, BottomRight
+    };
+
+    // If the watermark (plus applicable margin) exceeds the main image, reject it.
+    if wm_w + margin_x > main_w || wm_h + margin_y > main_h {
         return Err(TransformError::InvalidOptions(
             "watermark image is too large for the output dimensions".to_string(),
         ));
@@ -2702,6 +2710,45 @@ mod tests {
                 "watermark image is too large for the output dimensions".to_string()
             )
         );
+    }
+
+    #[test]
+    fn watermark_full_width_at_top_with_margin_succeeds() {
+        // A watermark as wide as the main image should be accepted at Top
+        // because Top only applies margin on the Y axis.
+        let main = png_artifact(10, 10, Rgba([255, 255, 255, 255]));
+        let wm = png_artifact(10, 3, Rgba([0, 0, 0, 128]));
+
+        let mut request = TransformRequest::new(main, TransformOptions::default());
+        request.watermark = Some(WatermarkInput {
+            image: wm,
+            position: Position::Top,
+            opacity: 50,
+            margin: 2,
+        });
+
+        let result = transform_raster(request).expect("full-width watermark at Top should succeed");
+        assert_eq!(result.artifact.metadata.width, Some(10));
+    }
+
+    #[test]
+    fn watermark_full_height_at_left_with_margin_succeeds() {
+        // A watermark as tall as the main image should be accepted at Left
+        // because Left only applies margin on the X axis.
+        let main = png_artifact(10, 10, Rgba([255, 255, 255, 255]));
+        let wm = png_artifact(3, 10, Rgba([0, 0, 0, 128]));
+
+        let mut request = TransformRequest::new(main, TransformOptions::default());
+        request.watermark = Some(WatermarkInput {
+            image: wm,
+            position: Position::Left,
+            opacity: 50,
+            margin: 2,
+        });
+
+        let result =
+            transform_raster(request).expect("full-height watermark at Left should succeed");
+        assert_eq!(result.artifact.metadata.height, Some(10));
     }
 
     #[test]
