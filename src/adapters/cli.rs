@@ -121,6 +121,13 @@ OPTIONS:
       --strip-metadata     Remove all metadata (default)
       --keep-metadata      Preserve EXIF, ICC, and other supported metadata
       --preserve-exif      Preserve EXIF only (strip ICC and others)
+      --blur <SIGMA>       Gaussian blur sigma (0.1-100.0)
+      --watermark <FILE>   Watermark image to composite onto the output
+      --watermark-position <POS>  Watermark placement (default: bottom-right)
+                           center, top, right, bottom, left,
+                           top-left, top-right, bottom-left, bottom-right
+      --watermark-opacity <1-100> Watermark opacity percentage (default: 50)
+      --watermark-margin <PX>     Margin from edge in pixels (default: 10)
 
 EXAMPLES:
   truss photo.png -o photo.jpg --width 800
@@ -204,7 +211,7 @@ OPTIONAL:
       --version <VALUE>    Cache-busting version tag
       --width, --height, --fit, --position, --format, --quality,
       --background, --rotate, --auto-orient, --no-auto-orient,
-      --strip-metadata, --keep-metadata, --preserve-exif
+      --strip-metadata, --keep-metadata, --preserve-exif, --blur
 
 EXAMPLES:
   truss sign --base-url https://cdn.example.com \\
@@ -1374,7 +1381,9 @@ where
     };
 
     let result = if input.media_type == MediaType::Svg {
-        transform_svg(TransformRequest::new(input, options))
+        let mut request = TransformRequest::new(input, options);
+        request.watermark = watermark;
+        transform_svg(request)
     } else {
         let mut request = TransformRequest::new(input, options);
         request.watermark = watermark;
