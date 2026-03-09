@@ -3184,67 +3184,113 @@ mod tests {
 
     // -----------------------------------------------------------------------
     // S3: from_env branches
+    //
+    // These tests mutate process-global environment variables. A mutex
+    // serializes them so that parallel test threads cannot interfere, and
+    // each test saves/restores the variables it touches.
     // -----------------------------------------------------------------------
+
+    #[cfg(feature = "s3")]
+    static FROM_ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[cfg(feature = "s3")]
+    const S3_ENV_VARS: &[&str] = &[
+        "TRUSS_STORAGE_ROOT",
+        "TRUSS_STORAGE_BACKEND",
+        "TRUSS_S3_BUCKET",
+    ];
+
+    /// Save current values, run `f`, then restore originals regardless of
+    /// panics. Holds `FROM_ENV_MUTEX` for the duration.
+    #[cfg(feature = "s3")]
+    fn with_s3_env<F: FnOnce()>(vars: &[(&str, Option<&str>)], f: F) {
+        let _guard = FROM_ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let saved: Vec<(&str, Option<String>)> = S3_ENV_VARS
+            .iter()
+            .map(|k| (*k, std::env::var(k).ok()))
+            .collect();
+        // Apply requested overrides
+        for &(key, value) in vars {
+            match value {
+                Some(v) => unsafe { std::env::set_var(key, v) },
+                None => unsafe { std::env::remove_var(key) },
+            }
+        }
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+        // Restore originals
+        for (key, original) in saved {
+            match original {
+                Some(v) => unsafe { std::env::set_var(key, v) },
+                None => unsafe { std::env::remove_var(key) },
+            }
+        }
+        if let Err(payload) = result {
+            std::panic::resume_unwind(payload);
+        }
+    }
 
     #[test]
     #[cfg(feature = "s3")]
     fn from_env_rejects_invalid_storage_backend() {
         let storage = temp_dir("env-bad-backend");
-        unsafe {
-            std::env::set_var("TRUSS_STORAGE_ROOT", storage.to_str().unwrap());
-            std::env::set_var("TRUSS_STORAGE_BACKEND", "gcs");
-        }
-        let result = ServerConfig::from_env();
-        unsafe {
-            std::env::remove_var("TRUSS_STORAGE_BACKEND");
-            std::env::remove_var("TRUSS_STORAGE_ROOT");
-        }
+        let storage_str = storage.to_str().unwrap().to_string();
+        with_s3_env(
+            &[
+                ("TRUSS_STORAGE_ROOT", Some(&storage_str)),
+                ("TRUSS_STORAGE_BACKEND", Some("gcs")),
+                ("TRUSS_S3_BUCKET", None),
+            ],
+            || {
+                let result = ServerConfig::from_env();
+                assert!(result.is_err());
+                let msg = result.unwrap_err().to_string();
+                assert!(msg.contains("unknown storage backend"), "got: {msg}");
+            },
+        );
         let _ = std::fs::remove_dir_all(storage);
-        assert!(result.is_err());
-        let msg = result.unwrap_err().to_string();
-        assert!(msg.contains("unknown storage backend"), "got: {msg}");
     }
 
     #[test]
     #[cfg(feature = "s3")]
     fn from_env_rejects_s3_without_bucket() {
         let storage = temp_dir("env-no-bucket");
-        unsafe {
-            std::env::set_var("TRUSS_STORAGE_ROOT", storage.to_str().unwrap());
-            std::env::set_var("TRUSS_STORAGE_BACKEND", "s3");
-            std::env::remove_var("TRUSS_S3_BUCKET");
-        }
-        let result = ServerConfig::from_env();
-        unsafe {
-            std::env::remove_var("TRUSS_STORAGE_BACKEND");
-            std::env::remove_var("TRUSS_STORAGE_ROOT");
-        }
+        let storage_str = storage.to_str().unwrap().to_string();
+        with_s3_env(
+            &[
+                ("TRUSS_STORAGE_ROOT", Some(&storage_str)),
+                ("TRUSS_STORAGE_BACKEND", Some("s3")),
+                ("TRUSS_S3_BUCKET", None),
+            ],
+            || {
+                let result = ServerConfig::from_env();
+                assert!(result.is_err());
+                let msg = result.unwrap_err().to_string();
+                assert!(msg.contains("TRUSS_S3_BUCKET"), "got: {msg}");
+            },
+        );
         let _ = std::fs::remove_dir_all(storage);
-        assert!(result.is_err());
-        let msg = result.unwrap_err().to_string();
-        assert!(msg.contains("TRUSS_S3_BUCKET"), "got: {msg}");
     }
 
     #[test]
     #[cfg(feature = "s3")]
     fn from_env_accepts_s3_with_bucket() {
         let storage = temp_dir("env-s3-ok");
-        unsafe {
-            std::env::set_var("TRUSS_STORAGE_ROOT", storage.to_str().unwrap());
-            std::env::set_var("TRUSS_STORAGE_BACKEND", "s3");
-            std::env::set_var("TRUSS_S3_BUCKET", "my-images");
-        }
-        let result = ServerConfig::from_env();
-        unsafe {
-            std::env::remove_var("TRUSS_STORAGE_BACKEND");
-            std::env::remove_var("TRUSS_S3_BUCKET");
-            std::env::remove_var("TRUSS_STORAGE_ROOT");
-        }
+        let storage_str = storage.to_str().unwrap().to_string();
+        with_s3_env(
+            &[
+                ("TRUSS_STORAGE_ROOT", Some(&storage_str)),
+                ("TRUSS_STORAGE_BACKEND", Some("s3")),
+                ("TRUSS_S3_BUCKET", Some("my-images")),
+            ],
+            || {
+                let cfg =
+                    ServerConfig::from_env().expect("from_env should succeed with s3 + bucket");
+                assert_eq!(cfg.storage_backend, super::s3::StorageBackend::S3);
+                let ctx = cfg.s3_context.expect("s3_context should be Some");
+                assert_eq!(ctx.default_bucket, "my-images");
+            },
+        );
         let _ = std::fs::remove_dir_all(storage);
-        let cfg = result.expect("from_env should succeed with s3 + bucket");
-        assert_eq!(cfg.storage_backend, super::s3::StorageBackend::S3);
-        let ctx = cfg.s3_context.expect("s3_context should be Some");
-        assert_eq!(ctx.default_bucket, "my-images");
     }
 
     // -----------------------------------------------------------------------
@@ -3320,32 +3366,36 @@ mod tests {
     #[cfg(feature = "s3")]
     fn public_by_path_s3_remaps_to_storage_and_trims_leading_slash() {
         let storage = temp_dir("by-path-s3-remap");
-        let mut config = ServerConfig::new(storage.clone(), None);
+        let mut config = ServerConfig::new(storage.clone(), None)
+            .with_signed_url_credentials("public-dev", "secret-value");
         config.storage_backend = super::s3::StorageBackend::S3;
         config.s3_context = Some(std::sync::Arc::new(super::s3::S3Context::for_test(
             "my-bucket",
             None,
         )));
 
-        // Craft a minimal GET /images/by-path?path=/photos/hero.jpg&version=v1 request.
-        // We expect a 502 (S3 unreachable) rather than a filesystem error, proving the
-        // Storage branch is taken.
-        let request = super::http_parse::HttpRequest {
-            method: "GET".to_string(),
-            target: "/images/by-path?path=/photos/hero.jpg&version=v1".to_string(),
-            version: "HTTP/1.1".to_string(),
-            headers: vec![("Accept".to_string(), "image/jpeg".to_string())],
-            body: Vec::new(),
-        };
+        // Build a properly signed request so authorize_signed_request passes
+        // and the S3 remap branch is actually reached.
+        let request = signed_public_request(
+            "/images/by-path?path=%2Fphotos%2Fhero.jpg&version=v1&keyId=public-dev&expires=4102444800&format=jpeg",
+            "cdn.example.com",
+            "secret-value",
+        );
+        config.public_base_url = Some("https://cdn.example.com".to_string());
+
         let response = route_request(request, &config);
         let _ = std::fs::remove_dir_all(storage);
 
-        // Without a live S3 endpoint the request must fail with "S3 storage backend
-        // is not configured" (s3_context is set but the client points nowhere real)
-        // or 502 from the SDK. Either way it must NOT be a filesystem 404.
+        // Without a live S3 endpoint the request hits the S3 client and gets a
+        // 502 (bad gateway). It must NOT be a filesystem 404.
         assert_ne!(
             response.status, "404 Not Found",
             "expected S3 resolution, not filesystem lookup",
+        );
+        // Verify we got a 502 from S3 path, not a 503 from missing config
+        assert_eq!(
+            response.status, "502 Bad Gateway",
+            "expected 502 from S3 client failure",
         );
     }
 
