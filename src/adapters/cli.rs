@@ -1115,6 +1115,35 @@ fn generate_completions<W: Write>(
     stdout: &mut W,
 ) -> Result<(), CliError> {
     let mut cmd = Cli::command();
+
+    // Add implicit-convert positional argument and common flags so that shell
+    // completions expose the shorthand forms documented in the help text
+    // (e.g. `truss photo.png -o out.jpg`, `truss --bind 0.0.0.0:8080`).
+    cmd = cmd
+        .arg(
+            clap::Arg::new("INPUT")
+                .help("Input image file (implicit convert)")
+                .value_hint(clap::ValueHint::FilePath),
+        )
+        .arg(
+            clap::Arg::new("output")
+                .short('o')
+                .long("output")
+                .help("Output file path (implicit convert)")
+                .value_hint(clap::ValueHint::FilePath),
+        )
+        .arg(
+            clap::Arg::new("bind")
+                .long("bind")
+                .help("Listen address (implicit serve)"),
+        )
+        .arg(
+            clap::Arg::new("storage-root")
+                .long("storage-root")
+                .help("Root directory for path-based sources (implicit serve)")
+                .value_hint(clap::ValueHint::DirPath),
+        );
+
     clap_complete::generate(shell, &mut cmd, "truss", stdout);
     Ok(())
 }
