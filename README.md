@@ -198,6 +198,16 @@ Only the public GET endpoints should be exposed through CloudFront:
 | `POST /images:transform` | Private (Bearer token) | Do not expose |
 | `POST /images` | Private (Bearer token) | Do not expose |
 
+### CDN Cache Key Configuration
+
+CDN cache keys must vary by the signed-URL authentication inputs and any transform query parameters used by the public GET endpoints (`GET /images/by-path`, `GET /images/by-url`). Configure your CDN / CloudFront Cache Policy to include the following query string parameters in the cache key (or use a policy that forwards all query strings):
+
+- Authentication: `keyId`, `expires`, `signature`
+- Source: `path` or `url`, `version`
+- Transform: `width`, `height`, `fit`, `position`, `format`, `quality`, `background`, `rotate`, `autoOrient`, `stripMetadata`, `preserveExif`
+
+This ensures that a cached response for one signed URL is not served to requests with different or expired signatures, and different transform options produce separate cache entries.
+
 ### `TRUSS_PUBLIC_BASE_URL`
 
 When truss runs behind CloudFront, set `TRUSS_PUBLIC_BASE_URL` to the public CloudFront domain (e.g. `https://images.example.com`). Signed-URL verification compares the request authority against this value; a mismatch will cause signature validation to fail.
