@@ -230,9 +230,9 @@ pub(super) fn build_image_response_headers(
         (
             "Cache-Control".to_string(),
             match response_policy {
-                ImageResponsePolicy::PublicGet => format!(
-                    "public, max-age={public_max_age}, stale-while-revalidate={public_swr}"
-                ),
+                ImageResponsePolicy::PublicGet => {
+                    format!("public, max-age={public_max_age}, stale-while-revalidate={public_swr}")
+                }
                 ImageResponsePolicy::PrivateTransform => "no-store".to_string(),
             },
         ),

@@ -223,10 +223,7 @@ where
     // Transfer-Encoding header while using Content-Length for body framing
     // creates a request-smuggling vector when running behind a reverse proxy.
     // Reject it outright with 501 Not Implemented.
-    if headers
-        .iter()
-        .any(|(name, _)| name == "transfer-encoding")
-    {
+    if headers.iter().any(|(name, _)| name == "transfer-encoding") {
         return Err(not_implemented_response(
             "Transfer-Encoding is not supported; use Content-Length instead",
         ));
@@ -235,9 +232,7 @@ where
     Ok(headers)
 }
 
-pub(super) fn parse_content_length(
-    headers: &[(String, String)],
-) -> Result<usize, HttpResponse> {
+pub(super) fn parse_content_length(headers: &[(String, String)]) -> Result<usize, HttpResponse> {
     // Duplicate content-length is already rejected by the SINGLETON_HEADERS check
     // in parse_headers, so we only need to find the first (and only) value here.
     let Some(value) = headers
@@ -288,11 +283,7 @@ where
     }
 }
 
-pub(super) fn parse_named<T, F>(
-    value: &str,
-    field_name: &str,
-    parser: F,
-) -> Result<T, HttpResponse>
+pub(super) fn parse_named<T, F>(value: &str, field_name: &str, parser: F) -> Result<T, HttpResponse>
 where
     F: Fn(&str) -> Result<T, String>,
 {
@@ -342,10 +333,7 @@ pub(super) fn resolve_storage_path(
     Ok(canonical_candidate)
 }
 
-pub(super) fn header_value<'a>(
-    headers: &'a [(String, String)],
-    name: &str,
-) -> Option<&'a str> {
+pub(super) fn header_value<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
     headers
         .iter()
         .find_map(|(header_name, value)| (header_name == name).then_some(value.as_str()))

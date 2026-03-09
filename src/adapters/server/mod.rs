@@ -9,15 +9,13 @@ mod response;
 
 use auth::{
     authorize_request, authorize_request_headers, authorize_signed_request,
-    canonical_query_without_signature, extend_transform_query, parse_query_params,
+    canonical_query_without_signature, extend_transform_query, parse_optional_bool_query,
+    parse_optional_integer_query, parse_optional_u8_query, parse_query_params,
     required_query_param, signed_source_query, url_authority, validate_public_query_names,
-    parse_optional_integer_query, parse_optional_u8_query, parse_optional_bool_query,
 };
-use cache::{
-    CacheLookup, TransformCache, compute_cache_key, try_versioned_cache_lookup,
-};
+use cache::{CacheLookup, TransformCache, compute_cache_key, try_versioned_cache_lookup};
 use http_parse::{
-    HttpRequest, parse_optional_named, parse_named, read_request_body, read_request_headers,
+    HttpRequest, parse_named, parse_optional_named, read_request_body, read_request_headers,
     request_has_json_content_type,
 };
 use metrics::{
@@ -31,14 +29,13 @@ use negotiate::{
 };
 use remote::resolve_source_bytes;
 use response::{
-    HttpResponse, NOT_FOUND_BODY, bad_request_response,
-    service_unavailable_response, transform_error_response, unsupported_media_type_response,
-    write_response,
+    HttpResponse, NOT_FOUND_BODY, bad_request_response, service_unavailable_response,
+    transform_error_response, unsupported_media_type_response, write_response,
 };
 
 use crate::{
-    Fit, MediaType, Position, RawArtifact, Rgba8, Rotation,
-    TransformOptions, TransformRequest, sniff_artifact, transform_raster, transform_svg,
+    Fit, MediaType, Position, RawArtifact, Rgba8, Rotation, TransformOptions, TransformRequest,
+    sniff_artifact, transform_raster, transform_svg,
 };
 use hmac::{Hmac, Mac};
 use serde::Deserialize;
@@ -796,8 +793,7 @@ fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io::Result<()>
         }
 
         requests_served += 1;
-        let close_after =
-            client_wants_close || requests_served >= KEEP_ALIVE_MAX_REQUESTS;
+        let close_after = client_wants_close || requests_served >= KEEP_ALIVE_MAX_REQUESTS;
 
         write_response(&mut stream, response, close_after)?;
 
@@ -1381,22 +1377,23 @@ fn validate_public_base_url(value: String) -> io::Result<String> {
 
 #[cfg(test)]
 mod tests {
+    use super::http_parse::{
+        HttpRequest, find_header_terminator, read_request_body, read_request_headers,
+        resolve_storage_path,
+    };
+    use super::multipart::parse_multipart_form_data;
+    use super::remote::{PinnedResolver, prepare_remote_fetch_target};
+    use super::response::auth_required_response;
+    use super::response::{HttpResponse, bad_request_response};
     use super::{
         CacheHitStatus, DEFAULT_BIND_ADDR, DEFAULT_PUBLIC_MAX_AGE_SECONDS,
         DEFAULT_PUBLIC_STALE_WHILE_REVALIDATE_SECONDS, ImageResponsePolicy,
         MAX_CONCURRENT_TRANSFORMS, PublicSourceKind, ServerConfig, SignedUrlSource,
-        TRANSFORMS_IN_FLIGHT, TransformSourcePayload,
-        authorize_signed_request, bind_addr, build_image_etag,
-        build_image_response_headers, canonical_query_without_signature,
-        negotiate_output_format, parse_public_get_request,
-        route_request, serve_once_with_config, sign_public_url,
-        transform_source_bytes,
+        TRANSFORMS_IN_FLIGHT, TransformSourcePayload, authorize_signed_request, bind_addr,
+        build_image_etag, build_image_response_headers, canonical_query_without_signature,
+        negotiate_output_format, parse_public_get_request, route_request, serve_once_with_config,
+        sign_public_url, transform_source_bytes,
     };
-    use super::response::auth_required_response;
-    use super::http_parse::{HttpRequest, find_header_terminator, read_request_body, read_request_headers, resolve_storage_path};
-    use super::multipart::parse_multipart_form_data;
-    use super::remote::{PinnedResolver, prepare_remote_fetch_target};
-    use super::response::{HttpResponse, bad_request_response};
     use crate::{
         Artifact, ArtifactMetadata, MediaType, RawArtifact, TransformOptions, sniff_artifact,
     };
@@ -2471,9 +2468,11 @@ mod tests {
     #[test]
     fn parse_upload_request_extracts_file_and_options() {
         let request = upload_request(&png_bytes(), Some(r#"{"width":8,"format":"jpeg"}"#));
-        let boundary = super::multipart::parse_multipart_boundary(&request).expect("parse boundary");
+        let boundary =
+            super::multipart::parse_multipart_boundary(&request).expect("parse boundary");
         let (file_bytes, options) =
-            super::multipart::parse_upload_request(&request.body, &boundary).expect("parse upload body");
+            super::multipart::parse_upload_request(&request.body, &boundary)
+                .expect("parse upload body");
 
         assert_eq!(file_bytes, png_bytes());
         assert_eq!(options.width, Some(8));

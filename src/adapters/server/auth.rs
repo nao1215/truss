@@ -5,7 +5,7 @@ use super::response::{
     service_unavailable_response, signed_url_unauthorized_response,
 };
 use super::{HmacSha256, ServerConfig, SignedUrlSource};
-use crate::{Rotation, Rgba8, TransformOptions};
+use crate::{Rgba8, Rotation, TransformOptions};
 use hmac::Mac;
 use std::collections::BTreeMap;
 use url::Url;

@@ -77,9 +77,7 @@ pub(super) fn parse_upload_request(
     Ok((body[file_range].to_vec(), options.unwrap_or_default()))
 }
 
-pub(super) fn parse_multipart_boundary(
-    request: &HttpRequest,
-) -> Result<String, HttpResponse> {
+pub(super) fn parse_multipart_boundary(request: &HttpRequest) -> Result<String, HttpResponse> {
     let Some(content_type) = request.header("content-type") else {
         return Err(unsupported_media_type_response(
             "content-type must be multipart/form-data",

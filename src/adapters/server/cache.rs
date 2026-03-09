@@ -8,14 +8,14 @@ use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use super::ServerConfig;
+use super::http_parse::HttpRequest;
 use super::metrics::CACHE_HITS_TOTAL;
 use super::negotiate::{
     CacheHitStatus, ImageResponsePolicy, build_image_etag, build_image_response_headers,
     if_none_match_matches,
 };
 use super::response::HttpResponse;
-use super::http_parse::HttpRequest;
-use super::ServerConfig;
 use crate::{Fit, Position, Rotation, TransformOptions};
 
 pub(super) const DEFAULT_CACHE_TTL_SECONDS: u64 = 3600;

@@ -1069,7 +1069,8 @@ mod tests {
 
     #[test]
     fn sanitize_removes_file_scheme_href() {
-        let svg = b"<svg xmlns=\"http://www.w3.org/2000/svg\"><image href=\"file:///etc/passwd\"/></svg>";
+        let svg =
+            b"<svg xmlns=\"http://www.w3.org/2000/svg\"><image href=\"file:///etc/passwd\"/></svg>";
         let result = sanitize_svg(svg).unwrap();
         assert!(
             !result.contains("file:///etc/passwd"),
@@ -1082,10 +1083,7 @@ mod tests {
         let svg =
             b"<svg xmlns=\"http://www.w3.org/2000/svg\"><image href=\"ftp://evil.com/img.png\"/></svg>";
         let result = sanitize_svg(svg).unwrap();
-        assert!(
-            !result.contains("ftp://"),
-            "ftp: href should be removed"
-        );
+        assert!(!result.contains("ftp://"), "ftp: href should be removed");
     }
 
     #[test]
@@ -1168,7 +1166,9 @@ mod tests {
 
     #[test]
     fn is_dangerous_href_blocks_data_text() {
-        assert!(is_dangerous_href("data:text/html,<script>alert(1)</script>"));
+        assert!(is_dangerous_href(
+            "data:text/html,<script>alert(1)</script>"
+        ));
     }
 
     #[test]
