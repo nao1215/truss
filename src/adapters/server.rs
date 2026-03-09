@@ -3541,6 +3541,19 @@ where
         }
     }
 
+    // This server does not implement chunked transfer decoding.  Accepting a
+    // Transfer-Encoding header while using Content-Length for body framing
+    // creates a request-smuggling vector when running behind a reverse proxy.
+    // Reject it outright with 501 Not Implemented.
+    if headers
+        .iter()
+        .any(|(name, _)| name == "transfer-encoding")
+    {
+        return Err(not_implemented_response(
+            "Transfer-Encoding is not supported; use Content-Length instead",
+        ));
+    }
+
     Ok(headers)
 }
 
@@ -5039,6 +5052,30 @@ mod tests {
     #[test]
     fn parse_headers_rejects_duplicate_transfer_encoding() {
         let lines = "Transfer-Encoding: chunked\r\nTransfer-Encoding: gzip\r\n";
+        let result = super::parse_headers(lines.split("\r\n"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_headers_rejects_single_transfer_encoding() {
+        let lines = "Host: example.com\r\nTransfer-Encoding: chunked\r\n";
+        let result = super::parse_headers(lines.split("\r\n"));
+        let err = result.unwrap_err();
+        assert!(
+            err.status.starts_with("501"),
+            "expected 501 status, got: {}",
+            err.status
+        );
+        assert!(
+            String::from_utf8_lossy(&err.body).contains("Transfer-Encoding"),
+            "error response should mention Transfer-Encoding"
+        );
+    }
+
+    #[test]
+    fn parse_headers_rejects_transfer_encoding_identity() {
+        // Even "identity" should be rejected — the server does not implement TE decoding.
+        let lines = "Transfer-Encoding: identity\r\n";
         let result = super::parse_headers(lines.split("\r\n"));
         assert!(result.is_err());
     }
