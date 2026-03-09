@@ -87,6 +87,38 @@ truss inspect photo.jpg
 
 Run `truss --help` to see the full set of options.
 
+### Commands
+
+| Command | Description |
+|---------|-------------|
+| `convert` | Convert and transform an image file |
+| `inspect` | Show metadata (format, dimensions, alpha) of an image |
+| `serve` | Start the HTTP image-transform server |
+| `sign` | Generate a signed public URL for the server |
+| `completions` | Generate shell completion scripts |
+| `version` | Print version information |
+| `help` | Show help for a command (e.g. `truss help convert`) |
+
+The `convert` subcommand can be omitted: `truss photo.png -o photo.jpg` is equivalent to `truss convert photo.png -o photo.jpg`. Similarly, server flags at the top level imply `serve`: `truss --bind 0.0.0.0:8080` is equivalent to `truss serve --bind 0.0.0.0:8080`.
+
+### Shell Completions
+
+Generate completion scripts with the `completions` subcommand:
+
+```sh
+# Bash
+truss completions bash > ~/.local/share/bash-completion/completions/truss
+
+# Zsh (add ~/.zfunc to your fpath)
+truss completions zsh > ~/.zfunc/_truss
+
+# Fish
+truss completions fish > ~/.config/fish/completions/truss.fish
+
+# PowerShell
+truss completions powershell > truss.ps1
+```
+
 ### HTTP Server
 
 ```sh
@@ -197,6 +229,16 @@ Only the public GET endpoints should be exposed through CloudFront:
 | `GET /images/by-url` | Public (signed URL) | Origin for CDN |
 | `POST /images:transform` | Private (Bearer token) | Do not expose |
 | `POST /images` | Private (Bearer token) | Do not expose |
+
+### CDN Cache Key Configuration
+
+CDN cache keys must vary by the signed-URL authentication inputs and any transform query parameters used by the public GET endpoints (`GET /images/by-path`, `GET /images/by-url`). Configure your CDN / CloudFront Cache Policy to include the following query string parameters in the cache key (or use a policy that forwards all query strings):
+
+- Authentication: `keyId`, `expires`, `signature`
+- Source: `path` or `url`, `version`
+- Transform: `width`, `height`, `fit`, `position`, `format`, `quality`, `background`, `rotate`, `autoOrient`, `stripMetadata`, `preserveExif`
+
+This ensures that a cached response for one signed URL is not served to requests with different or expired signatures, and different transform options produce separate cache entries.
 
 ### `TRUSS_PUBLIC_BASE_URL`
 

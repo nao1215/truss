@@ -74,6 +74,7 @@ EXIT CODES:
   2  I/O error (file not found, permission denied, network failure)
   3  Input error (unsupported format, corrupt file)
   4  Transform error (encode failure, size limit exceeded, deadline)
+  5  Runtime error (bind failure, stdout write failure)
 
 Sponsor: https://github.com/sponsors/nao1215
 ",
@@ -211,6 +212,30 @@ EXAMPLES:
     --expires 1700000000 --width 640 --format webp
 ";
 
+const HELP_COMPLETIONS: &str = "\
+truss completions - generate shell completion scripts
+
+USAGE:
+  truss completions <SHELL>
+
+SHELLS:
+  bash, zsh, fish, elvish, powershell
+
+EXAMPLES:
+  truss completions bash > ~/.local/share/bash-completion/completions/truss
+  truss completions zsh > ~/.zfunc/_truss
+  truss completions fish > ~/.config/fish/completions/truss.fish
+";
+
+const HELP_VERSION: &str = "\
+truss version - print version information
+
+USAGE:
+  truss version
+  truss -V
+  truss --version
+";
+
 // ---------------------------------------------------------------------------
 // Clap derive structs
 // ---------------------------------------------------------------------------
@@ -247,9 +272,13 @@ enum CliSubcommand {
     /// Print version information
     Version,
     /// Generate shell completion scripts
+    #[command(disable_help_flag = true)]
     Completions {
         #[arg(value_enum)]
-        shell: clap_complete::Shell,
+        shell: Option<clap_complete::Shell>,
+        /// Print help
+        #[arg(long)]
+        help: bool,
     },
 }
 
@@ -522,6 +551,8 @@ enum HelpTopic {
     Inspect,
     Serve,
     Sign,
+    Completions,
+    Version,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -611,6 +642,8 @@ where
                 HelpTopic::Inspect => HELP_INSPECT.to_string(),
                 HelpTopic::Serve => HELP_SERVE.to_string(),
                 HelpTopic::Sign => HELP_SIGN.to_string(),
+                HelpTopic::Completions => HELP_COMPLETIONS.to_string(),
+                HelpTopic::Version => HELP_VERSION.to_string(),
             };
             match stdout.write_all(text.as_bytes()) {
                 Ok(_) => EXIT_SUCCESS,
@@ -649,7 +682,15 @@ where
 // Argument preprocessing for implicit convert / serve
 // ---------------------------------------------------------------------------
 
-const KNOWN_SUBCOMMANDS: &[&str] = &["convert", "inspect", "serve", "sign", "help", "completions"];
+const KNOWN_SUBCOMMANDS: &[&str] = &[
+    "convert",
+    "inspect",
+    "serve",
+    "sign",
+    "help",
+    "completions",
+    "version",
+];
 
 fn is_serve_flag(value: &str) -> bool {
     matches!(
@@ -715,7 +756,7 @@ fn preprocess_args(args: Vec<String>) -> Vec<String> {
     // extension), treat it as an implicit convert rather than an unknown
     // subcommand.  This handles `truss image -o out.jpg` where `image` is a
     // real file.
-    if std::path::Path::new(first).exists() {
+    if std::path::Path::new(first).is_file() {
         let mut new = vec![args[0].clone(), "convert".to_string()];
         new.extend_from_slice(&args[1..]);
         return new;
@@ -755,7 +796,21 @@ where
         None => Ok(Command::Help(HelpTopic::TopLevel)),
         Some(CliSubcommand::Help { topic }) => parse_help_topic(topic),
         Some(CliSubcommand::Version) => Ok(Command::Version),
-        Some(CliSubcommand::Completions { shell }) => Ok(Command::Completions(shell)),
+        Some(CliSubcommand::Completions { help: true, .. }) => {
+            Ok(Command::Help(HelpTopic::Completions))
+        }
+        Some(CliSubcommand::Completions {
+            shell: Some(shell), ..
+        }) => Ok(Command::Completions(shell)),
+        Some(CliSubcommand::Completions {
+            shell: None,
+            help: false,
+        }) => Err(CliError {
+            exit_code: EXIT_USAGE,
+            message: "'completions' requires a shell argument".to_string(),
+            usage: None,
+            hint: Some("try 'truss completions bash'".to_string()),
+        }),
         Some(CliSubcommand::Convert(args)) => convert_from_clap(args),
         Some(CliSubcommand::Inspect(args)) => inspect_from_clap(args),
         Some(CliSubcommand::Serve(args)) => serve_from_clap(args),
@@ -788,11 +843,15 @@ fn parse_help_topic(topic: Option<String>) -> Result<Command, CliError> {
         Some("inspect") => Ok(Command::Help(HelpTopic::Inspect)),
         Some("serve") => Ok(Command::Help(HelpTopic::Serve)),
         Some("sign") => Ok(Command::Help(HelpTopic::Sign)),
+        Some("completions") => Ok(Command::Help(HelpTopic::Completions)),
+        Some("version") => Ok(Command::Help(HelpTopic::Version)),
         Some(other) => Err(CliError {
             exit_code: EXIT_USAGE,
             message: format!("unknown help topic '{other}'"),
             usage: None,
-            hint: Some("available topics: convert, inspect, serve, sign".to_string()),
+            hint: Some(
+                "available topics: convert, inspect, serve, sign, completions, version".to_string(),
+            ),
         }),
     }
 }
@@ -1056,6 +1115,35 @@ fn generate_completions<W: Write>(
     stdout: &mut W,
 ) -> Result<(), CliError> {
     let mut cmd = Cli::command();
+
+    // Add implicit-convert positional argument and common flags so that shell
+    // completions expose the shorthand forms documented in the help text
+    // (e.g. `truss photo.png -o out.jpg`, `truss --bind 0.0.0.0:8080`).
+    cmd = cmd
+        .arg(
+            clap::Arg::new("INPUT")
+                .help("Input image file (implicit convert)")
+                .value_hint(clap::ValueHint::FilePath),
+        )
+        .arg(
+            clap::Arg::new("output")
+                .short('o')
+                .long("output")
+                .help("Output file path (implicit convert)")
+                .value_hint(clap::ValueHint::FilePath),
+        )
+        .arg(
+            clap::Arg::new("bind")
+                .long("bind")
+                .help("Listen address (implicit serve)"),
+        )
+        .arg(
+            clap::Arg::new("storage-root")
+                .long("storage-root")
+                .help("Root directory for path-based sources (implicit serve)")
+                .value_hint(clap::ValueHint::DirPath),
+        );
+
     clap_complete::generate(shell, &mut cmd, "truss", stdout);
     Ok(())
 }
@@ -1268,8 +1356,8 @@ where
 
 fn map_transform_error(error: crate::TransformError) -> CliError {
     match error {
-        crate::TransformError::InvalidInput(reason)
-        | crate::TransformError::InvalidOptions(reason) => runtime_error(EXIT_IO, &reason),
+        crate::TransformError::InvalidOptions(reason) => runtime_error(EXIT_USAGE, &reason),
+        crate::TransformError::InvalidInput(reason) => runtime_error(EXIT_INPUT, &reason),
         crate::TransformError::UnsupportedInputMediaType(reason)
         | crate::TransformError::DecodeFailed(reason)
         | crate::TransformError::EncodeFailed(reason)
@@ -1375,7 +1463,7 @@ where
         }),
         OutputTarget::Path(path) => fs::write(&path, bytes).map_err(|error| {
             runtime_error(
-                EXIT_RUNTIME,
+                EXIT_IO,
                 &format!("failed to write {}: {error}", path.display()),
             )
         }),
@@ -2842,22 +2930,26 @@ mod tests {
         let file_path = dir.join("image");
         fs::write(&file_path, png_bytes()).expect("write extensionless fixture");
 
+        // Use bare filename and set cwd to the temp dir so preprocess_args
+        // sees a relative name without path separators.
+        let original_dir = std::env::current_dir().expect("get cwd");
+        std::env::set_current_dir(&dir).expect("set cwd to temp dir");
+
         let args = vec![
             "truss".to_string(),
-            file_path.to_string_lossy().to_string(),
+            "image".to_string(),
             "-o".to_string(),
             "out.jpg".to_string(),
         ];
         let result = preprocess_args(args);
+
+        std::env::set_current_dir(&original_dir).expect("restore cwd");
+
         assert_eq!(
             result[1], "convert",
             "extensionless file should trigger implicit convert"
         );
-        assert_eq!(
-            result[2],
-            file_path.to_string_lossy().to_string(),
-            "original file path should follow convert"
-        );
+        assert_eq!(result[2], "image", "bare file name should follow convert");
 
         fs::remove_dir_all(&dir).ok();
     }
@@ -2874,5 +2966,151 @@ mod tests {
             result, args,
             "non-existent extensionless name should pass through unchanged"
         );
+    }
+
+    // ===== Exit code: InvalidOptions maps to EXIT_USAGE (1) =====
+
+    #[test]
+    fn exit_code_invalid_options_is_usage_error() {
+        // quality=0 triggers InvalidOptions via normalize()
+        let png_bytes = {
+            let mut img = image::RgbaImage::new(1, 1);
+            img.put_pixel(0, 0, image::Rgba([255, 0, 0, 255]));
+            let mut buf = Vec::new();
+            let encoder = image::codecs::png::PngEncoder::new(&mut buf);
+            image::ImageEncoder::write_image(
+                encoder,
+                img.as_raw(),
+                1,
+                1,
+                image::ColorType::Rgba8.into(),
+            )
+            .unwrap();
+            buf
+        };
+        let mut stdin = Cursor::new(png_bytes);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let code = run_with_io(
+            vec![
+                "truss".to_string(),
+                "convert".to_string(),
+                "-".to_string(),
+                "-o".to_string(),
+                "-".to_string(),
+                "--format".to_string(),
+                "jpeg".to_string(),
+                "--quality".to_string(),
+                "0".to_string(),
+            ],
+            &mut stdin,
+            &mut stdout,
+            &mut stderr,
+        );
+        assert_eq!(code, 1, "InvalidOptions should exit with code 1 (usage)");
+    }
+
+    // ===== Help: completions topic =====
+
+    #[test]
+    fn help_completions_shows_completions_help() {
+        let result = parse_args(vec![
+            "truss".to_string(),
+            "help".to_string(),
+            "completions".to_string(),
+        ]);
+        assert_eq!(result.unwrap(), Command::Help(HelpTopic::Completions));
+    }
+
+    #[test]
+    fn help_version_shows_version_help() {
+        let result = parse_args(vec![
+            "truss".to_string(),
+            "help".to_string(),
+            "version".to_string(),
+        ]);
+        assert_eq!(result.unwrap(), Command::Help(HelpTopic::Version));
+    }
+
+    #[test]
+    fn completions_dash_help_shows_completions_help() {
+        let result = parse_args(vec![
+            "truss".to_string(),
+            "completions".to_string(),
+            "--help".to_string(),
+        ]);
+        assert_eq!(result.unwrap(), Command::Help(HelpTopic::Completions));
+    }
+
+    #[test]
+    fn completions_without_shell_exits_with_usage_error() {
+        let mut stdin = Cursor::new(Vec::<u8>::new());
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let code = run_with_io(
+            vec!["truss".to_string(), "completions".to_string()],
+            &mut stdin,
+            &mut stdout,
+            &mut stderr,
+        );
+        assert_eq!(code, 1, "completions without shell arg should exit 1");
+    }
+
+    // ===== Completions: implicit args are present =====
+
+    #[test]
+    fn completions_bash_includes_implicit_args() {
+        let mut stdin = Cursor::new(Vec::<u8>::new());
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let code = run_with_io(
+            vec![
+                "truss".to_string(),
+                "completions".to_string(),
+                "bash".to_string(),
+            ],
+            &mut stdin,
+            &mut stdout,
+            &mut stderr,
+        );
+        assert_eq!(code, 0);
+        let output = String::from_utf8(stdout).expect("utf8 stdout");
+        assert!(
+            output.contains("--output"),
+            "bash completions should include --output for implicit convert"
+        );
+        assert!(
+            output.contains("--bind"),
+            "bash completions should include --bind for implicit serve"
+        );
+    }
+
+    // ===== Help text: exit code 5 is documented =====
+
+    #[test]
+    fn help_exit_codes_includes_runtime() {
+        let text = super::help_top_level();
+        assert!(
+            text.contains("5  Runtime error"),
+            "help text should document exit code 5"
+        );
+    }
+
+    // ===== Unknown help topic hint lists all topics =====
+
+    #[test]
+    fn unknown_help_topic_hint_lists_all_topics() {
+        let result = parse_args(vec![
+            "truss".to_string(),
+            "help".to_string(),
+            "nonexistent".to_string(),
+        ]);
+        let err = result.unwrap_err();
+        let hint = err.hint.unwrap();
+        assert!(hint.contains("completions"), "hint should list completions");
+        assert!(hint.contains("version"), "hint should list version");
     }
 }

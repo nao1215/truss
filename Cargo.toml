@@ -1,6 +1,6 @@
 [package]
 name = "truss-image"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "Image toolkit with a shared Rust core across the CLI, HTTP server, and WASM demo."
 license = "MIT"

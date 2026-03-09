@@ -41,11 +41,16 @@ pub(super) fn negotiate_output_format(
 
     let mut best_candidate = None;
     let mut best_q = 0_u16;
+    let mut best_specificity = 0_u8;
 
     for candidate in preferred_output_media_types(artifact) {
-        let (candidate_q, _) = match_accept_preferences(candidate, &preferences);
-        if candidate_q > best_q {
+        let (candidate_q, candidate_specificity) =
+            match_accept_preferences(candidate, &preferences);
+        if candidate_q > best_q
+            || (candidate_q == best_q && candidate_specificity > best_specificity)
+        {
             best_q = candidate_q;
+            best_specificity = candidate_specificity;
             best_candidate = Some(candidate);
         }
     }
@@ -269,10 +274,18 @@ pub(super) fn if_none_match_matches(value: Option<&str>, etag: &str) -> bool {
         return false;
     };
 
-    value
-        .split(',')
-        .map(str::trim)
-        .any(|candidate| candidate == "*" || candidate == etag)
+    value.split(',').map(str::trim).any(|candidate| {
+        if candidate == "*" {
+            return true;
+        }
+        let normalized = candidate
+            .strip_prefix("W/")
+            .unwrap_or(candidate)
+            .trim()
+            .trim_matches('"');
+        let expected = etag.trim_matches('"');
+        normalized == expected
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

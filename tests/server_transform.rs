@@ -48,8 +48,14 @@ fn spawn_fixture_server(responses: Vec<FixtureResponse>) -> (String, thread::Joi
     let addr = listener.local_addr().expect("fixture server addr");
     let url = format!("http://{addr}/image");
     let handle = thread::spawn(move || {
+        let mut served_any = false;
         for (status, headers, body) in responses {
-            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            let timeout = if served_any {
+                Duration::from_millis(100)
+            } else {
+                Duration::from_secs(10)
+            };
+            let deadline = std::time::Instant::now() + timeout;
             let mut accepted = None;
             while std::time::Instant::now() < deadline {
                 match listener.accept() {
@@ -67,6 +73,7 @@ fn spawn_fixture_server(responses: Vec<FixtureResponse>) -> (String, thread::Joi
             let Some((mut stream, _)) = accepted else {
                 break;
             };
+            served_any = true;
             let mut request = [0_u8; 4096];
             let _ = stream.read(&mut request);
             let mut header = format!(

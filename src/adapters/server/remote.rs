@@ -73,16 +73,16 @@ pub(super) fn read_remote_source_bytes(
                 let status = response.status().as_u16();
                 if is_redirect_status(status) {
                     current_url = next_redirect_url(&target.url, &response, redirect_index)?;
-                } else if status >= 400 {
-                    return Err(bad_gateway_response(&format!(
-                        "failed to fetch remote URL: upstream HTTP {status}"
-                    )));
-                } else {
+                } else if (200..=299).contains(&status) {
                     let bytes = read_remote_response_body(target.url.as_str(), response)?;
                     if let Some(cache) = origin_cache {
                         cache.put(url, &bytes);
                     }
                     return Ok(bytes);
+                } else {
+                    return Err(bad_gateway_response(&format!(
+                        "failed to fetch remote URL: upstream HTTP {status}"
+                    )));
                 }
             }
             Err(error) => {
@@ -372,6 +372,12 @@ pub(super) fn is_disallowed_ipv4(ip: Ipv4Addr) -> bool {
 }
 
 pub(super) fn is_disallowed_ipv6(ip: Ipv6Addr) -> bool {
+    // Check IPv4-mapped addresses (e.g. ::ffff:127.0.0.1) against IPv4 rules
+    // to prevent SSRF bypass via mapped addresses.
+    if let Some(v4) = ip.to_ipv4_mapped() {
+        return is_disallowed_ipv4(v4);
+    }
+
     let segments = ip.segments();
     ip.is_loopback()
         || ip.is_unspecified()

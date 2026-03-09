@@ -30,8 +30,10 @@ pub(super) fn authorize_request_headers(
     let provided = headers
         .iter()
         .find_map(|(name, value)| (name == "authorization").then_some(value.as_str()))
-        .and_then(|value| value.strip_prefix("Bearer "))
-        .map(str::trim);
+        .and_then(|value| {
+            let (scheme, token) = value.split_once(|c: char| c.is_whitespace())?;
+            scheme.eq_ignore_ascii_case("Bearer").then(|| token.trim())
+        });
 
     match provided {
         Some(token) if token == expected => Ok(()),

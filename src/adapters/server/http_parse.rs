@@ -95,6 +95,9 @@ where
         }
 
         if let Some(index) = find_header_terminator(&buffer) {
+            if index > MAX_HEADER_BYTES {
+                return Err(payload_too_large_response("request headers are too large"));
+            }
             break index;
         }
 
@@ -136,7 +139,18 @@ pub(super) fn read_request_body<R>(
 where
     R: Read,
 {
-    let mut body = partial.overflow;
+    let mut body = if partial.overflow.len() > partial.content_length {
+        let mut overflow = partial.overflow;
+        let tail = overflow.split_off(partial.content_length);
+        // tail belongs to the next request on the kept-alive connection;
+        // currently we do not pipeline, so we discard it here, but at least
+        // we no longer lose the body bytes.
+        let _ = tail;
+        overflow
+    } else {
+        partial.overflow
+    };
+
     let mut chunk = [0_u8; 4096];
     while body.len() < partial.content_length {
         let read = stream.read(&mut chunk).map_err(|error| {
@@ -147,7 +161,10 @@ where
         }
         body.extend_from_slice(&chunk[..read]);
     }
-    body.truncate(partial.content_length);
+
+    if body.len() > partial.content_length {
+        body.truncate(partial.content_length);
+    }
 
     Ok(HttpRequest {
         method: partial.method,
@@ -207,7 +224,12 @@ where
             ));
         };
 
-        headers.push((name.trim().to_ascii_lowercase(), value.trim().to_string()));
+        if name != name.trim() || name.is_empty() {
+            return Err(bad_request_response(
+                "header name must not be empty or contain leading/trailing whitespace",
+            ));
+        }
+        headers.push((name.to_ascii_lowercase(), value.trim().to_string()));
     }
 
     for &singleton in SINGLETON_HEADERS {
