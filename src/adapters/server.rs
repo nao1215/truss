@@ -399,6 +399,15 @@ impl ServerConfig {
             ));
         }
 
+        if signed_url_key_id.is_some() && public_base_url.is_none() {
+            eprintln!(
+                "truss: warning: TRUSS_SIGNED_URL_KEY_ID is set but TRUSS_PUBLIC_BASE_URL is not. \
+                 Behind a reverse proxy or CDN the Host header may differ from the externally \
+                 visible authority, causing signed URL verification to fail. Consider setting \
+                 TRUSS_PUBLIC_BASE_URL to the canonical external origin."
+            );
+        }
+
         let cache_root = env::var("TRUSS_CACHE_ROOT")
             .ok()
             .filter(|value| !value.is_empty())
