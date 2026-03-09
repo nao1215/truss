@@ -33,6 +33,15 @@ pub(super) fn resolve_source_bytes(
             std::fs::read(&path).map_err(map_source_io_error)
         }
         TransformSourcePayload::Url { url, .. } => read_remote_source_bytes(&url, config),
+        #[cfg(feature = "s3")]
+        TransformSourcePayload::Storage { bucket, key, .. } => {
+            let s3_ctx = config
+                .s3_context
+                .as_ref()
+                .ok_or_else(|| bad_request_response("S3 storage backend is not configured"))?;
+            let effective_bucket = bucket.as_deref().unwrap_or(&s3_ctx.default_bucket);
+            super::s3::read_s3_source_bytes(effective_bucket, &key, s3_ctx)
+        }
     }
 }
 

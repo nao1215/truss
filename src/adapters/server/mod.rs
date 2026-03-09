@@ -6,6 +6,8 @@ mod multipart;
 mod negotiate;
 mod remote;
 mod response;
+#[cfg(feature = "s3")]
+mod s3;
 
 use auth::{
     authorize_request, authorize_request_headers, authorize_signed_request,
@@ -157,6 +159,12 @@ pub struct ServerConfig {
     /// failures, transform warnings) through this handler. When `None`, messages are
     /// written to stderr via `eprintln!`.
     pub log_handler: Option<LogHandler>,
+    /// The storage backend used to resolve `Path`-based public GET requests.
+    #[cfg(feature = "s3")]
+    pub storage_backend: s3::StorageBackend,
+    /// Shared S3 client context, present when `storage_backend` is `S3`.
+    #[cfg(feature = "s3")]
+    pub s3_context: Option<Arc<s3::S3Context>>,
 }
 
 impl Clone for ServerConfig {
@@ -173,14 +181,18 @@ impl Clone for ServerConfig {
             public_stale_while_revalidate_seconds: self.public_stale_while_revalidate_seconds,
             disable_accept_negotiation: self.disable_accept_negotiation,
             log_handler: self.log_handler.clone(),
+            #[cfg(feature = "s3")]
+            storage_backend: self.storage_backend,
+            #[cfg(feature = "s3")]
+            s3_context: self.s3_context.clone(),
         }
     }
 }
 
 impl fmt::Debug for ServerConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("ServerConfig")
-            .field("storage_root", &self.storage_root)
+        let mut d = f.debug_struct("ServerConfig");
+        d.field("storage_root", &self.storage_root)
             .field("bearer_token", &self.bearer_token)
             .field("public_base_url", &self.public_base_url)
             .field("signed_url_key_id", &self.signed_url_key_id)
@@ -199,8 +211,13 @@ impl fmt::Debug for ServerConfig {
                 "disable_accept_negotiation",
                 &self.disable_accept_negotiation,
             )
-            .field("log_handler", &self.log_handler.as_ref().map(|_| ".."))
-            .finish()
+            .field("log_handler", &self.log_handler.as_ref().map(|_| ".."));
+        #[cfg(feature = "s3")]
+        {
+            d.field("storage_backend", &self.storage_backend)
+                .field("s3_context", &self.s3_context.as_ref().map(|_| ".."));
+        }
+        d.finish()
     }
 }
 
@@ -217,6 +234,18 @@ impl PartialEq for ServerConfig {
             && self.public_stale_while_revalidate_seconds
                 == other.public_stale_while_revalidate_seconds
             && self.disable_accept_negotiation == other.disable_accept_negotiation
+            && cfg_s3_eq(self, other)
+    }
+}
+
+fn cfg_s3_eq(_this: &ServerConfig, _other: &ServerConfig) -> bool {
+    #[cfg(feature = "s3")]
+    {
+        _this.storage_backend == _other.storage_backend
+    }
+    #[cfg(not(feature = "s3"))]
+    {
+        true
     }
 }
 
@@ -250,6 +279,10 @@ impl ServerConfig {
             public_stale_while_revalidate_seconds: DEFAULT_PUBLIC_STALE_WHILE_REVALIDATE_SECONDS,
             disable_accept_negotiation: false,
             log_handler: None,
+            #[cfg(feature = "s3")]
+            storage_backend: s3::StorageBackend::Filesystem,
+            #[cfg(feature = "s3")]
+            s3_context: None,
         }
     }
 
@@ -331,6 +364,14 @@ impl ServerConfig {
         self
     }
 
+    /// Returns a copy of the configuration with an S3 storage backend attached.
+    #[cfg(feature = "s3")]
+    pub fn with_s3_context(mut self, context: s3::S3Context) -> Self {
+        self.storage_backend = s3::StorageBackend::S3;
+        self.s3_context = Some(Arc::new(context));
+        self
+    }
+
     /// Loads server configuration from environment variables.
     ///
     /// The adapter currently reads:
@@ -376,8 +417,27 @@ impl ServerConfig {
     /// assert!(config.allow_insecure_url_sources);
     /// ```
     pub fn from_env() -> io::Result<Self> {
+        #[cfg(feature = "s3")]
+        let storage_backend = match env::var("TRUSS_STORAGE_BACKEND")
+            .ok()
+            .filter(|v| !v.is_empty())
+        {
+            Some(value) => s3::StorageBackend::parse(&value)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?,
+            None => s3::StorageBackend::Filesystem,
+        };
+
         let storage_root =
             env::var("TRUSS_STORAGE_ROOT").unwrap_or_else(|_| DEFAULT_STORAGE_ROOT.to_string());
+        // When the storage backend is S3, the filesystem root may not exist. Only
+        // canonicalize when using the filesystem backend.
+        #[cfg(feature = "s3")]
+        let storage_root = if storage_backend == s3::StorageBackend::S3 {
+            PathBuf::from(storage_root)
+        } else {
+            PathBuf::from(storage_root).canonicalize()?
+        };
+        #[cfg(not(feature = "s3"))]
         let storage_root = PathBuf::from(storage_root).canonicalize()?;
         let bearer_token = env::var("TRUSS_BEARER_TOKEN")
             .ok()
@@ -421,6 +481,22 @@ impl ServerConfig {
             parse_optional_env_u32("TRUSS_PUBLIC_STALE_WHILE_REVALIDATE")?
                 .unwrap_or(DEFAULT_PUBLIC_STALE_WHILE_REVALIDATE_SECONDS);
 
+        #[cfg(feature = "s3")]
+        let s3_context = if storage_backend == s3::StorageBackend::S3 {
+            let bucket = env::var("TRUSS_S3_BUCKET")
+                .ok()
+                .filter(|v| !v.is_empty())
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "TRUSS_S3_BUCKET is required when TRUSS_STORAGE_BACKEND=s3",
+                    )
+                })?;
+            Some(Arc::new(s3::build_s3_context(bucket)?))
+        } else {
+            None
+        };
+
         Ok(Self {
             storage_root,
             bearer_token,
@@ -433,6 +509,10 @@ impl ServerConfig {
             public_stale_while_revalidate_seconds,
             disable_accept_negotiation: env_flag("TRUSS_DISABLE_ACCEPT_NEGOTIATION"),
             log_handler: None,
+            #[cfg(feature = "s3")]
+            storage_backend,
+            #[cfg(feature = "s3")]
+            s3_context,
         })
     }
 }
@@ -663,6 +743,12 @@ enum TransformSourcePayload {
         url: String,
         version: Option<String>,
     },
+    #[cfg(feature = "s3")]
+    Storage {
+        bucket: Option<String>,
+        key: String,
+        version: Option<String>,
+    },
 }
 
 impl TransformSourcePayload {
@@ -675,9 +761,29 @@ impl TransformSourcePayload {
     /// cannot be reused across instances with different security settings sharing
     /// the same cache directory.
     fn versioned_source_hash(&self, config: &ServerConfig) -> Option<String> {
-        let (kind, reference, version) = match self {
-            Self::Path { path, version } => ("path", path.as_str(), version.as_deref()),
-            Self::Url { url, version } => ("url", url.as_str(), version.as_deref()),
+        let (kind, reference, version): (&str, std::borrow::Cow<'_, str>, Option<&str>) = match self
+        {
+            Self::Path { path, version } => ("path", path.as_str().into(), version.as_deref()),
+            Self::Url { url, version } => ("url", url.as_str().into(), version.as_deref()),
+            #[cfg(feature = "s3")]
+            Self::Storage {
+                bucket,
+                key,
+                version,
+            } => {
+                let effective_bucket = bucket
+                    .as_deref()
+                    .or(config
+                        .s3_context
+                        .as_ref()
+                        .map(|ctx| ctx.default_bucket.as_str()))
+                    .unwrap_or("unknown");
+                (
+                    "storage",
+                    format!("s3://{effective_bucket}/{key}").into(),
+                    version.as_deref(),
+                )
+            }
         };
         let version = version?;
         // Use newline separators so that values containing colons cannot collide
@@ -686,7 +792,7 @@ impl TransformSourcePayload {
         let mut id = String::new();
         id.push_str(kind);
         id.push('\n');
-        id.push_str(reference);
+        id.push_str(&reference);
         id.push('\n');
         id.push_str(version);
         id.push('\n');
@@ -697,6 +803,14 @@ impl TransformSourcePayload {
         } else {
             "strict"
         });
+        #[cfg(feature = "s3")]
+        {
+            id.push('\n');
+            id.push_str(match config.storage_backend {
+                s3::StorageBackend::S3 => "s3-backend",
+                s3::StorageBackend::Filesystem => "fs-backend",
+            });
+        }
         Some(hex::encode(Sha256::digest(id.as_bytes())))
     }
 }
@@ -918,6 +1032,22 @@ fn handle_public_get_request(
         Err(response) => return response,
     };
 
+    // When the storage backend is S3, convert Path sources to Storage sources so
+    // that the `path` query parameter is resolved as an S3 key.
+    #[cfg(feature = "s3")]
+    let source = if config.storage_backend == s3::StorageBackend::S3 {
+        match source {
+            TransformSourcePayload::Path { path, version } => TransformSourcePayload::Storage {
+                bucket: None,
+                key: path,
+                version,
+            },
+            other => other,
+        }
+    } else {
+        source
+    };
+
     let versioned_hash = source.versioned_source_hash(config);
     if let Some(response) = try_versioned_cache_lookup(
         versioned_hash.as_deref(),
@@ -986,9 +1116,9 @@ fn handle_health_ready(config: &ServerConfig) -> HttpResponse {
     let mut checks: Vec<serde_json::Value> = Vec::new();
     let mut all_ok = true;
 
-    let storage_ok = config.storage_root.is_dir();
+    let (storage_ok, storage_check_name) = storage_health_check(config);
     checks.push(json!({
-        "name": "storageRoot",
+        "name": storage_check_name,
         "status": if storage_ok { "ok" } else { "fail" },
     }));
     if !storage_ok {
@@ -1032,13 +1162,21 @@ fn handle_health_ready(config: &ServerConfig) -> HttpResponse {
 }
 
 /// Returns a comprehensive diagnostic health response.
+fn storage_health_check(config: &ServerConfig) -> (bool, &'static str) {
+    #[cfg(feature = "s3")]
+    if config.storage_backend == s3::StorageBackend::S3 {
+        return (config.s3_context.is_some(), "s3Client");
+    }
+    (config.storage_root.is_dir(), "storageRoot")
+}
+
 fn handle_health(config: &ServerConfig) -> HttpResponse {
     let mut checks: Vec<serde_json::Value> = Vec::new();
     let mut all_ok = true;
 
-    let storage_ok = config.storage_root.is_dir();
+    let (storage_ok, storage_check_name) = storage_health_check(config);
     checks.push(json!({
-        "name": "storageRoot",
+        "name": storage_check_name,
         "status": if storage_ok { "ok" } else { "fail" },
     }));
     if !storage_ok {
@@ -2837,6 +2975,123 @@ mod tests {
             source.versioned_source_hash(&cfg1).unwrap(),
             source.versioned_source_hash(&cfg2).unwrap()
         );
+    }
+
+    #[test]
+    #[cfg(feature = "s3")]
+    fn versioned_source_hash_storage_variant_is_deterministic() {
+        let cfg = make_test_config();
+        let source = TransformSourcePayload::Storage {
+            bucket: Some("my-bucket".to_string()),
+            key: "photos/hero.jpg".to_string(),
+            version: Some("v1".to_string()),
+        };
+        let hash1 = source.versioned_source_hash(&cfg).unwrap();
+        let hash2 = source.versioned_source_hash(&cfg).unwrap();
+        assert_eq!(hash1, hash2);
+        assert_eq!(hash1.len(), 64);
+    }
+
+    #[test]
+    #[cfg(feature = "s3")]
+    fn versioned_source_hash_storage_differs_from_path() {
+        let cfg = make_test_config();
+        let path_source = TransformSourcePayload::Path {
+            path: "photos/hero.jpg".to_string(),
+            version: Some("v1".to_string()),
+        };
+        let storage_source = TransformSourcePayload::Storage {
+            bucket: Some("my-bucket".to_string()),
+            key: "photos/hero.jpg".to_string(),
+            version: Some("v1".to_string()),
+        };
+        assert_ne!(
+            path_source.versioned_source_hash(&cfg).unwrap(),
+            storage_source.versioned_source_hash(&cfg).unwrap()
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "s3")]
+    fn versioned_source_hash_storage_differs_by_bucket() {
+        let cfg = make_test_config();
+        let s1 = TransformSourcePayload::Storage {
+            bucket: Some("bucket-a".to_string()),
+            key: "image.jpg".to_string(),
+            version: Some("v1".to_string()),
+        };
+        let s2 = TransformSourcePayload::Storage {
+            bucket: Some("bucket-b".to_string()),
+            key: "image.jpg".to_string(),
+            version: Some("v1".to_string()),
+        };
+        assert_ne!(
+            s1.versioned_source_hash(&cfg).unwrap(),
+            s2.versioned_source_hash(&cfg).unwrap()
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "s3")]
+    fn versioned_source_hash_differs_by_backend() {
+        let cfg_fs = make_test_config();
+        let mut cfg_s3 = make_test_config();
+        cfg_s3.storage_backend = super::s3::StorageBackend::S3;
+
+        let source = TransformSourcePayload::Path {
+            path: "photos/hero.jpg".to_string(),
+            version: Some("v1".to_string()),
+        };
+        assert_ne!(
+            source.versioned_source_hash(&cfg_fs).unwrap(),
+            source.versioned_source_hash(&cfg_s3).unwrap()
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "s3")]
+    fn storage_backend_default_is_filesystem() {
+        let cfg = make_test_config();
+        assert_eq!(cfg.storage_backend, super::s3::StorageBackend::Filesystem);
+        assert!(cfg.s3_context.is_none());
+    }
+
+    #[test]
+    #[cfg(feature = "s3")]
+    fn storage_payload_deserializes_storage_variant() {
+        let json = r#"{"source":{"kind":"storage","key":"photos/hero.jpg"},"options":{}}"#;
+        let payload: super::TransformImageRequestPayload = serde_json::from_str(json).unwrap();
+        match payload.source {
+            TransformSourcePayload::Storage {
+                bucket,
+                key,
+                version,
+            } => {
+                assert!(bucket.is_none());
+                assert_eq!(key, "photos/hero.jpg");
+                assert!(version.is_none());
+            }
+            _ => panic!("expected Storage variant"),
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "s3")]
+    fn storage_payload_deserializes_with_bucket() {
+        let json = r#"{"source":{"kind":"storage","bucket":"my-bucket","key":"img.png","version":"v2"},"options":{}}"#;
+        let payload: super::TransformImageRequestPayload = serde_json::from_str(json).unwrap();
+        match payload.source {
+            TransformSourcePayload::Storage {
+                bucket,
+                key,
+                version,
+            } => {
+                assert_eq!(bucket.as_deref(), Some("my-bucket"));
+                assert_eq!(key, "img.png");
+                assert_eq!(version.as_deref(), Some("v2"));
+            }
+            _ => panic!("expected Storage variant"),
+        }
     }
 
     #[test]
