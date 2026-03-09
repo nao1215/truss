@@ -73,16 +73,16 @@ pub(super) fn read_remote_source_bytes(
                 let status = response.status().as_u16();
                 if is_redirect_status(status) {
                     current_url = next_redirect_url(&target.url, &response, redirect_index)?;
-                } else if status >= 400 {
-                    return Err(bad_gateway_response(&format!(
-                        "failed to fetch remote URL: upstream HTTP {status}"
-                    )));
-                } else {
+                } else if (200..=299).contains(&status) {
                     let bytes = read_remote_response_body(target.url.as_str(), response)?;
                     if let Some(cache) = origin_cache {
                         cache.put(url, &bytes);
                     }
                     return Ok(bytes);
+                } else {
+                    return Err(bad_gateway_response(&format!(
+                        "failed to fetch remote URL: upstream HTTP {status}"
+                    )));
                 }
             }
             Err(error) => {
