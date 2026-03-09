@@ -212,6 +212,30 @@ EXAMPLES:
     --expires 1700000000 --width 640 --format webp
 ";
 
+const HELP_COMPLETIONS: &str = "\
+truss completions - generate shell completion scripts
+
+USAGE:
+  truss completions <SHELL>
+
+SHELLS:
+  bash, zsh, fish, elvish, powershell
+
+EXAMPLES:
+  truss completions bash > ~/.local/share/bash-completion/completions/truss
+  truss completions zsh > ~/.zfunc/_truss
+  truss completions fish > ~/.config/fish/completions/truss.fish
+";
+
+const HELP_VERSION: &str = "\
+truss version - print version information
+
+USAGE:
+  truss version
+  truss -V
+  truss --version
+";
+
 // ---------------------------------------------------------------------------
 // Clap derive structs
 // ---------------------------------------------------------------------------
@@ -248,9 +272,13 @@ enum CliSubcommand {
     /// Print version information
     Version,
     /// Generate shell completion scripts
+    #[command(disable_help_flag = true)]
     Completions {
         #[arg(value_enum)]
-        shell: clap_complete::Shell,
+        shell: Option<clap_complete::Shell>,
+        /// Print help
+        #[arg(long)]
+        help: bool,
     },
 }
 
@@ -523,6 +551,8 @@ enum HelpTopic {
     Inspect,
     Serve,
     Sign,
+    Completions,
+    Version,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -612,6 +642,8 @@ where
                 HelpTopic::Inspect => HELP_INSPECT.to_string(),
                 HelpTopic::Serve => HELP_SERVE.to_string(),
                 HelpTopic::Sign => HELP_SIGN.to_string(),
+                HelpTopic::Completions => HELP_COMPLETIONS.to_string(),
+                HelpTopic::Version => HELP_VERSION.to_string(),
             };
             match stdout.write_all(text.as_bytes()) {
                 Ok(_) => EXIT_SUCCESS,
@@ -764,7 +796,21 @@ where
         None => Ok(Command::Help(HelpTopic::TopLevel)),
         Some(CliSubcommand::Help { topic }) => parse_help_topic(topic),
         Some(CliSubcommand::Version) => Ok(Command::Version),
-        Some(CliSubcommand::Completions { shell }) => Ok(Command::Completions(shell)),
+        Some(CliSubcommand::Completions { help: true, .. }) => {
+            Ok(Command::Help(HelpTopic::Completions))
+        }
+        Some(CliSubcommand::Completions {
+            shell: Some(shell), ..
+        }) => Ok(Command::Completions(shell)),
+        Some(CliSubcommand::Completions {
+            shell: None,
+            help: false,
+        }) => Err(CliError {
+            exit_code: EXIT_USAGE,
+            message: "'completions' requires a shell argument".to_string(),
+            usage: None,
+            hint: Some("try 'truss completions bash'".to_string()),
+        }),
         Some(CliSubcommand::Convert(args)) => convert_from_clap(args),
         Some(CliSubcommand::Inspect(args)) => inspect_from_clap(args),
         Some(CliSubcommand::Serve(args)) => serve_from_clap(args),
@@ -797,11 +843,15 @@ fn parse_help_topic(topic: Option<String>) -> Result<Command, CliError> {
         Some("inspect") => Ok(Command::Help(HelpTopic::Inspect)),
         Some("serve") => Ok(Command::Help(HelpTopic::Serve)),
         Some("sign") => Ok(Command::Help(HelpTopic::Sign)),
+        Some("completions") => Ok(Command::Help(HelpTopic::Completions)),
+        Some("version") => Ok(Command::Help(HelpTopic::Version)),
         Some(other) => Err(CliError {
             exit_code: EXIT_USAGE,
             message: format!("unknown help topic '{other}'"),
             usage: None,
-            hint: Some("available topics: convert, inspect, serve, sign".to_string()),
+            hint: Some(
+                "available topics: convert, inspect, serve, sign, completions, version".to_string(),
+            ),
         }),
     }
 }
