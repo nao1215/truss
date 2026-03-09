@@ -716,6 +716,7 @@ fn apply_watermark(
     image: DynamicImage,
     watermark: &WatermarkInput,
 ) -> Result<DynamicImage, TransformError> {
+    check_input_pixel_limit(&watermark.image)?;
     let wm_image = decode_input(&watermark.image)?;
     let mut wm_rgba = wm_image.to_rgba8();
 
@@ -2700,6 +2701,31 @@ mod tests {
             TransformError::InvalidOptions(
                 "watermark image is too large for the output dimensions".to_string()
             )
+        );
+    }
+
+    #[test]
+    fn watermark_pixel_limit_enforced() {
+        // Create a watermark artifact with fake dimensions exceeding MAX_DECODED_PIXELS.
+        // We use a valid but tiny PNG, then override the metadata to claim huge dimensions.
+        let main = png_artifact(4, 4, Rgba([255, 255, 255, 255]));
+        let mut wm = png_artifact(2, 2, Rgba([0, 0, 0, 128]));
+        // Override metadata to simulate a decompression bomb watermark.
+        wm.metadata.width = Some(100_000);
+        wm.metadata.height = Some(100_000);
+
+        let mut request = TransformRequest::new(main, TransformOptions::default());
+        request.watermark = Some(WatermarkInput {
+            image: wm,
+            position: Position::Center,
+            opacity: 50,
+            margin: 0,
+        });
+
+        let err = transform_raster(request).expect_err("huge watermark should be rejected");
+        assert!(
+            matches!(err, TransformError::LimitExceeded(ref msg) if msg.contains("pixels")),
+            "expected LimitExceeded about pixels, got: {err}"
         );
     }
 }

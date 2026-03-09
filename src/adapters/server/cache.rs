@@ -332,7 +332,7 @@ pub(super) fn compute_cache_key(
         ));
     }
     if let Some(blur) = options.blur {
-        params.push(("blur", format!("{blur:.1}")));
+        params.push(("blur", format!("{blur}")));
     }
     if has_bounded_resize {
         let fit = options.fit.unwrap_or(Fit::Contain);
@@ -434,4 +434,27 @@ pub(super) fn try_versioned_cache_lookup(
         ));
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cache_key_blur_full_precision() {
+        let opts_a = TransformOptions {
+            blur: Some(0.11),
+            ..TransformOptions::default()
+        };
+        let opts_b = TransformOptions {
+            blur: Some(0.14),
+            ..TransformOptions::default()
+        };
+        let key_a = compute_cache_key("img.png", &opts_a, None);
+        let key_b = compute_cache_key("img.png", &opts_b, None);
+        assert_ne!(
+            key_a, key_b,
+            "blur=0.11 and blur=0.14 must produce different cache keys"
+        );
+    }
 }
