@@ -169,6 +169,43 @@ cargo install wasm-bindgen-cli --version 0.2.114
 
 The build output is written to `web/dist/`.
 
+## CDN / Reverse-Proxy Integration
+
+truss is an image transformation origin, not a CDN itself. In production, place a CDN such as CloudFront (or a reverse proxy like nginx / Envoy) in front of truss so that transformed images are cached at the edge.
+
+```mermaid
+flowchart LR
+    Viewer -->|HTTPS request| CloudFront
+    CloudFront -->|cache hit| Viewer
+    CloudFront -->|cache miss| ALB["ALB / nginx / Envoy"]
+    ALB --> truss
+    truss -->|read source| Storage["Local storage<br/>or remote URL origin"]
+```
+
+- CloudFront is the cache layer. It serves cached responses directly on cache hits.
+- truss is the origin API. Image transformation runs on truss, not on CloudFront.
+- An ALB or reverse proxy is recommended between CloudFront and truss because truss does not handle TLS termination or large-scale traffic on its own.
+- The truss on-disk cache (`TRUSS_CACHE_ROOT`) is a single-node auxiliary cache that reduces redundant transforms on the origin; it is not a replacement for the CDN cache.
+
+### Public vs. Private Endpoints
+
+Only the public GET endpoints should be exposed through CloudFront:
+
+| Endpoint | Visibility | CloudFront |
+|----------|-----------|------------|
+| `GET /images/by-path` | Public (signed URL) | Origin for CDN |
+| `GET /images/by-url` | Public (signed URL) | Origin for CDN |
+| `POST /images:transform` | Private (Bearer token) | Do not expose |
+| `POST /images` | Private (Bearer token) | Do not expose |
+
+### `TRUSS_PUBLIC_BASE_URL`
+
+When truss runs behind CloudFront, set `TRUSS_PUBLIC_BASE_URL` to the public CloudFront domain (e.g. `https://images.example.com`). Signed-URL verification compares the request authority against this value; a mismatch will cause signature validation to fail.
+
+```sh
+TRUSS_PUBLIC_BASE_URL=https://images.example.com truss serve
+```
+
 ## Contributing
 
 Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for details.
