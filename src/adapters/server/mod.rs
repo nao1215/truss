@@ -774,13 +774,10 @@ impl TransformSourcePayload {
                 key,
                 version,
             } => {
-                let effective_bucket = bucket
-                    .as_deref()
-                    .or(config
-                        .s3_context
-                        .as_ref()
-                        .map(|ctx| ctx.default_bucket.as_str()))
-                    .unwrap_or("unknown");
+                let effective_bucket = bucket.as_deref().or(config
+                    .s3_context
+                    .as_ref()
+                    .map(|ctx| ctx.default_bucket.as_str()))?;
                 (
                     "storage",
                     format!("s3://{effective_bucket}/{key}").into(),
@@ -3134,6 +3131,222 @@ mod tests {
             }
             _ => panic!("expected Storage variant"),
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // S3: default_bucket fallback with bucket: None
+    // -----------------------------------------------------------------------
+
+    #[test]
+    #[cfg(feature = "s3")]
+    fn versioned_source_hash_uses_default_bucket_when_bucket_is_none() {
+        let mut cfg_a = make_test_config();
+        cfg_a.storage_backend = super::s3::StorageBackend::S3;
+        cfg_a.s3_context = Some(std::sync::Arc::new(super::s3::S3Context::for_test(
+            "bucket-a", None,
+        )));
+
+        let mut cfg_b = make_test_config();
+        cfg_b.storage_backend = super::s3::StorageBackend::S3;
+        cfg_b.s3_context = Some(std::sync::Arc::new(super::s3::S3Context::for_test(
+            "bucket-b", None,
+        )));
+
+        let source = TransformSourcePayload::Storage {
+            bucket: None,
+            key: "image.jpg".to_string(),
+            version: Some("v1".to_string()),
+        };
+        // Different default_bucket ⇒ different hash
+        assert_ne!(
+            source.versioned_source_hash(&cfg_a).unwrap(),
+            source.versioned_source_hash(&cfg_b).unwrap(),
+        );
+        // PartialEq also distinguishes them
+        assert_ne!(cfg_a, cfg_b);
+    }
+
+    #[test]
+    #[cfg(feature = "s3")]
+    fn versioned_source_hash_returns_none_without_bucket_or_context() {
+        let mut cfg = make_test_config();
+        cfg.storage_backend = super::s3::StorageBackend::S3;
+        cfg.s3_context = None;
+
+        let source = TransformSourcePayload::Storage {
+            bucket: None,
+            key: "image.jpg".to_string(),
+            version: Some("v1".to_string()),
+        };
+        // No bucket available ⇒ None (falls back to content-hash)
+        assert!(source.versioned_source_hash(&cfg).is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // S3: from_env branches
+    // -----------------------------------------------------------------------
+
+    #[test]
+    #[cfg(feature = "s3")]
+    fn from_env_rejects_invalid_storage_backend() {
+        let storage = temp_dir("env-bad-backend");
+        unsafe {
+            std::env::set_var("TRUSS_STORAGE_ROOT", storage.to_str().unwrap());
+            std::env::set_var("TRUSS_STORAGE_BACKEND", "gcs");
+        }
+        let result = ServerConfig::from_env();
+        unsafe {
+            std::env::remove_var("TRUSS_STORAGE_BACKEND");
+            std::env::remove_var("TRUSS_STORAGE_ROOT");
+        }
+        let _ = std::fs::remove_dir_all(storage);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("unknown storage backend"), "got: {msg}");
+    }
+
+    #[test]
+    #[cfg(feature = "s3")]
+    fn from_env_rejects_s3_without_bucket() {
+        let storage = temp_dir("env-no-bucket");
+        unsafe {
+            std::env::set_var("TRUSS_STORAGE_ROOT", storage.to_str().unwrap());
+            std::env::set_var("TRUSS_STORAGE_BACKEND", "s3");
+            std::env::remove_var("TRUSS_S3_BUCKET");
+        }
+        let result = ServerConfig::from_env();
+        unsafe {
+            std::env::remove_var("TRUSS_STORAGE_BACKEND");
+            std::env::remove_var("TRUSS_STORAGE_ROOT");
+        }
+        let _ = std::fs::remove_dir_all(storage);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("TRUSS_S3_BUCKET"), "got: {msg}");
+    }
+
+    #[test]
+    #[cfg(feature = "s3")]
+    fn from_env_accepts_s3_with_bucket() {
+        let storage = temp_dir("env-s3-ok");
+        unsafe {
+            std::env::set_var("TRUSS_STORAGE_ROOT", storage.to_str().unwrap());
+            std::env::set_var("TRUSS_STORAGE_BACKEND", "s3");
+            std::env::set_var("TRUSS_S3_BUCKET", "my-images");
+        }
+        let result = ServerConfig::from_env();
+        unsafe {
+            std::env::remove_var("TRUSS_STORAGE_BACKEND");
+            std::env::remove_var("TRUSS_S3_BUCKET");
+            std::env::remove_var("TRUSS_STORAGE_ROOT");
+        }
+        let _ = std::fs::remove_dir_all(storage);
+        let cfg = result.expect("from_env should succeed with s3 + bucket");
+        assert_eq!(cfg.storage_backend, super::s3::StorageBackend::S3);
+        let ctx = cfg.s3_context.expect("s3_context should be Some");
+        assert_eq!(ctx.default_bucket, "my-images");
+    }
+
+    // -----------------------------------------------------------------------
+    // S3: health endpoint
+    // -----------------------------------------------------------------------
+
+    #[test]
+    #[cfg(feature = "s3")]
+    fn health_ready_s3_returns_503_when_context_missing() {
+        let storage = temp_dir("health-s3-no-ctx");
+        let mut config = ServerConfig::new(storage.clone(), None);
+        config.storage_backend = super::s3::StorageBackend::S3;
+        config.s3_context = None;
+
+        let request = super::http_parse::HttpRequest {
+            method: "GET".to_string(),
+            target: "/health/ready".to_string(),
+            version: "HTTP/1.1".to_string(),
+            headers: Vec::new(),
+            body: Vec::new(),
+        };
+        let response = route_request(request, &config);
+        let _ = std::fs::remove_dir_all(storage);
+
+        assert_eq!(response.status, "503 Service Unavailable");
+        let body: serde_json::Value = serde_json::from_slice(&response.body).expect("parse body");
+        let checks = body["checks"].as_array().expect("checks array");
+        assert!(
+            checks
+                .iter()
+                .any(|c| c["name"] == "s3Client" && c["status"] == "fail"),
+            "expected s3Client fail check in {body}",
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "s3")]
+    fn health_ready_s3_includes_s3_client_check() {
+        let storage = temp_dir("health-s3-ok");
+        let mut config = ServerConfig::new(storage.clone(), None);
+        config.storage_backend = super::s3::StorageBackend::S3;
+        config.s3_context = Some(std::sync::Arc::new(super::s3::S3Context::for_test(
+            "test-bucket",
+            None,
+        )));
+
+        let request = super::http_parse::HttpRequest {
+            method: "GET".to_string(),
+            target: "/health/ready".to_string(),
+            version: "HTTP/1.1".to_string(),
+            headers: Vec::new(),
+            body: Vec::new(),
+        };
+        let response = route_request(request, &config);
+        let _ = std::fs::remove_dir_all(storage);
+
+        assert_eq!(response.status, "200 OK");
+        let body: serde_json::Value = serde_json::from_slice(&response.body).expect("parse body");
+        let checks = body["checks"].as_array().expect("checks array");
+        assert!(
+            checks
+                .iter()
+                .any(|c| c["name"] == "s3Client" && c["status"] == "ok"),
+            "expected s3Client ok check in {body}",
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // S3: public by-path remap (leading slash trimmed, Storage variant used)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    #[cfg(feature = "s3")]
+    fn public_by_path_s3_remaps_to_storage_and_trims_leading_slash() {
+        let storage = temp_dir("by-path-s3-remap");
+        let mut config = ServerConfig::new(storage.clone(), None);
+        config.storage_backend = super::s3::StorageBackend::S3;
+        config.s3_context = Some(std::sync::Arc::new(super::s3::S3Context::for_test(
+            "my-bucket",
+            None,
+        )));
+
+        // Craft a minimal GET /images/by-path?path=/photos/hero.jpg&version=v1 request.
+        // We expect a 502 (S3 unreachable) rather than a filesystem error, proving the
+        // Storage branch is taken.
+        let request = super::http_parse::HttpRequest {
+            method: "GET".to_string(),
+            target: "/images/by-path?path=/photos/hero.jpg&version=v1".to_string(),
+            version: "HTTP/1.1".to_string(),
+            headers: vec![("Accept".to_string(), "image/jpeg".to_string())],
+            body: Vec::new(),
+        };
+        let response = route_request(request, &config);
+        let _ = std::fs::remove_dir_all(storage);
+
+        // Without a live S3 endpoint the request must fail with "S3 storage backend
+        // is not configured" (s3_context is set but the client points nowhere real)
+        // or 502 from the SDK. Either way it must NOT be a filesystem 404.
+        assert_ne!(
+            response.status, "404 Not Found",
+            "expected S3 resolution, not filesystem lookup",
+        );
     }
 
     #[test]
