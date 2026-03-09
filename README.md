@@ -10,19 +10,111 @@
 
 ![logo](./doc/img/logo-small.png)
 
-truss is a library-first image toolkit that reuses the same transformation core across the CLI, HTTP server, and WASM demo. User-facing behavior is locked down with Docker-based integration tests using [ShellSpec](https://github.com/shellspec/shellspec) and [runn](https://github.com/k1LoW/runn), so the CLI and API remain aligned with executable documentation.
+Resize, convert, blur, and watermark images from the CLI, an HTTP server, or the browser -- written in Rust with signed-URL authentication and SSRF protection built in.
 
-- Cross Platform: support Linux, macOS, Windows
-- Tested contracts: the CLI is covered by [ShellSpec](https://github.com/shellspec/shellspec) and the HTTP API by [runn](https://github.com/k1LoW/runn), keeping user-visible behavior under integration test.
-- Security by default: signed URLs, SSRF protections, and SVG sanitization are built in.
-- Practical image pipeline: handles JPEG, PNG, WebP, AVIF, BMP, and SVG, with support for retaining metadata such as EXIF, ICC, and XMP where possible.
+[Try the WASM demo in your browser](https://nao1215.github.io/truss/) -- no install, no upload, runs 100 % client-side.
 
-## Requirements
+![wasm-sample](./doc/img/wasm-sample.png)
 
-| Item | Requirement |
-|------|------|
-| Rust | stable toolchain (edition 2024) |
-| OS | Linux, macOS, Windows |
+
+## Why truss?
+
+- **One binary, three interfaces** -- the same Rust core powers the CLI, an HTTP image-transform server, and a WASM browser demo.
+- **Security by default** -- signed URLs, SSRF protections, and SVG sanitization are built in.
+- **Broad format support** -- JPEG, PNG, WebP, AVIF, BMP, and SVG; retains EXIF, ICC, and XMP metadata where possible.
+- **Cross-platform** -- Linux, macOS, Windows.
+- **Tested contracts** -- CLI behavior is locked by [ShellSpec](https://github.com/shellspec/shellspec), HTTP API by [runn](https://github.com/k1LoW/runn).
+
+## Installation
+
+```sh
+cargo install truss-image
+```
+
+This installs the `truss` command.
+
+## Quick Start
+
+### CLI
+
+Run `truss --help` to see the full set of options.
+
+```sh
+# Convert format
+truss photo.png -o photo.jpg
+
+# Resize + convert
+truss photo.png -o thumb.webp --width 800 --format webp --quality 75
+
+# Convert from a remote URL
+truss --url https://example.com/img.png -o out.avif --format avif
+
+# Sanitize SVG (remove scripts and external references)
+truss diagram.svg -o safe.svg
+
+# Rasterize SVG
+truss diagram.svg -o diagram.png --width 1024
+
+# Inspect metadata
+truss inspect photo.jpg
+```
+
+#### Filter: Before / After
+
+| | Original | Gaussian Blur (`--blur 5.0`) | Watermark (`--watermark`) |
+|---|---|---|---|
+| | ![original](./doc/img/sample-bee.jpg) | ![blurred](./doc/img/sample-bee-blurred.jpg) | ![watermarked](./doc/img/sample-bee-watermarked.jpg) |
+
+```sh
+# Blur
+truss photo.jpg -o blurred.jpg --blur 5.0
+
+# Watermark
+truss photo.jpg -o watermarked.jpg \
+  --watermark logo.png --watermark-position bottom-right \
+  --watermark-opacity 50 --watermark-margin 10
+```
+
+
+
+### HTTP Server -- one curl to transform
+
+```sh
+# Start the server
+docker run -p 8080:8080 \
+  -e TRUSS_BIND_ADDR=0.0.0.0:8080 \
+  -e TRUSS_BEARER_TOKEN=changeme \
+  -v ./images:/data:ro \
+  -e TRUSS_STORAGE_ROOT=/data \
+  ghcr.io/nao1215/truss:latest
+
+# Resize a local image to 400 px wide WebP in one request
+curl -X POST http://localhost:8080/images:transform \
+  -H "Authorization: Bearer changeme" \
+  -F "file=@photo.jpg" \
+  -F 'options={"format":"webp","width":400}' \
+  -o thumb.webp
+
+# Signed public URL (no Bearer token needed)
+truss sign --base-url http://localhost:8080 \
+  --path photos/hero.jpg --key-id mykey --secret s3cret \
+  --expires 1700000000 --width 800 --format webp
+# => http://localhost:8080/images/by-path?path=photos/hero.jpg&width=800&format=webp&keyId=mykey&expires=1700000000&signature=...
+```
+
+## Commands
+
+| Command | Description |
+|---------|-------------|
+| `convert` | Convert and transform an image file |
+| `inspect` | Show metadata (format, dimensions, alpha) of an image |
+| `serve` | Start the HTTP image-transform server |
+| `sign` | Generate a signed public URL for the server |
+| `completions` | Generate shell completion scripts |
+| `version` | Print version information |
+| `help` | Show help for a command (e.g. `truss help convert`) |
+
+The `convert` subcommand can be omitted: `truss photo.png -o photo.jpg` is equivalent to `truss convert photo.png -o photo.jpg`. Similarly, server flags at the top level imply `serve`: `truss --bind 0.0.0.0:8080` is equivalent to `truss serve --bind 0.0.0.0:8080`.
 
 ## Supported Formats
 
@@ -37,105 +129,7 @@ truss is a library-first image toolkit that reuses the same transformation core 
 
 SVG to SVG performs sanitization only, removing scripts and external references.
 
-## Installation
-
-```sh
-cargo install truss-image
-```
-
-This installs the `truss` command.
-
-## Usage
-
-### CLI
-
-Convert image formats:
-
-```sh
-truss photo.png -o photo.jpg
-```
-
-Resize and convert:
-
-```sh
-truss photo.png -o thumb.webp --width 800 --format webp --quality 75
-```
-
-Convert from a remote URL:
-
-```sh
-truss --url https://example.com/img.png -o out.avif --format avif
-```
-
-Sanitize SVG by removing scripts and external references:
-
-```sh
-truss diagram.svg -o safe.svg
-```
-
-Rasterize SVG:
-
-```sh
-truss diagram.svg -o diagram.png --width 1024
-```
-
-Apply Gaussian blur:
-
-```sh
-truss photo.png -o blurred.jpg --blur 5.0
-```
-
-Add a watermark:
-
-```sh
-truss photo.png -o watermarked.jpg --watermark logo.png --watermark-position bottom-right --watermark-opacity 50 --watermark-margin 10
-```
-
-Inspect image metadata:
-
-```sh
-truss inspect photo.jpg
-```
-
-Run `truss --help` to see the full set of options.
-
-### Commands
-
-| Command | Description |
-|---------|-------------|
-| `convert` | Convert and transform an image file |
-| `inspect` | Show metadata (format, dimensions, alpha) of an image |
-| `serve` | Start the HTTP image-transform server |
-| `sign` | Generate a signed public URL for the server |
-| `completions` | Generate shell completion scripts |
-| `version` | Print version information |
-| `help` | Show help for a command (e.g. `truss help convert`) |
-
-The `convert` subcommand can be omitted: `truss photo.png -o photo.jpg` is equivalent to `truss convert photo.png -o photo.jpg`. Similarly, server flags at the top level imply `serve`: `truss --bind 0.0.0.0:8080` is equivalent to `truss serve --bind 0.0.0.0:8080`.
-
-### Shell Completions
-
-Generate completion scripts with the `completions` subcommand:
-
-```sh
-# Bash
-truss completions bash > ~/.local/share/bash-completion/completions/truss
-
-# Zsh (add ~/.zfunc to your fpath)
-truss completions zsh > ~/.zfunc/_truss
-
-# Fish
-truss completions fish > ~/.config/fish/completions/truss.fish
-
-# PowerShell
-truss completions powershell > truss.ps1
-```
-
-### HTTP Server
-
-```sh
-truss serve
-```
+## HTTP Server
 
 By default, the server listens on `127.0.0.1:8080`. Configuration can be supplied through environment variables or CLI flags.
 
@@ -161,7 +155,7 @@ API reference:
 - OpenAPI YAML: [doc/openapi.yaml](doc/openapi.yaml)
 - Swagger UI on GitHub Pages: https://nao1215.github.io/truss/swagger/
 
-### Docker
+## Docker
 
 ```sh
 docker compose up
@@ -185,17 +179,11 @@ Prebuilt container images are published to GHCR:
 
 ```sh
 docker pull ghcr.io/nao1215/truss:latest
-docker run -p 8080:8080 \
-  -e TRUSS_BIND_ADDR=0.0.0.0:8080 \
-  -e TRUSS_BEARER_TOKEN=changeme \
-  -v ./images:/data:ro \
-  -e TRUSS_STORAGE_ROOT=/data \
-  ghcr.io/nao1215/truss:latest
 ```
 
 The first GHCR package publish is private by default. To allow anonymous pulls from ECS, change the package visibility to `Public` in GitHub Packages settings once after the first publish.
 
-### WASM
+## WASM Demo
 
 A browser demo is available on GitHub Pages:
 
@@ -207,11 +195,28 @@ To build the demo locally, use [`scripts/build-wasm-demo.sh`](scripts/build-wasm
 
 ```sh
 rustup target add wasm32-unknown-unknown
+# The wasm-bindgen-cli version must match the wasm-bindgen dependency in Cargo.toml.
 cargo install wasm-bindgen-cli --version 0.2.114
 ./scripts/build-wasm-demo.sh
 ```
 
 The build output is written to `web/dist/`.
+
+## Shell Completions
+
+```sh
+# Bash
+truss completions bash > ~/.local/share/bash-completion/completions/truss
+
+# Zsh (add ~/.zfunc to your fpath)
+truss completions zsh > ~/.zfunc/_truss
+
+# Fish
+truss completions fish > ~/.config/fish/completions/truss.fish
+
+# PowerShell
+truss completions powershell > truss.ps1
+```
 
 ## CDN / Reverse-Proxy Integration
 
@@ -260,6 +265,13 @@ When truss runs behind CloudFront, set `TRUSS_PUBLIC_BASE_URL` to the public Clo
 TRUSS_PUBLIC_BASE_URL=https://images.example.com truss serve
 ```
 
+## Requirements
+
+| Item | Requirement |
+|------|------|
+| Rust | stable toolchain (edition 2024) |
+| OS | Linux, macOS, Windows |
+
 ## Benchmark
 
 Measured with `doc/img/logo.png` (1536 x 1024 PNG, 1.6 MB) on AMD Ryzen 7 5800U. Each operation was run 10 times; the table shows min / avg / max wall-clock time.
@@ -291,10 +303,15 @@ Measured with `doc/img/logo.png` (1536 x 1024 PNG, 1.6 MB) on AMD Ryzen 7 5800U.
 | Resize 400w → WebP | 108 KB |
 | Resize 200w → AVIF | 4.0 KB |
 
+## Roadmap
+
+See the [public roadmap](https://github.com/nao1215/truss/issues?q=is%3Aissue+label%3Aroadmap) for planned features and milestones.
+
 ## Contributing
 
 Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for details.
 
+- Look for [`good first issue`](https://github.com/nao1215/truss/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22) to get started.
 - Report bugs and request features via [Issues](https://github.com/nao1215/truss/issues).
 - If the project is useful, starring the repository helps.
 - Support via [GitHub Sponsors](https://github.com/sponsors/nao1215) is also welcome.
