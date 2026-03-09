@@ -711,6 +711,16 @@ fn preprocess_args(args: Vec<String>) -> Vec<String> {
         return args;
     }
 
+    // If the first argument refers to an existing file (even without an
+    // extension), treat it as an implicit convert rather than an unknown
+    // subcommand.  This handles `truss image -o out.jpg` where `image` is a
+    // real file.
+    if std::path::Path::new(first).exists() {
+        let mut new = vec![args[0].clone(), "convert".to_string()];
+        new.extend_from_slice(&args[1..]);
+        return new;
+    }
+
     // Looks like an unknown subcommand (alphabetic, no dots/slashes) →
     // let clap handle it for typo suggestions
     if looks_like_unknown_subcommand(first) {
@@ -1477,7 +1487,7 @@ where
 mod tests {
     use super::{
         Command, ConvertCommand, HelpTopic, InputSource, OutputTarget, ServeCommand, SignCommand,
-        parse_args, resolve_server_config, run_with_io,
+        parse_args, preprocess_args, resolve_server_config, run_with_io,
     };
     use crate::{Fit, MediaType, RawArtifact, SignedUrlSource, TransformOptions, sniff_artifact};
     use image::codecs::png::PngEncoder;
@@ -2820,6 +2830,49 @@ mod tests {
         assert!(
             output.contains("github.com/sponsors/nao1215"),
             "help should include GitHub Sponsors URL: {output}"
+        );
+    }
+
+    // ===== Fix: extensionless file treated as implicit convert =====
+
+    #[test]
+    fn preprocess_args_extensionless_file_is_implicit_convert() {
+        // Create a temp file without extension
+        let dir = temp_dir("extensionless");
+        let file_path = dir.join("image");
+        fs::write(&file_path, png_bytes()).expect("write extensionless fixture");
+
+        let args = vec![
+            "truss".to_string(),
+            file_path.to_string_lossy().to_string(),
+            "-o".to_string(),
+            "out.jpg".to_string(),
+        ];
+        let result = preprocess_args(args);
+        assert_eq!(
+            result[1], "convert",
+            "extensionless file should trigger implicit convert"
+        );
+        assert_eq!(
+            result[2],
+            file_path.to_string_lossy().to_string(),
+            "original file path should follow convert"
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn preprocess_args_nonexistent_extensionless_is_unknown_subcommand() {
+        // A name that doesn't exist on disk should pass through (clap handles typo suggestion)
+        let args = vec![
+            "truss".to_string(),
+            "nonexistent_subcommand_xyz".to_string(),
+        ];
+        let result = preprocess_args(args.clone());
+        assert_eq!(
+            result, args,
+            "non-existent extensionless name should pass through unchanged"
         );
     }
 }
