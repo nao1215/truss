@@ -429,15 +429,6 @@ impl ServerConfig {
 
         let storage_root =
             env::var("TRUSS_STORAGE_ROOT").unwrap_or_else(|_| DEFAULT_STORAGE_ROOT.to_string());
-        // When the storage backend is S3, the filesystem root may not exist. Only
-        // canonicalize when using the filesystem backend.
-        #[cfg(feature = "s3")]
-        let storage_root = if storage_backend == s3::StorageBackend::S3 {
-            PathBuf::from(storage_root)
-        } else {
-            PathBuf::from(storage_root).canonicalize()?
-        };
-        #[cfg(not(feature = "s3"))]
         let storage_root = PathBuf::from(storage_root).canonicalize()?;
         let bearer_token = env::var("TRUSS_BEARER_TOKEN")
             .ok()
@@ -1039,7 +1030,7 @@ fn handle_public_get_request(
         match source {
             TransformSourcePayload::Path { path, version } => TransformSourcePayload::Storage {
                 bucket: None,
-                key: path,
+                key: path.trim_start_matches('/').to_string(),
                 version,
             },
             other => other,
@@ -1116,13 +1107,14 @@ fn handle_health_ready(config: &ServerConfig) -> HttpResponse {
     let mut checks: Vec<serde_json::Value> = Vec::new();
     let mut all_ok = true;
 
-    let (storage_ok, storage_check_name) = storage_health_check(config);
-    checks.push(json!({
-        "name": storage_check_name,
-        "status": if storage_ok { "ok" } else { "fail" },
-    }));
-    if !storage_ok {
-        all_ok = false;
+    for (ok, name) in storage_health_check(config) {
+        checks.push(json!({
+            "name": name,
+            "status": if ok { "ok" } else { "fail" },
+        }));
+        if !ok {
+            all_ok = false;
+        }
     }
 
     if let Some(cache_root) = &config.cache_root {
@@ -1162,25 +1154,27 @@ fn handle_health_ready(config: &ServerConfig) -> HttpResponse {
 }
 
 /// Returns a comprehensive diagnostic health response.
-fn storage_health_check(config: &ServerConfig) -> (bool, &'static str) {
+fn storage_health_check(config: &ServerConfig) -> Vec<(bool, &'static str)> {
+    let mut checks = vec![(config.storage_root.is_dir(), "storageRoot")];
     #[cfg(feature = "s3")]
     if config.storage_backend == s3::StorageBackend::S3 {
-        return (config.s3_context.is_some(), "s3Client");
+        checks.push((config.s3_context.is_some(), "s3Client"));
     }
-    (config.storage_root.is_dir(), "storageRoot")
+    checks
 }
 
 fn handle_health(config: &ServerConfig) -> HttpResponse {
     let mut checks: Vec<serde_json::Value> = Vec::new();
     let mut all_ok = true;
 
-    let (storage_ok, storage_check_name) = storage_health_check(config);
-    checks.push(json!({
-        "name": storage_check_name,
-        "status": if storage_ok { "ok" } else { "fail" },
-    }));
-    if !storage_ok {
-        all_ok = false;
+    for (ok, name) in storage_health_check(config) {
+        checks.push(json!({
+            "name": name,
+            "status": if ok { "ok" } else { "fail" },
+        }));
+        if !ok {
+            all_ok = false;
+        }
     }
 
     if let Some(cache_root) = &config.cache_root {
