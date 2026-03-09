@@ -131,6 +131,16 @@ pub struct ServerConfig {
     /// are served from the cache instead of re-transforming. When `None`, caching is disabled
     /// and every request performs a fresh transform.
     pub cache_root: Option<PathBuf>,
+    /// `Cache-Control: max-age` value (in seconds) for public GET image responses.
+    ///
+    /// Defaults to [`DEFAULT_PUBLIC_MAX_AGE_SECONDS`] (3600).  Operators can tune this
+    /// via the `TRUSS_PUBLIC_MAX_AGE` environment variable when running behind a CDN.
+    pub public_max_age_seconds: u32,
+    /// `Cache-Control: stale-while-revalidate` value (in seconds) for public GET image responses.
+    ///
+    /// Defaults to [`DEFAULT_PUBLIC_STALE_WHILE_REVALIDATE_SECONDS`] (60).  Configurable
+    /// via `TRUSS_PUBLIC_STALE_WHILE_REVALIDATE`.
+    pub public_stale_while_revalidate_seconds: u32,
     /// Whether Accept-based content negotiation is disabled for public GET endpoints.
     ///
     /// When running behind a CDN such as CloudFront, Accept negotiation combined with
@@ -157,6 +167,8 @@ impl Clone for ServerConfig {
             signed_url_secret: self.signed_url_secret.clone(),
             allow_insecure_url_sources: self.allow_insecure_url_sources,
             cache_root: self.cache_root.clone(),
+            public_max_age_seconds: self.public_max_age_seconds,
+            public_stale_while_revalidate_seconds: self.public_stale_while_revalidate_seconds,
             disable_accept_negotiation: self.disable_accept_negotiation,
             log_handler: self.log_handler.clone(),
         }
@@ -176,6 +188,11 @@ impl fmt::Debug for ServerConfig {
                 &self.allow_insecure_url_sources,
             )
             .field("cache_root", &self.cache_root)
+            .field("public_max_age_seconds", &self.public_max_age_seconds)
+            .field(
+                "public_stale_while_revalidate_seconds",
+                &self.public_stale_while_revalidate_seconds,
+            )
             .field(
                 "disable_accept_negotiation",
                 &self.disable_accept_negotiation,
@@ -194,6 +211,9 @@ impl PartialEq for ServerConfig {
             && self.signed_url_secret == other.signed_url_secret
             && self.allow_insecure_url_sources == other.allow_insecure_url_sources
             && self.cache_root == other.cache_root
+            && self.public_max_age_seconds == other.public_max_age_seconds
+            && self.public_stale_while_revalidate_seconds
+                == other.public_stale_while_revalidate_seconds
             && self.disable_accept_negotiation == other.disable_accept_negotiation
     }
 }
@@ -224,6 +244,8 @@ impl ServerConfig {
             signed_url_secret: None,
             allow_insecure_url_sources: false,
             cache_root: None,
+            public_max_age_seconds: DEFAULT_PUBLIC_MAX_AGE_SECONDS,
+            public_stale_while_revalidate_seconds: DEFAULT_PUBLIC_STALE_WHILE_REVALIDATE_SECONDS,
             disable_accept_negotiation: false,
             log_handler: None,
         }
@@ -324,6 +346,10 @@ impl ServerConfig {
     /// - `TRUSS_CACHE_ROOT`: directory for the on-disk transform cache. When set, transformed
     ///   images are cached using a sharded `ab/cd/ef/<sha256>` layout. When absent, caching is
     ///   disabled.
+    /// - `TRUSS_PUBLIC_MAX_AGE`: `Cache-Control: max-age` value (in seconds) for public GET
+    ///   image responses. Defaults to 3600.
+    /// - `TRUSS_PUBLIC_STALE_WHILE_REVALIDATE`: `Cache-Control: stale-while-revalidate` value
+    ///   (in seconds) for public GET image responses. Defaults to 60.
     /// - `TRUSS_DISABLE_ACCEPT_NEGOTIATION`: when set to `1`, `true`, `yes`, or `on`, disables
     ///   Accept-based content negotiation on public GET endpoints. This is recommended when running
     ///   behind a CDN that does not forward the `Accept` header in its cache key.
@@ -378,6 +404,12 @@ impl ServerConfig {
             .filter(|value| !value.is_empty())
             .map(PathBuf::from);
 
+        let public_max_age_seconds = parse_optional_env_u32("TRUSS_PUBLIC_MAX_AGE")?
+            .unwrap_or(DEFAULT_PUBLIC_MAX_AGE_SECONDS);
+        let public_stale_while_revalidate_seconds =
+            parse_optional_env_u32("TRUSS_PUBLIC_STALE_WHILE_REVALIDATE")?
+                .unwrap_or(DEFAULT_PUBLIC_STALE_WHILE_REVALIDATE_SECONDS);
+
         Ok(Self {
             storage_root,
             bearer_token,
@@ -386,6 +418,8 @@ impl ServerConfig {
             signed_url_secret,
             allow_insecure_url_sources: env_flag("TRUSS_ALLOW_INSECURE_URL_SOURCES"),
             cache_root,
+            public_max_age_seconds,
+            public_stale_while_revalidate_seconds,
             disable_accept_negotiation: env_flag("TRUSS_DISABLE_ACCEPT_NEGOTIATION"),
             log_handler: None,
         })
@@ -781,6 +815,8 @@ fn try_versioned_cache_lookup(
             response_policy,
             false,
             CacheHitStatus::Hit,
+            config.public_max_age_seconds,
+            config.public_stale_while_revalidate_seconds,
         );
         headers.push(("Age".to_string(), age.as_secs().to_string()));
         if matches!(response_policy, ImageResponsePolicy::PublicGet)
@@ -1769,6 +1805,8 @@ fn transform_source_bytes(
                     response_policy,
                     false,
                     CacheHitStatus::Hit,
+                    config.public_max_age_seconds,
+                    config.public_stale_while_revalidate_seconds,
                 );
                 headers.push(("Age".to_string(), age.as_secs().to_string()));
                 if matches!(response_policy, ImageResponsePolicy::PublicGet)
@@ -1800,6 +1838,8 @@ fn transform_source_bytes(
         cache.as_ref(),
         source_hash,
         config.disable_accept_negotiation,
+        config.public_max_age_seconds,
+        config.public_stale_while_revalidate_seconds,
     );
     TRANSFORMS_IN_FLIGHT.fetch_sub(1, Ordering::Relaxed);
     response
@@ -1813,6 +1853,8 @@ fn transform_source_bytes_inner(
     cache: Option<&TransformCache>,
     source_hash: &str,
     disable_accept_negotiation: bool,
+    public_max_age: u32,
+    public_swr: u32,
 ) -> HttpResponse {
     if options.deadline.is_none() {
         options.deadline = Some(SERVER_TRANSFORM_DEADLINE);
@@ -1857,6 +1899,8 @@ fn transform_source_bytes_inner(
             response_policy,
             negotiation_used,
             CacheHitStatus::Hit,
+            public_max_age,
+            public_swr,
         );
         headers.push(("Age".to_string(), age.as_secs().to_string()));
         if matches!(response_policy, ImageResponsePolicy::PublicGet)
@@ -1915,6 +1959,8 @@ fn transform_source_bytes_inner(
         response_policy,
         negotiation_used,
         cache_hit_status,
+        public_max_age,
+        public_swr,
     );
 
     if matches!(response_policy, ImageResponsePolicy::PublicGet)
@@ -2138,13 +2184,15 @@ fn build_image_response_headers(
     response_policy: ImageResponsePolicy,
     negotiation_used: bool,
     cache_status: CacheHitStatus,
+    public_max_age: u32,
+    public_swr: u32,
 ) -> Vec<(String, String)> {
     let mut headers = vec![
         (
             "Cache-Control".to_string(),
             match response_policy {
                 ImageResponsePolicy::PublicGet => format!(
-                    "public, max-age={DEFAULT_PUBLIC_MAX_AGE_SECONDS}, stale-while-revalidate={DEFAULT_PUBLIC_STALE_WHILE_REVALIDATE_SECONDS}"
+                    "public, max-age={public_max_age}, stale-while-revalidate={public_swr}"
                 ),
                 ImageResponsePolicy::PrivateTransform => "no-store".to_string(),
             },
@@ -3245,6 +3293,18 @@ fn env_flag(name: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn parse_optional_env_u32(name: &str) -> io::Result<Option<u32>> {
+    match env::var(name) {
+        Ok(value) if !value.is_empty() => value.parse::<u32>().map(Some).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{name} must be a non-negative integer"),
+            )
+        }),
+        _ => Ok(None),
+    }
+}
+
 fn validate_public_base_url(value: String) -> io::Result<String> {
     let parsed = Url::parse(&value).map_err(|error| {
         io::Error::new(
@@ -3696,7 +3756,8 @@ fn problem_detail_body(status: u16, title: &str, detail: &str) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::{
-        CacheHitStatus, DEFAULT_BIND_ADDR, HttpRequest, ImageResponsePolicy,
+        CacheHitStatus, DEFAULT_BIND_ADDR, DEFAULT_PUBLIC_MAX_AGE_SECONDS,
+        DEFAULT_PUBLIC_STALE_WHILE_REVALIDATE_SECONDS, HttpRequest, ImageResponsePolicy,
         MAX_CONCURRENT_TRANSFORMS, PinnedResolver, PublicSourceKind, ServerConfig, SignedUrlSource,
         TRANSFORMS_IN_FLIGHT, TransformSourcePayload, auth_required_response,
         authorize_signed_request, bad_request_response, bind_addr, build_image_etag,
@@ -4081,6 +4142,8 @@ mod tests {
             ImageResponsePolicy::PublicGet,
             true,
             CacheHitStatus::Disabled,
+            DEFAULT_PUBLIC_MAX_AGE_SECONDS,
+            DEFAULT_PUBLIC_STALE_WHILE_REVALIDATE_SECONDS,
         );
 
         assert!(headers.contains(&(
@@ -4107,6 +4170,8 @@ mod tests {
             ImageResponsePolicy::PublicGet,
             true,
             CacheHitStatus::Disabled,
+            DEFAULT_PUBLIC_MAX_AGE_SECONDS,
+            DEFAULT_PUBLIC_STALE_WHILE_REVALIDATE_SECONDS,
         );
 
         assert!(headers.contains(&("Content-Security-Policy".to_string(), "sandbox".to_string())));
@@ -4120,6 +4185,8 @@ mod tests {
             ImageResponsePolicy::PublicGet,
             true,
             CacheHitStatus::Disabled,
+            DEFAULT_PUBLIC_MAX_AGE_SECONDS,
+            DEFAULT_PUBLIC_STALE_WHILE_REVALIDATE_SECONDS,
         );
 
         assert!(!headers.iter().any(|(k, _)| k == "Content-Security-Policy"));
@@ -4296,6 +4363,8 @@ mod tests {
             ImageResponsePolicy::PublicGet,
             false,
             CacheHitStatus::Hit,
+            DEFAULT_PUBLIC_MAX_AGE_SECONDS,
+            DEFAULT_PUBLIC_STALE_WHILE_REVALIDATE_SECONDS,
         );
         assert!(headers.contains(&("Cache-Status".to_string(), "\"truss\"; hit".to_string())));
     }
@@ -4308,6 +4377,8 @@ mod tests {
             ImageResponsePolicy::PublicGet,
             false,
             CacheHitStatus::Miss,
+            DEFAULT_PUBLIC_MAX_AGE_SECONDS,
+            DEFAULT_PUBLIC_STALE_WHILE_REVALIDATE_SECONDS,
         );
         assert!(headers.contains(&(
             "Cache-Status".to_string(),
