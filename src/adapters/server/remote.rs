@@ -372,6 +372,12 @@ pub(super) fn is_disallowed_ipv4(ip: Ipv4Addr) -> bool {
 }
 
 pub(super) fn is_disallowed_ipv6(ip: Ipv6Addr) -> bool {
+    // Check IPv4-mapped addresses (e.g. ::ffff:127.0.0.1) against IPv4 rules
+    // to prevent SSRF bypass via mapped addresses.
+    if let Some(v4) = ip.to_ipv4_mapped() {
+        return is_disallowed_ipv4(v4);
+    }
+
     let segments = ip.segments();
     ip.is_loopback()
         || ip.is_unspecified()
