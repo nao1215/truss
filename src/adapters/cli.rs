@@ -2949,10 +2949,7 @@ mod tests {
             result[1], "convert",
             "extensionless file should trigger implicit convert"
         );
-        assert_eq!(
-            result[2], "image",
-            "bare file name should follow convert"
-        );
+        assert_eq!(result[2], "image", "bare file name should follow convert");
 
         fs::remove_dir_all(&dir).ok();
     }
