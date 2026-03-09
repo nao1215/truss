@@ -221,7 +221,12 @@ where
             ));
         };
 
-        headers.push((name.trim().to_ascii_lowercase(), value.trim().to_string()));
+        if name != name.trim() || name.is_empty() {
+            return Err(bad_request_response(
+                "header name must not be empty or contain leading/trailing whitespace",
+            ));
+        }
+        headers.push((name.to_ascii_lowercase(), value.trim().to_string()));
     }
 
     for &singleton in SINGLETON_HEADERS {
