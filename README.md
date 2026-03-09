@@ -87,6 +87,38 @@ truss inspect photo.jpg
 
 Run `truss --help` to see the full set of options.
 
+### Commands
+
+| Command | Description |
+|---------|-------------|
+| `convert` | Convert and transform an image file |
+| `inspect` | Show metadata (format, dimensions, alpha) of an image |
+| `serve` | Start the HTTP image-transform server |
+| `sign` | Generate a signed public URL for the server |
+| `completions` | Generate shell completion scripts |
+| `version` | Print version information |
+| `help` | Show help for a command (e.g. `truss help convert`) |
+
+The `convert` subcommand can be omitted: `truss photo.png -o photo.jpg` is equivalent to `truss convert photo.png -o photo.jpg`. Similarly, server flags at the top level imply `serve`: `truss --bind 0.0.0.0:8080` is equivalent to `truss serve --bind 0.0.0.0:8080`.
+
+### Shell Completions
+
+Generate completion scripts with the `completions` subcommand:
+
+```sh
+# Bash
+truss completions bash > ~/.local/share/bash-completion/completions/truss
+
+# Zsh (add ~/.zfunc to your fpath)
+truss completions zsh > ~/.zfunc/_truss
+
+# Fish
+truss completions fish > ~/.config/fish/completions/truss.fish
+
+# PowerShell
+truss completions powershell > truss.ps1
+```
+
 ### HTTP Server
 
 ```sh

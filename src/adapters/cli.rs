@@ -2970,4 +2970,150 @@ mod tests {
             "non-existent extensionless name should pass through unchanged"
         );
     }
+
+    // ===== Exit code: InvalidOptions maps to EXIT_USAGE (1) =====
+
+    #[test]
+    fn exit_code_invalid_options_is_usage_error() {
+        // quality=0 triggers InvalidOptions via normalize()
+        let png_bytes = {
+            let mut img = image::RgbaImage::new(1, 1);
+            img.put_pixel(0, 0, image::Rgba([255, 0, 0, 255]));
+            let mut buf = Vec::new();
+            let encoder = image::codecs::png::PngEncoder::new(&mut buf);
+            image::ImageEncoder::write_image(
+                encoder,
+                img.as_raw(),
+                1,
+                1,
+                image::ColorType::Rgba8.into(),
+            )
+            .unwrap();
+            buf
+        };
+        let mut stdin = Cursor::new(png_bytes);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let code = run_with_io(
+            vec![
+                "truss".to_string(),
+                "convert".to_string(),
+                "-".to_string(),
+                "-o".to_string(),
+                "-".to_string(),
+                "--format".to_string(),
+                "jpeg".to_string(),
+                "--quality".to_string(),
+                "0".to_string(),
+            ],
+            &mut stdin,
+            &mut stdout,
+            &mut stderr,
+        );
+        assert_eq!(code, 1, "InvalidOptions should exit with code 1 (usage)");
+    }
+
+    // ===== Help: completions topic =====
+
+    #[test]
+    fn help_completions_shows_completions_help() {
+        let result = parse_args(vec![
+            "truss".to_string(),
+            "help".to_string(),
+            "completions".to_string(),
+        ]);
+        assert_eq!(result.unwrap(), Command::Help(HelpTopic::Completions));
+    }
+
+    #[test]
+    fn help_version_shows_version_help() {
+        let result = parse_args(vec![
+            "truss".to_string(),
+            "help".to_string(),
+            "version".to_string(),
+        ]);
+        assert_eq!(result.unwrap(), Command::Help(HelpTopic::Version));
+    }
+
+    #[test]
+    fn completions_dash_help_shows_completions_help() {
+        let result = parse_args(vec![
+            "truss".to_string(),
+            "completions".to_string(),
+            "--help".to_string(),
+        ]);
+        assert_eq!(result.unwrap(), Command::Help(HelpTopic::Completions));
+    }
+
+    #[test]
+    fn completions_without_shell_exits_with_usage_error() {
+        let mut stdin = Cursor::new(Vec::<u8>::new());
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let code = run_with_io(
+            vec!["truss".to_string(), "completions".to_string()],
+            &mut stdin,
+            &mut stdout,
+            &mut stderr,
+        );
+        assert_eq!(code, 1, "completions without shell arg should exit 1");
+    }
+
+    // ===== Completions: implicit args are present =====
+
+    #[test]
+    fn completions_bash_includes_implicit_args() {
+        let mut stdin = Cursor::new(Vec::<u8>::new());
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let code = run_with_io(
+            vec![
+                "truss".to_string(),
+                "completions".to_string(),
+                "bash".to_string(),
+            ],
+            &mut stdin,
+            &mut stdout,
+            &mut stderr,
+        );
+        assert_eq!(code, 0);
+        let output = String::from_utf8(stdout).expect("utf8 stdout");
+        assert!(
+            output.contains("--output"),
+            "bash completions should include --output for implicit convert"
+        );
+        assert!(
+            output.contains("--bind"),
+            "bash completions should include --bind for implicit serve"
+        );
+    }
+
+    // ===== Help text: exit code 5 is documented =====
+
+    #[test]
+    fn help_exit_codes_includes_runtime() {
+        let text = super::help_top_level();
+        assert!(
+            text.contains("5  Runtime error"),
+            "help text should document exit code 5"
+        );
+    }
+
+    // ===== Unknown help topic hint lists all topics =====
+
+    #[test]
+    fn unknown_help_topic_hint_lists_all_topics() {
+        let result = parse_args(vec![
+            "truss".to_string(),
+            "help".to_string(),
+            "nonexistent".to_string(),
+        ]);
+        let err = result.unwrap_err();
+        let hint = err.hint.unwrap();
+        assert!(hint.contains("completions"), "hint should list completions");
+        assert!(hint.contains("version"), "hint should list version");
+    }
 }
