@@ -339,10 +339,11 @@ fn is_dangerous_href(value: &str) -> bool {
         return false;
     }
 
-    // Allow data:image/* URLs.
+    // Allow safe raster data:image/* URLs, but reject data:image/svg+xml
+    // to prevent embedded SVGs from bypassing sanitization.
     let lower = trimmed.to_ascii_lowercase();
     if lower.starts_with("data:image/") {
-        return false;
+        return !lower.starts_with("data:image/svg");
     }
 
     // Everything else is dangerous.
@@ -497,10 +498,11 @@ fn is_dangerous_css_url(value: &str) -> bool {
         return false;
     }
 
-    // Allow data:image/* URLs.
+    // Allow safe raster data:image/* URLs, but reject data:image/svg+xml
+    // to prevent embedded SVGs from bypassing sanitization.
     let lower = trimmed.to_ascii_lowercase();
     if lower.starts_with("data:image/") {
-        return false;
+        return !lower.starts_with("data:image/svg");
     }
 
     // Everything else is dangerous.
