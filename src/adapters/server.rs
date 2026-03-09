@@ -73,6 +73,10 @@ static CACHE_HITS_TOTAL: AtomicU64 = AtomicU64::new(0);
 static CACHE_MISSES_TOTAL: AtomicU64 = AtomicU64::new(0);
 static ORIGIN_CACHE_HITS_TOTAL: AtomicU64 = AtomicU64::new(0);
 static ORIGIN_CACHE_MISSES_TOTAL: AtomicU64 = AtomicU64::new(0);
+/// Monotonically increasing counter used to generate unique temp-file suffixes
+/// for cache writes.  Combined with the process ID this avoids collisions from
+/// concurrent writers within the same process.
+static CACHE_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Maximum number of concurrent image transforms allowed. When this limit is
 /// reached, new transform requests are rejected with 503 Service Unavailable.
@@ -510,8 +514,7 @@ impl TransformCache {
         }
 
         // Write to a temp file with a unique suffix, then rename atomically.
-        // The process ID prevents collisions from concurrent writers.
-        let tmp_path = path.with_extension(format!("tmp.{}", std::process::id()));
+        let tmp_path = path.with_extension(unique_tmp_suffix());
         let mut header = media_type.as_name().as_bytes().to_vec();
         header.push(b'\n');
 
@@ -609,7 +612,7 @@ impl OriginCache {
             return;
         }
 
-        let tmp_path = path.with_extension(format!("tmp.{}", std::process::id()));
+        let tmp_path = path.with_extension(unique_tmp_suffix());
         let result = (|| -> io::Result<()> {
             let mut file = fs::File::create(&tmp_path)?;
             file.write_all(body)?;
@@ -623,6 +626,16 @@ impl OriginCache {
             let _ = fs::remove_file(&tmp_path);
         }
     }
+}
+
+/// Returns a unique temporary-file suffix for cache writes.
+///
+/// The suffix combines the process ID with a monotonically increasing counter
+/// so that concurrent writers within the same process never collide on the
+/// same temp path (the previous PID-only scheme could).
+fn unique_tmp_suffix() -> String {
+    let seq = CACHE_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("tmp.{}.{seq}", std::process::id())
 }
 
 /// Computes a SHA-256 cache key from the source identifier, transform options, and
