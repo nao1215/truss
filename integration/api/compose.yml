@@ -1,5 +1,6 @@
 services:
   truss:
+    image: ${TRUSS_IMAGE:-truss:local}
     build:
       context: ../..
       dockerfile: Dockerfile

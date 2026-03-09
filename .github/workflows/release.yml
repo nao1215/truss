@@ -5,14 +5,136 @@ on:
     tags:
       - "v*"
 
-permissions:
-  contents: write
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
 
 jobs:
-  release:
+  # ── 1. Verify tag, run dry-run publish ──────────────────────────────
+  verify:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-      - name: Checkout code
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Ensure tag matches Cargo.toml version
+        run: |
+          expected_tag="v$(cargo pkgid | sed -E 's/.*@//')"
+          if [ "${GITHUB_REF_NAME}" != "${expected_tag}" ]; then
+            echo "::error title=Tag/version mismatch::Expected ${expected_tag} from Cargo.toml, got ${GITHUB_REF_NAME}."
+            exit 1
+          fi
+
+      - name: Verify publishable package
+        run: cargo publish --locked --dry-run
+
+  # ── 2. Publish crate to crates.io ───────────────────────────────────
+  publish-crate:
+    runs-on: ubuntu-latest
+    needs: verify
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      HAS_CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN != '' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Authenticate to crates.io with trusted publishing
+        if: env.HAS_CARGO_REGISTRY_TOKEN == 'false'
+        id: crates-auth
+        uses: rust-lang/crates-io-auth-action@v1
+
+      - name: Publish crate with API token
+        if: env.HAS_CARGO_REGISTRY_TOKEN == 'true'
+        run: cargo publish --locked
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+      - name: Publish crate with trusted publishing
+        if: env.HAS_CARGO_REGISTRY_TOKEN == 'false'
+        run: cargo publish --locked
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.crates-auth.outputs.token }}
+
+  # ── 3. Build & push container image ─────────────────────────────────
+  publish-container:
+    runs-on: ubuntu-latest
+    needs: publish-crate
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set image name
+        id: image
+        run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Extract image metadata
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ steps.image.outputs.name }}
+          flavor: |
+            latest=false
+          tags: |
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') && !contains(github.ref, '-') }}
+            type=semver,pattern={{version}},value=${{ github.ref_name }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ github.ref_name }}
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push container image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ── 4. Create GitHub Release ────────────────────────────────────────
+  create-release:
+    runs-on: ubuntu-latest
+    needs: publish-container
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
@@ -28,13 +150,17 @@ jobs:
           version="${tag#v}"
           changelog_file="release_notes.md"
 
-          awk -v tag="$tag" -v version="$version" '
-            BEGIN { found = 0 }
-            $0 ~ "^#{2,3} \\[?" tag "\\]?$" { found = 1; next }
-            $0 ~ "^#{2,3} \\[?" version "\\]?$" { found = 1; next }
-            /^#{2,3} \[?v?[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?\]?$/ { if (found) exit }
-            found { print }
-          ' CHANGELOG.md > "$changelog_file"
+          if [ -f CHANGELOG.md ]; then
+            awk -v tag="$tag" -v version="$version" '
+              BEGIN { found = 0 }
+              $0 ~ "^#{2,3} \\[?" tag "\\]?$" { found = 1; next }
+              $0 ~ "^#{2,3} \\[?" version "\\]?$" { found = 1; next }
+              /^#{2,3} \[?v?[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?\]?$/ { if (found) exit }
+              found { print }
+            ' CHANGELOG.md > "$changelog_file"
+          else
+            echo "::warning::CHANGELOG.md not found, using default release notes"
+          fi
 
           if [ ! -s "$changelog_file" ]; then
             echo "- Release $tag" > "$changelog_file"
@@ -53,7 +179,7 @@ jobs:
           name: ${{ steps.tag.outputs.TAG_NAME }}
           body: ${{ steps.changelog.outputs.BODY }}
           draft: false
-          prerelease: ${{ contains(steps.tag.outputs.TAG_NAME, '-alpha') || contains(steps.tag.outputs.TAG_NAME, '-beta') || contains(steps.tag.outputs.TAG_NAME, '-rc') }}
+          prerelease: ${{ contains(steps.tag.outputs.TAG_NAME, '-') }}
           generate_release_notes: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

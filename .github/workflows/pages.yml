@@ -34,7 +34,10 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Install wasm-bindgen CLI
-        run: cargo install wasm-bindgen-cli --version 0.2.114
+        run: |
+          if ! wasm-bindgen --version 2>/dev/null | grep -q '0.2.114'; then
+            cargo install wasm-bindgen-cli --version 0.2.114
+          fi
 
       - name: Build Pages artifact
         run: ./scripts/build-wasm-demo.sh
