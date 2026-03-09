@@ -17,12 +17,12 @@ Resize, convert, blur, and watermark images from the CLI, an HTTP server, or the
 ![wasm-sample](./doc/img/wasm-sample.png)
 
 
-### Why truss?
+## Why truss?
 
 - **One binary, three interfaces** -- the same Rust core powers the CLI, an HTTP image-transform server, and a WASM browser demo.
 - **Security by default** -- signed URLs, SSRF protections, and SVG sanitization are built in.
 - **Broad format support** -- JPEG, PNG, WebP, AVIF, BMP, and SVG; retains EXIF, ICC, and XMP metadata where possible.
-- **Cross platform** -- Linux, macOS, Windows.
+- **Cross-platform** -- Linux, macOS, Windows.
 - **Tested contracts** -- CLI behavior is locked by [ShellSpec](https://github.com/shellspec/shellspec), HTTP API by [runn](https://github.com/k1LoW/runn).
 
 ## Installation
@@ -96,8 +96,10 @@ curl -X POST http://localhost:8080/images:transform \
   -o thumb.webp
 
 # Signed public URL (no Bearer token needed)
-truss sign --path photos/hero.jpg --width 800 --format webp
-# => http://localhost:8080/images/by-path?path=photos/hero.jpg&width=800&format=webp&keyId=default&expires=...&signature=...
+truss sign --base-url http://localhost:8080 \
+  --path photos/hero.jpg --key-id mykey --secret s3cret \
+  --expires 1700000000 --width 800 --format webp
+# => http://localhost:8080/images/by-path?path=photos/hero.jpg&width=800&format=webp&keyId=mykey&expires=1700000000&signature=...
 ```
 
 ## Commands
@@ -193,6 +195,7 @@ To build the demo locally, use [`scripts/build-wasm-demo.sh`](scripts/build-wasm
 
 ```sh
 rustup target add wasm32-unknown-unknown
+# The wasm-bindgen-cli version must match the wasm-bindgen dependency in Cargo.toml.
 cargo install wasm-bindgen-cli --version 0.2.114
 ./scripts/build-wasm-demo.sh
 ```
