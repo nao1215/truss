@@ -7,7 +7,7 @@ mod negotiate;
 mod remote;
 mod response;
 #[cfg(feature = "s3")]
-mod s3;
+pub mod s3;
 
 use auth::{
     authorize_request, authorize_request_headers, authorize_signed_request,
@@ -396,6 +396,10 @@ impl ServerConfig {
     /// - `TRUSS_DISABLE_ACCEPT_NEGOTIATION`: when set to `1`, `true`, `yes`, or `on`, disables
     ///   Accept-based content negotiation on public GET endpoints. This is recommended when running
     ///   behind a CDN that does not forward the `Accept` header in its cache key.
+    /// - `TRUSS_STORAGE_BACKEND` *(requires the `s3` feature)*: storage backend for resolving
+    ///   `Path`-based public GET requests. Accepts `filesystem` (default) or `s3`.
+    /// - `TRUSS_S3_BUCKET` *(requires the `s3` feature)*: default S3 bucket name. Required when
+    ///   the storage backend is `s3`.
     ///
     /// # Errors
     ///

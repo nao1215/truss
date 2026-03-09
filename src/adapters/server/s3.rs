@@ -37,7 +37,7 @@ pub enum StorageBackend {
 
 impl StorageBackend {
     /// Parses the `TRUSS_STORAGE_BACKEND` environment variable value.
-    pub(super) fn parse(value: &str) -> Result<Self, String> {
+    pub fn parse(value: &str) -> Result<Self, String> {
         match value.to_ascii_lowercase().as_str() {
             "filesystem" | "fs" | "local" => Ok(Self::Filesystem),
             "s3" => Ok(Self::S3),
