@@ -2,7 +2,27 @@ name: CLI Integration
 on:
   push:
     branches: [main]
+    paths:
+      - "src/**"
+      - "integration/cli/**"
+      - "integration/fixtures/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "Dockerfile"
+      - ".github/workflows/integration-cli.yml"
   pull_request:
+    paths:
+      - "src/**"
+      - "integration/cli/**"
+      - "integration/fixtures/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "Dockerfile"
+      - ".github/workflows/integration-cli.yml"
+
+concurrency:
+  group: integration-cli-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   cli-integration:

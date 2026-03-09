@@ -2,7 +2,27 @@ name: API Server Integration
 on:
   push:
     branches: [main]
+    paths:
+      - "src/**"
+      - "integration/api/**"
+      - "integration/fixtures/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "Dockerfile"
+      - ".github/workflows/integration-api.yml"
   pull_request:
+    paths:
+      - "src/**"
+      - "integration/api/**"
+      - "integration/fixtures/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "Dockerfile"
+      - ".github/workflows/integration-api.yml"
+
+concurrency:
+  group: integration-api-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   api-integration:
