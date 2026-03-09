@@ -95,6 +95,9 @@ where
         }
 
         if let Some(index) = find_header_terminator(&buffer) {
+            if index > MAX_HEADER_BYTES {
+                return Err(payload_too_large_response("request headers are too large"));
+            }
             break index;
         }
 
