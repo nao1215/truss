@@ -649,7 +649,15 @@ where
 // Argument preprocessing for implicit convert / serve
 // ---------------------------------------------------------------------------
 
-const KNOWN_SUBCOMMANDS: &[&str] = &["convert", "inspect", "serve", "sign", "help", "completions"];
+const KNOWN_SUBCOMMANDS: &[&str] = &[
+    "convert",
+    "inspect",
+    "serve",
+    "sign",
+    "help",
+    "completions",
+    "version",
+];
 
 fn is_serve_flag(value: &str) -> bool {
     matches!(
@@ -715,7 +723,7 @@ fn preprocess_args(args: Vec<String>) -> Vec<String> {
     // extension), treat it as an implicit convert rather than an unknown
     // subcommand.  This handles `truss image -o out.jpg` where `image` is a
     // real file.
-    if std::path::Path::new(first).exists() {
+    if std::path::Path::new(first).is_file() {
         let mut new = vec![args[0].clone(), "convert".to_string()];
         new.extend_from_slice(&args[1..]);
         return new;
