@@ -79,6 +79,18 @@ const KEEP_ALIVE_MAX_REQUESTS: usize = 100;
 /// to this limit by default.
 const SERVER_TRANSFORM_DEADLINE: Duration = Duration::from_secs(30);
 
+#[derive(Clone, Copy)]
+struct PublicCacheControl {
+    max_age: u32,
+    stale_while_revalidate: u32,
+}
+
+#[derive(Clone, Copy)]
+struct ImageResponseConfig {
+    disable_accept_negotiation: bool,
+    public_cache_control: PublicCacheControl,
+}
+
 /// Runtime configuration for the HTTP server adapter.
 ///
 /// The HTTP adapter keeps environment-specific concerns, such as the storage root and
@@ -122,12 +134,12 @@ pub struct ServerConfig {
     pub cache_root: Option<PathBuf>,
     /// `Cache-Control: max-age` value (in seconds) for public GET image responses.
     ///
-    /// Defaults to [`DEFAULT_PUBLIC_MAX_AGE_SECONDS`] (3600).  Operators can tune this
+    /// Defaults to `3600`. Operators can tune this
     /// via the `TRUSS_PUBLIC_MAX_AGE` environment variable when running behind a CDN.
     pub public_max_age_seconds: u32,
     /// `Cache-Control: stale-while-revalidate` value (in seconds) for public GET image responses.
     ///
-    /// Defaults to [`DEFAULT_PUBLIC_STALE_WHILE_REVALIDATE_SECONDS`] (60).  Configurable
+    /// Defaults to `60`. Configurable
     /// via `TRUSS_PUBLIC_STALE_WHILE_REVALIDATE`.
     pub public_stale_while_revalidate_seconds: u32,
     /// Whether Accept-based content negotiation is disabled for public GET endpoints.
@@ -770,11 +782,10 @@ fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io::Result<()>
             (partial.method.as_str(), partial.path()),
             ("POST", "/images:transform") | ("POST", "/images")
         );
-        if requires_auth {
-            if let Err(response) = authorize_request_headers(&partial.headers, config) {
-                let _ = write_response(&mut stream, response, true);
-                return Ok(());
-            }
+        if requires_auth && let Err(response) = authorize_request_headers(&partial.headers, config)
+        {
+            let _ = write_response(&mut stream, response, true);
+            return Ok(());
         }
 
         let request = match read_request_body(&mut stream, partial) {
@@ -1154,39 +1165,39 @@ fn transform_source_bytes(
         .as_ref()
         .map(|root| TransformCache::new(root.clone()).with_log_handler(config.log_handler.clone()));
 
-    if let Some(ref cache) = cache {
-        if options.format.is_some() {
-            let cache_key = compute_cache_key(source_hash, &options, None);
-            if let CacheLookup::Hit {
+    if let Some(ref cache) = cache
+        && options.format.is_some()
+    {
+        let cache_key = compute_cache_key(source_hash, &options, None);
+        if let CacheLookup::Hit {
+            media_type,
+            body,
+            age,
+        } = cache.get(&cache_key)
+        {
+            CACHE_HITS_TOTAL.fetch_add(1, Ordering::Relaxed);
+            let etag = build_image_etag(&body);
+            let mut headers = build_image_response_headers(
                 media_type,
-                body,
-                age,
-            } = cache.get(&cache_key)
+                &etag,
+                response_policy,
+                false,
+                CacheHitStatus::Hit,
+                config.public_max_age_seconds,
+                config.public_stale_while_revalidate_seconds,
+            );
+            headers.push(("Age".to_string(), age.as_secs().to_string()));
+            if matches!(response_policy, ImageResponsePolicy::PublicGet)
+                && if_none_match_matches(request.header("if-none-match"), &etag)
             {
-                CACHE_HITS_TOTAL.fetch_add(1, Ordering::Relaxed);
-                let etag = build_image_etag(&body);
-                let mut headers = build_image_response_headers(
-                    media_type,
-                    &etag,
-                    response_policy,
-                    false,
-                    CacheHitStatus::Hit,
-                    config.public_max_age_seconds,
-                    config.public_stale_while_revalidate_seconds,
-                );
-                headers.push(("Age".to_string(), age.as_secs().to_string()));
-                if matches!(response_policy, ImageResponsePolicy::PublicGet)
-                    && if_none_match_matches(request.header("if-none-match"), &etag)
-                {
-                    return HttpResponse::empty("304 Not Modified", headers);
-                }
-                return HttpResponse::binary_with_headers(
-                    "200 OK",
-                    media_type.as_mime(),
-                    headers,
-                    body,
-                );
+                return HttpResponse::empty("304 Not Modified", headers);
             }
+            return HttpResponse::binary_with_headers(
+                "200 OK",
+                media_type.as_mime(),
+                headers,
+                body,
+            );
         }
     }
 
@@ -1202,9 +1213,13 @@ fn transform_source_bytes(
         response_policy,
         cache.as_ref(),
         source_hash,
-        config.disable_accept_negotiation,
-        config.public_max_age_seconds,
-        config.public_stale_while_revalidate_seconds,
+        ImageResponseConfig {
+            disable_accept_negotiation: config.disable_accept_negotiation,
+            public_cache_control: PublicCacheControl {
+                max_age: config.public_max_age_seconds,
+                stale_while_revalidate: config.public_stale_while_revalidate_seconds,
+            },
+        },
     );
     TRANSFORMS_IN_FLIGHT.fetch_sub(1, Ordering::Relaxed);
     response
@@ -1217,9 +1232,7 @@ fn transform_source_bytes_inner(
     response_policy: ImageResponsePolicy,
     cache: Option<&TransformCache>,
     source_hash: &str,
-    disable_accept_negotiation: bool,
-    public_max_age: u32,
-    public_swr: u32,
+    response_config: ImageResponseConfig,
 ) -> HttpResponse {
     if options.deadline.is_none() {
         options.deadline = Some(SERVER_TRANSFORM_DEADLINE);
@@ -1228,18 +1241,19 @@ fn transform_source_bytes_inner(
         Ok(artifact) => artifact,
         Err(error) => return transform_error_response(error),
     };
-    let negotiation_used = if options.format.is_none() && !disable_accept_negotiation {
-        match negotiate_output_format(request.header("accept"), &artifact) {
-            Ok(Some(format)) => {
-                options.format = Some(format);
-                true
+    let negotiation_used =
+        if options.format.is_none() && !response_config.disable_accept_negotiation {
+            match negotiate_output_format(request.header("accept"), &artifact) {
+                Ok(Some(format)) => {
+                    options.format = Some(format);
+                    true
+                }
+                Ok(None) => false,
+                Err(response) => return response,
             }
-            Ok(None) => false,
-            Err(response) => return response,
-        }
-    } else {
-        false
-    };
+        } else {
+            false
+        };
 
     let negotiated_accept = if negotiation_used {
         request.header("accept")
@@ -1263,8 +1277,8 @@ fn transform_source_bytes_inner(
             response_policy,
             negotiation_used,
             CacheHitStatus::Hit,
-            public_max_age,
-            public_swr,
+            response_config.public_cache_control.max_age,
+            response_config.public_cache_control.stale_while_revalidate,
         );
         headers.push(("Age".to_string(), age.as_secs().to_string()));
         if matches!(response_policy, ImageResponsePolicy::PublicGet)
@@ -1322,8 +1336,8 @@ fn transform_source_bytes_inner(
         response_policy,
         negotiation_used,
         cache_hit_status,
-        public_max_age,
-        public_swr,
+        response_config.public_cache_control.max_age,
+        response_config.public_cache_control.stale_while_revalidate,
     );
 
     if matches!(response_policy, ImageResponsePolicy::PublicGet)
