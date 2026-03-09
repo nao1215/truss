@@ -106,7 +106,7 @@ function wireEvents() {
       state.updatingAspect = true;
       const w = parseInteger(elements.width.value);
       if (w !== null) {
-        elements.height.value = Math.round(w / state.aspectRatio);
+        elements.height.value = Math.max(1, Math.round(w / state.aspectRatio));
       }
       state.updatingAspect = false;
     }
@@ -118,7 +118,7 @@ function wireEvents() {
       state.updatingAspect = true;
       const h = parseInteger(elements.height.value);
       if (h !== null) {
-        elements.width.value = Math.round(h * state.aspectRatio);
+        elements.width.value = Math.max(1, Math.round(h * state.aspectRatio));
       }
       state.updatingAspect = false;
     }
