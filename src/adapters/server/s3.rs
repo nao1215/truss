@@ -105,6 +105,8 @@ pub fn build_s3_context(
     default_bucket: String,
     allow_insecure: bool,
 ) -> Result<S3Context, std::io::Error> {
+    // One Tokio worker suffices: server threads drive futures via block_on(),
+    // so the runtime only handles I/O polling and timer ticks.
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(1)
         .enable_all()
@@ -243,7 +245,7 @@ fn map_s3_get_object_error(
                 );
             }
             if service_err.raw().status().as_u16() == 401 {
-                return super::response::forbidden_response(
+                return bad_gateway_response(
                     "object storage authentication failed — check credentials",
                 );
             }
@@ -346,10 +348,10 @@ mod tests {
     }
 
     #[test]
-    fn test_map_s3_error_401_returns_forbidden() {
+    fn test_map_s3_error_401_returns_bad_gateway() {
         let err = aws_sdk_s3::operation::get_object::GetObjectError::unhandled("unauthorized");
         let resp = map_s3_get_object_error(s3_service_error(err, 401));
-        assert_eq!(resp.status, "403 Forbidden");
+        assert_eq!(resp.status, "502 Bad Gateway");
     }
 
     #[test]

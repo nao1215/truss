@@ -13,7 +13,7 @@ steps:
       && current.res.body.status == 'ok'
       && current.res.body.service == 'truss'
   health_ready:
-    desc: "GET /health/ready returns ok when Azure is reachable and azureClient check passes"
+    desc: "GET /health/ready returns ok when Azure is reachable and storageBackend check passes"
     req:
       /health/ready:
         get:
@@ -23,5 +23,5 @@ steps:
       && current.res.body.status == 'ok'
       && current.res.body.checks[0].name == 'storageRoot'
       && current.res.body.checks[0].status == 'ok'
-      && current.res.body.checks[1].name == 'azureClient'
+      && current.res.body.checks[1].name == 'storageBackend'
       && current.res.body.checks[1].status == 'ok'

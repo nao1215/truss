@@ -107,6 +107,8 @@ pub fn build_gcs_context(
     default_bucket: String,
     allow_insecure: bool,
 ) -> Result<GcsContext, std::io::Error> {
+    // One Tokio worker suffices: server threads drive futures via block_on(),
+    // so the runtime only handles I/O polling and timer ticks.
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(1)
         .enable_all()
@@ -250,6 +252,8 @@ fn is_bucket_not_found(err: &google_cloud_storage::Error) -> bool {
 ///   is missing — it consistently returns 404 for missing objects and 403
 ///   only for genuine permission issues.  The recommended fix is to grant
 ///   the `roles/storage.objectViewer` role to the service account.
+/// - **401**: Authentication failed — mapped to 502 Bad Gateway (server-side
+///   credential misconfiguration).
 /// - **Other**: Treated as a backend failure and mapped to 502 Bad Gateway.
 fn map_gcs_error(err: google_cloud_storage::Error) -> HttpResponse {
     if let Some(status) = err.http_status_code() {
@@ -262,7 +266,7 @@ fn map_gcs_error(err: google_cloud_storage::Error) -> HttpResponse {
             );
         }
         if status == 401 {
-            return super::response::forbidden_response(
+            return bad_gateway_response(
                 "object storage authentication failed — check credentials",
             );
         }
@@ -373,11 +377,11 @@ mod tests {
     }
 
     #[test]
-    fn test_map_gcs_error_401_returns_forbidden() {
+    fn test_map_gcs_error_401_returns_bad_gateway() {
         let err =
             google_cloud_storage::Error::http(401, http::HeaderMap::new(), bytes::Bytes::new());
         let resp = map_gcs_error(err);
-        assert_eq!(resp.status, "403 Forbidden");
+        assert_eq!(resp.status, "502 Bad Gateway");
     }
 
     // L-3: Unicode / special character key tests

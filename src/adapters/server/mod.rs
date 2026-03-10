@@ -277,10 +277,16 @@ impl fmt::Debug for ServerConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut d = f.debug_struct("ServerConfig");
         d.field("storage_root", &self.storage_root)
-            .field("bearer_token", &self.bearer_token)
+            .field(
+                "bearer_token",
+                &self.bearer_token.as_ref().map(|_| "[REDACTED]"),
+            )
             .field("public_base_url", &self.public_base_url)
             .field("signed_url_key_id", &self.signed_url_key_id)
-            .field("signed_url_secret", &self.signed_url_secret)
+            .field(
+                "signed_url_secret",
+                &self.signed_url_secret.as_ref().map(|_| "[REDACTED]"),
+            )
             .field(
                 "allow_insecure_url_sources",
                 &self.allow_insecure_url_sources,
@@ -976,8 +982,37 @@ pub fn serve_with_config(listener: TcpListener, config: &ServerConfig) -> io::Re
     }
 
     drop(sender);
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
     for worker in workers {
-        let _ = worker.join();
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            eprintln!("shutdown: timed out waiting for worker threads");
+            break;
+        }
+        // Park the main thread until the worker finishes or the deadline
+        // elapses. We cannot interrupt a blocked worker, but the socket
+        // read/write timeouts ensure workers do not block forever.
+        let worker_done =
+            std::sync::Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+        let wd = std::sync::Arc::clone(&worker_done);
+        std::thread::spawn(move || {
+            let _ = worker.join();
+            let (lock, cvar) = &*wd;
+            *lock.lock().expect("shutdown notify lock") = true;
+            cvar.notify_one();
+        });
+        let (lock, cvar) = &*worker_done;
+        let mut done = lock.lock().expect("shutdown wait lock");
+        while !*done {
+            let (guard, timeout) = cvar
+                .wait_timeout(done, remaining)
+                .expect("shutdown condvar wait");
+            done = guard;
+            if timeout.timed_out() {
+                eprintln!("shutdown: timed out waiting for a worker thread");
+                break;
+            }
+        }
     }
 
     Ok(())
@@ -1521,7 +1556,7 @@ fn storage_health_check(config: &ServerConfig) -> Vec<(bool, &'static str)> {
             .s3_context
             .as_ref()
             .is_some_and(|ctx| ctx.check_reachable());
-        checks.push((reachable, "s3Client"));
+        checks.push((reachable, "storageBackend"));
     }
     #[cfg(feature = "gcs")]
     if config.storage_backend == StorageBackend::Gcs {
@@ -1529,7 +1564,7 @@ fn storage_health_check(config: &ServerConfig) -> Vec<(bool, &'static str)> {
             .gcs_context
             .as_ref()
             .is_some_and(|ctx| ctx.check_reachable());
-        checks.push((reachable, "gcsClient"));
+        checks.push((reachable, "storageBackend"));
     }
     #[cfg(feature = "azure")]
     if config.storage_backend == StorageBackend::Azure {
@@ -1537,7 +1572,7 @@ fn storage_health_check(config: &ServerConfig) -> Vec<(bool, &'static str)> {
             .azure_context
             .as_ref()
             .is_some_and(|ctx| ctx.check_reachable());
-        checks.push((reachable, "azureClient"));
+        checks.push((reachable, "storageBackend"));
     }
     checks
 }
@@ -3746,7 +3781,7 @@ mod tests {
         assert!(
             checks
                 .iter()
-                .any(|c| c["name"] == "s3Client" && c["status"] == "fail"),
+                .any(|c| c["name"] == "storageBackend" && c["status"] == "fail"),
             "expected s3Client fail check in {body}",
         );
     }
@@ -3777,7 +3812,7 @@ mod tests {
         let body: serde_json::Value = serde_json::from_slice(&response.body).expect("parse body");
         let checks = body["checks"].as_array().expect("checks array");
         assert!(
-            checks.iter().any(|c| c["name"] == "s3Client"),
+            checks.iter().any(|c| c["name"] == "storageBackend"),
             "expected s3Client check in {body}",
         );
     }
@@ -3889,7 +3924,7 @@ mod tests {
         assert!(
             checks
                 .iter()
-                .any(|c| c["name"] == "gcsClient" && c["status"] == "fail"),
+                .any(|c| c["name"] == "storageBackend" && c["status"] == "fail"),
             "expected gcsClient fail check in {body}",
         );
     }
@@ -3920,7 +3955,7 @@ mod tests {
         let body: serde_json::Value = serde_json::from_slice(&response.body).expect("parse body");
         let checks = body["checks"].as_array().expect("checks array");
         assert!(
-            checks.iter().any(|c| c["name"] == "gcsClient"),
+            checks.iter().any(|c| c["name"] == "storageBackend"),
             "expected gcsClient check in {body}",
         );
     }
@@ -4023,7 +4058,7 @@ mod tests {
         assert!(
             checks
                 .iter()
-                .any(|c| c["name"] == "azureClient" && c["status"] == "fail"),
+                .any(|c| c["name"] == "storageBackend" && c["status"] == "fail"),
             "expected azureClient fail check in {body}",
         );
     }
@@ -4052,7 +4087,7 @@ mod tests {
         let body: serde_json::Value = serde_json::from_slice(&response.body).expect("parse body");
         let checks = body["checks"].as_array().expect("checks array");
         assert!(
-            checks.iter().any(|c| c["name"] == "azureClient"),
+            checks.iter().any(|c| c["name"] == "storageBackend"),
             "expected azureClient check in {body}",
         );
     }
@@ -4275,5 +4310,61 @@ mod tests {
         unsafe {
             std::env::remove_var("TRUSS_STORAGE_BACKEND");
         }
+    }
+
+    #[test]
+    fn server_config_debug_redacts_bearer_token_and_signed_url_secret() {
+        let mut config = ServerConfig::new(
+            temp_dir("debug-redact"),
+            Some("super-secret-token-12345".to_string()),
+        );
+        config.signed_url_key_id = Some("visible-key-id".to_string());
+        config.signed_url_secret = Some("super-secret-hmac-key".to_string());
+        let debug = format!("{config:?}");
+        assert!(
+            !debug.contains("super-secret-token-12345"),
+            "bearer_token leaked in Debug output: {debug}"
+        );
+        assert!(
+            !debug.contains("super-secret-hmac-key"),
+            "signed_url_secret leaked in Debug output: {debug}"
+        );
+        assert!(
+            debug.contains("[REDACTED]"),
+            "expected [REDACTED] in Debug output: {debug}"
+        );
+        assert!(
+            debug.contains("visible-key-id"),
+            "signed_url_key_id should be visible: {debug}"
+        );
+    }
+
+    #[test]
+    fn authorize_headers_accepts_correct_bearer_token() {
+        let config = ServerConfig::new(temp_dir("auth-ok"), Some("correct-token".to_string()));
+        let headers = vec![(
+            "authorization".to_string(),
+            "Bearer correct-token".to_string(),
+        )];
+        assert!(super::authorize_request_headers(&headers, &config).is_ok());
+    }
+
+    #[test]
+    fn authorize_headers_rejects_wrong_bearer_token() {
+        let config = ServerConfig::new(temp_dir("auth-wrong"), Some("correct-token".to_string()));
+        let headers = vec![(
+            "authorization".to_string(),
+            "Bearer wrong-token".to_string(),
+        )];
+        let err = super::authorize_request_headers(&headers, &config).unwrap_err();
+        assert_eq!(err.status, "401 Unauthorized");
+    }
+
+    #[test]
+    fn authorize_headers_rejects_missing_header() {
+        let config = ServerConfig::new(temp_dir("auth-missing"), Some("correct-token".to_string()));
+        let headers: Vec<(String, String)> = vec![];
+        let err = super::authorize_request_headers(&headers, &config).unwrap_err();
+        assert_eq!(err.status, "401 Unauthorized");
     }
 }

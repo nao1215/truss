@@ -389,7 +389,7 @@ paths:
                     checks:
                       - name: storageRoot
                         status: ok
-                      - name: s3Client
+                      - name: storageBackend
                         status: ok
                 gcs:
                   summary: GCS backend
@@ -398,7 +398,7 @@ paths:
                     checks:
                       - name: storageRoot
                         status: ok
-                      - name: gcsClient
+                      - name: storageBackend
                         status: ok
                 azure:
                   summary: Azure Blob Storage backend
@@ -407,7 +407,7 @@ paths:
                     checks:
                       - name: storageRoot
                         status: ok
-                      - name: azureClient
+                      - name: storageBackend
                         status: ok
         '503':
           description: Server is not ready to accept traffic
@@ -736,11 +736,14 @@ components:
         bucket:
           type: string
           minLength: 1
-          description: Bucket name. Defaults to `TRUSS_S3_BUCKET`, `TRUSS_GCS_BUCKET`, or `TRUSS_AZURE_CONTAINER` when omitted.
+          description: >-
+            Bucket name (or Azure container name). Defaults to
+            `TRUSS_S3_BUCKET`, `TRUSS_GCS_BUCKET`, or `TRUSS_AZURE_CONTAINER`
+            when omitted.
         key:
           type: string
           minLength: 1
-          description: Object key within the bucket.
+          description: Object key within the bucket (or Azure container).
         version:
           type: string
           minLength: 1

@@ -106,6 +106,8 @@ pub fn build_azure_context(
     default_container: String,
     allow_insecure: bool,
 ) -> Result<AzureContext, std::io::Error> {
+    // One Tokio worker suffices: server threads drive futures via block_on(),
+    // so the runtime only handles I/O polling and timer ticks.
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(1)
         .enable_all()
@@ -250,8 +252,9 @@ fn validate_azure_key(key: &str) -> Result<(), HttpResponse> {
 /// Maps an Azure SDK error to an appropriate HTTP response.
 ///
 /// - **404**: The blob was not found in the container.
-/// - **403**: Access was denied.  Azure returns 403 when the storage account
-///   key is incorrect or the SAS token lacks the required permissions.
+/// - **403**: Access was denied — mapped to 403 Forbidden.
+/// - **401**: Authentication failed — mapped to 502 Bad Gateway (server-side
+///   credential misconfiguration).
 /// - **Other**: Treated as a backend failure and mapped to 502 Bad Gateway.
 fn map_azure_error(err: azure_core::Error) -> HttpResponse {
     if let Some(status) = err.http_status() {
@@ -264,7 +267,7 @@ fn map_azure_error(err: azure_core::Error) -> HttpResponse {
             );
         }
         if status == azure_core::http::StatusCode::Unauthorized {
-            return super::response::forbidden_response(
+            return bad_gateway_response(
                 "object storage authentication failed — check credentials",
             );
         }
@@ -357,9 +360,9 @@ mod tests {
     }
 
     #[test]
-    fn test_map_azure_error_401_returns_forbidden() {
+    fn test_map_azure_error_401_returns_bad_gateway() {
         let resp = map_azure_error(http_error(azure_core::http::StatusCode::Unauthorized));
-        assert_eq!(resp.status, "403 Forbidden");
+        assert_eq!(resp.status, "502 Bad Gateway");
     }
 
     // L-3: Unicode / special character key tests
