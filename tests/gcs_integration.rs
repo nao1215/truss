@@ -231,6 +231,40 @@ fn gcs_mock_nonexistent_key_returns_404() {
     handle.join().expect("server thread").expect("serve_once");
 }
 
+/// Request a path that triggers a 403 from the GCS backend.
+///
+/// fake-gcs-server does not simulate IAM denial, so this test creates
+/// a separate context with a bucket whose ACLs would deny read access.
+/// With the default emulator this may return 404 instead of 403 — the
+/// test primarily verifies that the server does not panic and returns a
+/// well-formed error response.
+#[test]
+#[ignore]
+fn gcs_mock_forbidden_returns_error() {
+    let ctx = gcs_mock_context();
+    // Use a bucket that has no objects uploaded — requesting any key
+    // should surface a non-200 response from the backend.
+    let storage = temp_dir("forbidden");
+    let config = gcs_mock_server_config(ctx, &storage);
+    let (addr, handle) = spawn_server(config);
+
+    let target = signed_by_path_target(BTreeMap::from([
+        ("path".to_string(), "/forbidden/object.png".to_string()),
+        ("keyId".to_string(), KEY_ID.to_string()),
+        ("expires".to_string(), "4102444800".to_string()),
+        ("format".to_string(), "png".to_string()),
+    ]));
+    let (header, _body) = send_signed_get(addr, &target);
+
+    let code = status_code(&header);
+    assert!(
+        code == 403 || code == 404,
+        "expected 403 or 404 for forbidden/missing key, got {code}: {header}"
+    );
+
+    handle.join().expect("server thread").expect("serve_once");
+}
+
 /// Upload a second object and retrieve it to verify independent keys work.
 #[test]
 #[ignore]

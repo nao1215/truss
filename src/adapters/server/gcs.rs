@@ -55,16 +55,8 @@ impl GcsContext {
                     // A 404 for the bucket itself means the bucket name is
                     // wrong — treat as unreachable, matching S3's NoSuchBucket
                     // behavior.
-                    if err.http_status_code() == Some(404) {
-                        // Check if this is a bucket-level 404 (not an object-level 404).
-                        // A 404 mentioning "bucket" indicates the bucket does not exist.
-                        // We intentionally avoid broader checks like "not found" because
-                        // object-level 404s (the expected case for a healthy bucket) would
-                        // also match and cause a false negative.
-                        let msg = err.to_string().to_ascii_lowercase();
-                        if msg.contains("bucket") {
-                            return false;
-                        }
+                    if err.http_status_code() == Some(404) && is_bucket_not_found(&err) {
+                        return false;
                     }
                     // Other service errors (NoSuchKey, AccessDenied, etc.)
                     // prove that GCS accepted the request, so the bucket is
@@ -213,6 +205,40 @@ fn validate_gcs_key(key: &str) -> Result<(), HttpResponse> {
     Ok(())
 }
 
+/// Returns `true` if the GCS error indicates the bucket itself does not exist.
+///
+/// Parses the raw HTTP response body (GCS JSON API format) rather than
+/// relying on `Error::to_string()`, which includes SDK-specific formatting
+/// and may change between SDK releases.  Falls back to string matching
+/// when no parseable payload is available (e.g. emulators that return
+/// non-JSON errors).
+fn is_bucket_not_found(err: &google_cloud_storage::Error) -> bool {
+    // Primary: parse the structured JSON error payload from the GCS API.
+    // GCS returns {"error":{"message":"The specified bucket does not exist."}}
+    // for missing buckets vs {"error":{"message":"No such object: ..."}} for
+    // missing objects.
+    if let Some(payload) = err.http_payload()
+        && let Ok(body) = serde_json::from_slice::<serde_json::Value>(payload)
+        && let Some(msg) = body.pointer("/error/message").and_then(|v| v.as_str())
+    {
+        return msg.contains("bucket does not exist");
+    }
+    // Fallback: match against the Display output when no parseable payload
+    // is available (e.g. emulators that return non-JSON errors).
+    let msg = err.to_string().to_ascii_lowercase();
+    msg.contains("bucket")
+}
+
+/// Maps a GCS error to an appropriate HTTP response.
+///
+/// - **404**: The object was not found in the bucket.
+/// - **403**: Access was denied.  GCS returns 403 when the service account
+///   lacks `storage.objects.get` on the bucket or object.  Unlike AWS S3,
+///   GCS does not return 403 for non-existent objects when list permission
+///   is missing — it consistently returns 404 for missing objects and 403
+///   only for genuine permission issues.  The recommended fix is to grant
+///   the `roles/storage.objectViewer` role to the service account.
+/// - **Other**: Treated as a backend failure and mapped to 502 Bad Gateway.
 fn map_gcs_error(err: google_cloud_storage::Error) -> HttpResponse {
     if let Some(status) = err.http_status_code() {
         if status == 404 {
@@ -294,5 +320,37 @@ mod tests {
             google_cloud_storage::Error::http(500, http::HeaderMap::new(), bytes::Bytes::new());
         let resp = map_gcs_error(err);
         assert_eq!(resp.status, "502 Bad Gateway");
+    }
+
+    #[test]
+    fn test_is_bucket_not_found_with_json_payload() {
+        let payload = br#"{"error":{"code":404,"message":"The specified bucket does not exist."}}"#;
+        let err = google_cloud_storage::Error::http(
+            404,
+            http::HeaderMap::new(),
+            bytes::Bytes::from_static(payload),
+        );
+        assert!(is_bucket_not_found(&err));
+    }
+
+    #[test]
+    fn test_is_bucket_not_found_false_for_object_404() {
+        let payload = br#"{"error":{"code":404,"message":"No such object: my-bucket/my-key.png"}}"#;
+        let err = google_cloud_storage::Error::http(
+            404,
+            http::HeaderMap::new(),
+            bytes::Bytes::from_static(payload),
+        );
+        assert!(!is_bucket_not_found(&err));
+    }
+
+    #[test]
+    fn test_is_bucket_not_found_fallback_empty_payload() {
+        // Empty payload → falls back to to_string() matching.
+        let err =
+            google_cloud_storage::Error::http(404, http::HeaderMap::new(), bytes::Bytes::new());
+        // The Display output for an HTTP error with empty body typically does
+        // not contain "bucket", so this should return false.
+        assert!(!is_bucket_not_found(&err));
     }
 }
