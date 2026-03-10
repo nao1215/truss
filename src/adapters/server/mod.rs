@@ -27,7 +27,7 @@ use http_parse::{
 };
 use metrics::{
     CACHE_HITS_TOTAL, CACHE_MISSES_TOTAL, DEFAULT_MAX_CONCURRENT_TRANSFORMS, RouteMetric,
-    TRANSFORMS_IN_FLIGHT, record_http_metrics, render_metrics_text, uptime_seconds,
+    record_http_metrics, render_metrics_text, uptime_seconds,
 };
 use multipart::{parse_multipart_boundary, parse_upload_request};
 use negotiate::{
@@ -56,7 +56,7 @@ use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use url::Url;
 
@@ -232,6 +232,12 @@ pub struct ServerConfig {
     ///
     /// Configurable via `TRUSS_TRANSFORM_DEADLINE_SECS`. Defaults to 30.
     pub transform_deadline_secs: u64,
+    /// Per-server counter tracking the number of image transforms currently in
+    /// flight.  This is runtime state (not configuration) but lives here so that
+    /// each `serve_with_config` invocation gets an independent counter, avoiding
+    /// cross-server interference when multiple listeners run in the same process
+    /// or during tests.
+    pub transforms_in_flight: Arc<AtomicU64>,
     /// Download timeout in seconds for object storage backends (S3, GCS, Azure).
     ///
     /// Configurable via `TRUSS_STORAGE_TIMEOUT_SECS`. Defaults to 30.
@@ -267,6 +273,7 @@ impl Clone for ServerConfig {
             log_handler: self.log_handler.clone(),
             max_concurrent_transforms: self.max_concurrent_transforms,
             transform_deadline_secs: self.transform_deadline_secs,
+            transforms_in_flight: Arc::clone(&self.transforms_in_flight),
             #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
             storage_timeout_secs: self.storage_timeout_secs,
             #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
@@ -435,6 +442,7 @@ impl ServerConfig {
             log_handler: None,
             max_concurrent_transforms: DEFAULT_MAX_CONCURRENT_TRANSFORMS,
             transform_deadline_secs: DEFAULT_TRANSFORM_DEADLINE_SECS,
+            transforms_in_flight: Arc::new(AtomicU64::new(0)),
             #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
             storage_timeout_secs: remote::STORAGE_DOWNLOAD_TIMEOUT_SECS,
             #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
@@ -842,6 +850,7 @@ impl ServerConfig {
             log_handler: None,
             max_concurrent_transforms,
             transform_deadline_secs,
+            transforms_in_flight: Arc::new(AtomicU64::new(0)),
             #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
             storage_timeout_secs,
             #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
@@ -1017,12 +1026,15 @@ pub fn serve_with_config(listener: TcpListener, config: &ServerConfig) -> io::Re
     let config = Arc::new(config.clone());
     let (sender, receiver) = std::sync::mpsc::channel::<TcpStream>();
 
-    // Spawn a fixed-size pool of worker threads. Each thread pulls connections
+    // Spawn a pool of worker threads sized to the configured concurrency limit
+    // (with a minimum of WORKER_THREADS to leave headroom for non-transform
+    // requests such as health checks and metrics).  Each thread pulls connections
     // from the shared channel and handles them independently, so a slow request
     // no longer blocks all other clients.
     let receiver = Arc::new(std::sync::Mutex::new(receiver));
-    let mut workers = Vec::with_capacity(WORKER_THREADS);
-    for _ in 0..WORKER_THREADS {
+    let pool_size = (config.max_concurrent_transforms as usize).max(WORKER_THREADS);
+    let mut workers = Vec::with_capacity(pool_size);
+    for _ in 0..pool_size {
         let rx = Arc::clone(&receiver);
         let cfg = Arc::clone(&config);
         workers.push(std::thread::spawn(move || {
@@ -1666,7 +1678,7 @@ fn handle_health(config: &ServerConfig) -> HttpResponse {
         }
     }
 
-    let in_flight = TRANSFORMS_IN_FLIGHT.load(Ordering::Relaxed);
+    let in_flight = config.transforms_in_flight.load(Ordering::Relaxed);
     let overloaded = in_flight >= config.max_concurrent_transforms;
     checks.push(json!({
         "name": "transformCapacity",
@@ -1698,7 +1710,11 @@ fn handle_metrics_request(request: HttpRequest, config: &ServerConfig) -> HttpRe
     HttpResponse::text(
         "200 OK",
         "text/plain; version=0.0.4; charset=utf-8",
-        render_metrics_text(config.max_concurrent_transforms).into_bytes(),
+        render_metrics_text(
+            config.max_concurrent_transforms,
+            &config.transforms_in_flight,
+        )
+        .into_bytes(),
     )
 }
 
@@ -1815,9 +1831,9 @@ fn transform_source_bytes(
         }
     }
 
-    let in_flight = TRANSFORMS_IN_FLIGHT.fetch_add(1, Ordering::Relaxed);
+    let in_flight = config.transforms_in_flight.fetch_add(1, Ordering::Relaxed);
     if in_flight >= config.max_concurrent_transforms {
-        TRANSFORMS_IN_FLIGHT.fetch_sub(1, Ordering::Relaxed);
+        config.transforms_in_flight.fetch_sub(1, Ordering::Relaxed);
         return service_unavailable_response("too many concurrent transforms; retry later");
     }
     let response = transform_source_bytes_inner(
@@ -1836,7 +1852,7 @@ fn transform_source_bytes(
             transform_deadline: Duration::from_secs(config.transform_deadline_secs),
         },
     );
-    TRANSFORMS_IN_FLIGHT.fetch_sub(1, Ordering::Relaxed);
+    config.transforms_in_flight.fetch_sub(1, Ordering::Relaxed);
     response
 }
 
@@ -2019,7 +2035,7 @@ mod tests {
     use super::{
         CacheHitStatus, DEFAULT_BIND_ADDR, DEFAULT_MAX_CONCURRENT_TRANSFORMS,
         DEFAULT_PUBLIC_MAX_AGE_SECONDS, DEFAULT_PUBLIC_STALE_WHILE_REVALIDATE_SECONDS,
-        ImageResponsePolicy, PublicSourceKind, ServerConfig, SignedUrlSource, TRANSFORMS_IN_FLIGHT,
+        ImageResponsePolicy, PublicSourceKind, ServerConfig, SignedUrlSource,
         TransformSourcePayload, authorize_signed_request, bind_addr, build_image_etag,
         build_image_response_headers, canonical_query_without_signature, negotiate_output_format,
         parse_public_get_request, route_request, serve_once_with_config, sign_public_url,
@@ -2448,30 +2464,12 @@ mod tests {
         assert!(!headers.iter().any(|(k, _)| k == "Content-Security-Policy"));
     }
 
-    /// RAII guard that restores `TRANSFORMS_IN_FLIGHT` to its previous value
-    /// on drop, even if the test panics.
-    struct InFlightGuard {
-        previous: u64,
-    }
-
-    impl InFlightGuard {
-        fn set(value: u64) -> Self {
-            let previous = TRANSFORMS_IN_FLIGHT.load(Ordering::Relaxed);
-            TRANSFORMS_IN_FLIGHT.store(value, Ordering::Relaxed);
-            Self { previous }
-        }
-    }
-
-    impl Drop for InFlightGuard {
-        fn drop(&mut self) {
-            TRANSFORMS_IN_FLIGHT.store(self.previous, Ordering::Relaxed);
-        }
-    }
-
     #[test]
-    #[serial]
     fn backpressure_rejects_when_at_capacity() {
-        let _guard = InFlightGuard::set(DEFAULT_MAX_CONCURRENT_TRANSFORMS);
+        let config = ServerConfig::new(std::env::temp_dir(), None);
+        config
+            .transforms_in_flight
+            .store(DEFAULT_MAX_CONCURRENT_TRANSFORMS, Ordering::Relaxed);
 
         let request = HttpRequest {
             method: "POST".to_string(),
@@ -2490,7 +2488,6 @@ mod tests {
             buf
         };
 
-        let config = ServerConfig::new(std::env::temp_dir(), None);
         let response = transform_source_bytes(
             png_bytes,
             TransformOptions::default(),
@@ -2503,16 +2500,19 @@ mod tests {
         assert!(response.status.contains("503"));
 
         assert_eq!(
-            TRANSFORMS_IN_FLIGHT.load(Ordering::Relaxed),
+            config.transforms_in_flight.load(Ordering::Relaxed),
             DEFAULT_MAX_CONCURRENT_TRANSFORMS
         );
     }
 
     #[test]
-    #[serial]
     fn backpressure_rejects_with_custom_concurrency_limit() {
         let custom_limit = 2u64;
-        let _guard = InFlightGuard::set(custom_limit);
+        let mut config = ServerConfig::new(std::env::temp_dir(), None);
+        config.max_concurrent_transforms = custom_limit;
+        config
+            .transforms_in_flight
+            .store(custom_limit, Ordering::Relaxed);
 
         let request = HttpRequest {
             method: "POST".to_string(),
@@ -2531,8 +2531,6 @@ mod tests {
             buf
         };
 
-        let mut config = ServerConfig::new(std::env::temp_dir(), None);
-        config.max_concurrent_transforms = custom_limit;
         let response = transform_source_bytes(
             png_bytes,
             TransformOptions::default(),
@@ -2930,13 +2928,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
     fn health_returns_comprehensive_diagnostic() {
-        // Reset the global counter so that a concurrent test
-        // (e.g. backpressure_rejects_when_at_capacity) does not leave a
-        // stale value that makes transformCapacity report "fail".
-        let _guard = InFlightGuard::set(0);
-
         let storage = temp_dir("health-diag");
         let request = HttpRequest {
             method: "GET".to_string(),

@@ -27,7 +27,6 @@ pub(super) static HTTP_RESPONSES_503_TOTAL: AtomicU64 = AtomicU64::new(0);
 pub(super) static HTTP_RESPONSES_508_TOTAL: AtomicU64 = AtomicU64::new(0);
 pub(super) static HTTP_RESPONSES_OTHER_TOTAL: AtomicU64 = AtomicU64::new(0);
 
-pub(super) static TRANSFORMS_IN_FLIGHT: AtomicU64 = AtomicU64::new(0);
 pub(super) static CACHE_HITS_TOTAL: AtomicU64 = AtomicU64::new(0);
 pub(super) static CACHE_MISSES_TOTAL: AtomicU64 = AtomicU64::new(0);
 pub(super) static ORIGIN_CACHE_HITS_TOTAL: AtomicU64 = AtomicU64::new(0);
@@ -80,7 +79,7 @@ pub(super) fn record_http_metrics(route: RouteMetric, status: &str) {
     status_counter(status).fetch_add(1, Ordering::Relaxed);
 }
 
-pub(super) fn render_metrics_text(max_concurrent: u64) -> String {
+pub(super) fn render_metrics_text(max_concurrent: u64, transforms_in_flight: &AtomicU64) -> String {
     let mut body = String::new();
     body.push_str(
         "# HELP truss_process_up Whether the server adapter considers the process alive.\n",
@@ -94,7 +93,7 @@ pub(super) fn render_metrics_text(max_concurrent: u64) -> String {
     body.push_str("# TYPE truss_transforms_in_flight gauge\n");
     body.push_str(&format!(
         "truss_transforms_in_flight {}\n",
-        TRANSFORMS_IN_FLIGHT.load(Ordering::Relaxed)
+        transforms_in_flight.load(Ordering::Relaxed)
     ));
 
     body.push_str(

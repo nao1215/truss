@@ -190,8 +190,8 @@ Key environment variables:
 | `TRUSS_AZURE_CONTAINER` | Default Azure Blob Storage container name (required when backend is `azure`) |
 | `TRUSS_AZURE_ENDPOINT` | Custom Azure Blob endpoint URL (e.g. `http://azurite:10000/devstoreaccount1` for Azurite) |
 | `AZURE_STORAGE_ACCOUNT_NAME` | Azure storage account name (used to derive the default endpoint when `TRUSS_AZURE_ENDPOINT` is not set; must be 3-24 lowercase alphanumeric characters) |
-| `TRUSS_MAX_CONCURRENT_TRANSFORMS` | Maximum concurrent image transforms; requests exceeding this limit receive 503 (default: `64`, range: 1–1024) |
-| `TRUSS_TRANSFORM_DEADLINE_SECS` | Per-transform wall-clock deadline in seconds (default: `30`, range: 1–300) |
+| `TRUSS_MAX_CONCURRENT_TRANSFORMS` | Maximum concurrent image transforms; requests exceeding this limit receive 503 (default: `64`, range: 1–1024). Start conservative (e.g. #CPUs × 2) and increase until CPU/memory saturation or 503s appear. |
+| `TRUSS_TRANSFORM_DEADLINE_SECS` | Per-transform wall-clock deadline in seconds (default: `30`, range: 1–300). Set slightly above your p95 transform latency but below any upstream/client timeout to avoid cascading failures. |
 | `TRUSS_STORAGE_TIMEOUT_SECS` | Download timeout in seconds for object storage backends (default: `30`, range: 1–300) |
 
 Azure authentication: By default, truss uses anonymous access, which works for public containers and Azurite local development. For private containers, append a SAS token to `TRUSS_AZURE_ENDPOINT`. On Azure-hosted compute (App Service, AKS, VMs), managed identity is used automatically when no explicit credentials are provided.
