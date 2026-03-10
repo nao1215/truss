@@ -96,12 +96,16 @@ paths:
           $ref: '#/components/responses/NotFound'
         '406':
           $ref: '#/components/responses/NotAcceptable'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
         '415':
           $ref: '#/components/responses/UnsupportedMediaType'
         '500':
           $ref: '#/components/responses/InternalError'
         '501':
           $ref: '#/components/responses/NotImplemented'
+        '502':
+          $ref: '#/components/responses/BadGateway'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
 
@@ -345,7 +349,14 @@ paths:
         `readinessProbe`). Checks that the server is able to accept traffic by
         verifying the storage root is accessible, the cache root (if configured)
         is accessible, and the object-storage backend (if configured) is
-        reachable.
+        network-reachable.
+
+        The S3 reachability check confirms that the configured bucket exists and
+        the S3 service responds to requests. It does **not** verify IAM
+        permissions for individual objects — a 403 AccessDenied response from S3
+        still counts as "reachable" because it proves the service is up and the
+        bucket name is correct. Permission errors on actual object reads are
+        surfaced as 403 on the transform endpoints.
 
         Returns 503 Service Unavailable when any check fails, signalling that
         traffic should be routed elsewhere.

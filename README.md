@@ -155,9 +155,13 @@ Key environment variables:
 | `TRUSS_SIGNED_URL_SECRET` | Shared secret for signed public URLs |
 | `TRUSS_ALLOW_INSECURE_URL_SOURCES` | Allow private-network/loopback URL sources (`true`/`1`; dev/test only) |
 | `TRUSS_CACHE_ROOT` | Directory for the transform cache; caching is disabled when unset |
-| `TRUSS_STORAGE_BACKEND` | Storage backend: `filesystem` (default) or `s3` |
+| `TRUSS_STORAGE_BACKEND` | Storage backend for public `GET /images/by-path`: `filesystem` (default) or `s3`. When set to `s3`, the `path` query parameter is used as the S3 object key. Private endpoints can still use `kind: storage` regardless of this setting. |
 | `TRUSS_S3_BUCKET` | Default S3 bucket name (required when backend is `s3`) |
 | `TRUSS_S3_FORCE_PATH_STYLE` | Use path-style S3 addressing (`true`/`1`; required for MinIO, LocalStack, etc.) |
+| `AWS_REGION` | AWS region for the S3 client (e.g. `us-east-1`) |
+| `AWS_ACCESS_KEY_ID` | AWS access key for S3 authentication |
+| `AWS_SECRET_ACCESS_KEY` | AWS secret key for S3 authentication |
+| `AWS_ENDPOINT_URL` | Custom S3-compatible endpoint URL (e.g. `http://minio:9000` for MinIO) |
 
 API reference:
 
@@ -262,7 +266,7 @@ CDN cache keys must vary by the signed-URL authentication inputs and any transfo
 
 - Authentication: `keyId`, `expires`, `signature`
 - Source: `path` or `url`, `version`
-- Transform: `width`, `height`, `fit`, `position`, `format`, `quality`, `background`, `rotate`, `autoOrient`, `stripMetadata`, `preserveExif`, `blur`, `watermark`, `watermarkPosition`, `watermarkOpacity`, `watermarkMargin`
+- Transform: `width`, `height`, `fit`, `position`, `format`, `quality`, `background`, `rotate`, `autoOrient`, `stripMetadata`, `preserveExif`, `blur`
 
 This ensures that a cached response for one signed URL is not served to requests with different or expired signatures, and different transform options produce separate cache entries.
 

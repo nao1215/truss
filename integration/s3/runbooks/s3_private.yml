@@ -72,3 +72,36 @@ steps:
               options: {}
     test: |
       current.res.status == 401
+  transform_storage_wrong_bucket:
+    desc: "Request with non-existent bucket returns 502"
+    req:
+      /images:transform:
+        post:
+          headers:
+            Authorization: "Bearer {{ vars.token }}"
+            Content-Type: "application/json"
+          body:
+            application/json:
+              source:
+                kind: storage
+                bucket: no-such-bucket
+                key: sample.png
+              options: {}
+    test: |
+      current.res.status == 502
+  transform_storage_empty_key:
+    desc: "Request with empty S3 key returns 400"
+    req:
+      /images:transform:
+        post:
+          headers:
+            Authorization: "Bearer {{ vars.token }}"
+            Content-Type: "application/json"
+          body:
+            application/json:
+              source:
+                kind: storage
+                key: ""
+              options: {}
+    test: |
+      current.res.status == 400
