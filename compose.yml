@@ -60,14 +60,11 @@ services:
   #     - "8081:8080"
   #   environment:
   #     - TRUSS_BEARER_TOKEN=changeme
-  #     - TRUSS_STORAGE_ROOT=/data
   #     - TRUSS_BIND_ADDR=0.0.0.0:8080
   #     - TRUSS_STORAGE_BACKEND=gcs
   #     - TRUSS_GCS_BUCKET=my-bucket
   #     - TRUSS_GCS_ENDPOINT=http://fake-gcs:4443
   #     - GOOGLE_APPLICATION_CREDENTIALS_JSON={}
-  #   volumes:
-  #     - ./images:/data:ro
   #   read_only: true
   #   security_opt:
   #     - no-new-privileges:true

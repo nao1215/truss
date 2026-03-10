@@ -4,7 +4,7 @@ services:
     command: ["-scheme", "http", "-port", "4443"]
     # fake-gcs-server exposes HTTP on 4443
     healthcheck:
-      test: ["CMD", "nc", "-z", "localhost", "4443"]
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:4443/storage/v1/b || exit 1"]
       interval: 5s
       timeout: 3s
       retries: 10

@@ -56,7 +56,8 @@ except Exception:
   if [ "$status" = "200" ] || [ "$status" = "201" ]; then
     echo "  uploaded: ${key}"
   else
-    echo "  WARN: upload ${key} returned ${status}"
+    echo "  ERROR: upload ${key} returned ${status}"
+    exit 1
   fi
 }
 

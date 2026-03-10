@@ -33,7 +33,7 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
-      - name: Build truss image (with S3+GCS features) with cache
+      - name: Build truss image (with cloud storage features) with cache
         uses: docker/build-push-action@v7
         with:
           context: .
