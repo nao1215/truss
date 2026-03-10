@@ -91,30 +91,7 @@ impl S3Context {
     }
 }
 
-/// The storage backend that determines how `Path`-based public GET requests are
-/// resolved.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StorageBackend {
-    /// Source images live on the local filesystem under `storage_root`.
-    Filesystem,
-    /// Source images live in an S3-compatible bucket.
-    S3,
-    // TODO: to support non-S3 storage (GCS, Azure Blob), add variants here and
-    // update parse(), storage_health_check(), resolve_source_bytes(), and cache key hashing.
-}
-
-impl StorageBackend {
-    /// Parses the `TRUSS_STORAGE_BACKEND` environment variable value.
-    pub fn parse(value: &str) -> Result<Self, String> {
-        match value.to_ascii_lowercase().as_str() {
-            "filesystem" | "fs" | "local" => Ok(Self::Filesystem),
-            "s3" => Ok(Self::S3),
-            _ => Err(format!(
-                "unknown storage backend `{value}` (expected `filesystem` or `s3`)"
-            )),
-        }
-    }
-}
+// StorageBackend has been moved to mod.rs to support multiple storage features.
 
 /// Builds the S3 client from the default AWS SDK environment (`AWS_REGION`,
 /// `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and optionally
@@ -257,26 +234,6 @@ fn map_s3_get_object_error(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_storage_backend_parse() {
-        assert_eq!(
-            StorageBackend::parse("filesystem").unwrap(),
-            StorageBackend::Filesystem
-        );
-        assert_eq!(
-            StorageBackend::parse("fs").unwrap(),
-            StorageBackend::Filesystem
-        );
-        assert_eq!(
-            StorageBackend::parse("local").unwrap(),
-            StorageBackend::Filesystem
-        );
-        assert_eq!(StorageBackend::parse("s3").unwrap(), StorageBackend::S3);
-        assert_eq!(StorageBackend::parse("S3").unwrap(), StorageBackend::S3);
-        assert!(StorageBackend::parse("gcs").is_err());
-        assert!(StorageBackend::parse("").is_err());
-    }
 
     #[test]
     fn test_validate_s3_key_valid() {

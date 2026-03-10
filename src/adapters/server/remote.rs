@@ -33,15 +33,41 @@ pub(super) fn resolve_source_bytes(
             std::fs::read(&path).map_err(map_source_io_error)
         }
         TransformSourcePayload::Url { url, .. } => read_remote_source_bytes(&url, config),
-        #[cfg(feature = "s3")]
+        #[cfg(any(feature = "s3", feature = "gcs"))]
         TransformSourcePayload::Storage { bucket, key, .. } => {
+            resolve_storage_source_bytes(bucket.as_deref(), &key, config)
+        }
+    }
+}
+
+#[cfg(any(feature = "s3", feature = "gcs"))]
+fn resolve_storage_source_bytes(
+    bucket: Option<&str>,
+    key: &str,
+    config: &ServerConfig,
+) -> Result<Vec<u8>, HttpResponse> {
+    match config.storage_backend {
+        #[cfg(feature = "s3")]
+        super::StorageBackend::S3 => {
             let s3_ctx = config
                 .s3_context
                 .as_ref()
                 .ok_or_else(|| bad_request_response("S3 storage backend is not configured"))?;
-            let effective_bucket = bucket.as_deref().unwrap_or(&s3_ctx.default_bucket);
-            super::s3::read_s3_source_bytes(effective_bucket, &key, s3_ctx)
+            let effective_bucket = bucket.unwrap_or(&s3_ctx.default_bucket);
+            super::s3::read_s3_source_bytes(effective_bucket, key, s3_ctx)
         }
+        #[cfg(feature = "gcs")]
+        super::StorageBackend::Gcs => {
+            let gcs_ctx = config
+                .gcs_context
+                .as_ref()
+                .ok_or_else(|| bad_request_response("GCS storage backend is not configured"))?;
+            let effective_bucket = bucket.unwrap_or(&gcs_ctx.default_bucket);
+            super::gcs::read_gcs_source_bytes(effective_bucket, key, gcs_ctx)
+        }
+        super::StorageBackend::Filesystem => Err(bad_request_response(
+            "storage backend is set to filesystem but received a storage source",
+        )),
     }
 }
 

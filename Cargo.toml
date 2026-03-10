@@ -15,6 +15,7 @@ default = ["cli", "server", "svg", "webp-lossy"]
 cli = ["dep:clap", "dep:clap_complete", "dep:ureq", "server"]
 server = ["dep:hmac", "dep:hex", "dep:serde_json", "dep:sha2", "dep:ureq", "dep:url", "svg"]
 s3 = ["server", "dep:aws-sdk-s3", "dep:aws-config", "dep:tokio"]
+gcs = ["server", "dep:google-cloud-storage", "dep:tokio"]
 svg = ["dep:quick-xml", "dep:resvg"]
 wasm = ["dep:serde_json", "dep:wasm-bindgen"]
 webp-lossy = ["dep:webp"]
@@ -51,6 +52,7 @@ resvg = { version = "0.45", optional = true }
 aws-sdk-s3 = { version = "1", optional = true }
 aws-config = { version = "1", optional = true }
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "io-util"], optional = true }
+google-cloud-storage = { version = "1", optional = true }
 
 [dev-dependencies]
 serial_test = "3"
