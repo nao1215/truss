@@ -59,6 +59,8 @@ pub enum StorageBackend {
     Filesystem,
     /// Source images live in an S3-compatible bucket.
     S3,
+    // TODO: to support non-S3 storage (GCS, Azure Blob), add variants here and
+    // update parse(), storage_health_check(), resolve_source_bytes(), and cache key hashing.
 }
 
 impl StorageBackend {
@@ -77,6 +79,11 @@ impl StorageBackend {
 /// Builds the S3 client from the default AWS SDK environment (`AWS_REGION`,
 /// `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and optionally
 /// `AWS_ENDPOINT_URL` for S3-compatible services like MinIO).
+///
+/// When `TRUSS_S3_FORCE_PATH_STYLE` is set to `1`, `true`, `yes`, or `on`,
+/// the client uses path-style addressing (`http://endpoint/bucket/key`)
+/// instead of virtual-hosted-style (`http://bucket.endpoint/key`). This is
+/// required for most S3-compatible services (MinIO, LocalStack, adobe/s3mock).
 pub fn build_s3_context(default_bucket: String) -> Result<S3Context, std::io::Error> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(1)
@@ -86,7 +93,17 @@ pub fn build_s3_context(default_bucket: String) -> Result<S3Context, std::io::Er
         aws_config::BehaviorVersion::latest(),
     ));
     let endpoint_url = sdk_config.endpoint_url().map(|s| s.to_string());
-    let client = aws_sdk_s3::Client::new(&sdk_config);
+    let force_path_style = matches!(
+        std::env::var("TRUSS_S3_FORCE_PATH_STYLE")
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .as_str(),
+        "1" | "true" | "yes" | "on"
+    );
+    let s3_config = aws_sdk_s3::config::Builder::from(&sdk_config)
+        .force_path_style(force_path_style)
+        .build();
+    let client = aws_sdk_s3::Client::from_conf(s3_config);
     Ok(S3Context {
         client,
         default_bucket,
@@ -154,13 +171,6 @@ fn validate_s3_key(key: &str) -> Result<(), HttpResponse> {
         return Err(bad_request_response(
             "S3 key exceeds the maximum allowed length of 1024 bytes",
         ));
-    }
-    for segment in key.split('/') {
-        if segment == ".." {
-            return Err(bad_request_response(
-                "S3 key must not contain path traversal segments (..)",
-            ));
-        }
     }
     Ok(())
 }
@@ -240,11 +250,12 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_s3_key_rejects_traversal() {
-        assert!(validate_s3_key("../etc/passwd").is_err());
-        assert!(validate_s3_key("images/../secret").is_err());
-        assert!(validate_s3_key("..").is_err());
-        // Segments that merely contain dots are fine
+    fn test_validate_s3_key_allows_dot_segments() {
+        // S3 keys are opaque identifiers — ".." has no special meaning in
+        // object storage, so we must not reject them.
+        assert!(validate_s3_key("../etc/passwd").is_ok());
+        assert!(validate_s3_key("images/../secret").is_ok());
+        assert!(validate_s3_key("..").is_ok());
         assert!(validate_s3_key("a..b/file.jpg").is_ok());
         assert!(validate_s3_key(".hidden/file.jpg").is_ok());
     }

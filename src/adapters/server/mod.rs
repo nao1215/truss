@@ -408,6 +408,10 @@ impl ServerConfig {
     ///   `Path`-based public GET requests. Accepts `filesystem` (default) or `s3`.
     /// - `TRUSS_S3_BUCKET` *(requires the `s3` feature)*: default S3 bucket name. Required when
     ///   the storage backend is `s3`.
+    /// - `TRUSS_S3_FORCE_PATH_STYLE` *(requires the `s3` feature)*: when set to `1`, `true`,
+    ///   `yes`, or `on`, use path-style S3 addressing (`http://endpoint/bucket/key`) instead
+    ///   of virtual-hosted-style. Required for S3-compatible services such as MinIO and
+    ///   adobe/s3mock.
     ///
     /// # Errors
     ///
@@ -1543,6 +1547,8 @@ fn validate_public_base_url(value: String) -> io::Result<String> {
 
 #[cfg(test)]
 mod tests {
+    use serial_test::serial;
+
     use super::http_parse::{
         HttpRequest, find_header_terminator, read_request_body, read_request_headers,
         resolve_storage_path,
@@ -2004,6 +2010,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn backpressure_rejects_when_at_capacity() {
         let _guard = InFlightGuard::set(MAX_CONCURRENT_TRANSFORMS);
 
@@ -2349,7 +2356,9 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn health_ready_returns_ok_when_storage_exists() {
+        let _guard = InFlightGuard::set(0);
         let storage = temp_dir("ready-ok");
         let request = HttpRequest {
             method: "GET".to_string(),
@@ -2374,7 +2383,9 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn health_ready_returns_503_when_storage_missing() {
+        let _guard = InFlightGuard::set(0);
         let request = HttpRequest {
             method: "GET".to_string(),
             target: "/health/ready".to_string(),
@@ -2399,7 +2410,9 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn health_ready_returns_503_when_cache_root_missing() {
+        let _guard = InFlightGuard::set(0);
         let storage = temp_dir("ready-cache-fail");
         let mut config = ServerConfig::new(storage, None);
         config.cache_root = Some(PathBuf::from("/nonexistent-truss-cache-dir"));
@@ -2427,7 +2440,13 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn health_returns_comprehensive_diagnostic() {
+        // Reset the global counter so that a concurrent test
+        // (e.g. backpressure_rejects_when_at_capacity) does not leave a
+        // stale value that makes transformCapacity report "fail".
+        let _guard = InFlightGuard::set(0);
+
         let storage = temp_dir("health-diag");
         let request = HttpRequest {
             method: "GET".to_string(),
@@ -3298,8 +3317,10 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
+    #[serial]
     #[cfg(feature = "s3")]
     fn health_ready_s3_returns_503_when_context_missing() {
+        let _guard = InFlightGuard::set(0);
         let storage = temp_dir("health-s3-no-ctx");
         let mut config = ServerConfig::new(storage.clone(), None);
         config.storage_backend = super::s3::StorageBackend::S3;
@@ -3327,8 +3348,10 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     #[cfg(feature = "s3")]
     fn health_ready_s3_includes_s3_client_check() {
+        let _guard = InFlightGuard::set(0);
         let storage = temp_dir("health-s3-ok");
         let mut config = ServerConfig::new(storage.clone(), None);
         config.storage_backend = super::s3::StorageBackend::S3;
