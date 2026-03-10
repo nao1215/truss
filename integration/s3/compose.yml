@@ -33,6 +33,7 @@ services:
       AWS_REGION: us-east-1
       AWS_ENDPOINT_URL: http://s3mock:9090
       TRUSS_ALLOW_INSECURE_URL_SOURCES: "true"
+      TRUSS_STORAGE_TIMEOUT_SECS: "10"
     volumes:
       - ../fixtures:/data:ro
     read_only: true

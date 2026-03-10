@@ -52,18 +52,30 @@ impl GcsContext {
             match result {
                 Ok(Ok(_)) => true,
                 Ok(Err(err)) => {
-                    // A 404 for the bucket itself means the bucket name is
-                    // wrong — treat as unreachable, matching S3's NoSuchBucket
-                    // behavior.
-                    if err.http_status_code() == Some(404) && is_bucket_not_found(&err) {
-                        return false;
+                    if let Some(status) = err.http_status_code() {
+                        match status {
+                            // 404 for the *bucket* means misconfiguration.
+                            404 if is_bucket_not_found(&err) => false,
+                            // 404 for the probe object means the bucket exists
+                            // and GCS processed the request — healthy.
+                            404 => true,
+                            // 403 / 401: credentials work well enough that
+                            // GCS accepted the request — bucket is reachable.
+                            401 | 403 => true,
+                            // Any other HTTP status (5xx, etc.) is unexpected
+                            // — treat as unreachable.
+                            _ => {
+                                eprintln!("gcs health-check: unexpected status {status}: {err}");
+                                false
+                            }
+                        }
+                    } else {
+                        // No HTTP status → transport / DNS error.
+                        eprintln!("gcs health-check: transport error: {err}");
+                        false
                     }
-                    // Other service errors (NoSuchKey, AccessDenied, etc.)
-                    // prove that GCS accepted the request, so the bucket is
-                    // reachable.
-                    true
                 }
-                // Timeout or transport error — not reachable.
+                // Timeout — not reachable.
                 Err(_) => false,
             }
         })
@@ -102,12 +114,12 @@ impl GcsContext {
 ///
 /// Authentication follows the standard Google Cloud SDK conventions:
 /// - `GOOGLE_APPLICATION_CREDENTIALS` (path to service account JSON)
-/// - `GOOGLE_APPLICATION_CREDENTIALS_JSON` (inline JSON)
 /// - GCE metadata server (when running on Google Cloud)
 ///
 /// When `TRUSS_GCS_ENDPOINT` is set, the client uses that URL instead of
-/// the default GCS endpoint. This is required for emulators like
-/// `fake-gcs-server`.
+/// the default GCS endpoint and switches to anonymous credentials. This is
+/// required for emulators like `fake-gcs-server` that do not support
+/// authentication.
 pub fn build_gcs_context(
     default_bucket: String,
     allow_insecure: bool,
@@ -132,6 +144,14 @@ pub fn build_gcs_context(
             let mut builder = google_cloud_storage::client::Storage::builder();
             if let Some(ref endpoint) = endpoint_url {
                 builder = builder.with_endpoint(endpoint);
+                // Custom endpoints (emulators) typically do not support
+                // authentication.  Use anonymous credentials to avoid the
+                // default Application Default Credentials flow, which falls
+                // back to the GCE Metadata Service and hangs in non-GCE
+                // environments (Docker, CI, etc.).
+                builder = builder.with_credentials(
+                    google_cloud_auth::credentials::anonymous::Builder::new().build(),
+                );
             }
             builder.build().await
         })
@@ -245,7 +265,7 @@ fn is_bucket_not_found(err: &google_cloud_storage::Error) -> bool {
     // Fallback: match against the Display output when no parseable payload
     // is available (e.g. emulators that return non-JSON errors).
     let msg = err.to_string().to_ascii_lowercase();
-    msg.contains("bucket")
+    msg.contains("bucket does not exist") || msg.contains("bucket not found")
 }
 
 /// Maps a GCS error to an appropriate HTTP response.

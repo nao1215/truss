@@ -223,7 +223,6 @@ ENVIRONMENT VARIABLES:
   TRUSS_GCS_BUCKET                    Default GCS bucket name (required when backend=gcs)
   TRUSS_GCS_ENDPOINT                  Custom GCS endpoint URL (for testing with fake-gcs-server, etc.)
   GOOGLE_APPLICATION_CREDENTIALS      Path to GCS service account JSON key file
-  GOOGLE_APPLICATION_CREDENTIALS_JSON Inline GCS service account JSON (alternative to file path)
 ",
     );
 
@@ -240,6 +239,14 @@ ENVIRONMENT VARIABLES:
     s.push_str(
         "\
   TRUSS_STORAGE_TIMEOUT_SECS          Download timeout for storage backends in seconds (default: 30, range: 1-300)
+",
+    );
+
+    #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
+    s.push_str(
+        "\
+\nNOTE: When using local emulators (MinIO, fake-gcs-server, Azurite), set
+  TRUSS_ALLOW_INSECURE_URL_SOURCES=true to allow plain-HTTP endpoints.
 ",
     );
 
