@@ -152,38 +152,55 @@ pub(super) fn read_gcs_source_bytes(
 
     let gcs_bucket = format!("projects/_/buckets/{bucket}");
     gcs.runtime.block_on(async {
-        let mut resp = gcs
-            .client
-            .read_object(&gcs_bucket, key)
-            .send()
-            .await
-            .map_err(map_gcs_error)?;
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(super::remote::STORAGE_DOWNLOAD_TIMEOUT_SECS),
+            async {
+                let mut resp = gcs
+                    .client
+                    .read_object(&gcs_bucket, key)
+                    .send()
+                    .await
+                    .map_err(map_gcs_error)?;
 
-        let object = resp.object();
-        if object.size > 0 && object.size as u64 > MAX_SOURCE_BYTES {
-            return Err(payload_too_large_response(
-                "GCS object exceeds the source size limit",
-            ));
-        }
+                let object = resp.object();
+                if object.size > 0 && object.size as u64 > MAX_SOURCE_BYTES {
+                    return Err(payload_too_large_response(
+                        "GCS object exceeds the source size limit",
+                    ));
+                }
 
-        let capacity = if object.size > 0 {
-            (object.size as usize).min(MAX_SOURCE_BYTES as usize + 1)
-        } else {
-            0
-        };
-        let mut buf = Vec::with_capacity(capacity);
-        while let Some(chunk) = resp.next().await {
-            let chunk = chunk.map_err(|e| {
-                bad_gateway_response(&format!("failed to read GCS object body: {e}"))
-            })?;
-            buf.extend_from_slice(&chunk);
-            if buf.len() as u64 > MAX_SOURCE_BYTES {
-                return Err(payload_too_large_response(
-                    "GCS object exceeds the source size limit",
-                ));
+                let capacity = if object.size > 0 {
+                    (object.size as usize).min(MAX_SOURCE_BYTES as usize + 1)
+                } else {
+                    0
+                };
+                let mut buf = Vec::with_capacity(capacity);
+                while let Some(chunk) = resp.next().await {
+                    let chunk = chunk.map_err(|e| {
+                        eprintln!("gcs error: failed to read object body: {e}");
+                        bad_gateway_response("failed to read GCS object body")
+                    })?;
+                    buf.extend_from_slice(&chunk);
+                    if buf.len() as u64 > MAX_SOURCE_BYTES {
+                        return Err(payload_too_large_response(
+                            "GCS object exceeds the source size limit",
+                        ));
+                    }
+                }
+                Ok(buf)
+            },
+        )
+        .await;
+        match result {
+            Ok(inner) => inner,
+            Err(_) => {
+                eprintln!(
+                    "gcs error: download timed out after {}s",
+                    super::remote::STORAGE_DOWNLOAD_TIMEOUT_SECS
+                );
+                Err(bad_gateway_response("object storage download timed out"))
             }
         }
-        Ok(buf)
     })
 }
 
@@ -249,7 +266,13 @@ fn map_gcs_error(err: google_cloud_storage::Error) -> HttpResponse {
                 "access denied by object storage — check IAM permissions",
             );
         }
+        if status == 401 {
+            return super::response::forbidden_response(
+                "object storage authentication failed — check credentials",
+            );
+        }
     }
+    eprintln!("gcs error: {err}");
     bad_gateway_response("object storage returned an error")
 }
 
@@ -352,5 +375,27 @@ mod tests {
         // The Display output for an HTTP error with empty body typically does
         // not contain "bucket", so this should return false.
         assert!(!is_bucket_not_found(&err));
+    }
+
+    #[test]
+    fn test_map_gcs_error_401_returns_forbidden() {
+        let err =
+            google_cloud_storage::Error::http(401, http::HeaderMap::new(), bytes::Bytes::new());
+        let resp = map_gcs_error(err);
+        assert_eq!(resp.status, "403 Forbidden");
+    }
+
+    // L-3: Unicode / special character key tests
+    #[test]
+    fn test_validate_gcs_key_allows_unicode() {
+        assert!(validate_gcs_key("images/\u{5199}\u{771f}.jpg").is_ok());
+        assert!(validate_gcs_key("données/fichier.png").is_ok());
+    }
+
+    #[test]
+    fn test_validate_gcs_key_allows_special_chars() {
+        assert!(validate_gcs_key("path/to/file name.jpg").is_ok());
+        assert!(validate_gcs_key("a+b=c.jpg").is_ok());
+        assert!(validate_gcs_key("foo\tbar").is_ok());
     }
 }

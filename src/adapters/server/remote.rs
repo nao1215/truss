@@ -17,6 +17,8 @@ use url::Url;
 
 pub(super) const MAX_SOURCE_BYTES: u64 = 100 * 1024 * 1024;
 pub(super) const MAX_REMOTE_REDIRECTS: usize = 5;
+#[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
+pub(super) const STORAGE_DOWNLOAD_TIMEOUT_SECS: u64 = 30;
 
 pub(super) fn resolve_source_bytes(
     source: TransformSourcePayload,

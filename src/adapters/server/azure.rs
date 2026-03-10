@@ -133,7 +133,23 @@ pub fn build_azure_context(
                         "AZURE_STORAGE_ACCOUNT_NAME is required when TRUSS_AZURE_ENDPOINT is not set",
                     )
                 })?;
-            format!("https://{account_name}.blob.core.windows.net")
+            if !(3..=24).contains(&account_name.len())
+                || !account_name
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+            {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "AZURE_STORAGE_ACCOUNT_NAME must be 3-24 characters, lowercase letters and digits only",
+                ));
+            }
+            let url = format!("https://{account_name}.blob.core.windows.net");
+            super::remote::validate_backend_endpoint_url(
+                &url,
+                "AZURE_STORAGE_ACCOUNT_NAME (derived endpoint)",
+                allow_insecure,
+            )?;
+            url
         }
     };
 
@@ -157,46 +173,69 @@ pub(super) fn read_azure_source_bytes(
     validate_azure_key(key)?;
 
     ctx.runtime.block_on(async {
-        let client =
-            azure_storage_blob::BlobClient::new(&ctx.endpoint_url, container, key, None, None)
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(super::remote::STORAGE_DOWNLOAD_TIMEOUT_SECS),
+            async {
+                let client = azure_storage_blob::BlobClient::new(
+                    &ctx.endpoint_url,
+                    container,
+                    key,
+                    None,
+                    None,
+                )
                 .map_err(|e| {
-                    bad_gateway_response(&format!("failed to create Azure blob client: {e}"))
+                    eprintln!("azure error: failed to create blob client: {e}");
+                    bad_gateway_response("failed to create Azure blob client")
                 })?;
 
-        let resp = client.download(None).await.map_err(map_azure_error)?;
+                let resp = client.download(None).await.map_err(map_azure_error)?;
 
-        use azure_storage_blob::models::BlobClientDownloadResultHeaders;
-        let content_length = resp.content_length().ok().flatten();
-        if let Some(len) = content_length
-            && len > MAX_SOURCE_BYTES
-        {
-            return Err(payload_too_large_response(
-                "Azure blob exceeds the source size limit",
-            ));
-        }
+                use azure_storage_blob::models::BlobClientDownloadResultHeaders;
+                let content_length = resp.content_length().ok().flatten();
+                if let Some(len) = content_length
+                    && len > MAX_SOURCE_BYTES
+                {
+                    return Err(payload_too_large_response(
+                        "Azure blob exceeds the source size limit",
+                    ));
+                }
 
-        let (_, _, body) = resp.deconstruct();
+                let (_, _, body) = resp.deconstruct();
 
-        use futures::StreamExt;
-        let capacity = if let Some(len) = content_length {
-            (len as usize).min(MAX_SOURCE_BYTES as usize + 1)
-        } else {
-            0
-        };
-        let mut buf = Vec::with_capacity(capacity);
-        futures::pin_mut!(body);
-        while let Some(chunk) = body.next().await {
-            let chunk = chunk.map_err(|e| {
-                bad_gateway_response(&format!("failed to read Azure blob body: {e}"))
-            })?;
-            buf.extend_from_slice(&chunk);
-            if buf.len() as u64 > MAX_SOURCE_BYTES {
-                return Err(payload_too_large_response(
-                    "Azure blob exceeds the source size limit",
-                ));
+                use futures::StreamExt;
+                let capacity = if let Some(len) = content_length {
+                    (len as usize).min(MAX_SOURCE_BYTES as usize + 1)
+                } else {
+                    0
+                };
+                let mut buf = Vec::with_capacity(capacity);
+                futures::pin_mut!(body);
+                while let Some(chunk) = body.next().await {
+                    let chunk = chunk.map_err(|e| {
+                        eprintln!("azure error: failed to read blob body: {e}");
+                        bad_gateway_response("failed to read Azure blob body")
+                    })?;
+                    buf.extend_from_slice(&chunk);
+                    if buf.len() as u64 > MAX_SOURCE_BYTES {
+                        return Err(payload_too_large_response(
+                            "Azure blob exceeds the source size limit",
+                        ));
+                    }
+                }
+                Ok(buf)
+            },
+        )
+        .await;
+        match result {
+            Ok(inner) => inner,
+            Err(_) => {
+                eprintln!(
+                    "azure error: download timed out after {}s",
+                    super::remote::STORAGE_DOWNLOAD_TIMEOUT_SECS
+                );
+                Err(bad_gateway_response("object storage download timed out"))
             }
         }
-        Ok(buf)
     })
 }
 
@@ -234,13 +273,20 @@ fn map_azure_error(err: azure_core::Error) -> HttpResponse {
                 "access denied by object storage — check IAM permissions",
             );
         }
+        if status == azure_core::http::StatusCode::Unauthorized {
+            return super::response::forbidden_response(
+                "object storage authentication failed — check credentials",
+            );
+        }
     }
+    eprintln!("azure error: {err}");
     bad_gateway_response("object storage returned an error")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     #[test]
     fn test_validate_azure_key_valid() {
@@ -318,5 +364,83 @@ mod tests {
         let err = azure_core::error::ErrorKind::Other.into_error();
         let resp = map_azure_error(err);
         assert_eq!(resp.status, "502 Bad Gateway");
+    }
+
+    #[test]
+    fn test_map_azure_error_401_returns_forbidden() {
+        let resp = map_azure_error(http_error(azure_core::http::StatusCode::Unauthorized));
+        assert_eq!(resp.status, "403 Forbidden");
+    }
+
+    // L-3: Unicode / special character key tests
+    #[test]
+    fn test_validate_azure_key_allows_unicode() {
+        assert!(validate_azure_key("images/\u{5199}\u{771f}.jpg").is_ok());
+        assert!(validate_azure_key("données/fichier.png").is_ok());
+    }
+
+    #[test]
+    fn test_validate_azure_key_allows_special_chars() {
+        assert!(validate_azure_key("path/to/file name.jpg").is_ok());
+        assert!(validate_azure_key("a+b=c.jpg").is_ok());
+        assert!(validate_azure_key("foo\tbar").is_ok());
+    }
+
+    // L-2: build_azure_context negative tests
+    #[test]
+    #[serial]
+    fn test_build_azure_context_missing_env() {
+        unsafe {
+            std::env::remove_var("TRUSS_AZURE_ENDPOINT");
+            std::env::remove_var("AZURE_STORAGE_ACCOUNT_NAME");
+        }
+        let result = build_azure_context("test-bucket".to_string(), true);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("AZURE_STORAGE_ACCOUNT_NAME"),
+            "error should mention AZURE_STORAGE_ACCOUNT_NAME: {msg}"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn test_build_azure_context_invalid_account_name_chars() {
+        unsafe {
+            std::env::remove_var("TRUSS_AZURE_ENDPOINT");
+            std::env::set_var("AZURE_STORAGE_ACCOUNT_NAME", "My-Account!");
+        }
+        let result = build_azure_context("test-bucket".to_string(), true);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("lowercase letters and digits only"),
+            "error should mention format constraint: {msg}"
+        );
+        unsafe { std::env::remove_var("AZURE_STORAGE_ACCOUNT_NAME") };
+    }
+
+    #[test]
+    #[serial]
+    fn test_build_azure_context_account_name_too_short() {
+        unsafe {
+            std::env::remove_var("TRUSS_AZURE_ENDPOINT");
+            std::env::set_var("AZURE_STORAGE_ACCOUNT_NAME", "ab");
+        }
+        let result = build_azure_context("test-bucket".to_string(), true);
+        assert!(result.is_err());
+        unsafe { std::env::remove_var("AZURE_STORAGE_ACCOUNT_NAME") };
+    }
+
+    #[test]
+    #[serial]
+    fn test_build_azure_context_account_name_too_long() {
+        unsafe {
+            std::env::remove_var("TRUSS_AZURE_ENDPOINT");
+            std::env::set_var("AZURE_STORAGE_ACCOUNT_NAME", "a".repeat(25));
+        }
+        let result = build_azure_context("test-bucket".to_string(), true);
+        assert!(result.is_err());
+        unsafe { std::env::remove_var("AZURE_STORAGE_ACCOUNT_NAME") };
     }
 }

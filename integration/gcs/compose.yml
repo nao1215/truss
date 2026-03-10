@@ -22,6 +22,7 @@ services:
       TRUSS_SIGNED_URL_SECRET: test-secret
       TRUSS_PUBLIC_BASE_URL: http://nginx:80
       GOOGLE_APPLICATION_CREDENTIALS_JSON: "{}"
+      TRUSS_ALLOW_INSECURE_URL_SOURCES: "true"
     volumes:
       - ../fixtures:/data:ro
     read_only: true

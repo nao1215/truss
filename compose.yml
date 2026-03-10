@@ -13,6 +13,32 @@ services:
     security_opt:
       - no-new-privileges:true
 
+  # ── S3 / MinIO example (uncomment to use) ──
+  # minio:
+  #   image: minio/minio:latest
+  #   command: ["server", "/data"]
+  #   environment:
+  #     MINIO_ROOT_USER: minioadmin
+  #     MINIO_ROOT_PASSWORD: minioadmin
+  #
+  # truss-s3:
+  #   build: .
+  #   ports:
+  #     - "8083:8080"
+  #   environment:
+  #     - TRUSS_BEARER_TOKEN=changeme
+  #     - TRUSS_BIND_ADDR=0.0.0.0:8080
+  #     - TRUSS_STORAGE_BACKEND=s3
+  #     - TRUSS_S3_BUCKET=my-bucket
+  #     - TRUSS_S3_FORCE_PATH_STYLE=true
+  #     - AWS_ACCESS_KEY_ID=minioadmin
+  #     - AWS_SECRET_ACCESS_KEY=minioadmin
+  #     - AWS_REGION=us-east-1
+  #     - AWS_ENDPOINT_URL=http://minio:9000
+  #   read_only: true
+  #   security_opt:
+  #     - no-new-privileges:true
+
   # ── GCS example (uncomment to use) ──
   # fake-gcs:
   #   image: fsouza/fake-gcs-server:latest

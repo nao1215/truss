@@ -147,44 +147,60 @@ pub(super) fn read_s3_source_bytes(
 ) -> Result<Vec<u8>, HttpResponse> {
     validate_s3_key(key)?;
 
-    let result = s3
-        .runtime
-        .block_on(async { s3.client.get_object().bucket(bucket).key(key).send().await });
+    s3.runtime.block_on(async {
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(super::remote::STORAGE_DOWNLOAD_TIMEOUT_SECS),
+            async {
+                let output = s3
+                    .client
+                    .get_object()
+                    .bucket(bucket)
+                    .key(key)
+                    .send()
+                    .await
+                    .map_err(map_s3_get_object_error)?;
 
-    match result {
-        Ok(output) => {
-            if let Some(len) = output.content_length()
-                && len as u64 > MAX_SOURCE_BYTES
-            {
-                return Err(payload_too_large_response(
-                    "S3 object exceeds the source size limit",
-                ));
-            }
+                if let Some(len) = output.content_length()
+                    && len as u64 > MAX_SOURCE_BYTES
+                {
+                    return Err(payload_too_large_response(
+                        "S3 object exceeds the source size limit",
+                    ));
+                }
 
-            let capacity_hint = output
-                .content_length()
-                .map(|l| (l as usize).min(MAX_SOURCE_BYTES as usize + 1))
-                .unwrap_or(0);
-            let bytes = s3
-                .runtime
-                .block_on(async {
-                    use tokio::io::AsyncReadExt;
-                    let mut limited = output.body.into_async_read().take(MAX_SOURCE_BYTES + 1);
-                    let mut buf = Vec::with_capacity(capacity_hint);
-                    limited.read_to_end(&mut buf).await.map(|_| buf)
-                })
-                .map_err(|e| {
-                    bad_gateway_response(&format!("failed to read S3 object body: {e}"))
+                let capacity_hint = output
+                    .content_length()
+                    .map(|l| (l as usize).min(MAX_SOURCE_BYTES as usize + 1))
+                    .unwrap_or(0);
+
+                use tokio::io::AsyncReadExt;
+                let mut limited = output.body.into_async_read().take(MAX_SOURCE_BYTES + 1);
+                let mut buf = Vec::with_capacity(capacity_hint);
+                limited.read_to_end(&mut buf).await.map_err(|e| {
+                    eprintln!("s3 error: failed to read object body: {e}");
+                    bad_gateway_response("failed to read S3 object body")
                 })?;
-            if bytes.len() as u64 > MAX_SOURCE_BYTES {
-                return Err(payload_too_large_response(
-                    "S3 object exceeds the source size limit",
-                ));
+
+                if buf.len() as u64 > MAX_SOURCE_BYTES {
+                    return Err(payload_too_large_response(
+                        "S3 object exceeds the source size limit",
+                    ));
+                }
+                Ok(buf)
+            },
+        )
+        .await;
+        match result {
+            Ok(inner) => inner,
+            Err(_) => {
+                eprintln!(
+                    "s3 error: download timed out after {}s",
+                    super::remote::STORAGE_DOWNLOAD_TIMEOUT_SECS
+                );
+                Err(bad_gateway_response("object storage download timed out"))
             }
-            Ok(bytes)
         }
-        Err(err) => Err(map_s3_get_object_error(err)),
-    }
+    })
 }
 
 /// Validates that an S3 key does not contain dangerous characters or
@@ -231,9 +247,18 @@ fn map_s3_get_object_error(
                     "access denied by object storage — check IAM permissions",
                 );
             }
+            if service_err.raw().status().as_u16() == 401 {
+                return super::response::forbidden_response(
+                    "object storage authentication failed — check credentials",
+                );
+            }
+            eprintln!("s3 error: {err}");
             bad_gateway_response("object storage returned an error")
         }
-        _ => bad_gateway_response("object storage request failed"),
+        _ => {
+            eprintln!("s3 error: {err}");
+            bad_gateway_response("object storage request failed")
+        }
     }
 }
 
@@ -282,5 +307,75 @@ mod tests {
         assert!(validate_s3_key("..").is_ok());
         assert!(validate_s3_key("a..b/file.jpg").is_ok());
         assert!(validate_s3_key(".hidden/file.jpg").is_ok());
+    }
+
+    // L-3: Unicode / special character key tests
+    #[test]
+    fn test_validate_s3_key_allows_unicode() {
+        assert!(validate_s3_key("images/\u{5199}\u{771f}.jpg").is_ok());
+        assert!(validate_s3_key("données/fichier.png").is_ok());
+    }
+
+    #[test]
+    fn test_validate_s3_key_allows_special_chars() {
+        assert!(validate_s3_key("path/to/file name.jpg").is_ok());
+        assert!(validate_s3_key("a+b=c.jpg").is_ok());
+        assert!(validate_s3_key("foo\tbar").is_ok());
+    }
+
+    // L-6: map_s3_get_object_error tests
+    fn s3_service_error(
+        err: aws_sdk_s3::operation::get_object::GetObjectError,
+        status: u16,
+    ) -> aws_sdk_s3::error::SdkError<aws_sdk_s3::operation::get_object::GetObjectError> {
+        use aws_smithy_runtime_api::http::{Response, StatusCode};
+        use aws_smithy_types::body::SdkBody;
+        let raw = Response::new(StatusCode::try_from(status).unwrap(), SdkBody::empty());
+        aws_sdk_s3::error::SdkError::service_error(err, raw)
+    }
+
+    #[test]
+    fn test_map_s3_error_no_such_key_returns_not_found() {
+        let err = aws_sdk_s3::operation::get_object::GetObjectError::NoSuchKey(
+            aws_sdk_s3::types::error::NoSuchKey::builder().build(),
+        );
+        let resp = map_s3_get_object_error(s3_service_error(err, 404));
+        assert_eq!(resp.status, "404 Not Found");
+    }
+
+    #[test]
+    fn test_map_s3_error_403_returns_forbidden() {
+        let err = aws_sdk_s3::operation::get_object::GetObjectError::unhandled("access denied");
+        let resp = map_s3_get_object_error(s3_service_error(err, 403));
+        assert_eq!(resp.status, "403 Forbidden");
+    }
+
+    #[test]
+    fn test_map_s3_error_401_returns_forbidden() {
+        let err = aws_sdk_s3::operation::get_object::GetObjectError::unhandled("unauthorized");
+        let resp = map_s3_get_object_error(s3_service_error(err, 401));
+        assert_eq!(resp.status, "403 Forbidden");
+    }
+
+    #[test]
+    fn test_map_s3_error_500_returns_bad_gateway() {
+        let err =
+            aws_sdk_s3::operation::get_object::GetObjectError::unhandled("internal server error");
+        let resp = map_s3_get_object_error(s3_service_error(err, 500));
+        assert_eq!(resp.status, "502 Bad Gateway");
+    }
+
+    #[test]
+    fn test_map_s3_error_non_service_returns_bad_gateway() {
+        let err = aws_sdk_s3::error::SdkError::<
+            aws_sdk_s3::operation::get_object::GetObjectError,
+        >::dispatch_failure(
+            aws_smithy_runtime_api::client::result::ConnectorError::other(
+                "connection refused".into(),
+                None,
+            ),
+        );
+        let resp = map_s3_get_object_error(err);
+        assert_eq!(resp.status, "502 Bad Gateway");
     }
 }

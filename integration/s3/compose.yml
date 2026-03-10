@@ -26,6 +26,7 @@ services:
       AWS_SECRET_ACCESS_KEY: test
       AWS_REGION: us-east-1
       AWS_ENDPOINT_URL: http://s3mock:9090
+      TRUSS_ALLOW_INSECURE_URL_SOURCES: "true"
     volumes:
       - ../fixtures:/data:ro
     read_only: true

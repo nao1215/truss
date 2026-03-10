@@ -186,7 +186,12 @@ Key environment variables:
 | `GOOGLE_APPLICATION_CREDENTIALS_JSON` | Inline GCS service account JSON (alternative to file path) |
 | `TRUSS_AZURE_BUCKET` | Default Azure Blob Storage container name (required when backend is `azure`) |
 | `TRUSS_AZURE_ENDPOINT` | Custom Azure Blob endpoint URL (e.g. `http://azurite:10000/devstoreaccount1` for Azurite) |
-| `AZURE_STORAGE_ACCOUNT_NAME` | Azure storage account name (used to derive the default endpoint when `TRUSS_AZURE_ENDPOINT` is not set) |
+| `AZURE_STORAGE_ACCOUNT_NAME` | Azure storage account name (used to derive the default endpoint when `TRUSS_AZURE_ENDPOINT` is not set; must be 3-24 lowercase alphanumeric characters) |
+| `AZURE_CLIENT_ID` | Azure AD application (client) ID for service principal authentication |
+| `AZURE_CLIENT_SECRET` | Azure AD client secret for service principal authentication |
+| `AZURE_TENANT_ID` | Azure AD tenant ID for service principal authentication |
+
+Azure authentication: By default, truss uses anonymous access, which works for public containers and Azurite local development. For private containers, you can either append a SAS token to `TRUSS_AZURE_ENDPOINT`, or set `AZURE_CLIENT_ID` / `AZURE_CLIENT_SECRET` / `AZURE_TENANT_ID` to authenticate via Azure AD service principal (requires the `Storage Blob Data Reader` role). On Azure-hosted compute (App Service, AKS, VMs), managed identity is used automatically when no explicit credentials are provided.
 
 API reference:
 
