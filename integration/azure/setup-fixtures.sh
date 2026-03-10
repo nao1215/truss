@@ -172,7 +172,5 @@ upload "azureonly.png" "$AZUREONLY_FILE"
 
 rm -f "$HELPER_PY"
 
-# ── Wait for truss (via nginx), then exec the given command ──────
-export SERVER_HOST="${SERVER_HOST:-nginx}"
-export SERVER_PORT="${SERVER_PORT:-80}"
-exec /wait-for-server.sh "$@"
+# ── Run the given command (truss/nginx readiness is handled by compose healthchecks) ──
+exec "$@"

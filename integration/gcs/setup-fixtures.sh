@@ -85,7 +85,5 @@ import sys; sys.stdout.buffer.write(png_1x1(255, 0, 0))
 " > "$GCSONLY_FILE"
 upload "gcsonly.png" "$GCSONLY_FILE"
 
-# ── Wait for truss (via nginx), then exec the given command ──────
-export SERVER_HOST="${SERVER_HOST:-nginx}"
-export SERVER_PORT="${SERVER_PORT:-80}"
-exec /wait-for-server.sh "$@"
+# ── Run the given command (truss/nginx readiness is handled by compose healthchecks) ──
+exec "$@"

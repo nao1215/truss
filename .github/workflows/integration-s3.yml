@@ -33,15 +33,15 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
-      - name: Build truss image (with S3 feature) with cache
+      - name: Build truss image with cache
         uses: docker/build-push-action@v7
         with:
           context: .
           file: ./Dockerfile
           load: true
           tags: truss:local
-          cache-from: type=gha,scope=integration-s3
-          cache-to: type=gha,mode=max,scope=integration-s3
+          cache-from: type=gha,scope=integration
+          cache-to: type=gha,mode=max,scope=integration
 
       - name: Run S3 integration tests
         run: |

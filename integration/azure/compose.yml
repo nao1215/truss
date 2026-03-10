@@ -35,27 +35,40 @@ services:
     read_only: true
     security_opt:
       - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8080/health/live"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+      start_period: 3s
 
   nginx:
     image: nginx:alpine
     depends_on:
-      - truss
+      truss:
+        condition: service_healthy
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
     tmpfs:
       - /tmp/nginx-cache
     # nginx listens on port 80
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:80/health/live || exit 1"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+      start_period: 2s
 
   runn:
     image: ghcr.io/k1low/runn:latest
     depends_on:
-      - nginx
-      - truss
-      - azurite
+      nginx:
+        condition: service_healthy
+      azurite:
+        condition: service_healthy
     volumes:
       - ./runbooks:/runbooks:ro
       - ./setup-fixtures.sh:/setup-fixtures.sh:ro
-      - ../api/wait-for-server.sh:/wait-for-server.sh:ro
       - ../fixtures:/fixtures:ro
     environment:
       SERVER_HOST: nginx

@@ -40,8 +40,8 @@ jobs:
           file: ./Dockerfile
           load: true
           tags: truss:local
-          cache-from: type=gha,scope=integration-api
-          cache-to: type=gha,mode=max,scope=integration-api
+          cache-from: type=gha,scope=integration
+          cache-to: type=gha,mode=max,scope=integration
 
       - name: Run API integration tests
         run: |

@@ -13,14 +13,19 @@ services:
     read_only: true
     security_opt:
       - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8080/health/live"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+      start_period: 3s
 
   runn:
     image: ghcr.io/k1low/runn:latest
     depends_on:
-      - truss
+      truss:
+        condition: service_healthy
     volumes:
       - ./runbooks:/runbooks:ro
-      - ./wait-for-server.sh:/wait-for-server.sh:ro
       - ../fixtures:/fixtures:ro
-    entrypoint: ["/bin/bash", "/wait-for-server.sh"]
     command: ["runn", "run", "/runbooks/*.yml", "--verbose", "--scopes", "read:parent"]
