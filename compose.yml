@@ -7,6 +7,8 @@ services:
       - TRUSS_BEARER_TOKEN=changeme
       - TRUSS_STORAGE_ROOT=/data
       - TRUSS_BIND_ADDR=0.0.0.0:8080
+      # - TRUSS_MAX_CONCURRENT_TRANSFORMS=64
+      # - TRUSS_TRANSFORM_DEADLINE_SECS=30
     volumes:
       - ./images:/data:ro
     read_only: true
