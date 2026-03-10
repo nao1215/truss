@@ -37,7 +37,7 @@ services:
     security_opt:
       - no-new-privileges:true
     healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:8080/health/ready"]
+      test: ["CMD", "curl", "-sf", "http://localhost:8080/health/live"]
       interval: 2s
       timeout: 2s
       retries: 15
@@ -54,7 +54,7 @@ services:
       - /tmp/nginx-cache
     # nginx listens on port 80
     healthcheck:
-      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:80/health/ready || exit 1"]
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:80/health/live || exit 1"]
       interval: 2s
       timeout: 2s
       retries: 15

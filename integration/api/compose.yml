@@ -16,7 +16,7 @@ services:
     security_opt:
       - no-new-privileges:true
     healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:8080/health/ready"]
+      test: ["CMD", "curl", "-sf", "http://localhost:8080/health/live"]
       interval: 2s
       timeout: 2s
       retries: 15
