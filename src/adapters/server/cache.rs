@@ -363,8 +363,7 @@ pub(super) fn compute_cache_key(
     if let Some(w) = options.width {
         params.push(("width", w.to_string()));
     }
-    // Sort to guarantee a stable canonical form regardless of insertion order.
-    params.sort_by_key(|(k, _)| *k);
+    // Keys are inserted in alphabetical order above, so no sort is needed.
     for (i, (k, v)) in params.iter().enumerate() {
         if i > 0 {
             canonical.push('&');
@@ -420,7 +419,7 @@ pub(super) fn try_versioned_cache_lookup(
             config.public_max_age_seconds,
             config.public_stale_while_revalidate_seconds,
         );
-        headers.push(("Age".to_string(), age.as_secs().to_string()));
+        headers.push(("Age", age.as_secs().to_string()));
         if matches!(response_policy, ImageResponsePolicy::PublicGet)
             && if_none_match_matches(request.header("if-none-match"), &etag)
         {

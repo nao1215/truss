@@ -230,10 +230,10 @@ pub(super) fn build_image_response_headers(
     cache_status: CacheHitStatus,
     public_max_age: u32,
     public_swr: u32,
-) -> Vec<(String, String)> {
+) -> Vec<(&'static str, String)> {
     let mut headers = vec![
         (
-            "Cache-Control".to_string(),
+            "Cache-Control",
             match response_policy {
                 ImageResponsePolicy::PublicGet => {
                     format!("public, max-age={public_max_age}, stale-while-revalidate={public_swr}")
@@ -241,22 +241,22 @@ pub(super) fn build_image_response_headers(
                 ImageResponsePolicy::PrivateTransform => "no-store".to_string(),
             },
         ),
-        ("ETag".to_string(), etag.to_string()),
-        ("X-Content-Type-Options".to_string(), "nosniff".to_string()),
+        ("ETag", etag.to_string()),
+        ("X-Content-Type-Options", "nosniff".to_string()),
         (
-            "Content-Disposition".to_string(),
+            "Content-Disposition",
             format!("inline; filename=\"truss.{}\"", media_type.as_name()),
         ),
     ];
 
     if negotiation_used {
-        headers.push(("Vary".to_string(), "Accept".to_string()));
+        headers.push(("Vary", "Accept".to_string()));
     }
 
     // SVG outputs get a Content-Security-Policy sandbox to prevent script execution
     // when served inline. This mitigates XSS risk from user-supplied SVG content.
     if media_type == MediaType::Svg {
-        headers.push(("Content-Security-Policy".to_string(), "sandbox".to_string()));
+        headers.push(("Content-Security-Policy", "sandbox".to_string()));
     }
 
     // Cache-Status per RFC 9211.
@@ -264,7 +264,7 @@ pub(super) fn build_image_response_headers(
         CacheHitStatus::Hit => "\"truss\"; hit".to_string(),
         CacheHitStatus::Miss | CacheHitStatus::Disabled => "\"truss\"; fwd=miss".to_string(),
     };
-    headers.push(("Cache-Status".to_string(), cache_status_value));
+    headers.push(("Cache-Status", cache_status_value));
 
     headers
 }

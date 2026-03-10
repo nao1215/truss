@@ -1373,7 +1373,7 @@ fn execute_serve(command: ServeCommand) -> Result<(), CliError> {
         runtime_error(EXIT_RUNTIME, &format!("failed to flush stdout: {error}"))
     })?;
 
-    server::serve_with_config(listener, &config)
+    server::serve_with_config(listener, config)
         .map_err(|error| runtime_error(EXIT_RUNTIME, &format!("server runtime failed: {error}")))
 }
 

@@ -244,7 +244,8 @@ fn sanitize_svg(bytes: &[u8]) -> Result<String, TransformError> {
                     continue;
                 }
                 if in_style {
-                    let text = e.unescape().unwrap_or_default();
+                    let decoded = e.decode().unwrap_or_default();
+                    let text = quick_xml::escape::unescape(&decoded).unwrap_or_default();
                     let sanitized_css = sanitize_css_urls(&text);
                     let text_event = quick_xml::events::BytesText::new(&sanitized_css);
                     writer
@@ -872,6 +873,22 @@ mod tests {
         assert!(
             !result.contains("evil.com"),
             "external url() in inline style should be removed"
+        );
+        assert!(
+            result.contains("url()"),
+            "dangerous url() should be emptied"
+        );
+    }
+
+    #[test]
+    fn sanitize_removes_entity_escaped_external_css_url() {
+        // Entity-escaped text: `&amp;` in the URL and the scheme itself
+        // must still be detected as dangerous after unescape.
+        let svg = b"<svg xmlns=\"http://www.w3.org/2000/svg\"><style>rect { fill: url(https://evil.example/a?x=1&amp;y=2) }</style><rect width=\"10\" height=\"10\"/></svg>";
+        let result = sanitize_svg(svg).unwrap();
+        assert!(
+            !result.contains("evil.example"),
+            "entity-escaped external CSS url() should be removed"
         );
         assert!(
             result.contains("url()"),

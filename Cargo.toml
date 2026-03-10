@@ -1,6 +1,6 @@
 [package]
 name = "truss-image"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 description = "Image toolkit with a shared Rust core across the CLI, HTTP server, and WASM demo."
 license = "MIT"
@@ -13,7 +13,7 @@ categories = ["command-line-utilities", "multimedia::images", "web-programming::
 [features]
 default = ["cli", "server", "svg", "webp-lossy"]
 cli = ["dep:clap", "dep:clap_complete", "dep:ureq", "server"]
-server = ["dep:hmac", "dep:hex", "dep:serde_json", "dep:sha2", "dep:subtle", "dep:ureq", "dep:url", "svg"]
+server = ["dep:hmac", "dep:hex", "dep:serde_json", "dep:sha2", "dep:subtle", "dep:ureq", "dep:url", "dep:uuid", "svg"]
 s3 = ["server", "dep:aws-sdk-s3", "dep:aws-config", "dep:tokio"]
 gcs = ["server", "dep:google-cloud-storage", "dep:google-cloud-auth", "dep:tokio"]
 azure = ["server", "dep:azure_storage_blob", "dep:azure_core", "dep:futures", "dep:tokio"]
@@ -44,13 +44,14 @@ sha2 = { version = "0.10.9", optional = true }
 subtle = { version = "2", optional = true }
 ureq = { version = "3.2.0", optional = true }
 url = { version = "2.5.8", optional = true }
+uuid = { version = "1", features = ["v4"], optional = true }
 rav1d-safe = { version = "0.3", default-features = false, features = ["bitdepth_8", "bitdepth_16"] }
 mp4parse = "0.17"
 yuvutils-rs = "0.8"
 wasm-bindgen = { version = "0.2.114", optional = true }
 webp = { version = "0.3", optional = true }
-quick-xml = { version = "0.37", optional = true }
-resvg = { version = "0.45", optional = true }
+quick-xml = { version = "0.39", optional = true }
+resvg = { version = "0.47", optional = true }
 aws-sdk-s3 = { version = "1", optional = true }
 aws-config = { version = "1", optional = true }
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "io-util", "time"], optional = true }

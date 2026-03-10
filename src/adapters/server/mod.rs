@@ -27,7 +27,7 @@ use http_parse::{
 };
 use metrics::{
     CACHE_HITS_TOTAL, CACHE_MISSES_TOTAL, DEFAULT_MAX_CONCURRENT_TRANSFORMS, RouteMetric,
-    record_http_metrics, render_metrics_text, uptime_seconds,
+    record_http_metrics, render_metrics_text, status_code, uptime_seconds,
 };
 use multipart::{parse_multipart_boundary, parse_upload_request};
 use negotiate::{
@@ -57,8 +57,30 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use url::Url;
+use uuid::Uuid;
+
+/// Writes a line to stderr using a raw file-descriptor write, bypassing Rust's
+/// `std::io::Stderr` type whose internal `ReentrantLock` can interfere with
+/// `MutexGuard` drop ordering in Rust 2024 edition, breaking HTTP keep-alive.
+fn stderr_write(msg: &str) {
+    use std::io::Write;
+    use std::os::fd::FromRawFd;
+
+    // SAFETY: fd 2 (stderr) is always valid for the lifetime of the process.
+    let mut f = unsafe { std::fs::File::from_raw_fd(2) };
+
+    // Build a single buffer to issue one write(2) syscall instead of two.
+    let bytes = msg.as_bytes();
+    let mut buf = Vec::with_capacity(bytes.len() + 1);
+    buf.extend_from_slice(bytes);
+    buf.push(b'\n');
+    let _ = f.write_all(&buf);
+
+    // Do not drop `f` — that would close fd 2 (stderr).
+    std::mem::forget(f);
+}
 
 /// The storage backend that determines how `Path`-based public GET requests are
 /// resolved.
@@ -157,6 +179,35 @@ struct ImageResponseConfig {
     disable_accept_negotiation: bool,
     public_cache_control: PublicCacheControl,
     transform_deadline: Duration,
+}
+
+/// RAII guard that holds a concurrency slot for an in-flight image transform.
+///
+/// The counter is incremented on successful acquisition and decremented when
+/// the guard is dropped, ensuring the slot is always released even if the
+/// caller returns early or panics.
+struct TransformSlot {
+    counter: Arc<AtomicU64>,
+}
+
+impl TransformSlot {
+    fn try_acquire(counter: &Arc<AtomicU64>, limit: u64) -> Option<Self> {
+        let prev = counter.fetch_add(1, Ordering::Relaxed);
+        if prev >= limit {
+            counter.fetch_sub(1, Ordering::Relaxed);
+            None
+        } else {
+            Some(Self {
+                counter: Arc::clone(counter),
+            })
+        }
+    }
+}
+
+impl Drop for TransformSlot {
+    fn drop(&mut self) {
+        self.counter.fetch_sub(1, Ordering::Relaxed);
+    }
 }
 
 /// Runtime configuration for the HTTP server adapter.
@@ -462,7 +513,7 @@ impl ServerConfig {
         if let Some(handler) = &self.log_handler {
             handler(msg);
         } else {
-            eprintln!("{msg}");
+            stderr_write(msg);
         }
     }
 
@@ -1010,7 +1061,7 @@ pub fn serve(listener: TcpListener) -> io::Result<()> {
         }
     }
 
-    serve_with_config(listener, &config)
+    serve_with_config(listener, config)
 }
 
 /// Serves requests with an explicit server configuration.
@@ -1022,8 +1073,8 @@ pub fn serve(listener: TcpListener) -> io::Result<()> {
 ///
 /// Returns an [`io::Error`] when accepting the next connection fails or when a response cannot
 /// be written to the socket.
-pub fn serve_with_config(listener: TcpListener, config: &ServerConfig) -> io::Result<()> {
-    let config = Arc::new(config.clone());
+pub fn serve_with_config(listener: TcpListener, config: ServerConfig) -> io::Result<()> {
+    let config = Arc::new(config);
     let (sender, receiver) = std::sync::mpsc::channel::<TcpStream>();
 
     // Spawn a pool of worker threads sized to the configured concurrency limit
@@ -1038,7 +1089,14 @@ pub fn serve_with_config(listener: TcpListener, config: &ServerConfig) -> io::Re
         let rx = Arc::clone(&receiver);
         let cfg = Arc::clone(&config);
         workers.push(std::thread::spawn(move || {
-            while let Ok(stream) = rx.lock().expect("worker lock poisoned").recv() {
+            loop {
+                let stream = {
+                    let guard = rx.lock().expect("worker lock poisoned");
+                    match guard.recv() {
+                        Ok(stream) => stream,
+                        Err(_) => break,
+                    }
+                }; // MutexGuard dropped here — before handle_stream runs.
                 if let Err(err) = handle_stream(stream, &cfg) {
                     cfg.log(&format!("failed to handle connection: {err}"));
                 }
@@ -1105,7 +1163,7 @@ pub fn serve_with_config(listener: TcpListener, config: &ServerConfig) -> io::Re
 /// connection fails, or when a response cannot be written to the socket.
 pub fn serve_once(listener: TcpListener) -> io::Result<()> {
     let config = ServerConfig::from_env()?;
-    serve_once_with_config(listener, &config)
+    serve_once_with_config(listener, config)
 }
 
 /// Serves exactly one request with an explicit server configuration.
@@ -1114,9 +1172,9 @@ pub fn serve_once(listener: TcpListener) -> io::Result<()> {
 ///
 /// Returns an [`io::Error`] when accepting the next connection fails or when a response cannot
 /// be written to the socket.
-pub fn serve_once_with_config(listener: TcpListener, config: &ServerConfig) -> io::Result<()> {
+pub fn serve_once_with_config(listener: TcpListener, config: ServerConfig) -> io::Result<()> {
     let (stream, _) = listener.accept()?;
-    handle_stream(stream, config)
+    handle_stream(stream, &config)
 }
 
 #[derive(Debug, Deserialize)]
@@ -1332,6 +1390,49 @@ impl TransformOptionsPayload {
     }
 }
 
+struct AccessLogEntry<'a> {
+    request_id: &'a str,
+    method: &'a str,
+    path: &'a str,
+    route: &'a str,
+    status: &'a str,
+    start: Instant,
+    cache_status: Option<&'a str>,
+}
+
+/// Extracts the `X-Request-Id` header value from request headers.
+/// Returns `None` if the header is absent or empty.
+fn extract_request_id(headers: &[(String, String)]) -> Option<String> {
+    headers.iter().find_map(|(name, value)| {
+        (name == "x-request-id" && !value.is_empty()).then_some(value.clone())
+    })
+}
+
+/// Classifies the `Cache-Status` response header as `"hit"` or `"miss"`.
+/// Returns `None` when the header is absent.
+fn extract_cache_status(headers: &[(&'static str, String)]) -> Option<&'static str> {
+    headers
+        .iter()
+        .find_map(|(name, value)| (*name == "Cache-Status").then_some(value.as_str()))
+        .map(|v| if v.contains("hit") { "hit" } else { "miss" })
+}
+
+fn emit_access_log(config: &ServerConfig, entry: &AccessLogEntry<'_>) {
+    config.log(
+        &json!({
+            "kind": "access_log",
+            "request_id": entry.request_id,
+            "method": entry.method,
+            "path": entry.path,
+            "route": entry.route,
+            "status": entry.status,
+            "latency_ms": entry.start.elapsed().as_millis() as u64,
+            "cache_status": entry.cache_status,
+        })
+        .to_string(),
+    );
+}
+
 fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io::Result<()> {
     // Prevent slow or stalled clients from blocking the accept loop indefinitely.
     if let Err(err) = stream.set_read_timeout(Some(SOCKET_READ_TIMEOUT)) {
@@ -1355,6 +1456,13 @@ fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io::Result<()>
             }
         };
 
+        // Start timing after headers are read so latency reflects server
+        // processing time, not client send / socket-wait time.
+        let start = Instant::now();
+
+        let request_id =
+            extract_request_id(&partial.headers).unwrap_or_else(|| Uuid::new_v4().to_string());
+
         let client_wants_close = partial
             .headers
             .iter()
@@ -1366,22 +1474,63 @@ fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io::Result<()>
             (partial.method.as_str(), partial.path()),
             ("POST", "/images:transform") | ("POST", "/images")
         );
-        if requires_auth && let Err(response) = authorize_request_headers(&partial.headers, config)
+        if requires_auth
+            && let Err(mut response) = authorize_request_headers(&partial.headers, config)
         {
+            response.headers.push(("X-Request-Id", request_id.clone()));
+            let sc = status_code(response.status).unwrap_or("unknown");
+            let method_log = partial.method.clone();
+            let path_log = partial.path().to_string();
             let _ = write_response(&mut stream, response, true);
+            emit_access_log(
+                config,
+                &AccessLogEntry {
+                    request_id: &request_id,
+                    method: &method_log,
+                    path: &path_log,
+                    route: &path_log,
+                    status: sc,
+                    start,
+                    cache_status: None,
+                },
+            );
             return Ok(());
         }
 
+        // Clone method/path before `read_request_body` consumes `partial`.
+        let method = partial.method.clone();
+        let path = partial.path().to_string();
+
         let request = match read_request_body(&mut stream, partial) {
             Ok(request) => request,
-            Err(response) => {
+            Err(mut response) => {
+                response.headers.push(("X-Request-Id", request_id.clone()));
+                let sc = status_code(response.status).unwrap_or("unknown");
                 let _ = write_response(&mut stream, response, true);
+                emit_access_log(
+                    config,
+                    &AccessLogEntry {
+                        request_id: &request_id,
+                        method: &method,
+                        path: &path,
+                        route: &path,
+                        status: sc,
+                        start,
+                        cache_status: None,
+                    },
+                );
                 return Ok(());
             }
         };
         let route = classify_route(&request);
         let mut response = route_request(request, config);
         record_http_metrics(route, response.status);
+
+        response.headers.push(("X-Request-Id", request_id.clone()));
+
+        let cache_status = extract_cache_status(&response.headers);
+
+        let sc = status_code(response.status).unwrap_or("unknown");
 
         if is_head {
             response.body = Vec::new();
@@ -1391,6 +1540,19 @@ fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io::Result<()>
         let close_after = client_wants_close || requests_served >= KEEP_ALIVE_MAX_REQUESTS;
 
         write_response(&mut stream, response, close_after)?;
+
+        emit_access_log(
+            config,
+            &AccessLogEntry {
+                request_id: &request_id,
+                method: &method,
+                path: &path,
+                route: route.as_label(),
+                status: sc,
+                start,
+                cache_status,
+            },
+        );
 
         if close_after {
             return Ok(());
@@ -1816,7 +1978,7 @@ fn transform_source_bytes(
                 config.public_max_age_seconds,
                 config.public_stale_while_revalidate_seconds,
             );
-            headers.push(("Age".to_string(), age.as_secs().to_string()));
+            headers.push(("Age", age.as_secs().to_string()));
             if matches!(response_policy, ImageResponsePolicy::PublicGet)
                 && if_none_match_matches(request.header("if-none-match"), &etag)
             {
@@ -1831,12 +1993,14 @@ fn transform_source_bytes(
         }
     }
 
-    let in_flight = config.transforms_in_flight.fetch_add(1, Ordering::Relaxed);
-    if in_flight >= config.max_concurrent_transforms {
-        config.transforms_in_flight.fetch_sub(1, Ordering::Relaxed);
-        return service_unavailable_response("too many concurrent transforms; retry later");
-    }
-    let response = transform_source_bytes_inner(
+    let _slot = match TransformSlot::try_acquire(
+        &config.transforms_in_flight,
+        config.max_concurrent_transforms,
+    ) {
+        Some(slot) => slot,
+        None => return service_unavailable_response("too many concurrent transforms; retry later"),
+    };
+    transform_source_bytes_inner(
         source_bytes,
         options,
         request,
@@ -1851,9 +2015,7 @@ fn transform_source_bytes(
             },
             transform_deadline: Duration::from_secs(config.transform_deadline_secs),
         },
-    );
-    config.transforms_in_flight.fetch_sub(1, Ordering::Relaxed);
-    response
+    )
 }
 
 fn transform_source_bytes_inner(
@@ -1911,7 +2073,7 @@ fn transform_source_bytes_inner(
             response_config.public_cache_control.max_age,
             response_config.public_cache_control.stale_while_revalidate,
         );
-        headers.push(("Age".to_string(), age.as_secs().to_string()));
+        headers.push(("Age", age.as_secs().to_string()));
         if matches!(response_policy, ImageResponsePolicy::PublicGet)
             && if_none_match_matches(request.header("if-none-match"), &etag)
         {
@@ -1944,7 +2106,7 @@ fn transform_source_bytes_inner(
         {
             handler(&msg);
         } else {
-            eprintln!("{msg}");
+            stderr_write(&msg);
         }
     }
 
@@ -2324,8 +2486,8 @@ mod tests {
         }
     }
 
-    fn response_body(response: &HttpResponse) -> String {
-        String::from_utf8(response.body.clone()).expect("utf8 response body")
+    fn response_body(response: &HttpResponse) -> &str {
+        std::str::from_utf8(&response.body).expect("utf8 response body")
     }
 
     fn signed_public_request(target: &str, host: &str, secret: &str) -> HttpRequest {
@@ -2419,19 +2581,16 @@ mod tests {
         );
 
         assert!(headers.contains(&(
-            "Cache-Control".to_string(),
+            "Cache-Control",
             "public, max-age=3600, stale-while-revalidate=60".to_string()
         )));
-        assert!(headers.contains(&("Vary".to_string(), "Accept".to_string())));
-        assert!(headers.contains(&("X-Content-Type-Options".to_string(), "nosniff".to_string())));
+        assert!(headers.contains(&("Vary", "Accept".to_string())));
+        assert!(headers.contains(&("X-Content-Type-Options", "nosniff".to_string())));
         assert!(headers.contains(&(
-            "Content-Disposition".to_string(),
+            "Content-Disposition",
             "inline; filename=\"truss.webp\"".to_string()
         )));
-        assert!(headers.contains(&(
-            "Cache-Status".to_string(),
-            "\"truss\"; fwd=miss".to_string()
-        )));
+        assert!(headers.contains(&("Cache-Status", "\"truss\"; fwd=miss".to_string())));
     }
 
     #[test]
@@ -2446,7 +2605,7 @@ mod tests {
             DEFAULT_PUBLIC_STALE_WHILE_REVALIDATE_SECONDS,
         );
 
-        assert!(headers.contains(&("Content-Security-Policy".to_string(), "sandbox".to_string())));
+        assert!(headers.contains(&("Content-Security-Policy", "sandbox".to_string())));
     }
 
     #[test]
@@ -2461,7 +2620,7 @@ mod tests {
             DEFAULT_PUBLIC_STALE_WHILE_REVALIDATE_SECONDS,
         );
 
-        assert!(!headers.iter().any(|(k, _)| k == "Content-Security-Policy"));
+        assert!(!headers.iter().any(|(k, _)| *k == "Content-Security-Policy"));
     }
 
     #[test]
@@ -2669,7 +2828,7 @@ mod tests {
             DEFAULT_PUBLIC_MAX_AGE_SECONDS,
             DEFAULT_PUBLIC_STALE_WHILE_REVALIDATE_SECONDS,
         );
-        assert!(headers.contains(&("Cache-Status".to_string(), "\"truss\"; hit".to_string())));
+        assert!(headers.contains(&("Cache-Status", "\"truss\"; hit".to_string())));
     }
 
     #[test]
@@ -2683,10 +2842,7 @@ mod tests {
             DEFAULT_PUBLIC_MAX_AGE_SECONDS,
             DEFAULT_PUBLIC_STALE_WHILE_REVALIDATE_SECONDS,
         );
-        assert!(headers.contains(&(
-            "Cache-Status".to_string(),
-            "\"truss\"; fwd=miss".to_string()
-        )));
+        assert!(headers.contains(&("Cache-Status", "\"truss\"; fwd=miss".to_string())));
     }
 
     #[test]
@@ -2963,10 +3119,7 @@ mod tests {
         let response = route_request(request, &ServerConfig::new(temp_dir("not-found"), None));
 
         assert_eq!(response.status, "404 Not Found");
-        assert_eq!(
-            response.content_type.as_deref(),
-            Some("application/problem+json")
-        );
+        assert_eq!(response.content_type, Some("application/problem+json"));
         let body = response_body(&response);
         assert!(body.contains("\"type\":\"about:blank\""));
         assert!(body.contains("\"title\":\"Not Found\""));
@@ -3015,7 +3168,7 @@ mod tests {
         );
 
         assert_eq!(response.status, "200 OK");
-        assert_eq!(response.content_type.as_deref(), Some("image/jpeg"));
+        assert_eq!(response.content_type, Some("image/jpeg"));
 
         let artifact = sniff_artifact(RawArtifact::new(response.body, None)).expect("sniff output");
         assert_eq!(artifact.media_type, MediaType::Jpeg);
@@ -3051,7 +3204,7 @@ mod tests {
         handle.join().expect("join fixture server");
 
         assert_eq!(response.status, "200 OK");
-        assert_eq!(response.content_type.as_deref(), Some("image/jpeg"));
+        assert_eq!(response.content_type, Some("image/jpeg"));
 
         let artifact = sniff_artifact(RawArtifact::new(response.body, None)).expect("sniff output");
         assert_eq!(artifact.media_type, MediaType::Jpeg);
@@ -3093,7 +3246,7 @@ mod tests {
         );
 
         assert_eq!(response.status, "200 OK");
-        assert_eq!(response.content_type.as_deref(), Some("image/jpeg"));
+        assert_eq!(response.content_type, Some("image/jpeg"));
 
         let artifact = sniff_artifact(RawArtifact::new(response.body, None)).expect("sniff output");
         assert_eq!(artifact.media_type, MediaType::Jpeg);
@@ -3186,7 +3339,7 @@ mod tests {
 
         assert_eq!(response.status, "200 OK");
         assert_eq!(
-            response.content_type.as_deref(),
+            response.content_type,
             Some("text/plain; version=0.0.4; charset=utf-8")
         );
         assert!(body.contains("truss_http_requests_total"));
@@ -3258,7 +3411,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind test listener");
         let addr = listener.local_addr().expect("read local addr");
 
-        let server = thread::spawn(move || serve_once_with_config(listener, &config));
+        let server = thread::spawn(move || serve_once_with_config(listener, config));
 
         let mut stream = TcpStream::connect(addr).expect("connect to test server");
         stream
@@ -3286,14 +3439,11 @@ mod tests {
         let bad_request = bad_request_response("bad input");
 
         assert_eq!(
-            response.content_type.as_deref(),
+            response.content_type,
             Some("application/problem+json"),
             "error responses must use application/problem+json"
         );
-        assert_eq!(
-            bad_request.content_type.as_deref(),
-            Some("application/problem+json"),
-        );
+        assert_eq!(bad_request.content_type, Some("application/problem+json"),);
 
         let auth_body = response_body(&response);
         assert!(auth_body.contains("authorization required"));
@@ -4680,5 +4830,184 @@ mod tests {
         let headers: Vec<(String, String)> = vec![];
         let err = super::authorize_request_headers(&headers, &config).unwrap_err();
         assert_eq!(err.status, "401 Unauthorized");
+    }
+
+    // ── TransformSlot RAII guard ──────────────────────────────────────
+
+    #[test]
+    fn transform_slot_acquire_succeeds_under_limit() {
+        use std::sync::Arc;
+        use std::sync::atomic::AtomicU64;
+
+        let counter = Arc::new(AtomicU64::new(0));
+        let slot = super::TransformSlot::try_acquire(&counter, 2);
+        assert!(slot.is_some());
+        assert_eq!(counter.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn transform_slot_acquire_returns_none_at_limit() {
+        use std::sync::Arc;
+        use std::sync::atomic::AtomicU64;
+
+        let counter = Arc::new(AtomicU64::new(0));
+        let _s1 = super::TransformSlot::try_acquire(&counter, 1).unwrap();
+        let s2 = super::TransformSlot::try_acquire(&counter, 1);
+        assert!(s2.is_none());
+        // Counter must still be 1 (failed acquire must not leak).
+        assert_eq!(counter.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn transform_slot_drop_decrements_counter() {
+        use std::sync::Arc;
+        use std::sync::atomic::AtomicU64;
+
+        let counter = Arc::new(AtomicU64::new(0));
+        {
+            let _slot = super::TransformSlot::try_acquire(&counter, 4).unwrap();
+            assert_eq!(counter.load(Ordering::Relaxed), 1);
+        }
+        // After drop the counter must return to zero.
+        assert_eq!(counter.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn transform_slot_multiple_acquires_up_to_limit() {
+        use std::sync::Arc;
+        use std::sync::atomic::AtomicU64;
+
+        let counter = Arc::new(AtomicU64::new(0));
+        let limit = 3u64;
+        let mut slots = Vec::new();
+        for _ in 0..limit {
+            slots.push(super::TransformSlot::try_acquire(&counter, limit).unwrap());
+        }
+        assert_eq!(counter.load(Ordering::Relaxed), limit);
+        // One more must fail.
+        assert!(super::TransformSlot::try_acquire(&counter, limit).is_none());
+        assert_eq!(counter.load(Ordering::Relaxed), limit);
+        // Drop all slots.
+        slots.clear();
+        assert_eq!(counter.load(Ordering::Relaxed), 0);
+    }
+
+    // ── Access log via emit_access_log ────────────────────────────────
+
+    #[test]
+    fn emit_access_log_produces_json_with_expected_fields() {
+        use std::sync::{Arc, Mutex};
+        use std::time::Instant;
+
+        let captured = Arc::new(Mutex::new(String::new()));
+        let captured_clone = Arc::clone(&captured);
+        let handler: super::LogHandler =
+            Arc::new(move |msg: &str| *captured_clone.lock().unwrap() = msg.to_owned());
+
+        let mut config = ServerConfig::new(temp_dir("access-log"), None);
+        config.log_handler = Some(handler);
+
+        let start = Instant::now();
+        super::emit_access_log(
+            &config,
+            &super::AccessLogEntry {
+                request_id: "req-123",
+                method: "GET",
+                path: "/image.png",
+                route: "transform",
+                status: "200",
+                start,
+                cache_status: Some("hit"),
+            },
+        );
+
+        let output = captured.lock().unwrap().clone();
+        let parsed: serde_json::Value = serde_json::from_str(&output).expect("valid JSON");
+        assert_eq!(parsed["kind"], "access_log");
+        assert_eq!(parsed["request_id"], "req-123");
+        assert_eq!(parsed["method"], "GET");
+        assert_eq!(parsed["path"], "/image.png");
+        assert_eq!(parsed["route"], "transform");
+        assert_eq!(parsed["status"], "200");
+        assert_eq!(parsed["cache_status"], "hit");
+        assert!(parsed["latency_ms"].is_u64());
+    }
+
+    #[test]
+    fn emit_access_log_null_cache_status_when_none() {
+        use std::sync::{Arc, Mutex};
+        use std::time::Instant;
+
+        let captured = Arc::new(Mutex::new(String::new()));
+        let captured_clone = Arc::clone(&captured);
+        let handler: super::LogHandler =
+            Arc::new(move |msg: &str| *captured_clone.lock().unwrap() = msg.to_owned());
+
+        let mut config = ServerConfig::new(temp_dir("access-log-none"), None);
+        config.log_handler = Some(handler);
+
+        super::emit_access_log(
+            &config,
+            &super::AccessLogEntry {
+                request_id: "req-456",
+                method: "POST",
+                path: "/upload",
+                route: "upload",
+                status: "201",
+                start: Instant::now(),
+                cache_status: None,
+            },
+        );
+
+        let output = captured.lock().unwrap().clone();
+        let parsed: serde_json::Value = serde_json::from_str(&output).expect("valid JSON");
+        assert!(parsed["cache_status"].is_null());
+    }
+
+    // ── X-Request-Id header ───────────────────────────────────────────
+
+    #[test]
+    fn x_request_id_is_extracted_from_incoming_headers() {
+        let headers = vec![
+            ("host".to_string(), "localhost".to_string()),
+            ("x-request-id".to_string(), "custom-id-abc".to_string()),
+        ];
+        assert_eq!(
+            super::extract_request_id(&headers),
+            Some("custom-id-abc".to_string())
+        );
+    }
+
+    #[test]
+    fn x_request_id_not_extracted_when_empty() {
+        let headers = vec![("x-request-id".to_string(), "".to_string())];
+        assert!(super::extract_request_id(&headers).is_none());
+    }
+
+    #[test]
+    fn x_request_id_not_extracted_when_absent() {
+        let headers = vec![("host".to_string(), "localhost".to_string())];
+        assert!(super::extract_request_id(&headers).is_none());
+    }
+
+    // ── Cache status extraction ───────────────────────────────────────
+
+    #[test]
+    fn cache_status_hit_detected() {
+        let headers: Vec<(&str, String)> = vec![("Cache-Status", "\"truss\"; hit".to_string())];
+        assert_eq!(super::extract_cache_status(&headers), Some("hit"));
+    }
+
+    #[test]
+    fn cache_status_miss_detected() {
+        let headers: Vec<(&str, String)> =
+            vec![("Cache-Status", "\"truss\"; fwd=miss".to_string())];
+        assert_eq!(super::extract_cache_status(&headers), Some("miss"));
+    }
+
+    #[test]
+    fn cache_status_none_when_header_absent() {
+        let headers: Vec<(&str, String)> = vec![("Content-Type", "image/png".to_string())];
+        assert!(super::extract_cache_status(&headers).is_none());
     }
 }
