@@ -20,6 +20,10 @@ info:
 
     Common transform options are shared across endpoints. When `format` is omitted,
     the server first tries `Accept` negotiation and otherwise keeps the input format.
+
+    **Note:** Watermark compositing is currently available in CLI mode only
+    (`truss convert --watermark`). Server-side watermark support is planned
+    (see [#33](https://github.com/nao1215/truss/issues/33)).
   license:
     name: MIT
     url: https://opensource.org/licenses/MIT
@@ -732,7 +736,7 @@ components:
         bucket:
           type: string
           minLength: 1
-          description: Bucket name. Defaults to `TRUSS_S3_BUCKET`, `TRUSS_GCS_BUCKET`, or `TRUSS_AZURE_BUCKET` when omitted.
+          description: Bucket name. Defaults to `TRUSS_S3_BUCKET`, `TRUSS_GCS_BUCKET`, or `TRUSS_AZURE_CONTAINER` when omitted.
         key:
           type: string
           minLength: 1

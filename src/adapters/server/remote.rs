@@ -56,7 +56,12 @@ fn resolve_storage_source_bytes(
                 .as_ref()
                 .ok_or_else(|| bad_request_response("S3 storage backend is not configured"))?;
             let effective_bucket = bucket.unwrap_or(&s3_ctx.default_bucket);
-            super::s3::read_s3_source_bytes(effective_bucket, key, s3_ctx)
+            super::s3::read_s3_source_bytes(
+                effective_bucket,
+                key,
+                s3_ctx,
+                config.storage_timeout_secs,
+            )
         }
         #[cfg(feature = "gcs")]
         super::StorageBackend::Gcs => {
@@ -65,7 +70,12 @@ fn resolve_storage_source_bytes(
                 .as_ref()
                 .ok_or_else(|| bad_request_response("GCS storage backend is not configured"))?;
             let effective_bucket = bucket.unwrap_or(&gcs_ctx.default_bucket);
-            super::gcs::read_gcs_source_bytes(effective_bucket, key, gcs_ctx)
+            super::gcs::read_gcs_source_bytes(
+                effective_bucket,
+                key,
+                gcs_ctx,
+                config.storage_timeout_secs,
+            )
         }
         #[cfg(feature = "azure")]
         super::StorageBackend::Azure => {
@@ -73,8 +83,13 @@ fn resolve_storage_source_bytes(
                 .azure_context
                 .as_ref()
                 .ok_or_else(|| bad_request_response("Azure storage backend is not configured"))?;
-            let effective_bucket = bucket.unwrap_or(&azure_ctx.default_bucket);
-            super::azure::read_azure_source_bytes(effective_bucket, key, azure_ctx)
+            let effective_bucket = bucket.unwrap_or(&azure_ctx.default_container);
+            super::azure::read_azure_source_bytes(
+                effective_bucket,
+                key,
+                azure_ctx,
+                config.storage_timeout_secs,
+            )
         }
         super::StorageBackend::Filesystem => Err(bad_request_response(
             "storage backend is set to filesystem but received a storage source",

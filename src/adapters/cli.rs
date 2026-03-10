@@ -210,6 +210,10 @@ ENVIRONMENT VARIABLES:
         "\
   TRUSS_S3_BUCKET                     Default S3 bucket name (required when backend=s3)
   TRUSS_S3_FORCE_PATH_STYLE           Use path-style S3 addressing (set to 1/true/yes/on for MinIO, etc.)
+  AWS_ACCESS_KEY_ID                   AWS access key for S3 authentication
+  AWS_SECRET_ACCESS_KEY               AWS secret key for S3 authentication
+  AWS_REGION                          AWS region for the S3 client (e.g. us-east-1)
+  AWS_ENDPOINT_URL                    Custom S3-compatible endpoint URL (e.g. http://minio:9000)
 ",
     );
 
@@ -218,15 +222,24 @@ ENVIRONMENT VARIABLES:
         "\
   TRUSS_GCS_BUCKET                    Default GCS bucket name (required when backend=gcs)
   TRUSS_GCS_ENDPOINT                  Custom GCS endpoint URL (for testing with fake-gcs-server, etc.)
+  GOOGLE_APPLICATION_CREDENTIALS      Path to GCS service account JSON key file
+  GOOGLE_APPLICATION_CREDENTIALS_JSON Inline GCS service account JSON (alternative to file path)
 ",
     );
 
     #[cfg(feature = "azure")]
     s.push_str(
         "\
-  TRUSS_AZURE_BUCKET                  Default Azure container name (required when backend=azure)
+  TRUSS_AZURE_CONTAINER               Default Azure container name (required when backend=azure)
   TRUSS_AZURE_ENDPOINT                Custom Azure Blob endpoint URL (for Azurite, etc.)
   AZURE_STORAGE_ACCOUNT_NAME          Storage account name (derives endpoint when TRUSS_AZURE_ENDPOINT is unset)
+",
+    );
+
+    #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
+    s.push_str(
+        "\
+  TRUSS_STORAGE_TIMEOUT_SECS          Download timeout for storage backends in seconds (default: 30, range: 1-300)
 ",
     );
 

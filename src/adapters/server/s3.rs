@@ -144,59 +144,54 @@ pub(super) fn read_s3_source_bytes(
     bucket: &str,
     key: &str,
     s3: &S3Context,
+    timeout_secs: u64,
 ) -> Result<Vec<u8>, HttpResponse> {
     validate_s3_key(key)?;
 
     s3.runtime.block_on(async {
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(super::remote::STORAGE_DOWNLOAD_TIMEOUT_SECS),
-            async {
-                let output = s3
-                    .client
-                    .get_object()
-                    .bucket(bucket)
-                    .key(key)
-                    .send()
-                    .await
-                    .map_err(map_s3_get_object_error)?;
+        let result = tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), async {
+            let output = s3
+                .client
+                .get_object()
+                .bucket(bucket)
+                .key(key)
+                .send()
+                .await
+                .map_err(map_s3_get_object_error)?;
 
-                if let Some(len) = output.content_length()
-                    && len as u64 > MAX_SOURCE_BYTES
-                {
-                    return Err(payload_too_large_response(
-                        "S3 object exceeds the source size limit",
-                    ));
-                }
+            if let Some(len) = output.content_length()
+                && len as u64 > MAX_SOURCE_BYTES
+            {
+                return Err(payload_too_large_response(
+                    "S3 object exceeds the source size limit",
+                ));
+            }
 
-                let capacity_hint = output
-                    .content_length()
-                    .map(|l| (l as usize).min(MAX_SOURCE_BYTES as usize + 1))
-                    .unwrap_or(0);
+            let capacity_hint = output
+                .content_length()
+                .map(|l| (l as usize).min(MAX_SOURCE_BYTES as usize + 1))
+                .unwrap_or(0);
 
-                use tokio::io::AsyncReadExt;
-                let mut limited = output.body.into_async_read().take(MAX_SOURCE_BYTES + 1);
-                let mut buf = Vec::with_capacity(capacity_hint);
-                limited.read_to_end(&mut buf).await.map_err(|e| {
-                    eprintln!("s3 error: failed to read object body: {e}");
-                    bad_gateway_response("failed to read S3 object body")
-                })?;
+            use tokio::io::AsyncReadExt;
+            let mut limited = output.body.into_async_read().take(MAX_SOURCE_BYTES + 1);
+            let mut buf = Vec::with_capacity(capacity_hint);
+            limited.read_to_end(&mut buf).await.map_err(|e| {
+                eprintln!("s3 error: failed to read object body: {e}");
+                bad_gateway_response("failed to read S3 object body")
+            })?;
 
-                if buf.len() as u64 > MAX_SOURCE_BYTES {
-                    return Err(payload_too_large_response(
-                        "S3 object exceeds the source size limit",
-                    ));
-                }
-                Ok(buf)
-            },
-        )
+            if buf.len() as u64 > MAX_SOURCE_BYTES {
+                return Err(payload_too_large_response(
+                    "S3 object exceeds the source size limit",
+                ));
+            }
+            Ok(buf)
+        })
         .await;
         match result {
             Ok(inner) => inner,
             Err(_) => {
-                eprintln!(
-                    "s3 error: download timed out after {}s",
-                    super::remote::STORAGE_DOWNLOAD_TIMEOUT_SECS
-                );
+                eprintln!("s3 error: download timed out after {timeout_secs}s");
                 Err(bad_gateway_response("object storage download timed out"))
             }
         }

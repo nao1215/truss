@@ -147,57 +147,52 @@ pub(super) fn read_gcs_source_bytes(
     bucket: &str,
     key: &str,
     gcs: &GcsContext,
+    timeout_secs: u64,
 ) -> Result<Vec<u8>, HttpResponse> {
     validate_gcs_key(key)?;
 
     let gcs_bucket = format!("projects/_/buckets/{bucket}");
     gcs.runtime.block_on(async {
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(super::remote::STORAGE_DOWNLOAD_TIMEOUT_SECS),
-            async {
-                let mut resp = gcs
-                    .client
-                    .read_object(&gcs_bucket, key)
-                    .send()
-                    .await
-                    .map_err(map_gcs_error)?;
+        let result = tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), async {
+            let mut resp = gcs
+                .client
+                .read_object(&gcs_bucket, key)
+                .send()
+                .await
+                .map_err(map_gcs_error)?;
 
-                let object = resp.object();
-                if object.size > 0 && object.size as u64 > MAX_SOURCE_BYTES {
+            let object = resp.object();
+            if object.size > 0 && object.size as u64 > MAX_SOURCE_BYTES {
+                return Err(payload_too_large_response(
+                    "GCS object exceeds the source size limit",
+                ));
+            }
+
+            let capacity = if object.size > 0 {
+                (object.size as usize).min(MAX_SOURCE_BYTES as usize + 1)
+            } else {
+                0
+            };
+            let mut buf = Vec::with_capacity(capacity);
+            while let Some(chunk) = resp.next().await {
+                let chunk = chunk.map_err(|e| {
+                    eprintln!("gcs error: failed to read object body: {e}");
+                    bad_gateway_response("failed to read GCS object body")
+                })?;
+                buf.extend_from_slice(&chunk);
+                if buf.len() as u64 > MAX_SOURCE_BYTES {
                     return Err(payload_too_large_response(
                         "GCS object exceeds the source size limit",
                     ));
                 }
-
-                let capacity = if object.size > 0 {
-                    (object.size as usize).min(MAX_SOURCE_BYTES as usize + 1)
-                } else {
-                    0
-                };
-                let mut buf = Vec::with_capacity(capacity);
-                while let Some(chunk) = resp.next().await {
-                    let chunk = chunk.map_err(|e| {
-                        eprintln!("gcs error: failed to read object body: {e}");
-                        bad_gateway_response("failed to read GCS object body")
-                    })?;
-                    buf.extend_from_slice(&chunk);
-                    if buf.len() as u64 > MAX_SOURCE_BYTES {
-                        return Err(payload_too_large_response(
-                            "GCS object exceeds the source size limit",
-                        ));
-                    }
-                }
-                Ok(buf)
-            },
-        )
+            }
+            Ok(buf)
+        })
         .await;
         match result {
             Ok(inner) => inner,
             Err(_) => {
-                eprintln!(
-                    "gcs error: download timed out after {}s",
-                    super::remote::STORAGE_DOWNLOAD_TIMEOUT_SECS
-                );
+                eprintln!("gcs error: download timed out after {timeout_secs}s");
                 Err(bad_gateway_response("object storage download timed out"))
             }
         }

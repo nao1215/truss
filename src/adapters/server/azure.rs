@@ -12,14 +12,14 @@ use super::response::{
 /// creating a new runtime per request.
 pub struct AzureContext {
     pub endpoint_url: String,
-    pub default_bucket: String,
+    pub default_container: String,
     runtime: tokio::runtime::Runtime,
 }
 
 impl std::fmt::Debug for AzureContext {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AzureContext")
-            .field("default_bucket", &self.default_bucket)
+            .field("default_container", &self.default_container)
             .field("endpoint_url", &self.endpoint_url)
             .finish()
     }
@@ -38,7 +38,7 @@ impl AzureContext {
         use std::time::Duration;
 
         let endpoint = self.endpoint_url.clone();
-        let container = self.default_bucket.clone();
+        let container = self.default_container.clone();
         self.runtime.block_on(async {
             let client = match azure_storage_blob::BlobClient::new(
                 &endpoint,
@@ -78,14 +78,14 @@ impl AzureContext {
 
 #[cfg(test)]
 impl AzureContext {
-    pub(crate) fn for_test(default_bucket: &str, endpoint_url: &str) -> Self {
+    pub(crate) fn for_test(default_container: &str, endpoint_url: &str) -> Self {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap();
         AzureContext {
             endpoint_url: endpoint_url.to_string(),
-            default_bucket: default_bucket.to_string(),
+            default_container: default_container.to_string(),
             runtime,
         }
     }
@@ -103,7 +103,7 @@ impl AzureContext {
 /// - `AZURE_STORAGE_ACCOUNT_NAME`: storage account name (used to derive
 ///   the default endpoint when `TRUSS_AZURE_ENDPOINT` is not set)
 pub fn build_azure_context(
-    default_bucket: String,
+    default_container: String,
     allow_insecure: bool,
 ) -> Result<AzureContext, std::io::Error> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -155,7 +155,7 @@ pub fn build_azure_context(
 
     Ok(AzureContext {
         endpoint_url,
-        default_bucket,
+        default_container,
         runtime,
     })
 }
@@ -169,70 +169,60 @@ pub(super) fn read_azure_source_bytes(
     container: &str,
     key: &str,
     ctx: &AzureContext,
+    timeout_secs: u64,
 ) -> Result<Vec<u8>, HttpResponse> {
     validate_azure_key(key)?;
 
     ctx.runtime.block_on(async {
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(super::remote::STORAGE_DOWNLOAD_TIMEOUT_SECS),
-            async {
-                let client = azure_storage_blob::BlobClient::new(
-                    &ctx.endpoint_url,
-                    container,
-                    key,
-                    None,
-                    None,
-                )
-                .map_err(|e| {
-                    eprintln!("azure error: failed to create blob client: {e}");
-                    bad_gateway_response("failed to create Azure blob client")
+        let result = tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), async {
+            let client =
+                azure_storage_blob::BlobClient::new(&ctx.endpoint_url, container, key, None, None)
+                    .map_err(|e| {
+                        eprintln!("azure error: failed to create blob client: {e}");
+                        bad_gateway_response("failed to create Azure blob client")
+                    })?;
+
+            let resp = client.download(None).await.map_err(map_azure_error)?;
+
+            use azure_storage_blob::models::BlobClientDownloadResultHeaders;
+            let content_length = resp.content_length().ok().flatten();
+            if let Some(len) = content_length
+                && len > MAX_SOURCE_BYTES
+            {
+                return Err(payload_too_large_response(
+                    "Azure blob exceeds the source size limit",
+                ));
+            }
+
+            let (_, _, body) = resp.deconstruct();
+
+            use futures::StreamExt;
+            let capacity = if let Some(len) = content_length {
+                (len as usize).min(MAX_SOURCE_BYTES as usize + 1)
+            } else {
+                0
+            };
+            let mut buf = Vec::with_capacity(capacity);
+            futures::pin_mut!(body);
+            while let Some(chunk) = body.next().await {
+                let chunk = chunk.map_err(|e| {
+                    eprintln!("azure error: failed to read blob body: {e}");
+                    bad_gateway_response("failed to read Azure blob body")
                 })?;
-
-                let resp = client.download(None).await.map_err(map_azure_error)?;
-
-                use azure_storage_blob::models::BlobClientDownloadResultHeaders;
-                let content_length = resp.content_length().ok().flatten();
-                if let Some(len) = content_length
-                    && len > MAX_SOURCE_BYTES
-                {
+                buf.extend_from_slice(&chunk);
+                if buf.len() as u64 > MAX_SOURCE_BYTES {
                     return Err(payload_too_large_response(
                         "Azure blob exceeds the source size limit",
                     ));
                 }
-
-                let (_, _, body) = resp.deconstruct();
-
-                use futures::StreamExt;
-                let capacity = if let Some(len) = content_length {
-                    (len as usize).min(MAX_SOURCE_BYTES as usize + 1)
-                } else {
-                    0
-                };
-                let mut buf = Vec::with_capacity(capacity);
-                futures::pin_mut!(body);
-                while let Some(chunk) = body.next().await {
-                    let chunk = chunk.map_err(|e| {
-                        eprintln!("azure error: failed to read blob body: {e}");
-                        bad_gateway_response("failed to read Azure blob body")
-                    })?;
-                    buf.extend_from_slice(&chunk);
-                    if buf.len() as u64 > MAX_SOURCE_BYTES {
-                        return Err(payload_too_large_response(
-                            "Azure blob exceeds the source size limit",
-                        ));
-                    }
-                }
-                Ok(buf)
-            },
-        )
+            }
+            Ok(buf)
+        })
         .await;
         match result {
             Ok(inner) => inner,
             Err(_) => {
-                eprintln!(
-                    "azure error: download timed out after {}s",
-                    super::remote::STORAGE_DOWNLOAD_TIMEOUT_SECS
-                );
+                eprintln!("azure error: download timed out after {timeout_secs}s");
                 Err(bad_gateway_response("object storage download timed out"))
             }
         }
@@ -394,7 +384,7 @@ mod tests {
             std::env::remove_var("TRUSS_AZURE_ENDPOINT");
             std::env::remove_var("AZURE_STORAGE_ACCOUNT_NAME");
         }
-        let result = build_azure_context("test-bucket".to_string(), true);
+        let result = build_azure_context("test-container".to_string(), true);
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(
@@ -410,7 +400,7 @@ mod tests {
             std::env::remove_var("TRUSS_AZURE_ENDPOINT");
             std::env::set_var("AZURE_STORAGE_ACCOUNT_NAME", "My-Account!");
         }
-        let result = build_azure_context("test-bucket".to_string(), true);
+        let result = build_azure_context("test-container".to_string(), true);
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(
@@ -427,7 +417,7 @@ mod tests {
             std::env::remove_var("TRUSS_AZURE_ENDPOINT");
             std::env::set_var("AZURE_STORAGE_ACCOUNT_NAME", "ab");
         }
-        let result = build_azure_context("test-bucket".to_string(), true);
+        let result = build_azure_context("test-container".to_string(), true);
         assert!(result.is_err());
         unsafe { std::env::remove_var("AZURE_STORAGE_ACCOUNT_NAME") };
     }
@@ -439,7 +429,7 @@ mod tests {
             std::env::remove_var("TRUSS_AZURE_ENDPOINT");
             std::env::set_var("AZURE_STORAGE_ACCOUNT_NAME", "a".repeat(25));
         }
-        let result = build_azure_context("test-bucket".to_string(), true);
+        let result = build_azure_context("test-container".to_string(), true);
         assert!(result.is_err());
         unsafe { std::env::remove_var("AZURE_STORAGE_ACCOUNT_NAME") };
     }

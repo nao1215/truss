@@ -3,6 +3,11 @@ services:
     image: mcr.microsoft.com/azure-storage/azurite:latest
     command: ["azurite-blob", "--blobHost", "0.0.0.0", "--blobPort", "10000"]
     # Azurite exposes Blob service on port 10000
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "10000"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 
   truss:
     image: ${TRUSS_IMAGE:-truss:local}
@@ -10,13 +15,14 @@ services:
       context: ../..
       dockerfile: Dockerfile
     depends_on:
-      - azurite
+      azurite:
+        condition: service_healthy
     environment:
       TRUSS_BEARER_TOKEN: test-token
       TRUSS_STORAGE_ROOT: /data
       TRUSS_BIND_ADDR: "0.0.0.0:8080"
       TRUSS_STORAGE_BACKEND: azure
-      TRUSS_AZURE_BUCKET: truss-test
+      TRUSS_AZURE_CONTAINER: truss-test
       TRUSS_AZURE_ENDPOINT: http://azurite:10000/devstoreaccount1
       AZURE_STORAGE_ACCOUNT_NAME: devstoreaccount1
       TRUSS_ALLOW_INSECURE_URL_SOURCES: "true"

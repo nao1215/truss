@@ -4,6 +4,11 @@ services:
     environment:
       initialBuckets: truss-test
     # s3mock exposes HTTP on 9090 by default
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:9090"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 
   truss:
     image: ${TRUSS_IMAGE:-truss:local}
@@ -11,7 +16,8 @@ services:
       context: ../..
       dockerfile: Dockerfile
     depends_on:
-      - s3mock
+      s3mock:
+        condition: service_healthy
     environment:
       TRUSS_BEARER_TOKEN: test-token
       TRUSS_STORAGE_ROOT: /data

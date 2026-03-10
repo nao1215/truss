@@ -226,6 +226,11 @@ pub struct ServerConfig {
     /// failures, transform warnings) through this handler. When `None`, messages are
     /// written to stderr via `eprintln!`.
     pub log_handler: Option<LogHandler>,
+    /// Download timeout in seconds for object storage backends (S3, GCS, Azure).
+    ///
+    /// Configurable via `TRUSS_STORAGE_TIMEOUT_SECS`. Defaults to 30.
+    #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
+    pub storage_timeout_secs: u64,
     /// The storage backend used to resolve `Path`-based public GET requests.
     #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
     pub storage_backend: StorageBackend,
@@ -254,6 +259,8 @@ impl Clone for ServerConfig {
             public_stale_while_revalidate_seconds: self.public_stale_while_revalidate_seconds,
             disable_accept_negotiation: self.disable_accept_negotiation,
             log_handler: self.log_handler.clone(),
+            #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
+            storage_timeout_secs: self.storage_timeout_secs,
             #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
             storage_backend: self.storage_backend,
             #[cfg(feature = "s3")]
@@ -366,11 +373,11 @@ fn cfg_storage_eq(_this: &ServerConfig, _other: &ServerConfig) -> bool {
         if _this
             .azure_context
             .as_ref()
-            .map(|c| (&c.default_bucket, &c.endpoint_url))
+            .map(|c| (&c.default_container, &c.endpoint_url))
             != _other
                 .azure_context
                 .as_ref()
-                .map(|c| (&c.default_bucket, &c.endpoint_url))
+                .map(|c| (&c.default_container, &c.endpoint_url))
         {
             return false;
         }
@@ -408,6 +415,8 @@ impl ServerConfig {
             public_stale_while_revalidate_seconds: DEFAULT_PUBLIC_STALE_WHILE_REVALIDATE_SECONDS,
             disable_accept_negotiation: false,
             log_handler: None,
+            #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
+            storage_timeout_secs: remote::STORAGE_DOWNLOAD_TIMEOUT_SECS,
             #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
             storage_backend: StorageBackend::Filesystem,
             #[cfg(feature = "s3")]
@@ -562,13 +571,15 @@ impl ServerConfig {
     /// - `GOOGLE_APPLICATION_CREDENTIALS`: path to a GCS service account JSON key file.
     /// - `GOOGLE_APPLICATION_CREDENTIALS_JSON`: inline GCS service account JSON (alternative to
     ///   file path).
-    /// - `TRUSS_AZURE_BUCKET` *(requires the `azure` feature)*: default Azure Blob Storage
+    /// - `TRUSS_AZURE_CONTAINER` *(requires the `azure` feature)*: default Azure Blob Storage
     ///   container name. Required when the storage backend is `azure`.
     /// - `TRUSS_AZURE_ENDPOINT` *(requires the `azure` feature)*: custom Azure Blob Storage
     ///   endpoint URL. Used for emulators such as Azurite. When absent, the endpoint is derived
     ///   from `AZURE_STORAGE_ACCOUNT_NAME`.
     /// - `AZURE_STORAGE_ACCOUNT_NAME`: Azure storage account name (used to derive the default
     ///   endpoint when `TRUSS_AZURE_ENDPOINT` is not set).
+    /// - `TRUSS_STORAGE_TIMEOUT_SECS`: download timeout for storage backends in seconds
+    ///   (default: 30, range: 1–300).
     ///
     /// # Errors
     ///
@@ -647,6 +658,29 @@ impl ServerConfig {
 
         let allow_insecure_url_sources = env_flag("TRUSS_ALLOW_INSECURE_URL_SOURCES");
 
+        #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
+        let storage_timeout_secs = match env::var("TRUSS_STORAGE_TIMEOUT_SECS")
+            .ok()
+            .filter(|v| !v.is_empty())
+        {
+            Some(value) => {
+                let secs: u64 = value.parse().map_err(|_| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "TRUSS_STORAGE_TIMEOUT_SECS must be a positive integer",
+                    )
+                })?;
+                if secs == 0 || secs > 300 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "TRUSS_STORAGE_TIMEOUT_SECS must be between 1 and 300",
+                    ));
+                }
+                secs
+            }
+            None => remote::STORAGE_DOWNLOAD_TIMEOUT_SECS,
+        };
+
         #[cfg(feature = "s3")]
         let s3_context = if storage_backend == StorageBackend::S3 {
             let bucket = env::var("TRUSS_S3_BUCKET")
@@ -698,28 +732,28 @@ impl ServerConfig {
 
         #[cfg(feature = "azure")]
         let azure_context = if storage_backend == StorageBackend::Azure {
-            let bucket = env::var("TRUSS_AZURE_BUCKET")
+            let container = env::var("TRUSS_AZURE_CONTAINER")
                 .ok()
                 .filter(|v| !v.is_empty())
                 .ok_or_else(|| {
                     io::Error::new(
                         io::ErrorKind::InvalidInput,
-                        "TRUSS_AZURE_BUCKET is required when TRUSS_STORAGE_BACKEND=azure",
+                        "TRUSS_AZURE_CONTAINER is required when TRUSS_STORAGE_BACKEND=azure",
                     )
                 })?;
             Some(Arc::new(azure::build_azure_context(
-                bucket,
+                container,
                 allow_insecure_url_sources,
             )?))
         } else {
-            if env::var("TRUSS_AZURE_BUCKET")
+            if env::var("TRUSS_AZURE_CONTAINER")
                 .ok()
                 .filter(|v| !v.is_empty())
                 .is_some()
             {
                 eprintln!(
-                    "truss: warning: TRUSS_AZURE_BUCKET is set but TRUSS_STORAGE_BACKEND is not \
-                     `azure`. The Azure bucket will be ignored. Set TRUSS_STORAGE_BACKEND=azure to \
+                    "truss: warning: TRUSS_AZURE_CONTAINER is set but TRUSS_STORAGE_BACKEND is not \
+                     `azure`. The Azure container will be ignored. Set TRUSS_STORAGE_BACKEND=azure to \
                      enable the Azure backend."
                 );
             }
@@ -738,6 +772,8 @@ impl ServerConfig {
             public_stale_while_revalidate_seconds,
             disable_accept_negotiation: env_flag("TRUSS_DISABLE_ACCEPT_NEGOTIATION"),
             log_handler: None,
+            #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
+            storage_timeout_secs,
             #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
             storage_backend,
             #[cfg(feature = "s3")]
@@ -880,6 +916,21 @@ pub fn bind_addr() -> String {
 /// connection fails, or when a response cannot be written to the socket.
 pub fn serve(listener: TcpListener) -> io::Result<()> {
     let config = ServerConfig::from_env()?;
+
+    // Fail fast: verify the storage backend is reachable before accepting
+    // connections so that configuration errors are surfaced immediately.
+    for (ok, name) in storage_health_check(&config) {
+        if !ok {
+            return Err(io::Error::new(
+                io::ErrorKind::ConnectionRefused,
+                format!(
+                    "storage connectivity check failed for `{name}` — verify the backend \
+                     endpoint, credentials, and container/bucket configuration"
+                ),
+            ));
+        }
+    }
+
     serve_with_config(listener, &config)
 }
 
@@ -1088,7 +1139,7 @@ fn storage_scheme_and_bucket<'a>(
             let bucket = explicit_bucket.or(config
                 .azure_context
                 .as_ref()
-                .map(|ctx| ctx.default_bucket.as_str()));
+                .map(|ctx| ctx.default_container.as_str()));
             ("azure", bucket)
         }
     }
@@ -4088,5 +4139,141 @@ mod tests {
         assert_eq!(parts.len(), 2);
         assert_eq!(parts[0].name, "field1");
         assert_eq!(parts[1].name, "field2");
+    }
+
+    #[test]
+    #[serial]
+    #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
+    fn test_storage_timeout_default() {
+        unsafe {
+            std::env::remove_var("TRUSS_STORAGE_TIMEOUT_SECS");
+        }
+        let config = ServerConfig::from_env().unwrap();
+        assert_eq!(config.storage_timeout_secs, 30);
+    }
+
+    #[test]
+    #[serial]
+    #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
+    fn test_storage_timeout_custom() {
+        unsafe {
+            std::env::set_var("TRUSS_STORAGE_TIMEOUT_SECS", "60");
+        }
+        let config = ServerConfig::from_env().unwrap();
+        assert_eq!(config.storage_timeout_secs, 60);
+        unsafe {
+            std::env::remove_var("TRUSS_STORAGE_TIMEOUT_SECS");
+        }
+    }
+
+    #[test]
+    #[serial]
+    #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
+    fn test_storage_timeout_min_boundary() {
+        unsafe {
+            std::env::set_var("TRUSS_STORAGE_TIMEOUT_SECS", "1");
+        }
+        let config = ServerConfig::from_env().unwrap();
+        assert_eq!(config.storage_timeout_secs, 1);
+        unsafe {
+            std::env::remove_var("TRUSS_STORAGE_TIMEOUT_SECS");
+        }
+    }
+
+    #[test]
+    #[serial]
+    #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
+    fn test_storage_timeout_max_boundary() {
+        unsafe {
+            std::env::set_var("TRUSS_STORAGE_TIMEOUT_SECS", "300");
+        }
+        let config = ServerConfig::from_env().unwrap();
+        assert_eq!(config.storage_timeout_secs, 300);
+        unsafe {
+            std::env::remove_var("TRUSS_STORAGE_TIMEOUT_SECS");
+        }
+    }
+
+    #[test]
+    #[serial]
+    #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
+    fn test_storage_timeout_empty_string_uses_default() {
+        unsafe {
+            std::env::set_var("TRUSS_STORAGE_TIMEOUT_SECS", "");
+        }
+        let config = ServerConfig::from_env().unwrap();
+        assert_eq!(config.storage_timeout_secs, 30);
+        unsafe {
+            std::env::remove_var("TRUSS_STORAGE_TIMEOUT_SECS");
+        }
+    }
+
+    #[test]
+    #[serial]
+    #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
+    fn test_storage_timeout_zero_rejected() {
+        unsafe {
+            std::env::set_var("TRUSS_STORAGE_TIMEOUT_SECS", "0");
+        }
+        let err = ServerConfig::from_env().unwrap_err();
+        assert!(
+            err.to_string().contains("between 1 and 300"),
+            "error should mention valid range: {err}"
+        );
+        unsafe {
+            std::env::remove_var("TRUSS_STORAGE_TIMEOUT_SECS");
+        }
+    }
+
+    #[test]
+    #[serial]
+    #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
+    fn test_storage_timeout_over_max_rejected() {
+        unsafe {
+            std::env::set_var("TRUSS_STORAGE_TIMEOUT_SECS", "301");
+        }
+        let err = ServerConfig::from_env().unwrap_err();
+        assert!(
+            err.to_string().contains("between 1 and 300"),
+            "error should mention valid range: {err}"
+        );
+        unsafe {
+            std::env::remove_var("TRUSS_STORAGE_TIMEOUT_SECS");
+        }
+    }
+
+    #[test]
+    #[serial]
+    #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
+    fn test_storage_timeout_non_numeric_rejected() {
+        unsafe {
+            std::env::set_var("TRUSS_STORAGE_TIMEOUT_SECS", "abc");
+        }
+        let err = ServerConfig::from_env().unwrap_err();
+        assert!(
+            err.to_string().contains("positive integer"),
+            "error should mention positive integer: {err}"
+        );
+        unsafe {
+            std::env::remove_var("TRUSS_STORAGE_TIMEOUT_SECS");
+        }
+    }
+
+    #[test]
+    #[serial]
+    #[cfg(feature = "azure")]
+    fn test_azure_container_env_var_required() {
+        unsafe {
+            std::env::set_var("TRUSS_STORAGE_BACKEND", "azure");
+            std::env::remove_var("TRUSS_AZURE_CONTAINER");
+        }
+        let err = ServerConfig::from_env().unwrap_err();
+        assert!(
+            err.to_string().contains("TRUSS_AZURE_CONTAINER"),
+            "error should mention TRUSS_AZURE_CONTAINER: {err}"
+        );
+        unsafe {
+            std::env::remove_var("TRUSS_STORAGE_BACKEND");
+        }
     }
 }

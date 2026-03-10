@@ -3,6 +3,11 @@ services:
     image: fsouza/fake-gcs-server:latest
     command: ["-scheme", "http", "-port", "4443"]
     # fake-gcs-server exposes HTTP on 4443
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "4443"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 
   truss:
     image: ${TRUSS_IMAGE:-truss:local}
@@ -10,7 +15,8 @@ services:
       context: ../..
       dockerfile: Dockerfile
     depends_on:
-      - fake-gcs
+      fake-gcs:
+        condition: service_healthy
     environment:
       TRUSS_BEARER_TOKEN: test-token
       TRUSS_STORAGE_ROOT: /data
