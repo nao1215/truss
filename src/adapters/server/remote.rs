@@ -33,14 +33,14 @@ pub(super) fn resolve_source_bytes(
             std::fs::read(&path).map_err(map_source_io_error)
         }
         TransformSourcePayload::Url { url, .. } => read_remote_source_bytes(&url, config),
-        #[cfg(any(feature = "s3", feature = "gcs"))]
+        #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
         TransformSourcePayload::Storage { bucket, key, .. } => {
             resolve_storage_source_bytes(bucket.as_deref(), &key, config)
         }
     }
 }
 
-#[cfg(any(feature = "s3", feature = "gcs"))]
+#[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
 fn resolve_storage_source_bytes(
     bucket: Option<&str>,
     key: &str,
@@ -64,6 +64,15 @@ fn resolve_storage_source_bytes(
                 .ok_or_else(|| bad_request_response("GCS storage backend is not configured"))?;
             let effective_bucket = bucket.unwrap_or(&gcs_ctx.default_bucket);
             super::gcs::read_gcs_source_bytes(effective_bucket, key, gcs_ctx)
+        }
+        #[cfg(feature = "azure")]
+        super::StorageBackend::Azure => {
+            let azure_ctx = config
+                .azure_context
+                .as_ref()
+                .ok_or_else(|| bad_request_response("Azure storage backend is not configured"))?;
+            let effective_bucket = bucket.unwrap_or(&azure_ctx.default_bucket);
+            super::azure::read_azure_source_bytes(effective_bucket, key, azure_ctx)
         }
         super::StorageBackend::Filesystem => Err(bad_request_response(
             "storage backend is set to filesystem but received a storage source",
@@ -391,7 +400,7 @@ pub(super) fn is_redirect_status(status: u16) -> bool {
 /// Cloud metadata hostnames are always blocked regardless of `allow_insecure`.
 /// When `allow_insecure` is false, the hostname is resolved via DNS and every
 /// resulting IP is checked against the private/loopback deny-list.
-#[cfg(any(feature = "s3", feature = "gcs"))]
+#[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
 pub(super) fn validate_backend_endpoint_url(
     url: &str,
     env_var_name: &str,
@@ -494,7 +503,7 @@ pub(super) fn is_disallowed_ipv6(ip: Ipv6Addr) -> bool {
 }
 
 #[cfg(test)]
-#[cfg(any(feature = "s3", feature = "gcs"))]
+#[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
 mod tests {
     use super::*;
 

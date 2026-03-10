@@ -7,8 +7,10 @@ pub mod codecs;
 /// Shared Core types and validation logic.
 pub mod core;
 
-#[cfg(any(feature = "s3", feature = "gcs"))]
+#[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
 pub use adapters::server::StorageBackend;
+#[cfg(feature = "azure")]
+pub use adapters::server::azure::{AzureContext, build_azure_context};
 #[cfg(feature = "gcs")]
 pub use adapters::server::gcs::{GcsContext, build_gcs_context};
 #[cfg(feature = "s3")]

@@ -6,8 +6,9 @@
 
 - S3-compatible object storage backend (`--features s3`).
 - Google Cloud Storage backend (`--features gcs`).
-- SSRF validation for S3/GCS backend endpoint URLs.
-- Signed URL support for S3/GCS source images.
+- Azure Blob Storage backend (`--features azure`).
+- SSRF validation for S3/GCS/Azure backend endpoint URLs.
+- Signed URL support for S3/GCS/Azure source images.
 
 ## v0.3.0
 

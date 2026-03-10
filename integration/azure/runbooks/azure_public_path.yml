@@ -1,0 +1,132 @@
+desc: "Azure backend — public by-path endpoint via nginx (CDN proxy)"
+runners:
+  req: http://nginx:80
+vars:
+  key_id: "test-key"
+  secret: "test-secret"
+  authority: "nginx"
+  expires: "4102444800"
+steps:
+  sign_sample:
+    desc: "Compute HMAC-SHA256 signature for sample.png request"
+    exec:
+      command: |
+        python3 -c "
+        import hmac, hashlib, urllib.parse
+        params = [('expires','{{ vars.expires }}'),('format','png'),('keyId','{{ vars.key_id }}'),('path','/sample.png')]
+        qs = urllib.parse.urlencode(params)
+        canonical = 'GET\n{{ vars.authority }}\n/images/by-path\n' + qs
+        sig = hmac.new(b'{{ vars.secret }}', canonical.encode(), hashlib.sha256).hexdigest()
+        target = '/images/by-path?' + qs + '&signature=' + sig
+        import sys; sys.stdout.write(target)
+        "
+    test: |
+      current.stdout != ''
+  get_sample_png:
+    desc: "GET sample.png from Azure via signed URL through nginx"
+    req:
+      "{{ steps.sign_sample.stdout }}":
+        get:
+          body: null
+    test: |
+      current.res.status == 200
+      && current.res.headers['Content-Type'][0] contains 'image/'
+
+  sign_1px:
+    desc: "Compute signature for 1px.png request"
+    exec:
+      command: |
+        python3 -c "
+        import hmac, hashlib, urllib.parse
+        params = [('expires','{{ vars.expires }}'),('format','png'),('keyId','{{ vars.key_id }}'),('path','/1px.png')]
+        qs = urllib.parse.urlencode(params)
+        canonical = 'GET\n{{ vars.authority }}\n/images/by-path\n' + qs
+        sig = hmac.new(b'{{ vars.secret }}', canonical.encode(), hashlib.sha256).hexdigest()
+        target = '/images/by-path?' + qs + '&signature=' + sig
+        import sys; sys.stdout.write(target)
+        "
+    test: |
+      current.stdout != ''
+  get_1px_png:
+    desc: "GET 1px.png from Azure — minimal image"
+    req:
+      "{{ steps.sign_1px.stdout }}":
+        get:
+          body: null
+    test: |
+      current.res.status == 200
+      && current.res.headers['Content-Type'][0] contains 'image/'
+
+  sign_azureonly:
+    desc: "Compute signature for azureonly.png — exists ONLY in Azure, not on local disk"
+    exec:
+      command: |
+        python3 -c "
+        import hmac, hashlib, urllib.parse
+        params = [('expires','{{ vars.expires }}'),('format','png'),('keyId','{{ vars.key_id }}'),('path','/azureonly.png')]
+        qs = urllib.parse.urlencode(params)
+        canonical = 'GET\n{{ vars.authority }}\n/images/by-path\n' + qs
+        sig = hmac.new(b'{{ vars.secret }}', canonical.encode(), hashlib.sha256).hexdigest()
+        target = '/images/by-path?' + qs + '&signature=' + sig
+        import sys; sys.stdout.write(target)
+        "
+    test: |
+      current.stdout != ''
+  get_azureonly_png:
+    desc: "GET azureonly.png — proves by-path reads from Azure, not filesystem fallback"
+    req:
+      "{{ steps.sign_azureonly.stdout }}":
+        get:
+          body: null
+    test: |
+      current.res.status == 200
+      && current.res.headers['Content-Type'][0] contains 'image/'
+
+  sign_missing:
+    desc: "Compute signature for a key that does not exist in Azure"
+    exec:
+      command: |
+        python3 -c "
+        import hmac, hashlib, urllib.parse
+        params = [('expires','{{ vars.expires }}'),('format','png'),('keyId','{{ vars.key_id }}'),('path','/does-not-exist.png')]
+        qs = urllib.parse.urlencode(params)
+        canonical = 'GET\n{{ vars.authority }}\n/images/by-path\n' + qs
+        sig = hmac.new(b'{{ vars.secret }}', canonical.encode(), hashlib.sha256).hexdigest()
+        target = '/images/by-path?' + qs + '&signature=' + sig
+        import sys; sys.stdout.write(target)
+        "
+    test: |
+      current.stdout != ''
+  get_missing_returns_404:
+    desc: "GET non-existent key from Azure returns 404"
+    req:
+      "{{ steps.sign_missing.stdout }}":
+        get:
+          body: null
+    test: |
+      current.res.status == 404
+
+  sign_resize:
+    desc: "Compute signature for sample.png with width=2 resize"
+    exec:
+      command: |
+        python3 -c "
+        import hmac, hashlib, urllib.parse
+        params = [('expires','{{ vars.expires }}'),('format','jpeg'),('keyId','{{ vars.key_id }}'),('path','/sample.png'),('width','2')]
+        qs = urllib.parse.urlencode(params)
+        canonical = 'GET\n{{ vars.authority }}\n/images/by-path\n' + qs
+        sig = hmac.new(b'{{ vars.secret }}', canonical.encode(), hashlib.sha256).hexdigest()
+        target = '/images/by-path?' + qs + '&signature=' + sig
+        import sys; sys.stdout.write(target)
+        "
+    test: |
+      current.stdout != ''
+  get_resize_to_jpeg:
+    desc: "GET sample.png resized to width=2, format=jpeg — verifies Azure + transform"
+    req:
+      "{{ steps.sign_resize.stdout }}":
+        get:
+          body: null
+    test: |
+      current.res.status == 200
+      && current.res.headers['Content-Type'][0] == 'image/jpeg'

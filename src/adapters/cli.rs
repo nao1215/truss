@@ -197,6 +197,8 @@ ENVIRONMENT VARIABLES:
         backends.push("s3");
         #[cfg(feature = "gcs")]
         backends.push("gcs");
+        #[cfg(feature = "azure")]
+        backends.push("azure");
         s.push_str(&format!(
             "  TRUSS_STORAGE_BACKEND               Source for public by-path resolution: {}\n",
             backends.join(", ")
@@ -216,6 +218,14 @@ ENVIRONMENT VARIABLES:
         "\
   TRUSS_GCS_BUCKET                    Default GCS bucket name (required when backend=gcs)
   TRUSS_GCS_ENDPOINT                  Custom GCS endpoint URL (for testing with fake-gcs-server, etc.)
+",
+    );
+
+    #[cfg(feature = "azure")]
+    s.push_str(
+        "\
+  TRUSS_AZURE_BUCKET                  Default Azure container name (required when backend=azure)
+  TRUSS_AZURE_ENDPOINT                Custom Azure Blob endpoint URL (for Azurite, etc.)
 ",
     );
 

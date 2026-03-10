@@ -1,0 +1,107 @@
+desc: "Azure backend — private POST /images:transform with storage source"
+runners:
+  req: http://nginx:80
+vars:
+  token: "test-token"
+steps:
+  transform_storage_default_bucket:
+    desc: "Transform an Azure object using default bucket (bucket omitted)"
+    req:
+      /images:transform:
+        post:
+          headers:
+            Authorization: "Bearer {{ vars.token }}"
+            Content-Type: "application/json"
+          body:
+            application/json:
+              source:
+                kind: storage
+                key: sample.png
+              options:
+                format: jpeg
+    test: |
+      current.res.status == 200
+      && current.res.headers['Content-Type'][0] == 'image/jpeg'
+  transform_storage_explicit_bucket:
+    desc: "Transform an Azure object with explicit bucket name"
+    req:
+      /images:transform:
+        post:
+          headers:
+            Authorization: "Bearer {{ vars.token }}"
+            Content-Type: "application/json"
+          body:
+            application/json:
+              source:
+                kind: storage
+                bucket: truss-test
+                key: sample.png
+              options:
+                format: png
+    test: |
+      current.res.status == 200
+      && current.res.headers['Content-Type'][0] == 'image/png'
+  transform_storage_missing_key:
+    desc: "Request for non-existent Azure key returns 404"
+    req:
+      /images:transform:
+        post:
+          headers:
+            Authorization: "Bearer {{ vars.token }}"
+            Content-Type: "application/json"
+          body:
+            application/json:
+              source:
+                kind: storage
+                key: does-not-exist.png
+              options: {}
+    test: |
+      current.res.status == 404
+  transform_storage_no_auth:
+    desc: "Storage request without Bearer token returns 401"
+    req:
+      /images:transform:
+        post:
+          headers:
+            Content-Type: "application/json"
+          body:
+            application/json:
+              source:
+                kind: storage
+                key: sample.png
+              options: {}
+    test: |
+      current.res.status == 401
+  transform_storage_wrong_bucket:
+    desc: "Request with non-existent bucket returns 502"
+    req:
+      /images:transform:
+        post:
+          headers:
+            Authorization: "Bearer {{ vars.token }}"
+            Content-Type: "application/json"
+          body:
+            application/json:
+              source:
+                kind: storage
+                bucket: no-such-bucket
+                key: sample.png
+              options: {}
+    test: |
+      current.res.status == 502
+  transform_storage_empty_key:
+    desc: "Request with empty Azure key returns 400"
+    req:
+      /images:transform:
+        post:
+          headers:
+            Authorization: "Bearer {{ vars.token }}"
+            Content-Type: "application/json"
+          body:
+            application/json:
+              source:
+                kind: storage
+                key: ""
+              options: {}
+    test: |
+      current.res.status == 400
