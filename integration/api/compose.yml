@@ -11,10 +11,12 @@ services:
     volumes:
       - ../fixtures:/data:ro
     read_only: true
+    tmpfs:
+      - /tmp
     security_opt:
       - no-new-privileges:true
     healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:8080/health/live"]
+      test: ["CMD", "curl", "-sf", "http://localhost:8080/health/ready"]
       interval: 2s
       timeout: 2s
       retries: 15
