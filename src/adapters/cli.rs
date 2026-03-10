@@ -158,7 +158,9 @@ EXAMPLES:
   cat photo.png | truss inspect -
 ";
 
-const HELP_SERVE: &str = "\
+fn help_serve() -> String {
+    let mut s = String::from(
+        "\
 truss serve - start the HTTP image-transform server
 
 USAGE:
@@ -184,11 +186,79 @@ ENVIRONMENT VARIABLES:
   TRUSS_SIGNED_URL_SECRET             Signing shared secret
   TRUSS_ALLOW_INSECURE_URL_SOURCES    Enable insecure URL sources
   TRUSS_CACHE_ROOT                    On-disk transform cache directory
+",
+    );
 
-EXAMPLES:
+    // Build the TRUSS_STORAGE_BACKEND description dynamically based on enabled features.
+    {
+        #[allow(unused_mut, clippy::useless_vec)]
+        let mut backends = vec!["filesystem (default)"];
+        #[cfg(feature = "s3")]
+        backends.push("s3");
+        #[cfg(feature = "gcs")]
+        backends.push("gcs");
+        #[cfg(feature = "azure")]
+        backends.push("azure");
+        s.push_str(&format!(
+            "  TRUSS_STORAGE_BACKEND               Source for public by-path resolution: {}\n",
+            backends.join(", ")
+        ));
+    }
+
+    #[cfg(feature = "s3")]
+    s.push_str(
+        "\
+  TRUSS_S3_BUCKET                     Default S3 bucket name (required when backend=s3)
+  TRUSS_S3_FORCE_PATH_STYLE           Use path-style S3 addressing (set to 1/true/yes/on for MinIO, etc.)
+  AWS_ACCESS_KEY_ID                   AWS access key for S3 authentication
+  AWS_SECRET_ACCESS_KEY               AWS secret key for S3 authentication
+  AWS_REGION                          AWS region for the S3 client (e.g. us-east-1)
+  AWS_ENDPOINT_URL                    Custom S3-compatible endpoint URL (e.g. http://minio:9000)
+",
+    );
+
+    #[cfg(feature = "gcs")]
+    s.push_str(
+        "\
+  TRUSS_GCS_BUCKET                    Default GCS bucket name (required when backend=gcs)
+  TRUSS_GCS_ENDPOINT                  Custom GCS endpoint URL (for testing with fake-gcs-server, etc.)
+  GOOGLE_APPLICATION_CREDENTIALS      Path to GCS service account JSON key file
+",
+    );
+
+    #[cfg(feature = "azure")]
+    s.push_str(
+        "\
+  TRUSS_AZURE_CONTAINER               Default Azure container name (required when backend=azure)
+  TRUSS_AZURE_ENDPOINT                Custom Azure Blob endpoint URL (for Azurite, etc.)
+  AZURE_STORAGE_ACCOUNT_NAME          Storage account name (derives endpoint when TRUSS_AZURE_ENDPOINT is unset)
+",
+    );
+
+    #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
+    s.push_str(
+        "\
+  TRUSS_STORAGE_TIMEOUT_SECS          Download timeout for storage backends in seconds (default: 30, range: 1-300)
+",
+    );
+
+    #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
+    s.push_str(
+        "\
+\nNOTE: When using local emulators (MinIO, fake-gcs-server, Azurite), set
+  TRUSS_ALLOW_INSECURE_URL_SOURCES=true to allow plain-HTTP endpoints.
+",
+    );
+
+    s.push_str(
+        "\
+\nEXAMPLES:
   truss serve --bind 0.0.0.0:8080 --storage-root /var/images
   truss serve --bind 127.0.0.1:3000 --signed-url-key-id mykey --signed-url-secret s3cret
-";
+",
+    );
+    s
+}
 
 const HELP_SIGN: &str = "\
 truss sign - generate a signed public URL
@@ -689,7 +759,7 @@ where
                 HelpTopic::TopLevel => help_top_level(),
                 HelpTopic::Convert => HELP_CONVERT.to_string(),
                 HelpTopic::Inspect => HELP_INSPECT.to_string(),
-                HelpTopic::Serve => HELP_SERVE.to_string(),
+                HelpTopic::Serve => help_serve(),
                 HelpTopic::Sign => HELP_SIGN.to_string(),
                 HelpTopic::Completions => HELP_COMPLETIONS.to_string(),
                 HelpTopic::Version => HELP_VERSION.to_string(),

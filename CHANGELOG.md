@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- S3-compatible object storage backend (`--features s3`).
+- Google Cloud Storage backend (`--features gcs`).
+- Azure Blob Storage backend (`--features azure`).
+- SSRF validation for S3/GCS/Azure backend endpoint URLs.
+- Signed URL support for S3/GCS/Azure source images.
+
 ## v0.3.0
 
 ### Added

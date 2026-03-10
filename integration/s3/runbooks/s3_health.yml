@@ -1,0 +1,27 @@
+desc: "S3 backend — health endpoint includes S3 client check"
+runners:
+  req: http://nginx:80
+steps:
+  health_ok:
+    desc: "GET /health returns ok with S3 client check present"
+    req:
+      /health:
+        get:
+          body: null
+    test: |
+      current.res.status == 200
+      && current.res.body.status == 'ok'
+      && current.res.body.service == 'truss'
+  health_ready:
+    desc: "GET /health/ready returns ok when S3 is reachable and storageBackend check passes"
+    req:
+      /health/ready:
+        get:
+          body: null
+    test: |
+      current.res.status == 200
+      && current.res.body.status == 'ok'
+      && current.res.body.checks[0].name == 'storageRoot'
+      && current.res.body.checks[0].status == 'ok'
+      && current.res.body.checks[1].name == 'storageBackend'
+      && current.res.body.checks[1].status == 'ok'

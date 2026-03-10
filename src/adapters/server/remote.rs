@@ -17,6 +17,8 @@ use url::Url;
 
 pub(super) const MAX_SOURCE_BYTES: u64 = 100 * 1024 * 1024;
 pub(super) const MAX_REMOTE_REDIRECTS: usize = 5;
+#[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
+pub(super) const STORAGE_DOWNLOAD_TIMEOUT_SECS: u64 = 30;
 
 pub(super) fn resolve_source_bytes(
     source: TransformSourcePayload,
@@ -33,6 +35,65 @@ pub(super) fn resolve_source_bytes(
             std::fs::read(&path).map_err(map_source_io_error)
         }
         TransformSourcePayload::Url { url, .. } => read_remote_source_bytes(&url, config),
+        #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
+        TransformSourcePayload::Storage { bucket, key, .. } => {
+            resolve_storage_source_bytes(bucket.as_deref(), &key, config)
+        }
+    }
+}
+
+#[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
+fn resolve_storage_source_bytes(
+    bucket: Option<&str>,
+    key: &str,
+    config: &ServerConfig,
+) -> Result<Vec<u8>, HttpResponse> {
+    match config.storage_backend {
+        #[cfg(feature = "s3")]
+        super::StorageBackend::S3 => {
+            let s3_ctx = config
+                .s3_context
+                .as_ref()
+                .ok_or_else(|| bad_request_response("S3 storage backend is not configured"))?;
+            let effective_bucket = bucket.unwrap_or(&s3_ctx.default_bucket);
+            super::s3::read_s3_source_bytes(
+                effective_bucket,
+                key,
+                s3_ctx,
+                config.storage_timeout_secs,
+            )
+        }
+        #[cfg(feature = "gcs")]
+        super::StorageBackend::Gcs => {
+            let gcs_ctx = config
+                .gcs_context
+                .as_ref()
+                .ok_or_else(|| bad_request_response("GCS storage backend is not configured"))?;
+            let effective_bucket = bucket.unwrap_or(&gcs_ctx.default_bucket);
+            super::gcs::read_gcs_source_bytes(
+                effective_bucket,
+                key,
+                gcs_ctx,
+                config.storage_timeout_secs,
+            )
+        }
+        #[cfg(feature = "azure")]
+        super::StorageBackend::Azure => {
+            let azure_ctx = config
+                .azure_context
+                .as_ref()
+                .ok_or_else(|| bad_request_response("Azure storage backend is not configured"))?;
+            let effective_bucket = bucket.unwrap_or(&azure_ctx.default_container);
+            super::azure::read_azure_source_bytes(
+                effective_bucket,
+                key,
+                azure_ctx,
+                config.storage_timeout_secs,
+            )
+        }
+        super::StorageBackend::Filesystem => Err(bad_request_response(
+            "storage backend is set to filesystem but received a storage source",
+        )),
     }
 }
 
@@ -350,6 +411,77 @@ pub(super) fn is_redirect_status(status: u16) -> bool {
     matches!(status, 301 | 302 | 303 | 307 | 308)
 }
 
+/// Validates a storage-backend endpoint URL (e.g. `TRUSS_GCS_ENDPOINT`,
+/// `AWS_ENDPOINT_URL`) to prevent SSRF attacks.
+///
+/// Cloud metadata hostnames are always blocked regardless of `allow_insecure`.
+/// When `allow_insecure` is false, the hostname is resolved via DNS and every
+/// resulting IP is checked against the private/loopback deny-list.
+#[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
+pub(super) fn validate_backend_endpoint_url(
+    url: &str,
+    env_var_name: &str,
+    allow_insecure: bool,
+) -> Result<(), std::io::Error> {
+    use std::io;
+    use std::net::ToSocketAddrs;
+
+    let parsed: url::Url = url.parse().map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{env_var_name} is not a valid URL: {e}"),
+        )
+    })?;
+
+    match parsed.scheme() {
+        "http" | "https" => {}
+        other => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{env_var_name} must use http or https scheme, got `{other}`"),
+            ));
+        }
+    }
+
+    if let Some(host) = parsed.host_str() {
+        // Always block cloud metadata services, even in insecure mode.
+        let is_metadata = host == "169.254.169.254"
+            || host == "metadata.google.internal"
+            || parsed.host()
+                == Some(url::Host::Ipv6(std::net::Ipv6Addr::new(
+                    0xfd00, 0x0ec2, 0, 0, 0, 0, 0, 0x0254,
+                )));
+        if is_metadata {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{env_var_name} must not point to a cloud metadata service"),
+            ));
+        }
+
+        if !allow_insecure {
+            let port = parsed.port_or_known_default().unwrap_or(80);
+            let addr_str = format!("{host}:{port}");
+            let addrs: Vec<_> = addr_str
+                .to_socket_addrs()
+                .map_err(|e| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!("{env_var_name} could not be resolved: {e}"),
+                    )
+                })?
+                .collect();
+            if addrs.iter().any(|a| is_disallowed_remote_ip(a.ip())) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("{env_var_name} must not point to a private or loopback address"),
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
 pub(super) fn is_disallowed_remote_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(ip) => is_disallowed_ipv4(ip),
@@ -385,4 +517,86 @@ pub(super) fn is_disallowed_ipv6(ip: Ipv6Addr) -> bool {
         || ip.is_unique_local()
         || ip.is_unicast_link_local()
         || (segments[0] == 0x2001 && segments[1] == 0x0db8)
+}
+
+#[cfg(test)]
+#[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_validate_backend_endpoint_url_accepts_http() {
+        // allow_insecure=true so localhost passes
+        assert!(validate_backend_endpoint_url("http://localhost:4443", "TEST_VAR", true).is_ok());
+    }
+
+    #[test]
+    fn test_validate_backend_endpoint_url_accepts_https() {
+        assert!(
+            validate_backend_endpoint_url("https://storage.googleapis.com", "TEST_VAR", true)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn test_validate_backend_endpoint_url_rejects_non_http_scheme() {
+        assert!(validate_backend_endpoint_url("ftp://example.com", "TEST_VAR", true).is_err());
+        assert!(validate_backend_endpoint_url("file:///etc/passwd", "TEST_VAR", true).is_err());
+    }
+
+    #[test]
+    fn test_validate_backend_endpoint_url_rejects_metadata_always() {
+        // Even with allow_insecure=true, metadata services must be blocked.
+        assert!(
+            validate_backend_endpoint_url(
+                "http://169.254.169.254/latest/meta-data",
+                "TEST_VAR",
+                true,
+            )
+            .is_err()
+        );
+        assert!(
+            validate_backend_endpoint_url(
+                "http://metadata.google.internal/computeMetadata",
+                "TEST_VAR",
+                true,
+            )
+            .is_err()
+        );
+        assert!(
+            validate_backend_endpoint_url(
+                "http://[fd00:ec2::254]/latest/meta-data",
+                "TEST_VAR",
+                true,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn test_validate_backend_endpoint_url_rejects_invalid_url() {
+        assert!(validate_backend_endpoint_url("not a url", "TEST_VAR", true).is_err());
+    }
+
+    #[test]
+    fn test_validate_backend_endpoint_url_rejects_loopback_strict() {
+        // allow_insecure=false should block 127.0.0.1
+        assert!(validate_backend_endpoint_url("http://127.0.0.1:6379", "TEST_VAR", false).is_err());
+    }
+
+    #[test]
+    fn test_validate_backend_endpoint_url_allows_loopback_insecure() {
+        // allow_insecure=true should allow 127.0.0.1
+        assert!(validate_backend_endpoint_url("http://127.0.0.1:4443", "TEST_VAR", true).is_ok());
+    }
+
+    #[test]
+    fn test_validate_backend_endpoint_url_error_contains_var_name() {
+        let err =
+            validate_backend_endpoint_url("ftp://example.com", "MY_CUSTOM_VAR", true).unwrap_err();
+        assert!(
+            err.to_string().contains("MY_CUSTOM_VAR"),
+            "error should mention the env var name: {err}"
+        );
+    }
 }

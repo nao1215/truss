@@ -20,6 +20,10 @@ info:
 
     Common transform options are shared across endpoints. When `format` is omitted,
     the server first tries `Accept` negotiation and otherwise keeps the input format.
+
+    **Note:** Watermark compositing is currently available in CLI mode only
+    (`truss convert --watermark`). Server-side watermark support is planned
+    (see [#33](https://github.com/nao1215/truss/issues/33)).
   license:
     name: MIT
     url: https://opensource.org/licenses/MIT
@@ -40,14 +44,15 @@ paths:
   /images/by-path:
     get:
       tags: [Transform]
-      summary: Transform an image from local storage
+      summary: Transform an image by storage path
       description: |
-        Public, cache-friendly transform endpoint for files that already exist under
-        `TRUSS_STORAGE_ROOT`.
+        Public, cache-friendly transform endpoint for files identified by path.
 
-        Use this when the origin asset is available on the same filesystem as the
-        Truss server. The `path` query parameter is resolved relative to the storage
-        root; path traversal and out-of-root access are rejected.
+        When the storage backend is `filesystem` (default), the `path` query
+        parameter is resolved relative to `TRUSS_STORAGE_ROOT`; path traversal
+        and out-of-root access are rejected. When the backend is `s3`, `gcs`,
+        or `azure`, the path is used as the object key (leading `/` is stripped
+        automatically).
 
         This endpoint requires signed URL authentication through `keyId`,
         `expires`, and `signature`.
@@ -96,12 +101,16 @@ paths:
           $ref: '#/components/responses/NotFound'
         '406':
           $ref: '#/components/responses/NotAcceptable'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
         '415':
           $ref: '#/components/responses/UnsupportedMediaType'
         '500':
           $ref: '#/components/responses/InternalError'
         '501':
           $ref: '#/components/responses/NotImplemented'
+        '502':
+          $ref: '#/components/responses/BadGateway'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
 
@@ -185,8 +194,9 @@ paths:
       description: |
         Private server-to-server transform endpoint.
 
-        The request body identifies the source image as either a storage-root-relative
-        path or a remote URL and provides an optional `options` object. This is the
+        The request body identifies the source image as a storage path, a remote
+        URL, or an object-storage reference (bucket + key) and provides an
+        optional `options` object. This is the
         most convenient endpoint for backend callers that want to authenticate with a
         Bearer token instead of generating signed public URLs.
 
@@ -343,7 +353,16 @@ paths:
         Readiness probe for container orchestrators (e.g. Kubernetes
         `readinessProbe`). Checks that the server is able to accept traffic by
         verifying the storage root is accessible, the cache root (if configured)
-        is accessible, and the transform pool is not saturated.
+        is accessible, and the object-storage backend (if configured) is
+        network-reachable.
+
+        The object-storage reachability check (S3, GCS, or Azure) confirms
+        that the configured bucket/container exists and the service responds to
+        requests. It does **not** verify IAM permissions for individual
+        objects — a 403 AccessDenied response still counts as "reachable"
+        because it proves the service is up and the bucket name is correct.
+        Permission errors on actual object reads are surfaced as 403 on the
+        transform endpoints.
 
         Returns 503 Service Unavailable when any check fails, signalling that
         traffic should be routed elsewhere.
@@ -355,13 +374,41 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ReadinessResponse'
-              example:
-                status: ok
-                checks:
-                  - name: storageRoot
+              examples:
+                filesystem:
+                  summary: Filesystem backend
+                  value:
                     status: ok
-                  - name: transformCapacity
+                    checks:
+                      - name: storageRoot
+                        status: ok
+                s3:
+                  summary: S3 backend
+                  value:
                     status: ok
+                    checks:
+                      - name: storageRoot
+                        status: ok
+                      - name: storageBackend
+                        status: ok
+                gcs:
+                  summary: GCS backend
+                  value:
+                    status: ok
+                    checks:
+                      - name: storageRoot
+                        status: ok
+                      - name: storageBackend
+                        status: ok
+                azure:
+                  summary: Azure Blob Storage backend
+                  value:
+                    status: ok
+                    checks:
+                      - name: storageRoot
+                        status: ok
+                      - name: storageBackend
+                        status: ok
         '503':
           description: Server is not ready to accept traffic
           content:
@@ -373,8 +420,6 @@ paths:
                 checks:
                   - name: storageRoot
                     status: fail
-                  - name: transformCapacity
-                    status: ok
 
   /metrics:
     get:
@@ -676,16 +721,49 @@ components:
         kind: url
         url: https://example.com/images/hero.png
         version: v3
+    StorageImageSource:
+      type: object
+      description: |
+        Source image stored in an S3-compatible, GCS, or Azure Blob Storage
+        backend. Requires the `s3`, `gcs`, or `azure` feature and the
+        corresponding `TRUSS_STORAGE_BACKEND` value.
+      additionalProperties: false
+      required: [kind, key]
+      properties:
+        kind:
+          type: string
+          enum: [storage]
+        bucket:
+          type: string
+          minLength: 1
+          description: >-
+            Bucket name (or Azure container name). Defaults to
+            `TRUSS_S3_BUCKET`, `TRUSS_GCS_BUCKET`, or `TRUSS_AZURE_CONTAINER`
+            when omitted.
+        key:
+          type: string
+          minLength: 1
+          description: Object key within the bucket (or Azure container).
+        version:
+          type: string
+          minLength: 1
+      example:
+        kind: storage
+        key: photos/hero.jpg
     ImageSource:
-      description: Exactly one source descriptor, either a storage path or a remote URL.
+      description: >-
+        Exactly one source descriptor: a storage path, a remote URL, or an
+        object-storage reference.
       oneOf:
         - $ref: '#/components/schemas/PathImageSource'
         - $ref: '#/components/schemas/UrlImageSource'
+        - $ref: '#/components/schemas/StorageImageSource'
       discriminator:
         propertyName: kind
         mapping:
           path: '#/components/schemas/PathImageSource'
           url: '#/components/schemas/UrlImageSource'
+          storage: '#/components/schemas/StorageImageSource'
     ImageTransformOptions:
       type: object
       description: |

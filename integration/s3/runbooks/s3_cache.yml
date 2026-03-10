@@ -1,0 +1,42 @@
+desc: "S3 backend — nginx proxy cache HIT / MISS verification"
+runners:
+  req: http://nginx:80
+vars:
+  key_id: "test-key"
+  secret: "test-secret"
+  authority: "nginx"
+  expires: "4102444800"
+steps:
+  sign_cache_test:
+    desc: "Compute signature for cache test request"
+    exec:
+      command: |
+        python3 -c "
+        import hmac, hashlib, urllib.parse
+        params = [('expires','{{ vars.expires }}'),('format','png'),('keyId','{{ vars.key_id }}'),('path','/sample.jpg')]
+        qs = urllib.parse.urlencode(params)
+        canonical = 'GET\n{{ vars.authority }}\n/images/by-path\n' + qs
+        sig = hmac.new(b'{{ vars.secret }}', canonical.encode(), hashlib.sha256).hexdigest()
+        target = '/images/by-path?' + qs + '&signature=' + sig
+        import sys; sys.stdout.write(target)
+        "
+    test: |
+      current.stdout != ''
+  first_request_is_miss:
+    desc: "First GET is a cache MISS — nginx fetches from truss origin"
+    req:
+      "{{ steps.sign_cache_test.stdout }}":
+        get:
+          body: null
+    test: |
+      current.res.status == 200
+      && current.res.headers['X-Cache-Status'][0] == 'MISS'
+  second_request_is_hit:
+    desc: "Second GET with same params is a cache HIT"
+    req:
+      "{{ steps.sign_cache_test.stdout }}":
+        get:
+          body: null
+    test: |
+      current.res.status == 200
+      && current.res.headers['X-Cache-Status'][0] == 'HIT'

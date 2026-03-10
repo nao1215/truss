@@ -8,6 +8,7 @@ use super::{HmacSha256, ServerConfig, SignedUrlSource};
 use crate::{Rgba8, Rotation, TransformOptions};
 use hmac::Mac;
 use std::collections::BTreeMap;
+use subtle::ConstantTimeEq;
 use url::Url;
 
 pub(super) fn authorize_request(
@@ -36,7 +37,7 @@ pub(super) fn authorize_request_headers(
         });
 
     match provided {
-        Some(token) if token == expected => Ok(()),
+        Some(token) if token.as_bytes().ct_eq(expected.as_bytes()).into() => Ok(()),
         _ => Err(auth_required_response("authorization required")),
     }
 }

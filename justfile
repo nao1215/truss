@@ -91,8 +91,16 @@ integration-api:
 integration-api-clean:
     cd integration/api && docker compose down --volumes --remove-orphans
 
+# Run S3 backend integration tests (runn → nginx → truss → s3mock)
+integration-s3:
+    cd integration/s3 && docker compose up --build --abort-on-container-exit --exit-code-from runn
+
+# Clean up S3 integration test containers
+integration-s3-clean:
+    cd integration/s3 && docker compose down --volumes --remove-orphans
+
 # Run all integration tests
-integration: integration-cli integration-api
+integration: integration-cli integration-api integration-s3
 
 # ---------------------------------------------------------------------------
 # WASM

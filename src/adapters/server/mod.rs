@@ -1,11 +1,17 @@
 mod auth;
+#[cfg(feature = "azure")]
+pub mod azure;
 mod cache;
+#[cfg(feature = "gcs")]
+pub mod gcs;
 mod http_parse;
 mod metrics;
 mod multipart;
 mod negotiate;
 mod remote;
 mod response;
+#[cfg(feature = "s3")]
+pub mod s3;
 
 use auth::{
     authorize_request, authorize_request_headers, authorize_signed_request,
@@ -53,6 +59,69 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 use url::Url;
+
+/// The storage backend that determines how `Path`-based public GET requests are
+/// resolved.
+#[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StorageBackend {
+    /// Source images live on the local filesystem under `storage_root`.
+    Filesystem,
+    /// Source images live in an S3-compatible bucket.
+    #[cfg(feature = "s3")]
+    S3,
+    /// Source images live in a Google Cloud Storage bucket.
+    #[cfg(feature = "gcs")]
+    Gcs,
+    /// Source images live in an Azure Blob Storage container.
+    #[cfg(feature = "azure")]
+    Azure,
+}
+
+#[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
+impl StorageBackend {
+    /// Parses the `TRUSS_STORAGE_BACKEND` environment variable value.
+    pub fn parse(value: &str) -> Result<Self, String> {
+        match value.to_ascii_lowercase().as_str() {
+            "filesystem" | "fs" | "local" => Ok(Self::Filesystem),
+            #[cfg(feature = "s3")]
+            "s3" => Ok(Self::S3),
+            #[cfg(feature = "gcs")]
+            "gcs" => Ok(Self::Gcs),
+            #[cfg(feature = "azure")]
+            "azure" => Ok(Self::Azure),
+            _ => {
+                let mut expected = vec!["filesystem"];
+                #[cfg(feature = "s3")]
+                expected.push("s3");
+                #[cfg(feature = "gcs")]
+                expected.push("gcs");
+                #[cfg(feature = "azure")]
+                expected.push("azure");
+
+                #[allow(unused_mut)]
+                let mut hint = String::new();
+                #[cfg(not(feature = "s3"))]
+                if value.eq_ignore_ascii_case("s3") {
+                    hint = " (hint: rebuild with --features s3)".to_string();
+                }
+                #[cfg(not(feature = "gcs"))]
+                if value.eq_ignore_ascii_case("gcs") {
+                    hint = " (hint: rebuild with --features gcs)".to_string();
+                }
+                #[cfg(not(feature = "azure"))]
+                if value.eq_ignore_ascii_case("azure") {
+                    hint = " (hint: rebuild with --features azure)".to_string();
+                }
+
+                Err(format!(
+                    "unknown storage backend `{value}` (expected {}){hint}",
+                    expected.join(" or ")
+                ))
+            }
+        }
+    }
+}
 
 /// The default bind address for the development HTTP server.
 pub const DEFAULT_BIND_ADDR: &str = "127.0.0.1:8080";
@@ -157,6 +226,23 @@ pub struct ServerConfig {
     /// failures, transform warnings) through this handler. When `None`, messages are
     /// written to stderr via `eprintln!`.
     pub log_handler: Option<LogHandler>,
+    /// Download timeout in seconds for object storage backends (S3, GCS, Azure).
+    ///
+    /// Configurable via `TRUSS_STORAGE_TIMEOUT_SECS`. Defaults to 30.
+    #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
+    pub storage_timeout_secs: u64,
+    /// The storage backend used to resolve `Path`-based public GET requests.
+    #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
+    pub storage_backend: StorageBackend,
+    /// Shared S3 client context, present when `storage_backend` is `S3`.
+    #[cfg(feature = "s3")]
+    pub s3_context: Option<Arc<s3::S3Context>>,
+    /// Shared GCS client context, present when `storage_backend` is `Gcs`.
+    #[cfg(feature = "gcs")]
+    pub gcs_context: Option<Arc<gcs::GcsContext>>,
+    /// Shared Azure Blob Storage client context, present when `storage_backend` is `Azure`.
+    #[cfg(feature = "azure")]
+    pub azure_context: Option<Arc<azure::AzureContext>>,
 }
 
 impl Clone for ServerConfig {
@@ -173,18 +259,34 @@ impl Clone for ServerConfig {
             public_stale_while_revalidate_seconds: self.public_stale_while_revalidate_seconds,
             disable_accept_negotiation: self.disable_accept_negotiation,
             log_handler: self.log_handler.clone(),
+            #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
+            storage_timeout_secs: self.storage_timeout_secs,
+            #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
+            storage_backend: self.storage_backend,
+            #[cfg(feature = "s3")]
+            s3_context: self.s3_context.clone(),
+            #[cfg(feature = "gcs")]
+            gcs_context: self.gcs_context.clone(),
+            #[cfg(feature = "azure")]
+            azure_context: self.azure_context.clone(),
         }
     }
 }
 
 impl fmt::Debug for ServerConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("ServerConfig")
-            .field("storage_root", &self.storage_root)
-            .field("bearer_token", &self.bearer_token)
+        let mut d = f.debug_struct("ServerConfig");
+        d.field("storage_root", &self.storage_root)
+            .field(
+                "bearer_token",
+                &self.bearer_token.as_ref().map(|_| "[REDACTED]"),
+            )
             .field("public_base_url", &self.public_base_url)
             .field("signed_url_key_id", &self.signed_url_key_id)
-            .field("signed_url_secret", &self.signed_url_secret)
+            .field(
+                "signed_url_secret",
+                &self.signed_url_secret.as_ref().map(|_| "[REDACTED]"),
+            )
             .field(
                 "allow_insecure_url_sources",
                 &self.allow_insecure_url_sources,
@@ -199,8 +301,24 @@ impl fmt::Debug for ServerConfig {
                 "disable_accept_negotiation",
                 &self.disable_accept_negotiation,
             )
-            .field("log_handler", &self.log_handler.as_ref().map(|_| ".."))
-            .finish()
+            .field("log_handler", &self.log_handler.as_ref().map(|_| ".."));
+        #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
+        {
+            d.field("storage_backend", &self.storage_backend);
+        }
+        #[cfg(feature = "s3")]
+        {
+            d.field("s3_context", &self.s3_context.as_ref().map(|_| ".."));
+        }
+        #[cfg(feature = "gcs")]
+        {
+            d.field("gcs_context", &self.gcs_context.as_ref().map(|_| ".."));
+        }
+        #[cfg(feature = "azure")]
+        {
+            d.field("azure_context", &self.azure_context.as_ref().map(|_| ".."));
+        }
+        d.finish()
     }
 }
 
@@ -217,7 +335,60 @@ impl PartialEq for ServerConfig {
             && self.public_stale_while_revalidate_seconds
                 == other.public_stale_while_revalidate_seconds
             && self.disable_accept_negotiation == other.disable_accept_negotiation
+            && cfg_storage_eq(self, other)
     }
+}
+
+fn cfg_storage_eq(_this: &ServerConfig, _other: &ServerConfig) -> bool {
+    #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
+    {
+        if _this.storage_backend != _other.storage_backend {
+            return false;
+        }
+    }
+    #[cfg(feature = "s3")]
+    {
+        if _this
+            .s3_context
+            .as_ref()
+            .map(|c| (&c.default_bucket, &c.endpoint_url))
+            != _other
+                .s3_context
+                .as_ref()
+                .map(|c| (&c.default_bucket, &c.endpoint_url))
+        {
+            return false;
+        }
+    }
+    #[cfg(feature = "gcs")]
+    {
+        if _this
+            .gcs_context
+            .as_ref()
+            .map(|c| (&c.default_bucket, &c.endpoint_url))
+            != _other
+                .gcs_context
+                .as_ref()
+                .map(|c| (&c.default_bucket, &c.endpoint_url))
+        {
+            return false;
+        }
+    }
+    #[cfg(feature = "azure")]
+    {
+        if _this
+            .azure_context
+            .as_ref()
+            .map(|c| (&c.default_container, &c.endpoint_url))
+            != _other
+                .azure_context
+                .as_ref()
+                .map(|c| (&c.default_container, &c.endpoint_url))
+        {
+            return false;
+        }
+    }
+    true
 }
 
 impl Eq for ServerConfig {}
@@ -250,6 +421,16 @@ impl ServerConfig {
             public_stale_while_revalidate_seconds: DEFAULT_PUBLIC_STALE_WHILE_REVALIDATE_SECONDS,
             disable_accept_negotiation: false,
             log_handler: None,
+            #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
+            storage_timeout_secs: remote::STORAGE_DOWNLOAD_TIMEOUT_SECS,
+            #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
+            storage_backend: StorageBackend::Filesystem,
+            #[cfg(feature = "s3")]
+            s3_context: None,
+            #[cfg(feature = "gcs")]
+            gcs_context: None,
+            #[cfg(feature = "azure")]
+            azure_context: None,
         }
     }
 
@@ -331,6 +512,30 @@ impl ServerConfig {
         self
     }
 
+    /// Returns a copy of the configuration with an S3 storage backend attached.
+    #[cfg(feature = "s3")]
+    pub fn with_s3_context(mut self, context: s3::S3Context) -> Self {
+        self.storage_backend = StorageBackend::S3;
+        self.s3_context = Some(Arc::new(context));
+        self
+    }
+
+    /// Returns a copy of the configuration with a GCS storage backend attached.
+    #[cfg(feature = "gcs")]
+    pub fn with_gcs_context(mut self, context: gcs::GcsContext) -> Self {
+        self.storage_backend = StorageBackend::Gcs;
+        self.gcs_context = Some(Arc::new(context));
+        self
+    }
+
+    /// Returns a copy of the configuration with an Azure Blob Storage backend attached.
+    #[cfg(feature = "azure")]
+    pub fn with_azure_context(mut self, context: azure::AzureContext) -> Self {
+        self.storage_backend = StorageBackend::Azure;
+        self.azure_context = Some(Arc::new(context));
+        self
+    }
+
     /// Loads server configuration from environment variables.
     ///
     /// The adapter currently reads:
@@ -355,6 +560,32 @@ impl ServerConfig {
     /// - `TRUSS_DISABLE_ACCEPT_NEGOTIATION`: when set to `1`, `true`, `yes`, or `on`, disables
     ///   Accept-based content negotiation on public GET endpoints. This is recommended when running
     ///   behind a CDN that does not forward the `Accept` header in its cache key.
+    /// - `TRUSS_STORAGE_BACKEND` *(requires the `s3`, `gcs`, or `azure` feature)*: storage backend
+    ///   for resolving `Path`-based public GET requests. Accepts `filesystem` (default), `s3`,
+    ///   `gcs`, or `azure`.
+    /// - `TRUSS_S3_BUCKET` *(requires the `s3` feature)*: default S3 bucket name. Required when
+    ///   the storage backend is `s3`.
+    /// - `TRUSS_S3_FORCE_PATH_STYLE` *(requires the `s3` feature)*: when set to `1`, `true`,
+    ///   `yes`, or `on`, use path-style S3 addressing (`http://endpoint/bucket/key`) instead
+    ///   of virtual-hosted-style. Required for S3-compatible services such as MinIO and
+    ///   adobe/s3mock.
+    /// - `TRUSS_GCS_BUCKET` *(requires the `gcs` feature)*: default GCS bucket name. Required
+    ///   when the storage backend is `gcs`.
+    /// - `TRUSS_GCS_ENDPOINT` *(requires the `gcs` feature)*: custom GCS endpoint URL. Used for
+    ///   emulators such as `fake-gcs-server`. When absent, the default Google Cloud Storage
+    ///   endpoint is used.
+    /// - `GOOGLE_APPLICATION_CREDENTIALS`: path to a GCS service account JSON key file.
+    /// - `GOOGLE_APPLICATION_CREDENTIALS_JSON`: inline GCS service account JSON (alternative to
+    ///   file path).
+    /// - `TRUSS_AZURE_CONTAINER` *(requires the `azure` feature)*: default Azure Blob Storage
+    ///   container name. Required when the storage backend is `azure`.
+    /// - `TRUSS_AZURE_ENDPOINT` *(requires the `azure` feature)*: custom Azure Blob Storage
+    ///   endpoint URL. Used for emulators such as Azurite. When absent, the endpoint is derived
+    ///   from `AZURE_STORAGE_ACCOUNT_NAME`.
+    /// - `AZURE_STORAGE_ACCOUNT_NAME`: Azure storage account name (used to derive the default
+    ///   endpoint when `TRUSS_AZURE_ENDPOINT` is not set).
+    /// - `TRUSS_STORAGE_TIMEOUT_SECS`: download timeout for storage backends in seconds
+    ///   (default: 30, range: 1–300).
     ///
     /// # Errors
     ///
@@ -376,6 +607,16 @@ impl ServerConfig {
     /// assert!(config.allow_insecure_url_sources);
     /// ```
     pub fn from_env() -> io::Result<Self> {
+        #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
+        let storage_backend = match env::var("TRUSS_STORAGE_BACKEND")
+            .ok()
+            .filter(|v| !v.is_empty())
+        {
+            Some(value) => StorageBackend::parse(&value)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?,
+            None => StorageBackend::Filesystem,
+        };
+
         let storage_root =
             env::var("TRUSS_STORAGE_ROOT").unwrap_or_else(|_| DEFAULT_STORAGE_ROOT.to_string());
         let storage_root = PathBuf::from(storage_root).canonicalize()?;
@@ -421,18 +662,132 @@ impl ServerConfig {
             parse_optional_env_u32("TRUSS_PUBLIC_STALE_WHILE_REVALIDATE")?
                 .unwrap_or(DEFAULT_PUBLIC_STALE_WHILE_REVALIDATE_SECONDS);
 
+        let allow_insecure_url_sources = env_flag("TRUSS_ALLOW_INSECURE_URL_SOURCES");
+
+        #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
+        let storage_timeout_secs = match env::var("TRUSS_STORAGE_TIMEOUT_SECS")
+            .ok()
+            .filter(|v| !v.is_empty())
+        {
+            Some(value) => {
+                let secs: u64 = value.parse().map_err(|_| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "TRUSS_STORAGE_TIMEOUT_SECS must be a positive integer",
+                    )
+                })?;
+                if secs == 0 || secs > 300 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "TRUSS_STORAGE_TIMEOUT_SECS must be between 1 and 300",
+                    ));
+                }
+                secs
+            }
+            None => remote::STORAGE_DOWNLOAD_TIMEOUT_SECS,
+        };
+
+        #[cfg(feature = "s3")]
+        let s3_context = if storage_backend == StorageBackend::S3 {
+            let bucket = env::var("TRUSS_S3_BUCKET")
+                .ok()
+                .filter(|v| !v.is_empty())
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "TRUSS_S3_BUCKET is required when TRUSS_STORAGE_BACKEND=s3",
+                    )
+                })?;
+            Some(Arc::new(s3::build_s3_context(
+                bucket,
+                allow_insecure_url_sources,
+            )?))
+        } else {
+            None
+        };
+
+        #[cfg(feature = "gcs")]
+        let gcs_context = if storage_backend == StorageBackend::Gcs {
+            let bucket = env::var("TRUSS_GCS_BUCKET")
+                .ok()
+                .filter(|v| !v.is_empty())
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "TRUSS_GCS_BUCKET is required when TRUSS_STORAGE_BACKEND=gcs",
+                    )
+                })?;
+            Some(Arc::new(gcs::build_gcs_context(
+                bucket,
+                allow_insecure_url_sources,
+            )?))
+        } else {
+            if env::var("TRUSS_GCS_BUCKET")
+                .ok()
+                .filter(|v| !v.is_empty())
+                .is_some()
+            {
+                eprintln!(
+                    "truss: warning: TRUSS_GCS_BUCKET is set but TRUSS_STORAGE_BACKEND is not \
+                     `gcs`. The GCS bucket will be ignored. Set TRUSS_STORAGE_BACKEND=gcs to \
+                     enable the GCS backend."
+                );
+            }
+            None
+        };
+
+        #[cfg(feature = "azure")]
+        let azure_context = if storage_backend == StorageBackend::Azure {
+            let container = env::var("TRUSS_AZURE_CONTAINER")
+                .ok()
+                .filter(|v| !v.is_empty())
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "TRUSS_AZURE_CONTAINER is required when TRUSS_STORAGE_BACKEND=azure",
+                    )
+                })?;
+            Some(Arc::new(azure::build_azure_context(
+                container,
+                allow_insecure_url_sources,
+            )?))
+        } else {
+            if env::var("TRUSS_AZURE_CONTAINER")
+                .ok()
+                .filter(|v| !v.is_empty())
+                .is_some()
+            {
+                eprintln!(
+                    "truss: warning: TRUSS_AZURE_CONTAINER is set but TRUSS_STORAGE_BACKEND is not \
+                     `azure`. The Azure container will be ignored. Set TRUSS_STORAGE_BACKEND=azure to \
+                     enable the Azure backend."
+                );
+            }
+            None
+        };
+
         Ok(Self {
             storage_root,
             bearer_token,
             public_base_url,
             signed_url_key_id,
             signed_url_secret,
-            allow_insecure_url_sources: env_flag("TRUSS_ALLOW_INSECURE_URL_SOURCES"),
+            allow_insecure_url_sources,
             cache_root,
             public_max_age_seconds,
             public_stale_while_revalidate_seconds,
             disable_accept_negotiation: env_flag("TRUSS_DISABLE_ACCEPT_NEGOTIATION"),
             log_handler: None,
+            #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
+            storage_timeout_secs,
+            #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
+            storage_backend,
+            #[cfg(feature = "s3")]
+            s3_context,
+            #[cfg(feature = "gcs")]
+            gcs_context,
+            #[cfg(feature = "azure")]
+            azure_context,
         })
     }
 }
@@ -567,6 +922,21 @@ pub fn bind_addr() -> String {
 /// connection fails, or when a response cannot be written to the socket.
 pub fn serve(listener: TcpListener) -> io::Result<()> {
     let config = ServerConfig::from_env()?;
+
+    // Fail fast: verify the storage backend is reachable before accepting
+    // connections so that configuration errors are surfaced immediately.
+    for (ok, name) in storage_health_check(&config) {
+        if !ok {
+            return Err(io::Error::new(
+                io::ErrorKind::ConnectionRefused,
+                format!(
+                    "storage connectivity check failed for `{name}` — verify the backend \
+                     endpoint, credentials, and container/bucket configuration"
+                ),
+            ));
+        }
+    }
+
     serve_with_config(listener, &config)
 }
 
@@ -612,8 +982,37 @@ pub fn serve_with_config(listener: TcpListener, config: &ServerConfig) -> io::Re
     }
 
     drop(sender);
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
     for worker in workers {
-        let _ = worker.join();
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            eprintln!("shutdown: timed out waiting for worker threads");
+            break;
+        }
+        // Park the main thread until the worker finishes or the deadline
+        // elapses. We cannot interrupt a blocked worker, but the socket
+        // read/write timeouts ensure workers do not block forever.
+        let worker_done =
+            std::sync::Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+        let wd = std::sync::Arc::clone(&worker_done);
+        std::thread::spawn(move || {
+            let _ = worker.join();
+            let (lock, cvar) = &*wd;
+            *lock.lock().expect("shutdown notify lock") = true;
+            cvar.notify_one();
+        });
+        let (lock, cvar) = &*worker_done;
+        let mut done = lock.lock().expect("shutdown wait lock");
+        while !*done {
+            let (guard, timeout) = cvar
+                .wait_timeout(done, remaining)
+                .expect("shutdown condvar wait");
+            done = guard;
+            if timeout.timed_out() {
+                eprintln!("shutdown: timed out waiting for a worker thread");
+                break;
+            }
+        }
     }
 
     Ok(())
@@ -663,6 +1062,12 @@ enum TransformSourcePayload {
         url: String,
         version: Option<String>,
     },
+    #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
+    Storage {
+        bucket: Option<String>,
+        key: String,
+        version: Option<String>,
+    },
 }
 
 impl TransformSourcePayload {
@@ -675,9 +1080,25 @@ impl TransformSourcePayload {
     /// cannot be reused across instances with different security settings sharing
     /// the same cache directory.
     fn versioned_source_hash(&self, config: &ServerConfig) -> Option<String> {
-        let (kind, reference, version) = match self {
-            Self::Path { path, version } => ("path", path.as_str(), version.as_deref()),
-            Self::Url { url, version } => ("url", url.as_str(), version.as_deref()),
+        let (kind, reference, version): (&str, std::borrow::Cow<'_, str>, Option<&str>) = match self
+        {
+            Self::Path { path, version } => ("path", path.as_str().into(), version.as_deref()),
+            Self::Url { url, version } => ("url", url.as_str().into(), version.as_deref()),
+            #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
+            Self::Storage {
+                bucket,
+                key,
+                version,
+            } => {
+                let (scheme, effective_bucket) =
+                    storage_scheme_and_bucket(bucket.as_deref(), config);
+                let effective_bucket = effective_bucket?;
+                (
+                    "storage",
+                    format!("{scheme}://{effective_bucket}/{key}").into(),
+                    version.as_deref(),
+                )
+            }
         };
         let version = version?;
         // Use newline separators so that values containing colons cannot collide
@@ -686,7 +1107,7 @@ impl TransformSourcePayload {
         let mut id = String::new();
         id.push_str(kind);
         id.push('\n');
-        id.push_str(reference);
+        id.push_str(&reference);
         id.push('\n');
         id.push_str(version);
         id.push('\n');
@@ -697,7 +1118,91 @@ impl TransformSourcePayload {
         } else {
             "strict"
         });
+        #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
+        {
+            id.push('\n');
+            id.push_str(storage_backend_label(config));
+            #[cfg(feature = "s3")]
+            if let Some(ref ctx) = config.s3_context
+                && let Some(ref endpoint) = ctx.endpoint_url
+            {
+                id.push('\n');
+                id.push_str(endpoint);
+            }
+            #[cfg(feature = "gcs")]
+            if let Some(ref ctx) = config.gcs_context
+                && let Some(ref endpoint) = ctx.endpoint_url
+            {
+                id.push('\n');
+                id.push_str(endpoint);
+            }
+            #[cfg(feature = "azure")]
+            if let Some(ref ctx) = config.azure_context {
+                id.push('\n');
+                id.push_str(&ctx.endpoint_url);
+            }
+        }
         Some(hex::encode(Sha256::digest(id.as_bytes())))
+    }
+}
+
+#[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
+fn storage_scheme_and_bucket<'a>(
+    explicit_bucket: Option<&'a str>,
+    config: &'a ServerConfig,
+) -> (&'static str, Option<&'a str>) {
+    match config.storage_backend {
+        #[cfg(feature = "s3")]
+        StorageBackend::S3 => {
+            let bucket = explicit_bucket.or(config
+                .s3_context
+                .as_ref()
+                .map(|ctx| ctx.default_bucket.as_str()));
+            ("s3", bucket)
+        }
+        #[cfg(feature = "gcs")]
+        StorageBackend::Gcs => {
+            let bucket = explicit_bucket.or(config
+                .gcs_context
+                .as_ref()
+                .map(|ctx| ctx.default_bucket.as_str()));
+            ("gcs", bucket)
+        }
+        StorageBackend::Filesystem => ("fs", explicit_bucket),
+        #[cfg(feature = "azure")]
+        StorageBackend::Azure => {
+            let bucket = explicit_bucket.or(config
+                .azure_context
+                .as_ref()
+                .map(|ctx| ctx.default_container.as_str()));
+            ("azure", bucket)
+        }
+    }
+}
+
+#[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
+fn is_object_storage_backend(config: &ServerConfig) -> bool {
+    match config.storage_backend {
+        StorageBackend::Filesystem => false,
+        #[cfg(feature = "s3")]
+        StorageBackend::S3 => true,
+        #[cfg(feature = "gcs")]
+        StorageBackend::Gcs => true,
+        #[cfg(feature = "azure")]
+        StorageBackend::Azure => true,
+    }
+}
+
+#[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
+fn storage_backend_label(config: &ServerConfig) -> &'static str {
+    match config.storage_backend {
+        StorageBackend::Filesystem => "fs-backend",
+        #[cfg(feature = "s3")]
+        StorageBackend::S3 => "s3-backend",
+        #[cfg(feature = "gcs")]
+        StorageBackend::Gcs => "gcs-backend",
+        #[cfg(feature = "azure")]
+        StorageBackend::Azure => "azure-backend",
     }
 }
 
@@ -918,6 +1423,23 @@ fn handle_public_get_request(
         Err(response) => return response,
     };
 
+    // When the storage backend is object storage (S3 or GCS), convert Path
+    // sources to Storage sources so that the `path` query parameter is
+    // resolved as an object key.
+    #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
+    let source = if is_object_storage_backend(config) {
+        match source {
+            TransformSourcePayload::Path { path, version } => TransformSourcePayload::Storage {
+                bucket: None,
+                key: path.trim_start_matches('/').to_string(),
+                version,
+            },
+            other => other,
+        }
+    } else {
+        source
+    };
+
     let versioned_hash = source.versioned_source_hash(config);
     if let Some(response) = try_versioned_cache_lookup(
         versioned_hash.as_deref(),
@@ -980,19 +1502,22 @@ fn handle_health_live() -> HttpResponse {
     HttpResponse::json("200 OK", body)
 }
 
-/// Returns a readiness response after checking that critical dependencies are
-/// available (storage root, cache root if configured, and transform capacity).
+/// Returns a readiness response after checking that critical infrastructure
+/// dependencies are available (storage root, cache root if configured, S3
+/// reachability).  Transform capacity is intentionally excluded — it is a
+/// runtime signal reported only by the full `/health` diagnostic endpoint.
 fn handle_health_ready(config: &ServerConfig) -> HttpResponse {
     let mut checks: Vec<serde_json::Value> = Vec::new();
     let mut all_ok = true;
 
-    let storage_ok = config.storage_root.is_dir();
-    checks.push(json!({
-        "name": "storageRoot",
-        "status": if storage_ok { "ok" } else { "fail" },
-    }));
-    if !storage_ok {
-        all_ok = false;
+    for (ok, name) in storage_health_check(config) {
+        checks.push(json!({
+            "name": name,
+            "status": if ok { "ok" } else { "fail" },
+        }));
+        if !ok {
+            all_ok = false;
+        }
     }
 
     if let Some(cache_root) = &config.cache_root {
@@ -1004,16 +1529,6 @@ fn handle_health_ready(config: &ServerConfig) -> HttpResponse {
         if !cache_ok {
             all_ok = false;
         }
-    }
-
-    let in_flight = TRANSFORMS_IN_FLIGHT.load(Ordering::Relaxed);
-    let overloaded = in_flight >= MAX_CONCURRENT_TRANSFORMS;
-    checks.push(json!({
-        "name": "transformCapacity",
-        "status": if overloaded { "fail" } else { "ok" },
-    }));
-    if overloaded {
-        all_ok = false;
     }
 
     let status_str = if all_ok { "ok" } else { "fail" };
@@ -1032,17 +1547,48 @@ fn handle_health_ready(config: &ServerConfig) -> HttpResponse {
 }
 
 /// Returns a comprehensive diagnostic health response.
+fn storage_health_check(config: &ServerConfig) -> Vec<(bool, &'static str)> {
+    #[allow(unused_mut)]
+    let mut checks = vec![(config.storage_root.is_dir(), "storageRoot")];
+    #[cfg(feature = "s3")]
+    if config.storage_backend == StorageBackend::S3 {
+        let reachable = config
+            .s3_context
+            .as_ref()
+            .is_some_and(|ctx| ctx.check_reachable());
+        checks.push((reachable, "storageBackend"));
+    }
+    #[cfg(feature = "gcs")]
+    if config.storage_backend == StorageBackend::Gcs {
+        let reachable = config
+            .gcs_context
+            .as_ref()
+            .is_some_and(|ctx| ctx.check_reachable());
+        checks.push((reachable, "storageBackend"));
+    }
+    #[cfg(feature = "azure")]
+    if config.storage_backend == StorageBackend::Azure {
+        let reachable = config
+            .azure_context
+            .as_ref()
+            .is_some_and(|ctx| ctx.check_reachable());
+        checks.push((reachable, "storageBackend"));
+    }
+    checks
+}
+
 fn handle_health(config: &ServerConfig) -> HttpResponse {
     let mut checks: Vec<serde_json::Value> = Vec::new();
     let mut all_ok = true;
 
-    let storage_ok = config.storage_root.is_dir();
-    checks.push(json!({
-        "name": "storageRoot",
-        "status": if storage_ok { "ok" } else { "fail" },
-    }));
-    if !storage_ok {
-        all_ok = false;
+    for (ok, name) in storage_health_check(config) {
+        checks.push(json!({
+            "name": name,
+            "status": if ok { "ok" } else { "fail" },
+        }));
+        if !ok {
+            all_ok = false;
+        }
     }
 
     if let Some(cache_root) = &config.cache_root {
@@ -1395,6 +1941,8 @@ fn validate_public_base_url(value: String) -> io::Result<String> {
 
 #[cfg(test)]
 mod tests {
+    use serial_test::serial;
+
     use super::http_parse::{
         HttpRequest, find_header_terminator, read_request_body, read_request_headers,
         resolve_storage_path,
@@ -1856,6 +2404,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn backpressure_rejects_when_at_capacity() {
         let _guard = InFlightGuard::set(MAX_CONCURRENT_TRANSFORMS);
 
@@ -2279,7 +2828,13 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn health_returns_comprehensive_diagnostic() {
+        // Reset the global counter so that a concurrent test
+        // (e.g. backpressure_rejects_when_at_capacity) does not leave a
+        // stale value that makes transformCapacity report "fail".
+        let _guard = InFlightGuard::set(0);
+
         let storage = temp_dir("health-diag");
         let request = HttpRequest {
             method: "GET".to_string(),
@@ -2754,6 +3309,59 @@ mod tests {
     }
 
     #[test]
+    #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
+    fn storage_backend_parse_filesystem_aliases() {
+        assert_eq!(
+            super::StorageBackend::parse("filesystem").unwrap(),
+            super::StorageBackend::Filesystem
+        );
+        assert_eq!(
+            super::StorageBackend::parse("fs").unwrap(),
+            super::StorageBackend::Filesystem
+        );
+        assert_eq!(
+            super::StorageBackend::parse("local").unwrap(),
+            super::StorageBackend::Filesystem
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "s3")]
+    fn storage_backend_parse_s3() {
+        assert_eq!(
+            super::StorageBackend::parse("s3").unwrap(),
+            super::StorageBackend::S3
+        );
+        assert_eq!(
+            super::StorageBackend::parse("S3").unwrap(),
+            super::StorageBackend::S3
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "gcs")]
+    fn storage_backend_parse_gcs() {
+        assert_eq!(
+            super::StorageBackend::parse("gcs").unwrap(),
+            super::StorageBackend::Gcs
+        );
+        assert_eq!(
+            super::StorageBackend::parse("GCS").unwrap(),
+            super::StorageBackend::Gcs
+        );
+    }
+
+    #[test]
+    #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
+    fn storage_backend_parse_rejects_unknown() {
+        assert!(super::StorageBackend::parse("").is_err());
+        #[cfg(not(feature = "azure"))]
+        assert!(super::StorageBackend::parse("azure").is_err());
+        #[cfg(feature = "azure")]
+        assert!(super::StorageBackend::parse("azure").is_ok());
+    }
+
+    #[test]
     fn versioned_source_hash_returns_none_without_version() {
         let source = TransformSourcePayload::Path {
             path: "/photos/hero.jpg".to_string(),
@@ -2840,6 +3448,651 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "s3")]
+    fn versioned_source_hash_storage_variant_is_deterministic() {
+        let cfg = make_test_config();
+        let source = TransformSourcePayload::Storage {
+            bucket: Some("my-bucket".to_string()),
+            key: "photos/hero.jpg".to_string(),
+            version: Some("v1".to_string()),
+        };
+        let hash1 = source.versioned_source_hash(&cfg).unwrap();
+        let hash2 = source.versioned_source_hash(&cfg).unwrap();
+        assert_eq!(hash1, hash2);
+        assert_eq!(hash1.len(), 64);
+    }
+
+    #[test]
+    #[cfg(feature = "s3")]
+    fn versioned_source_hash_storage_differs_from_path() {
+        let cfg = make_test_config();
+        let path_source = TransformSourcePayload::Path {
+            path: "photos/hero.jpg".to_string(),
+            version: Some("v1".to_string()),
+        };
+        let storage_source = TransformSourcePayload::Storage {
+            bucket: Some("my-bucket".to_string()),
+            key: "photos/hero.jpg".to_string(),
+            version: Some("v1".to_string()),
+        };
+        assert_ne!(
+            path_source.versioned_source_hash(&cfg).unwrap(),
+            storage_source.versioned_source_hash(&cfg).unwrap()
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "s3")]
+    fn versioned_source_hash_storage_differs_by_bucket() {
+        let cfg = make_test_config();
+        let s1 = TransformSourcePayload::Storage {
+            bucket: Some("bucket-a".to_string()),
+            key: "image.jpg".to_string(),
+            version: Some("v1".to_string()),
+        };
+        let s2 = TransformSourcePayload::Storage {
+            bucket: Some("bucket-b".to_string()),
+            key: "image.jpg".to_string(),
+            version: Some("v1".to_string()),
+        };
+        assert_ne!(
+            s1.versioned_source_hash(&cfg).unwrap(),
+            s2.versioned_source_hash(&cfg).unwrap()
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "s3")]
+    fn versioned_source_hash_differs_by_backend() {
+        let cfg_fs = make_test_config();
+        let mut cfg_s3 = make_test_config();
+        cfg_s3.storage_backend = super::StorageBackend::S3;
+
+        let source = TransformSourcePayload::Path {
+            path: "photos/hero.jpg".to_string(),
+            version: Some("v1".to_string()),
+        };
+        assert_ne!(
+            source.versioned_source_hash(&cfg_fs).unwrap(),
+            source.versioned_source_hash(&cfg_s3).unwrap()
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "s3")]
+    fn versioned_source_hash_storage_differs_by_endpoint() {
+        let mut cfg_a = make_test_config();
+        cfg_a.storage_backend = super::StorageBackend::S3;
+        cfg_a.s3_context = Some(std::sync::Arc::new(super::s3::S3Context::for_test(
+            "shared",
+            Some("http://minio-a:9000"),
+        )));
+
+        let mut cfg_b = make_test_config();
+        cfg_b.storage_backend = super::StorageBackend::S3;
+        cfg_b.s3_context = Some(std::sync::Arc::new(super::s3::S3Context::for_test(
+            "shared",
+            Some("http://minio-b:9000"),
+        )));
+
+        let source = TransformSourcePayload::Storage {
+            bucket: None,
+            key: "image.jpg".to_string(),
+            version: Some("v1".to_string()),
+        };
+        assert_ne!(
+            source.versioned_source_hash(&cfg_a).unwrap(),
+            source.versioned_source_hash(&cfg_b).unwrap(),
+        );
+        assert_ne!(cfg_a, cfg_b);
+    }
+
+    #[test]
+    #[cfg(feature = "s3")]
+    fn storage_backend_default_is_filesystem() {
+        let cfg = make_test_config();
+        assert_eq!(cfg.storage_backend, super::StorageBackend::Filesystem);
+        assert!(cfg.s3_context.is_none());
+    }
+
+    #[test]
+    #[cfg(feature = "s3")]
+    fn storage_payload_deserializes_storage_variant() {
+        let json = r#"{"source":{"kind":"storage","key":"photos/hero.jpg"},"options":{}}"#;
+        let payload: super::TransformImageRequestPayload = serde_json::from_str(json).unwrap();
+        match payload.source {
+            TransformSourcePayload::Storage {
+                bucket,
+                key,
+                version,
+            } => {
+                assert!(bucket.is_none());
+                assert_eq!(key, "photos/hero.jpg");
+                assert!(version.is_none());
+            }
+            _ => panic!("expected Storage variant"),
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "s3")]
+    fn storage_payload_deserializes_with_bucket() {
+        let json = r#"{"source":{"kind":"storage","bucket":"my-bucket","key":"img.png","version":"v2"},"options":{}}"#;
+        let payload: super::TransformImageRequestPayload = serde_json::from_str(json).unwrap();
+        match payload.source {
+            TransformSourcePayload::Storage {
+                bucket,
+                key,
+                version,
+            } => {
+                assert_eq!(bucket.as_deref(), Some("my-bucket"));
+                assert_eq!(key, "img.png");
+                assert_eq!(version.as_deref(), Some("v2"));
+            }
+            _ => panic!("expected Storage variant"),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // S3: default_bucket fallback with bucket: None
+    // -----------------------------------------------------------------------
+
+    #[test]
+    #[cfg(feature = "s3")]
+    fn versioned_source_hash_uses_default_bucket_when_bucket_is_none() {
+        let mut cfg_a = make_test_config();
+        cfg_a.storage_backend = super::StorageBackend::S3;
+        cfg_a.s3_context = Some(std::sync::Arc::new(super::s3::S3Context::for_test(
+            "bucket-a", None,
+        )));
+
+        let mut cfg_b = make_test_config();
+        cfg_b.storage_backend = super::StorageBackend::S3;
+        cfg_b.s3_context = Some(std::sync::Arc::new(super::s3::S3Context::for_test(
+            "bucket-b", None,
+        )));
+
+        let source = TransformSourcePayload::Storage {
+            bucket: None,
+            key: "image.jpg".to_string(),
+            version: Some("v1".to_string()),
+        };
+        // Different default_bucket ⇒ different hash
+        assert_ne!(
+            source.versioned_source_hash(&cfg_a).unwrap(),
+            source.versioned_source_hash(&cfg_b).unwrap(),
+        );
+        // PartialEq also distinguishes them
+        assert_ne!(cfg_a, cfg_b);
+    }
+
+    #[test]
+    #[cfg(feature = "s3")]
+    fn versioned_source_hash_returns_none_without_bucket_or_context() {
+        let mut cfg = make_test_config();
+        cfg.storage_backend = super::StorageBackend::S3;
+        cfg.s3_context = None;
+
+        let source = TransformSourcePayload::Storage {
+            bucket: None,
+            key: "image.jpg".to_string(),
+            version: Some("v1".to_string()),
+        };
+        // No bucket available ⇒ None (falls back to content-hash)
+        assert!(source.versioned_source_hash(&cfg).is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // S3: from_env branches
+    //
+    // These tests mutate process-global environment variables. A mutex
+    // serializes them so that parallel test threads cannot interfere, and
+    // each test saves/restores the variables it touches.
+    // -----------------------------------------------------------------------
+
+    #[cfg(feature = "s3")]
+    static FROM_ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[cfg(feature = "s3")]
+    const S3_ENV_VARS: &[&str] = &[
+        "TRUSS_STORAGE_ROOT",
+        "TRUSS_STORAGE_BACKEND",
+        "TRUSS_S3_BUCKET",
+    ];
+
+    /// Save current values, run `f`, then restore originals regardless of
+    /// panics. Holds `FROM_ENV_MUTEX` for the duration.
+    #[cfg(feature = "s3")]
+    fn with_s3_env<F: FnOnce()>(vars: &[(&str, Option<&str>)], f: F) {
+        let _guard = FROM_ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let saved: Vec<(&str, Option<String>)> = S3_ENV_VARS
+            .iter()
+            .map(|k| (*k, std::env::var(k).ok()))
+            .collect();
+        // Apply requested overrides
+        for &(key, value) in vars {
+            match value {
+                Some(v) => unsafe { std::env::set_var(key, v) },
+                None => unsafe { std::env::remove_var(key) },
+            }
+        }
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+        // Restore originals
+        for (key, original) in saved {
+            match original {
+                Some(v) => unsafe { std::env::set_var(key, v) },
+                None => unsafe { std::env::remove_var(key) },
+            }
+        }
+        if let Err(payload) = result {
+            std::panic::resume_unwind(payload);
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "s3")]
+    fn from_env_rejects_invalid_storage_backend() {
+        let storage = temp_dir("env-bad-backend");
+        let storage_str = storage.to_str().unwrap().to_string();
+        with_s3_env(
+            &[
+                ("TRUSS_STORAGE_ROOT", Some(&storage_str)),
+                ("TRUSS_STORAGE_BACKEND", Some("nosuchbackend")),
+                ("TRUSS_S3_BUCKET", None),
+            ],
+            || {
+                let result = ServerConfig::from_env();
+                assert!(result.is_err());
+                let msg = result.unwrap_err().to_string();
+                assert!(msg.contains("unknown storage backend"), "got: {msg}");
+            },
+        );
+        let _ = std::fs::remove_dir_all(storage);
+    }
+
+    #[test]
+    #[cfg(feature = "s3")]
+    fn from_env_rejects_s3_without_bucket() {
+        let storage = temp_dir("env-no-bucket");
+        let storage_str = storage.to_str().unwrap().to_string();
+        with_s3_env(
+            &[
+                ("TRUSS_STORAGE_ROOT", Some(&storage_str)),
+                ("TRUSS_STORAGE_BACKEND", Some("s3")),
+                ("TRUSS_S3_BUCKET", None),
+            ],
+            || {
+                let result = ServerConfig::from_env();
+                assert!(result.is_err());
+                let msg = result.unwrap_err().to_string();
+                assert!(msg.contains("TRUSS_S3_BUCKET"), "got: {msg}");
+            },
+        );
+        let _ = std::fs::remove_dir_all(storage);
+    }
+
+    #[test]
+    #[cfg(feature = "s3")]
+    fn from_env_accepts_s3_with_bucket() {
+        let storage = temp_dir("env-s3-ok");
+        let storage_str = storage.to_str().unwrap().to_string();
+        with_s3_env(
+            &[
+                ("TRUSS_STORAGE_ROOT", Some(&storage_str)),
+                ("TRUSS_STORAGE_BACKEND", Some("s3")),
+                ("TRUSS_S3_BUCKET", Some("my-images")),
+            ],
+            || {
+                let cfg =
+                    ServerConfig::from_env().expect("from_env should succeed with s3 + bucket");
+                assert_eq!(cfg.storage_backend, super::StorageBackend::S3);
+                let ctx = cfg.s3_context.expect("s3_context should be Some");
+                assert_eq!(ctx.default_bucket, "my-images");
+            },
+        );
+        let _ = std::fs::remove_dir_all(storage);
+    }
+
+    // -----------------------------------------------------------------------
+    // S3: health endpoint
+    // -----------------------------------------------------------------------
+
+    #[test]
+    #[cfg(feature = "s3")]
+    fn health_ready_s3_returns_503_when_context_missing() {
+        let storage = temp_dir("health-s3-no-ctx");
+        let mut config = ServerConfig::new(storage.clone(), None);
+        config.storage_backend = super::StorageBackend::S3;
+        config.s3_context = None;
+
+        let request = super::http_parse::HttpRequest {
+            method: "GET".to_string(),
+            target: "/health/ready".to_string(),
+            version: "HTTP/1.1".to_string(),
+            headers: Vec::new(),
+            body: Vec::new(),
+        };
+        let response = route_request(request, &config);
+        let _ = std::fs::remove_dir_all(storage);
+
+        assert_eq!(response.status, "503 Service Unavailable");
+        let body: serde_json::Value = serde_json::from_slice(&response.body).expect("parse body");
+        let checks = body["checks"].as_array().expect("checks array");
+        assert!(
+            checks
+                .iter()
+                .any(|c| c["name"] == "storageBackend" && c["status"] == "fail"),
+            "expected s3Client fail check in {body}",
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "s3")]
+    fn health_ready_s3_includes_s3_client_check() {
+        let storage = temp_dir("health-s3-ok");
+        let mut config = ServerConfig::new(storage.clone(), None);
+        config.storage_backend = super::StorageBackend::S3;
+        config.s3_context = Some(std::sync::Arc::new(super::s3::S3Context::for_test(
+            "test-bucket",
+            None,
+        )));
+
+        let request = super::http_parse::HttpRequest {
+            method: "GET".to_string(),
+            target: "/health/ready".to_string(),
+            version: "HTTP/1.1".to_string(),
+            headers: Vec::new(),
+            body: Vec::new(),
+        };
+        let response = route_request(request, &config);
+        let _ = std::fs::remove_dir_all(storage);
+
+        // The s3Client check will report "fail" because there is no real S3
+        // endpoint, but the important thing is that the check is present.
+        let body: serde_json::Value = serde_json::from_slice(&response.body).expect("parse body");
+        let checks = body["checks"].as_array().expect("checks array");
+        assert!(
+            checks.iter().any(|c| c["name"] == "storageBackend"),
+            "expected s3Client check in {body}",
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // S3: public by-path remap (leading slash trimmed, Storage variant used)
+    // -----------------------------------------------------------------------
+
+    /// Replicates the Path→Storage remap that `handle_public_get_request`
+    /// performs when `storage_backend == S3`, so we can inspect the resulting
+    /// key without issuing a real S3 request.
+    #[cfg(feature = "s3")]
+    fn remap_path_to_storage(path: &str, version: Option<&str>) -> TransformSourcePayload {
+        let source = TransformSourcePayload::Path {
+            path: path.to_string(),
+            version: version.map(|v| v.to_string()),
+        };
+        match source {
+            TransformSourcePayload::Path { path, version } => TransformSourcePayload::Storage {
+                bucket: None,
+                key: path.trim_start_matches('/').to_string(),
+                version,
+            },
+            other => other,
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "s3")]
+    fn public_by_path_s3_remap_trims_leading_slash() {
+        // Paths with a leading slash (the common case from signed URLs like
+        // `path=/image.png`) must have the slash stripped so that the S3 key
+        // is `image.png`, not `/image.png`.
+        let source = remap_path_to_storage("/photos/hero.jpg", Some("v1"));
+        match &source {
+            TransformSourcePayload::Storage { key, .. } => {
+                assert_eq!(key, "photos/hero.jpg", "leading / must be trimmed");
+            }
+            _ => panic!("expected Storage variant after remap"),
+        }
+
+        // Without a leading slash the key must be unchanged.
+        let source2 = remap_path_to_storage("photos/hero.jpg", Some("v1"));
+        match &source2 {
+            TransformSourcePayload::Storage { key, .. } => {
+                assert_eq!(key, "photos/hero.jpg");
+            }
+            _ => panic!("expected Storage variant after remap"),
+        }
+
+        // Both must produce the same versioned hash (same effective key).
+        let mut cfg = make_test_config();
+        cfg.storage_backend = super::StorageBackend::S3;
+        cfg.s3_context = Some(std::sync::Arc::new(super::s3::S3Context::for_test(
+            "my-bucket",
+            None,
+        )));
+        assert_eq!(
+            source.versioned_source_hash(&cfg),
+            source2.versioned_source_hash(&cfg),
+            "leading-slash and no-leading-slash paths must hash identically after trim",
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "s3")]
+    fn public_by_path_s3_remap_produces_storage_variant() {
+        // Verify the remap converts Path to Storage with bucket: None.
+        let source = remap_path_to_storage("/image.png", None);
+        match source {
+            TransformSourcePayload::Storage {
+                bucket,
+                key,
+                version,
+            } => {
+                assert!(bucket.is_none(), "bucket must be None (use default)");
+                assert_eq!(key, "image.png");
+                assert!(version.is_none());
+            }
+            _ => panic!("expected Storage variant"),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // GCS: health endpoint
+    // -----------------------------------------------------------------------
+
+    #[test]
+    #[cfg(feature = "gcs")]
+    fn health_ready_gcs_returns_503_when_context_missing() {
+        let storage = temp_dir("health-gcs-no-ctx");
+        let mut config = ServerConfig::new(storage.clone(), None);
+        config.storage_backend = super::StorageBackend::Gcs;
+        config.gcs_context = None;
+
+        let request = super::http_parse::HttpRequest {
+            method: "GET".to_string(),
+            target: "/health/ready".to_string(),
+            version: "HTTP/1.1".to_string(),
+            headers: Vec::new(),
+            body: Vec::new(),
+        };
+        let response = route_request(request, &config);
+        let _ = std::fs::remove_dir_all(storage);
+
+        assert_eq!(response.status, "503 Service Unavailable");
+        let body: serde_json::Value = serde_json::from_slice(&response.body).expect("parse body");
+        let checks = body["checks"].as_array().expect("checks array");
+        assert!(
+            checks
+                .iter()
+                .any(|c| c["name"] == "storageBackend" && c["status"] == "fail"),
+            "expected gcsClient fail check in {body}",
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "gcs")]
+    fn health_ready_gcs_includes_gcs_client_check() {
+        let storage = temp_dir("health-gcs-ok");
+        let mut config = ServerConfig::new(storage.clone(), None);
+        config.storage_backend = super::StorageBackend::Gcs;
+        config.gcs_context = Some(std::sync::Arc::new(super::gcs::GcsContext::for_test(
+            "test-bucket",
+            None,
+        )));
+
+        let request = super::http_parse::HttpRequest {
+            method: "GET".to_string(),
+            target: "/health/ready".to_string(),
+            version: "HTTP/1.1".to_string(),
+            headers: Vec::new(),
+            body: Vec::new(),
+        };
+        let response = route_request(request, &config);
+        let _ = std::fs::remove_dir_all(storage);
+
+        // The gcsClient check will report "fail" because there is no real GCS
+        // endpoint, but the important thing is that the check is present.
+        let body: serde_json::Value = serde_json::from_slice(&response.body).expect("parse body");
+        let checks = body["checks"].as_array().expect("checks array");
+        assert!(
+            checks.iter().any(|c| c["name"] == "storageBackend"),
+            "expected gcsClient check in {body}",
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // GCS: public by-path remap (leading slash trimmed, Storage variant used)
+    // -----------------------------------------------------------------------
+
+    #[cfg(feature = "gcs")]
+    fn remap_path_to_storage_gcs(path: &str, version: Option<&str>) -> TransformSourcePayload {
+        let source = TransformSourcePayload::Path {
+            path: path.to_string(),
+            version: version.map(|v| v.to_string()),
+        };
+        match source {
+            TransformSourcePayload::Path { path, version } => TransformSourcePayload::Storage {
+                bucket: None,
+                key: path.trim_start_matches('/').to_string(),
+                version,
+            },
+            other => other,
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "gcs")]
+    fn public_by_path_gcs_remap_trims_leading_slash() {
+        let source = remap_path_to_storage_gcs("/photos/hero.jpg", Some("v1"));
+        match &source {
+            TransformSourcePayload::Storage { key, .. } => {
+                assert_eq!(key, "photos/hero.jpg", "leading / must be trimmed");
+            }
+            _ => panic!("expected Storage variant after remap"),
+        }
+
+        let source2 = remap_path_to_storage_gcs("photos/hero.jpg", Some("v1"));
+        match &source2 {
+            TransformSourcePayload::Storage { key, .. } => {
+                assert_eq!(key, "photos/hero.jpg");
+            }
+            _ => panic!("expected Storage variant after remap"),
+        }
+
+        let mut cfg = make_test_config();
+        cfg.storage_backend = super::StorageBackend::Gcs;
+        cfg.gcs_context = Some(std::sync::Arc::new(super::gcs::GcsContext::for_test(
+            "my-bucket",
+            None,
+        )));
+        assert_eq!(
+            source.versioned_source_hash(&cfg),
+            source2.versioned_source_hash(&cfg),
+            "leading-slash and no-leading-slash paths must hash identically after trim",
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "gcs")]
+    fn public_by_path_gcs_remap_produces_storage_variant() {
+        let source = remap_path_to_storage_gcs("/image.png", None);
+        match source {
+            TransformSourcePayload::Storage {
+                bucket,
+                key,
+                version,
+            } => {
+                assert!(bucket.is_none(), "bucket must be None (use default)");
+                assert_eq!(key, "image.png");
+                assert!(version.is_none());
+            }
+            _ => panic!("expected Storage variant"),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Azure: health endpoint
+    // -----------------------------------------------------------------------
+
+    #[test]
+    #[cfg(feature = "azure")]
+    fn health_ready_azure_returns_503_when_context_missing() {
+        let storage = temp_dir("health-azure-no-ctx");
+        let mut config = ServerConfig::new(storage.clone(), None);
+        config.storage_backend = super::StorageBackend::Azure;
+        config.azure_context = None;
+
+        let request = super::http_parse::HttpRequest {
+            method: "GET".to_string(),
+            target: "/health/ready".to_string(),
+            version: "HTTP/1.1".to_string(),
+            headers: Vec::new(),
+            body: Vec::new(),
+        };
+        let response = route_request(request, &config);
+        let _ = std::fs::remove_dir_all(storage);
+
+        assert_eq!(response.status, "503 Service Unavailable");
+        let body: serde_json::Value = serde_json::from_slice(&response.body).expect("parse body");
+        let checks = body["checks"].as_array().expect("checks array");
+        assert!(
+            checks
+                .iter()
+                .any(|c| c["name"] == "storageBackend" && c["status"] == "fail"),
+            "expected azureClient fail check in {body}",
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "azure")]
+    fn health_ready_azure_includes_azure_client_check() {
+        let storage = temp_dir("health-azure-ok");
+        let mut config = ServerConfig::new(storage.clone(), None);
+        config.storage_backend = super::StorageBackend::Azure;
+        config.azure_context = Some(std::sync::Arc::new(super::azure::AzureContext::for_test(
+            "test-bucket",
+            "http://localhost:10000/devstoreaccount1",
+        )));
+
+        let request = super::http_parse::HttpRequest {
+            method: "GET".to_string(),
+            target: "/health/ready".to_string(),
+            version: "HTTP/1.1".to_string(),
+            headers: Vec::new(),
+            body: Vec::new(),
+        };
+        let response = route_request(request, &config);
+        let _ = std::fs::remove_dir_all(storage);
+
+        let body: serde_json::Value = serde_json::from_slice(&response.body).expect("parse body");
+        let checks = body["checks"].as_array().expect("checks array");
+        assert!(
+            checks.iter().any(|c| c["name"] == "storageBackend"),
+            "expected azureClient check in {body}",
+        );
+    }
+
+    #[test]
     fn read_request_rejects_json_body_over_1mib() {
         let body = vec![b'x'; super::http_parse::MAX_REQUEST_BODY_BYTES + 1];
         let content_length = body.len();
@@ -2921,5 +4174,197 @@ mod tests {
         assert_eq!(parts.len(), 2);
         assert_eq!(parts[0].name, "field1");
         assert_eq!(parts[1].name, "field2");
+    }
+
+    #[test]
+    #[serial]
+    #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
+    fn test_storage_timeout_default() {
+        unsafe {
+            std::env::remove_var("TRUSS_STORAGE_TIMEOUT_SECS");
+        }
+        let config = ServerConfig::from_env().unwrap();
+        assert_eq!(config.storage_timeout_secs, 30);
+    }
+
+    #[test]
+    #[serial]
+    #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
+    fn test_storage_timeout_custom() {
+        unsafe {
+            std::env::set_var("TRUSS_STORAGE_TIMEOUT_SECS", "60");
+        }
+        let config = ServerConfig::from_env().unwrap();
+        assert_eq!(config.storage_timeout_secs, 60);
+        unsafe {
+            std::env::remove_var("TRUSS_STORAGE_TIMEOUT_SECS");
+        }
+    }
+
+    #[test]
+    #[serial]
+    #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
+    fn test_storage_timeout_min_boundary() {
+        unsafe {
+            std::env::set_var("TRUSS_STORAGE_TIMEOUT_SECS", "1");
+        }
+        let config = ServerConfig::from_env().unwrap();
+        assert_eq!(config.storage_timeout_secs, 1);
+        unsafe {
+            std::env::remove_var("TRUSS_STORAGE_TIMEOUT_SECS");
+        }
+    }
+
+    #[test]
+    #[serial]
+    #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
+    fn test_storage_timeout_max_boundary() {
+        unsafe {
+            std::env::set_var("TRUSS_STORAGE_TIMEOUT_SECS", "300");
+        }
+        let config = ServerConfig::from_env().unwrap();
+        assert_eq!(config.storage_timeout_secs, 300);
+        unsafe {
+            std::env::remove_var("TRUSS_STORAGE_TIMEOUT_SECS");
+        }
+    }
+
+    #[test]
+    #[serial]
+    #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
+    fn test_storage_timeout_empty_string_uses_default() {
+        unsafe {
+            std::env::set_var("TRUSS_STORAGE_TIMEOUT_SECS", "");
+        }
+        let config = ServerConfig::from_env().unwrap();
+        assert_eq!(config.storage_timeout_secs, 30);
+        unsafe {
+            std::env::remove_var("TRUSS_STORAGE_TIMEOUT_SECS");
+        }
+    }
+
+    #[test]
+    #[serial]
+    #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
+    fn test_storage_timeout_zero_rejected() {
+        unsafe {
+            std::env::set_var("TRUSS_STORAGE_TIMEOUT_SECS", "0");
+        }
+        let err = ServerConfig::from_env().unwrap_err();
+        assert!(
+            err.to_string().contains("between 1 and 300"),
+            "error should mention valid range: {err}"
+        );
+        unsafe {
+            std::env::remove_var("TRUSS_STORAGE_TIMEOUT_SECS");
+        }
+    }
+
+    #[test]
+    #[serial]
+    #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
+    fn test_storage_timeout_over_max_rejected() {
+        unsafe {
+            std::env::set_var("TRUSS_STORAGE_TIMEOUT_SECS", "301");
+        }
+        let err = ServerConfig::from_env().unwrap_err();
+        assert!(
+            err.to_string().contains("between 1 and 300"),
+            "error should mention valid range: {err}"
+        );
+        unsafe {
+            std::env::remove_var("TRUSS_STORAGE_TIMEOUT_SECS");
+        }
+    }
+
+    #[test]
+    #[serial]
+    #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
+    fn test_storage_timeout_non_numeric_rejected() {
+        unsafe {
+            std::env::set_var("TRUSS_STORAGE_TIMEOUT_SECS", "abc");
+        }
+        let err = ServerConfig::from_env().unwrap_err();
+        assert!(
+            err.to_string().contains("positive integer"),
+            "error should mention positive integer: {err}"
+        );
+        unsafe {
+            std::env::remove_var("TRUSS_STORAGE_TIMEOUT_SECS");
+        }
+    }
+
+    #[test]
+    #[serial]
+    #[cfg(feature = "azure")]
+    fn test_azure_container_env_var_required() {
+        unsafe {
+            std::env::set_var("TRUSS_STORAGE_BACKEND", "azure");
+            std::env::remove_var("TRUSS_AZURE_CONTAINER");
+        }
+        let err = ServerConfig::from_env().unwrap_err();
+        assert!(
+            err.to_string().contains("TRUSS_AZURE_CONTAINER"),
+            "error should mention TRUSS_AZURE_CONTAINER: {err}"
+        );
+        unsafe {
+            std::env::remove_var("TRUSS_STORAGE_BACKEND");
+        }
+    }
+
+    #[test]
+    fn server_config_debug_redacts_bearer_token_and_signed_url_secret() {
+        let mut config = ServerConfig::new(
+            temp_dir("debug-redact"),
+            Some("super-secret-token-12345".to_string()),
+        );
+        config.signed_url_key_id = Some("visible-key-id".to_string());
+        config.signed_url_secret = Some("super-secret-hmac-key".to_string());
+        let debug = format!("{config:?}");
+        assert!(
+            !debug.contains("super-secret-token-12345"),
+            "bearer_token leaked in Debug output: {debug}"
+        );
+        assert!(
+            !debug.contains("super-secret-hmac-key"),
+            "signed_url_secret leaked in Debug output: {debug}"
+        );
+        assert!(
+            debug.contains("[REDACTED]"),
+            "expected [REDACTED] in Debug output: {debug}"
+        );
+        assert!(
+            debug.contains("visible-key-id"),
+            "signed_url_key_id should be visible: {debug}"
+        );
+    }
+
+    #[test]
+    fn authorize_headers_accepts_correct_bearer_token() {
+        let config = ServerConfig::new(temp_dir("auth-ok"), Some("correct-token".to_string()));
+        let headers = vec![(
+            "authorization".to_string(),
+            "Bearer correct-token".to_string(),
+        )];
+        assert!(super::authorize_request_headers(&headers, &config).is_ok());
+    }
+
+    #[test]
+    fn authorize_headers_rejects_wrong_bearer_token() {
+        let config = ServerConfig::new(temp_dir("auth-wrong"), Some("correct-token".to_string()));
+        let headers = vec![(
+            "authorization".to_string(),
+            "Bearer wrong-token".to_string(),
+        )];
+        let err = super::authorize_request_headers(&headers, &config).unwrap_err();
+        assert_eq!(err.status, "401 Unauthorized");
+    }
+
+    #[test]
+    fn authorize_headers_rejects_missing_header() {
+        let config = ServerConfig::new(temp_dir("auth-missing"), Some("correct-token".to_string()));
+        let headers: Vec<(String, String)> = vec![];
+        let err = super::authorize_request_headers(&headers, &config).unwrap_err();
+        assert_eq!(err.status, "401 Unauthorized");
     }
 }

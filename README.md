@@ -31,6 +31,30 @@ Resize, convert, blur, and watermark images from the CLI, an HTTP server, or the
 cargo install truss-image
 ```
 
+To enable S3 storage backend support, add `--features s3`:
+
+```sh
+cargo install truss-image --features s3
+```
+
+To enable Google Cloud Storage (GCS) backend support, add `--features gcs`:
+
+```sh
+cargo install truss-image --features gcs
+```
+
+To enable Azure Blob Storage backend support, add `--features azure`:
+
+```sh
+cargo install truss-image --features azure
+```
+
+To enable all storage backends:
+
+```sh
+cargo install truss-image --features "s3,gcs,azure"
+```
+
 This installs the `truss` command.
 
 ## Quick Start
@@ -149,6 +173,26 @@ Key environment variables:
 | `TRUSS_SIGNED_URL_SECRET` | Shared secret for signed public URLs |
 | `TRUSS_ALLOW_INSECURE_URL_SOURCES` | Allow private-network/loopback URL sources (`true`/`1`; dev/test only) |
 | `TRUSS_CACHE_ROOT` | Directory for the transform cache; caching is disabled when unset |
+| `TRUSS_PUBLIC_MAX_AGE` | `Cache-Control: max-age` for public GET responses in seconds (default: `3600`) |
+| `TRUSS_PUBLIC_STALE_WHILE_REVALIDATE` | `Cache-Control: stale-while-revalidate` for public GET responses in seconds (default: `60`) |
+| `TRUSS_DISABLE_ACCEPT_NEGOTIATION` | Disable Accept-based content negotiation (`true`/`1`; recommended behind CDNs that don't forward Accept) |
+| `TRUSS_STORAGE_BACKEND` | Storage backend for public `GET /images/by-path`: `filesystem` (default), `s3`, `gcs`, or `azure`. Only one backend can be active at a time. When set to `s3`, `gcs`, or `azure`, the `path` query parameter is used as the object key. Private endpoints can still use `kind: storage` regardless of this setting. |
+| `TRUSS_S3_BUCKET` | Default S3 bucket name (required when backend is `s3`) |
+| `TRUSS_S3_FORCE_PATH_STYLE` | Use path-style S3 addressing (`true`/`1`; required for MinIO, LocalStack, etc.) |
+| `AWS_REGION` | AWS region for the S3 client (e.g. `us-east-1`) |
+| `AWS_ACCESS_KEY_ID` | AWS access key for S3 authentication |
+| `AWS_SECRET_ACCESS_KEY` | AWS secret key for S3 authentication |
+| `AWS_ENDPOINT_URL` | Custom S3-compatible endpoint URL (e.g. `http://minio:9000` for MinIO) |
+| `TRUSS_GCS_BUCKET` | Default GCS bucket name (required when backend is `gcs`) |
+| `TRUSS_GCS_ENDPOINT` | Custom GCS endpoint URL (e.g. `http://fake-gcs:4443` for fake-gcs-server) |
+| `GOOGLE_APPLICATION_CREDENTIALS` | Path to GCS service account JSON key file |
+| `GOOGLE_APPLICATION_CREDENTIALS_JSON` | Inline GCS service account JSON (alternative to file path) |
+| `TRUSS_AZURE_CONTAINER` | Default Azure Blob Storage container name (required when backend is `azure`) |
+| `TRUSS_AZURE_ENDPOINT` | Custom Azure Blob endpoint URL (e.g. `http://azurite:10000/devstoreaccount1` for Azurite) |
+| `AZURE_STORAGE_ACCOUNT_NAME` | Azure storage account name (used to derive the default endpoint when `TRUSS_AZURE_ENDPOINT` is not set; must be 3-24 lowercase alphanumeric characters) |
+| `TRUSS_STORAGE_TIMEOUT_SECS` | Download timeout in seconds for object storage backends (default: `30`, range: 1–300) |
+
+Azure authentication: By default, truss uses anonymous access, which works for public containers and Azurite local development. For private containers, append a SAS token to `TRUSS_AZURE_ENDPOINT`. On Azure-hosted compute (App Service, AKS, VMs), managed identity is used automatically when no explicit credentials are provided.
 
 API reference:
 
@@ -253,7 +297,7 @@ CDN cache keys must vary by the signed-URL authentication inputs and any transfo
 
 - Authentication: `keyId`, `expires`, `signature`
 - Source: `path` or `url`, `version`
-- Transform: `width`, `height`, `fit`, `position`, `format`, `quality`, `background`, `rotate`, `autoOrient`, `stripMetadata`, `preserveExif`, `blur`, `watermark`, `watermarkPosition`, `watermarkOpacity`, `watermarkMargin`
+- Transform: `width`, `height`, `fit`, `position`, `format`, `quality`, `background`, `rotate`, `autoOrient`, `stripMetadata`, `preserveExif`, `blur`
 
 This ensures that a cached response for one signed URL is not served to requests with different or expired signatures, and different transform options produce separate cache entries.
 

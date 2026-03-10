@@ -1,0 +1,58 @@
+name: GCS Backend Integration
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "integration/gcs/**"
+      - "integration/fixtures/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "Dockerfile"
+      - ".github/workflows/integration-gcs.yml"
+  pull_request:
+    paths:
+      - "src/**"
+      - "integration/gcs/**"
+      - "integration/fixtures/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "Dockerfile"
+      - ".github/workflows/integration-gcs.yml"
+
+concurrency:
+  group: integration-gcs-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gcs-integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build truss image (with cloud storage features) with cache
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./Dockerfile
+          load: true
+          tags: truss:local
+          cache-from: type=gha,scope=integration-gcs
+          cache-to: type=gha,mode=max,scope=integration-gcs
+
+      - name: Run GCS integration tests
+        run: |
+          cd integration/gcs
+          docker compose up --no-build --abort-on-container-exit --exit-code-from runn
+        timeout-minutes: 10
+        env:
+          TRUSS_IMAGE: truss:local
+
+      - name: Cleanup
+        if: always()
+        run: |
+          cd integration/gcs
+          docker compose down --volumes --remove-orphans
