@@ -67,11 +67,18 @@ use uuid::Uuid;
 fn stderr_write(msg: &str) {
     use std::io::Write;
     use std::os::fd::FromRawFd;
-    // SAFETY: fd 2 is always open for the lifetime of the process.
+
+    // SAFETY: fd 2 (stderr) is always valid for the lifetime of the process.
     let mut f = unsafe { std::fs::File::from_raw_fd(2) };
-    let _ = f.write_all(msg.as_bytes());
-    let _ = f.write_all(b"\n");
-    // Do not drop `f` — that would close stderr.
+
+    // Build a single buffer to issue one write(2) syscall instead of two.
+    let bytes = msg.as_bytes();
+    let mut buf = Vec::with_capacity(bytes.len() + 1);
+    buf.extend_from_slice(bytes);
+    buf.push(b'\n');
+    let _ = f.write_all(&buf);
+
+    // Do not drop `f` — that would close fd 2 (stderr).
     std::mem::forget(f);
 }
 
