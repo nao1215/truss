@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.3.0
+## Unreleased
 
 ### Added
 
@@ -8,6 +8,11 @@
 - Google Cloud Storage backend (`--features gcs`).
 - SSRF validation for S3/GCS backend endpoint URLs.
 - Signed URL support for S3/GCS source images.
+
+## v0.3.0
+
+### Added
+
 - Blur filter support (`blur` query parameter) for image transforms.
 - Watermark overlay support for image transforms.
 - Sample image and template for documentation.
