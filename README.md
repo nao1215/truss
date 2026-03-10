@@ -194,6 +194,27 @@ Key environment variables:
 | `TRUSS_TRANSFORM_DEADLINE_SECS` | Per-transform wall-clock deadline in seconds (default: `30`, range: 1–300). Set slightly above your p95 transform latency but below any upstream/client timeout to avoid cascading failures. |
 | `TRUSS_STORAGE_TIMEOUT_SECS` | Download timeout in seconds for object storage backends (default: `30`, range: 1–300) |
 
+### Structured Access Logs
+
+Every request emits a JSON access log line through the server's log handler (stderr by default). Each entry includes a unique request ID for end-to-end correlation.
+
+```json
+{"kind":"access_log","request_id":"a1b2c3d4-...","method":"GET","path":"/images/by-path","route":"/images/by-path","status":"200","latency_ms":42,"cache_status":"hit"}
+```
+
+| Field | Description |
+|-------|-------------|
+| `kind` | Always `"access_log"` -- distinguishes access logs from diagnostic messages |
+| `request_id` | UUID v4 generated per request, or the incoming `X-Request-Id` header value when present |
+| `method` | HTTP method (`GET`, `POST`, `HEAD`) |
+| `path` | Request path without query string |
+| `route` | Matched route label (e.g. `/images/by-path`, `/images:transform`) |
+| `status` | HTTP status code as a string |
+| `latency_ms` | Total request processing time in milliseconds |
+| `cache_status` | `"hit"`, `"miss"`, or `null` (for non-transform endpoints) |
+
+The server echoes the request ID back in the `X-Request-Id` response header, making it easy to correlate client-side logs with server-side entries. To propagate your own trace context, send an `X-Request-Id` header with your request and the server will reuse it.
+
 Azure authentication: By default, truss uses anonymous access, which works for public containers and Azurite local development. For private containers, append a SAS token to `TRUSS_AZURE_ENDPOINT`. On Azure-hosted compute (App Service, AKS, VMs), managed identity is used automatically when no explicit credentials are provided.
 
 API reference:

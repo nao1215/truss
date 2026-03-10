@@ -4565,6 +4565,7 @@ dependencies = [
  "tokio",
  "ureq",
  "url",
+ "uuid",
  "wasm-bindgen",
  "webp",
  "yuvutils-rs",
