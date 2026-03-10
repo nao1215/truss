@@ -31,6 +31,12 @@ Resize, convert, blur, and watermark images from the CLI, an HTTP server, or the
 cargo install truss-image
 ```
 
+To enable S3 storage backend support, add `--features s3`:
+
+```sh
+cargo install truss-image --features s3
+```
+
 This installs the `truss` command.
 
 ## Quick Start
