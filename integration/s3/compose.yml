@@ -38,6 +38,8 @@ services:
       - truss
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    tmpfs:
+      - /tmp/nginx-cache
     # nginx listens on port 80
 
   runn:

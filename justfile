@@ -100,7 +100,7 @@ integration-s3-clean:
     cd integration/s3 && docker compose down --volumes --remove-orphans
 
 # Run all integration tests
-integration: integration-cli integration-api
+integration: integration-cli integration-api integration-s3
 
 # ---------------------------------------------------------------------------
 # WASM
