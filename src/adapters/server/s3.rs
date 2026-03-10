@@ -32,19 +32,33 @@ impl std::fmt::Debug for S3Context {
 }
 
 impl S3Context {
-    /// Returns `true` if the default bucket is reachable via a HeadBucket call.
-    /// Times out after 2 seconds to avoid blocking the health endpoint.
+    /// Returns `true` if the default bucket is reachable.
+    ///
+    /// Issues a GetObject for a key that is extremely unlikely to exist.
+    /// Any *service-level* response (NoSuchKey **or** AccessDenied) proves
+    /// that S3 accepted and processed the request, so we treat both as
+    /// "reachable".  Only transport / timeout errors are treated as failures.
+    ///
+    /// This deliberately avoids HeadBucket, which requires `s3:ListBucket` —
+    /// a permission that read-only image-serving roles should not need.
     pub fn check_reachable(&self) -> bool {
+        use aws_sdk_s3::error::SdkError;
         use std::time::Duration;
+
         let client = self.client.clone();
         let bucket = self.default_bucket.clone();
         self.runtime.block_on(async {
-            tokio::time::timeout(
+            let result = tokio::time::timeout(
                 Duration::from_secs(2),
-                client.head_bucket().bucket(&bucket).send(),
+                client
+                    .get_object()
+                    .bucket(&bucket)
+                    .key("__truss_health_probe__")
+                    .send(),
             )
-            .await
-            .is_ok_and(|r| r.is_ok())
+            .await;
+
+            matches!(result, Ok(Ok(_)) | Ok(Err(SdkError::ServiceError(_))))
         })
     }
 }
@@ -201,6 +215,17 @@ fn map_s3_get_object_error(
     match &err {
         SdkError::ServiceError(service_err) => {
             if service_err.err().is_no_such_key() {
+                return super::response::not_found_response(
+                    "source image was not found in object storage",
+                );
+            }
+            // When the IAM role lacks s3:ListBucket, AWS returns 403 for
+            // non-existent keys instead of 404.  Map this to 404 so that
+            // callers see consistent "not found" semantics regardless of
+            // the bucket policy.  This also avoids leaking the distinction
+            // between "key exists but denied" vs "key missing" — matching
+            // AWS's own information-hiding intent.
+            if service_err.raw().status().as_u16() == 403 {
                 return super::response::not_found_response(
                     "source image was not found in object storage",
                 );

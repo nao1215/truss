@@ -149,6 +149,9 @@ Key environment variables:
 | `TRUSS_SIGNED_URL_SECRET` | Shared secret for signed public URLs |
 | `TRUSS_ALLOW_INSECURE_URL_SOURCES` | Allow private-network/loopback URL sources (`true`/`1`; dev/test only) |
 | `TRUSS_CACHE_ROOT` | Directory for the transform cache; caching is disabled when unset |
+| `TRUSS_STORAGE_BACKEND` | Storage backend: `filesystem` (default) or `s3` |
+| `TRUSS_S3_BUCKET` | Default S3 bucket name (required when backend is `s3`) |
+| `TRUSS_S3_FORCE_PATH_STYLE` | Use path-style S3 addressing (`true`/`1`; required for MinIO, LocalStack, etc.) |
 
 API reference:
 
