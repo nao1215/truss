@@ -105,10 +105,10 @@ pub fn build_s3_context(
     default_bucket: String,
     allow_insecure: bool,
 ) -> Result<S3Context, std::io::Error> {
-    // One Tokio worker suffices: server threads drive futures via block_on(),
-    // so the runtime only handles I/O polling and timer ticks.
+    // Two Tokio workers: one drives the HTTP/TLS I/O while the other
+    // ensures tokio::time::timeout timers fire even when a request stalls.
     let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(1)
+        .worker_threads(2)
         .enable_all()
         .build()?;
     let sdk_config = runtime.block_on(aws_config::load_defaults(

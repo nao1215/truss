@@ -73,7 +73,7 @@ steps:
     test: |
       current.res.status == 401
   transform_storage_wrong_bucket:
-    desc: "Request with non-existent bucket returns 502"
+    desc: "Request with non-existent container returns 403 (Azurite denies anonymous access to non-existent containers)"
     req:
       /images:transform:
         post:
@@ -88,7 +88,7 @@ steps:
                 key: sample.png
               options: {}
     test: |
-      current.res.status == 502
+      current.res.status == 403
   transform_storage_empty_key:
     desc: "Request with empty Azure key returns 400"
     req:

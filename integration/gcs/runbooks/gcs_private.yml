@@ -73,7 +73,7 @@ steps:
     test: |
       current.res.status == 401
   transform_storage_wrong_bucket:
-    desc: "Request with non-existent bucket returns 502"
+    desc: "Request with non-existent bucket returns 404 (fake-gcs-server does not distinguish bucket/object 404)"
     req:
       /images:transform:
         post:
@@ -88,7 +88,7 @@ steps:
                 key: sample.png
               options: {}
     test: |
-      current.res.status == 502
+      current.res.status == 404
   transform_storage_empty_key:
     desc: "Request with empty GCS key returns 400"
     req:

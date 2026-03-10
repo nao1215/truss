@@ -124,10 +124,10 @@ pub fn build_gcs_context(
     default_bucket: String,
     allow_insecure: bool,
 ) -> Result<GcsContext, std::io::Error> {
-    // One Tokio worker suffices: server threads drive futures via block_on(),
-    // so the runtime only handles I/O polling and timer ticks.
+    // Two Tokio workers: one drives the HTTP/TLS I/O while the other
+    // ensures tokio::time::timeout timers fire even when a request stalls.
     let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(1)
+        .worker_threads(2)
         .enable_all()
         .build()?;
 
@@ -283,6 +283,12 @@ fn is_bucket_not_found(err: &google_cloud_storage::Error) -> bool {
 fn map_gcs_error(err: google_cloud_storage::Error) -> HttpResponse {
     if let Some(status) = err.http_status_code() {
         if status == 404 {
+            if is_bucket_not_found(&err) {
+                eprintln!("gcs error: bucket not found: {err}");
+                return bad_gateway_response(
+                    "object storage bucket not found — check configuration",
+                );
+            }
             return not_found_response("source image was not found in object storage");
         }
         if status == 403 {

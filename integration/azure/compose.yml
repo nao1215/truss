@@ -1,7 +1,7 @@
 services:
   azurite:
     image: mcr.microsoft.com/azure-storage/azurite:latest
-    command: ["azurite-blob", "--blobHost", "0.0.0.0", "--blobPort", "10000"]
+    command: ["azurite-blob", "--blobHost", "0.0.0.0", "--blobPort", "10000", "--skipApiVersionCheck"]
     # Azurite exposes Blob service on port 10000
     healthcheck:
       test: ["CMD-SHELL", "node -e \"require('net').createConnection(10000,'localhost').on('connect',()=>process.exit(0)).on('error',()=>process.exit(1))\""]
@@ -60,5 +60,7 @@ services:
     environment:
       SERVER_HOST: nginx
       SERVER_PORT: "80"
+      AZURE_HOST: azurite
+      AZURE_PORT: "10000"
     entrypoint: ["/bin/bash", "/setup-fixtures.sh"]
     command: ["runn", "run", "/runbooks/*.yml", "--verbose", "--scopes", "read:parent,run:exec"]
