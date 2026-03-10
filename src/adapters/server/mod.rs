@@ -26,8 +26,8 @@ use http_parse::{
     request_has_json_content_type,
 };
 use metrics::{
-    CACHE_HITS_TOTAL, CACHE_MISSES_TOTAL, MAX_CONCURRENT_TRANSFORMS, RouteMetric,
-    TRANSFORMS_IN_FLIGHT, record_http_metrics, render_metrics_text, uptime_seconds,
+    CACHE_HITS_TOTAL, CACHE_MISSES_TOTAL, DEFAULT_MAX_CONCURRENT_TRANSFORMS, RouteMetric,
+    record_http_metrics, render_metrics_text, uptime_seconds,
 };
 use multipart::{parse_multipart_boundary, parse_upload_request};
 use negotiate::{
@@ -56,7 +56,7 @@ use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use url::Url;
 
@@ -142,12 +142,9 @@ type HmacSha256 = Hmac<Sha256>;
 /// worker thread indefinitely.
 const KEEP_ALIVE_MAX_REQUESTS: usize = 100;
 
-/// Default wall-clock deadline for server-side transforms.
-///
-/// The server injects this deadline into every transform request to prevent individual
-/// requests from consuming unbounded wall-clock time. Library and CLI consumers are not subject
-/// to this limit by default.
-const SERVER_TRANSFORM_DEADLINE: Duration = Duration::from_secs(30);
+/// Default wall-clock deadline (in seconds) for server-side transforms.
+/// Configurable at runtime via `TRUSS_TRANSFORM_DEADLINE_SECS`.
+const DEFAULT_TRANSFORM_DEADLINE_SECS: u64 = 30;
 
 #[derive(Clone, Copy)]
 struct PublicCacheControl {
@@ -159,6 +156,7 @@ struct PublicCacheControl {
 struct ImageResponseConfig {
     disable_accept_negotiation: bool,
     public_cache_control: PublicCacheControl,
+    transform_deadline: Duration,
 }
 
 /// Runtime configuration for the HTTP server adapter.
@@ -226,6 +224,20 @@ pub struct ServerConfig {
     /// failures, transform warnings) through this handler. When `None`, messages are
     /// written to stderr via `eprintln!`.
     pub log_handler: Option<LogHandler>,
+    /// Maximum number of concurrent image transforms.
+    ///
+    /// Configurable via `TRUSS_MAX_CONCURRENT_TRANSFORMS`. Defaults to 64.
+    pub max_concurrent_transforms: u64,
+    /// Per-transform wall-clock deadline in seconds.
+    ///
+    /// Configurable via `TRUSS_TRANSFORM_DEADLINE_SECS`. Defaults to 30.
+    pub transform_deadline_secs: u64,
+    /// Per-server counter tracking the number of image transforms currently in
+    /// flight.  This is runtime state (not configuration) but lives here so that
+    /// each `serve_with_config` invocation gets an independent counter, avoiding
+    /// cross-server interference when multiple listeners run in the same process
+    /// or during tests.
+    pub transforms_in_flight: Arc<AtomicU64>,
     /// Download timeout in seconds for object storage backends (S3, GCS, Azure).
     ///
     /// Configurable via `TRUSS_STORAGE_TIMEOUT_SECS`. Defaults to 30.
@@ -259,6 +271,9 @@ impl Clone for ServerConfig {
             public_stale_while_revalidate_seconds: self.public_stale_while_revalidate_seconds,
             disable_accept_negotiation: self.disable_accept_negotiation,
             log_handler: self.log_handler.clone(),
+            max_concurrent_transforms: self.max_concurrent_transforms,
+            transform_deadline_secs: self.transform_deadline_secs,
+            transforms_in_flight: Arc::clone(&self.transforms_in_flight),
             #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
             storage_timeout_secs: self.storage_timeout_secs,
             #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
@@ -301,7 +316,9 @@ impl fmt::Debug for ServerConfig {
                 "disable_accept_negotiation",
                 &self.disable_accept_negotiation,
             )
-            .field("log_handler", &self.log_handler.as_ref().map(|_| ".."));
+            .field("log_handler", &self.log_handler.as_ref().map(|_| ".."))
+            .field("max_concurrent_transforms", &self.max_concurrent_transforms)
+            .field("transform_deadline_secs", &self.transform_deadline_secs);
         #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
         {
             d.field("storage_backend", &self.storage_backend);
@@ -335,6 +352,8 @@ impl PartialEq for ServerConfig {
             && self.public_stale_while_revalidate_seconds
                 == other.public_stale_while_revalidate_seconds
             && self.disable_accept_negotiation == other.disable_accept_negotiation
+            && self.max_concurrent_transforms == other.max_concurrent_transforms
+            && self.transform_deadline_secs == other.transform_deadline_secs
             && cfg_storage_eq(self, other)
     }
 }
@@ -421,6 +440,9 @@ impl ServerConfig {
             public_stale_while_revalidate_seconds: DEFAULT_PUBLIC_STALE_WHILE_REVALIDATE_SECONDS,
             disable_accept_negotiation: false,
             log_handler: None,
+            max_concurrent_transforms: DEFAULT_MAX_CONCURRENT_TRANSFORMS,
+            transform_deadline_secs: DEFAULT_TRANSFORM_DEADLINE_SECS,
+            transforms_in_flight: Arc::new(AtomicU64::new(0)),
             #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
             storage_timeout_secs: remote::STORAGE_DOWNLOAD_TIMEOUT_SECS,
             #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
@@ -584,6 +606,10 @@ impl ServerConfig {
     ///   from `AZURE_STORAGE_ACCOUNT_NAME`.
     /// - `AZURE_STORAGE_ACCOUNT_NAME`: Azure storage account name (used to derive the default
     ///   endpoint when `TRUSS_AZURE_ENDPOINT` is not set).
+    /// - `TRUSS_MAX_CONCURRENT_TRANSFORMS`: maximum number of concurrent image transforms
+    ///   (default: 64, range: 1–1024). Requests exceeding this limit are rejected with 503.
+    /// - `TRUSS_TRANSFORM_DEADLINE_SECS`: per-transform wall-clock deadline in seconds
+    ///   (default: 30, range: 1–300). Transforms exceeding this deadline are cancelled.
     /// - `TRUSS_STORAGE_TIMEOUT_SECS`: download timeout for storage backends in seconds
     ///   (default: 30, range: 1–300).
     ///
@@ -663,6 +689,50 @@ impl ServerConfig {
                 .unwrap_or(DEFAULT_PUBLIC_STALE_WHILE_REVALIDATE_SECONDS);
 
         let allow_insecure_url_sources = env_flag("TRUSS_ALLOW_INSECURE_URL_SOURCES");
+
+        let max_concurrent_transforms = match env::var("TRUSS_MAX_CONCURRENT_TRANSFORMS")
+            .ok()
+            .filter(|v| !v.is_empty())
+        {
+            Some(value) => {
+                let n: u64 = value.parse().map_err(|_| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "TRUSS_MAX_CONCURRENT_TRANSFORMS must be a positive integer",
+                    )
+                })?;
+                if n == 0 || n > 1024 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "TRUSS_MAX_CONCURRENT_TRANSFORMS must be between 1 and 1024",
+                    ));
+                }
+                n
+            }
+            None => DEFAULT_MAX_CONCURRENT_TRANSFORMS,
+        };
+
+        let transform_deadline_secs = match env::var("TRUSS_TRANSFORM_DEADLINE_SECS")
+            .ok()
+            .filter(|v| !v.is_empty())
+        {
+            Some(value) => {
+                let secs: u64 = value.parse().map_err(|_| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "TRUSS_TRANSFORM_DEADLINE_SECS must be a positive integer",
+                    )
+                })?;
+                if secs == 0 || secs > 300 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "TRUSS_TRANSFORM_DEADLINE_SECS must be between 1 and 300",
+                    ));
+                }
+                secs
+            }
+            None => DEFAULT_TRANSFORM_DEADLINE_SECS,
+        };
 
         #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
         let storage_timeout_secs = match env::var("TRUSS_STORAGE_TIMEOUT_SECS")
@@ -778,6 +848,9 @@ impl ServerConfig {
             public_stale_while_revalidate_seconds,
             disable_accept_negotiation: env_flag("TRUSS_DISABLE_ACCEPT_NEGOTIATION"),
             log_handler: None,
+            max_concurrent_transforms,
+            transform_deadline_secs,
+            transforms_in_flight: Arc::new(AtomicU64::new(0)),
             #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
             storage_timeout_secs,
             #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
@@ -953,12 +1026,15 @@ pub fn serve_with_config(listener: TcpListener, config: &ServerConfig) -> io::Re
     let config = Arc::new(config.clone());
     let (sender, receiver) = std::sync::mpsc::channel::<TcpStream>();
 
-    // Spawn a fixed-size pool of worker threads. Each thread pulls connections
+    // Spawn a pool of worker threads sized to the configured concurrency limit
+    // (with a minimum of WORKER_THREADS to leave headroom for non-transform
+    // requests such as health checks and metrics).  Each thread pulls connections
     // from the shared channel and handles them independently, so a slow request
     // no longer blocks all other clients.
     let receiver = Arc::new(std::sync::Mutex::new(receiver));
-    let mut workers = Vec::with_capacity(WORKER_THREADS);
-    for _ in 0..WORKER_THREADS {
+    let pool_size = (config.max_concurrent_transforms as usize).max(WORKER_THREADS);
+    let mut workers = Vec::with_capacity(pool_size);
+    for _ in 0..pool_size {
         let rx = Arc::clone(&receiver);
         let cfg = Arc::clone(&config);
         workers.push(std::thread::spawn(move || {
@@ -1602,8 +1678,8 @@ fn handle_health(config: &ServerConfig) -> HttpResponse {
         }
     }
 
-    let in_flight = TRANSFORMS_IN_FLIGHT.load(Ordering::Relaxed);
-    let overloaded = in_flight >= MAX_CONCURRENT_TRANSFORMS;
+    let in_flight = config.transforms_in_flight.load(Ordering::Relaxed);
+    let overloaded = in_flight >= config.max_concurrent_transforms;
     checks.push(json!({
         "name": "transformCapacity",
         "status": if overloaded { "fail" } else { "ok" },
@@ -1634,7 +1710,11 @@ fn handle_metrics_request(request: HttpRequest, config: &ServerConfig) -> HttpRe
     HttpResponse::text(
         "200 OK",
         "text/plain; version=0.0.4; charset=utf-8",
-        render_metrics_text().into_bytes(),
+        render_metrics_text(
+            config.max_concurrent_transforms,
+            &config.transforms_in_flight,
+        )
+        .into_bytes(),
     )
 }
 
@@ -1751,9 +1831,9 @@ fn transform_source_bytes(
         }
     }
 
-    let in_flight = TRANSFORMS_IN_FLIGHT.fetch_add(1, Ordering::Relaxed);
-    if in_flight >= MAX_CONCURRENT_TRANSFORMS {
-        TRANSFORMS_IN_FLIGHT.fetch_sub(1, Ordering::Relaxed);
+    let in_flight = config.transforms_in_flight.fetch_add(1, Ordering::Relaxed);
+    if in_flight >= config.max_concurrent_transforms {
+        config.transforms_in_flight.fetch_sub(1, Ordering::Relaxed);
         return service_unavailable_response("too many concurrent transforms; retry later");
     }
     let response = transform_source_bytes_inner(
@@ -1769,9 +1849,10 @@ fn transform_source_bytes(
                 max_age: config.public_max_age_seconds,
                 stale_while_revalidate: config.public_stale_while_revalidate_seconds,
             },
+            transform_deadline: Duration::from_secs(config.transform_deadline_secs),
         },
     );
-    TRANSFORMS_IN_FLIGHT.fetch_sub(1, Ordering::Relaxed);
+    config.transforms_in_flight.fetch_sub(1, Ordering::Relaxed);
     response
 }
 
@@ -1785,7 +1866,7 @@ fn transform_source_bytes_inner(
     response_config: ImageResponseConfig,
 ) -> HttpResponse {
     if options.deadline.is_none() {
-        options.deadline = Some(SERVER_TRANSFORM_DEADLINE);
+        options.deadline = Some(response_config.transform_deadline);
     }
     let artifact = match sniff_artifact(RawArtifact::new(source_bytes, None)) {
         Ok(artifact) => artifact,
@@ -1952,13 +2033,13 @@ mod tests {
     use super::response::auth_required_response;
     use super::response::{HttpResponse, bad_request_response};
     use super::{
-        CacheHitStatus, DEFAULT_BIND_ADDR, DEFAULT_PUBLIC_MAX_AGE_SECONDS,
-        DEFAULT_PUBLIC_STALE_WHILE_REVALIDATE_SECONDS, ImageResponsePolicy,
-        MAX_CONCURRENT_TRANSFORMS, PublicSourceKind, ServerConfig, SignedUrlSource,
-        TRANSFORMS_IN_FLIGHT, TransformSourcePayload, authorize_signed_request, bind_addr,
-        build_image_etag, build_image_response_headers, canonical_query_without_signature,
-        negotiate_output_format, parse_public_get_request, route_request, serve_once_with_config,
-        sign_public_url, transform_source_bytes,
+        CacheHitStatus, DEFAULT_BIND_ADDR, DEFAULT_MAX_CONCURRENT_TRANSFORMS,
+        DEFAULT_PUBLIC_MAX_AGE_SECONDS, DEFAULT_PUBLIC_STALE_WHILE_REVALIDATE_SECONDS,
+        ImageResponsePolicy, PublicSourceKind, ServerConfig, SignedUrlSource,
+        TransformSourcePayload, authorize_signed_request, bind_addr, build_image_etag,
+        build_image_response_headers, canonical_query_without_signature, negotiate_output_format,
+        parse_public_get_request, route_request, serve_once_with_config, sign_public_url,
+        transform_source_bytes,
     };
     use crate::{
         Artifact, ArtifactMetadata, MediaType, RawArtifact, TransformOptions, sniff_artifact,
@@ -2383,30 +2464,12 @@ mod tests {
         assert!(!headers.iter().any(|(k, _)| k == "Content-Security-Policy"));
     }
 
-    /// RAII guard that restores `TRANSFORMS_IN_FLIGHT` to its previous value
-    /// on drop, even if the test panics.
-    struct InFlightGuard {
-        previous: u64,
-    }
-
-    impl InFlightGuard {
-        fn set(value: u64) -> Self {
-            let previous = TRANSFORMS_IN_FLIGHT.load(Ordering::Relaxed);
-            TRANSFORMS_IN_FLIGHT.store(value, Ordering::Relaxed);
-            Self { previous }
-        }
-    }
-
-    impl Drop for InFlightGuard {
-        fn drop(&mut self) {
-            TRANSFORMS_IN_FLIGHT.store(self.previous, Ordering::Relaxed);
-        }
-    }
-
     #[test]
-    #[serial]
     fn backpressure_rejects_when_at_capacity() {
-        let _guard = InFlightGuard::set(MAX_CONCURRENT_TRANSFORMS);
+        let config = ServerConfig::new(std::env::temp_dir(), None);
+        config
+            .transforms_in_flight
+            .store(DEFAULT_MAX_CONCURRENT_TRANSFORMS, Ordering::Relaxed);
 
         let request = HttpRequest {
             method: "POST".to_string(),
@@ -2425,7 +2488,6 @@ mod tests {
             buf
         };
 
-        let config = ServerConfig::new(std::env::temp_dir(), None);
         let response = transform_source_bytes(
             png_bytes,
             TransformOptions::default(),
@@ -2438,9 +2500,47 @@ mod tests {
         assert!(response.status.contains("503"));
 
         assert_eq!(
-            TRANSFORMS_IN_FLIGHT.load(Ordering::Relaxed),
-            MAX_CONCURRENT_TRANSFORMS
+            config.transforms_in_flight.load(Ordering::Relaxed),
+            DEFAULT_MAX_CONCURRENT_TRANSFORMS
         );
+    }
+
+    #[test]
+    fn backpressure_rejects_with_custom_concurrency_limit() {
+        let custom_limit = 2u64;
+        let mut config = ServerConfig::new(std::env::temp_dir(), None);
+        config.max_concurrent_transforms = custom_limit;
+        config
+            .transforms_in_flight
+            .store(custom_limit, Ordering::Relaxed);
+
+        let request = HttpRequest {
+            method: "POST".to_string(),
+            target: "/transform".to_string(),
+            version: "HTTP/1.1".to_string(),
+            headers: Vec::new(),
+            body: Vec::new(),
+        };
+
+        let png_bytes = {
+            let mut buf = Vec::new();
+            let encoder = image::codecs::png::PngEncoder::new(&mut buf);
+            encoder
+                .write_image(&[255, 0, 0, 255], 1, 1, image::ExtendedColorType::Rgba8)
+                .unwrap();
+            buf
+        };
+
+        let response = transform_source_bytes(
+            png_bytes,
+            TransformOptions::default(),
+            None,
+            &request,
+            ImageResponsePolicy::PrivateTransform,
+            &config,
+        );
+
+        assert!(response.status.contains("503"));
     }
 
     #[test]
@@ -2828,13 +2928,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
     fn health_returns_comprehensive_diagnostic() {
-        // Reset the global counter so that a concurrent test
-        // (e.g. backpressure_rejects_when_at_capacity) does not leave a
-        // stale value that makes transformCapacity report "fail".
-        let _guard = InFlightGuard::set(0);
-
         let storage = temp_dir("health-diag");
         let request = HttpRequest {
             method: "GET".to_string(),
@@ -4291,6 +4385,226 @@ mod tests {
         );
         unsafe {
             std::env::remove_var("TRUSS_STORAGE_TIMEOUT_SECS");
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_max_concurrent_transforms_default() {
+        unsafe {
+            std::env::remove_var("TRUSS_MAX_CONCURRENT_TRANSFORMS");
+        }
+        let config = ServerConfig::from_env().unwrap();
+        assert_eq!(config.max_concurrent_transforms, 64);
+    }
+
+    #[test]
+    #[serial]
+    fn test_max_concurrent_transforms_custom() {
+        unsafe {
+            std::env::set_var("TRUSS_MAX_CONCURRENT_TRANSFORMS", "128");
+        }
+        let config = ServerConfig::from_env().unwrap();
+        assert_eq!(config.max_concurrent_transforms, 128);
+        unsafe {
+            std::env::remove_var("TRUSS_MAX_CONCURRENT_TRANSFORMS");
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_max_concurrent_transforms_min_boundary() {
+        unsafe {
+            std::env::set_var("TRUSS_MAX_CONCURRENT_TRANSFORMS", "1");
+        }
+        let config = ServerConfig::from_env().unwrap();
+        assert_eq!(config.max_concurrent_transforms, 1);
+        unsafe {
+            std::env::remove_var("TRUSS_MAX_CONCURRENT_TRANSFORMS");
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_max_concurrent_transforms_max_boundary() {
+        unsafe {
+            std::env::set_var("TRUSS_MAX_CONCURRENT_TRANSFORMS", "1024");
+        }
+        let config = ServerConfig::from_env().unwrap();
+        assert_eq!(config.max_concurrent_transforms, 1024);
+        unsafe {
+            std::env::remove_var("TRUSS_MAX_CONCURRENT_TRANSFORMS");
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_max_concurrent_transforms_empty_uses_default() {
+        unsafe {
+            std::env::set_var("TRUSS_MAX_CONCURRENT_TRANSFORMS", "");
+        }
+        let config = ServerConfig::from_env().unwrap();
+        assert_eq!(config.max_concurrent_transforms, 64);
+        unsafe {
+            std::env::remove_var("TRUSS_MAX_CONCURRENT_TRANSFORMS");
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_max_concurrent_transforms_zero_rejected() {
+        unsafe {
+            std::env::set_var("TRUSS_MAX_CONCURRENT_TRANSFORMS", "0");
+        }
+        let err = ServerConfig::from_env().unwrap_err();
+        assert!(
+            err.to_string().contains("between 1 and 1024"),
+            "error should mention valid range: {err}"
+        );
+        unsafe {
+            std::env::remove_var("TRUSS_MAX_CONCURRENT_TRANSFORMS");
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_max_concurrent_transforms_over_max_rejected() {
+        unsafe {
+            std::env::set_var("TRUSS_MAX_CONCURRENT_TRANSFORMS", "1025");
+        }
+        let err = ServerConfig::from_env().unwrap_err();
+        assert!(
+            err.to_string().contains("between 1 and 1024"),
+            "error should mention valid range: {err}"
+        );
+        unsafe {
+            std::env::remove_var("TRUSS_MAX_CONCURRENT_TRANSFORMS");
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_max_concurrent_transforms_non_numeric_rejected() {
+        unsafe {
+            std::env::set_var("TRUSS_MAX_CONCURRENT_TRANSFORMS", "abc");
+        }
+        let err = ServerConfig::from_env().unwrap_err();
+        assert!(
+            err.to_string().contains("positive integer"),
+            "error should mention positive integer: {err}"
+        );
+        unsafe {
+            std::env::remove_var("TRUSS_MAX_CONCURRENT_TRANSFORMS");
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_transform_deadline_default() {
+        unsafe {
+            std::env::remove_var("TRUSS_TRANSFORM_DEADLINE_SECS");
+        }
+        let config = ServerConfig::from_env().unwrap();
+        assert_eq!(config.transform_deadline_secs, 30);
+    }
+
+    #[test]
+    #[serial]
+    fn test_transform_deadline_custom() {
+        unsafe {
+            std::env::set_var("TRUSS_TRANSFORM_DEADLINE_SECS", "60");
+        }
+        let config = ServerConfig::from_env().unwrap();
+        assert_eq!(config.transform_deadline_secs, 60);
+        unsafe {
+            std::env::remove_var("TRUSS_TRANSFORM_DEADLINE_SECS");
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_transform_deadline_min_boundary() {
+        unsafe {
+            std::env::set_var("TRUSS_TRANSFORM_DEADLINE_SECS", "1");
+        }
+        let config = ServerConfig::from_env().unwrap();
+        assert_eq!(config.transform_deadline_secs, 1);
+        unsafe {
+            std::env::remove_var("TRUSS_TRANSFORM_DEADLINE_SECS");
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_transform_deadline_max_boundary() {
+        unsafe {
+            std::env::set_var("TRUSS_TRANSFORM_DEADLINE_SECS", "300");
+        }
+        let config = ServerConfig::from_env().unwrap();
+        assert_eq!(config.transform_deadline_secs, 300);
+        unsafe {
+            std::env::remove_var("TRUSS_TRANSFORM_DEADLINE_SECS");
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_transform_deadline_empty_uses_default() {
+        unsafe {
+            std::env::set_var("TRUSS_TRANSFORM_DEADLINE_SECS", "");
+        }
+        let config = ServerConfig::from_env().unwrap();
+        assert_eq!(config.transform_deadline_secs, 30);
+        unsafe {
+            std::env::remove_var("TRUSS_TRANSFORM_DEADLINE_SECS");
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_transform_deadline_zero_rejected() {
+        unsafe {
+            std::env::set_var("TRUSS_TRANSFORM_DEADLINE_SECS", "0");
+        }
+        let err = ServerConfig::from_env().unwrap_err();
+        assert!(
+            err.to_string().contains("between 1 and 300"),
+            "error should mention valid range: {err}"
+        );
+        unsafe {
+            std::env::remove_var("TRUSS_TRANSFORM_DEADLINE_SECS");
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_transform_deadline_over_max_rejected() {
+        unsafe {
+            std::env::set_var("TRUSS_TRANSFORM_DEADLINE_SECS", "301");
+        }
+        let err = ServerConfig::from_env().unwrap_err();
+        assert!(
+            err.to_string().contains("between 1 and 300"),
+            "error should mention valid range: {err}"
+        );
+        unsafe {
+            std::env::remove_var("TRUSS_TRANSFORM_DEADLINE_SECS");
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_transform_deadline_non_numeric_rejected() {
+        unsafe {
+            std::env::set_var("TRUSS_TRANSFORM_DEADLINE_SECS", "abc");
+        }
+        let err = ServerConfig::from_env().unwrap_err();
+        assert!(
+            err.to_string().contains("positive integer"),
+            "error should mention positive integer: {err}"
+        );
+        unsafe {
+            std::env::remove_var("TRUSS_TRANSFORM_DEADLINE_SECS");
         }
     }
 
