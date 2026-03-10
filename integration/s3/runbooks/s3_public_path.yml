@@ -57,6 +57,31 @@ steps:
       current.res.status == 200
       && current.res.headers['Content-Type'][0] contains 'image/'
 
+  sign_s3only:
+    desc: "Compute signature for s3only.png — exists ONLY in S3, not on local disk"
+    exec:
+      command: |
+        python3 -c "
+        import hmac, hashlib, urllib.parse
+        params = [('expires','{{ vars.expires }}'),('format','png'),('keyId','{{ vars.key_id }}'),('path','/s3only.png')]
+        qs = urllib.parse.urlencode(params)
+        canonical = 'GET\n{{ vars.authority }}\n/images/by-path\n' + qs
+        sig = hmac.new(b'{{ vars.secret }}', canonical.encode(), hashlib.sha256).hexdigest()
+        target = '/images/by-path?' + qs + '&signature=' + sig
+        print(target)
+        "
+    test: |
+      current.stdout != ''
+  get_s3only_png:
+    desc: "GET s3only.png — proves by-path reads from S3, not filesystem fallback"
+    req:
+      "{{ steps.sign_s3only.stdout }}":
+        get:
+          body: null
+    test: |
+      current.res.status == 200
+      && current.res.headers['Content-Type'][0] contains 'image/'
+
   sign_missing:
     desc: "Compute signature for a key that does not exist in S3"
     exec:
