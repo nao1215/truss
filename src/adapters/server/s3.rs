@@ -32,12 +32,13 @@ impl std::fmt::Debug for S3Context {
 }
 
 impl S3Context {
-    /// Returns `true` if the default bucket is reachable.
+    /// Returns `true` if the configured bucket is reachable.
     ///
     /// Issues a GetObject for a key that is extremely unlikely to exist.
-    /// Any *service-level* response (NoSuchKey **or** AccessDenied) proves
-    /// that S3 accepted and processed the request, so we treat both as
-    /// "reachable".  Only transport / timeout errors are treated as failures.
+    /// Most service-level responses (NoSuchKey, AccessDenied) prove that S3
+    /// accepted the request and the bucket exists, so they count as
+    /// "reachable".  `NoSuchBucket` is explicitly treated as *unreachable*
+    /// because it indicates a misconfigured bucket name.
     ///
     /// This deliberately avoids HeadBucket, which requires `s3:ListBucket` —
     /// a permission that read-only image-serving roles should not need.
@@ -58,7 +59,14 @@ impl S3Context {
             )
             .await;
 
-            matches!(result, Ok(Ok(_)) | Ok(Err(SdkError::ServiceError(_))))
+            match result {
+                Ok(Ok(_)) => true,
+                Ok(Err(SdkError::ServiceError(e))) => {
+                    // NoSuchBucket means the bucket name is wrong — not reachable.
+                    e.err().meta().code() != Some("NoSuchBucket")
+                }
+                _ => false,
+            }
         })
     }
 }
@@ -219,15 +227,17 @@ fn map_s3_get_object_error(
                     "source image was not found in object storage",
                 );
             }
-            // When the IAM role lacks s3:ListBucket, AWS returns 403 for
-            // non-existent keys instead of 404.  Map this to 404 so that
-            // callers see consistent "not found" semantics regardless of
-            // the bucket policy.  This also avoids leaking the distinction
-            // between "key exists but denied" vs "key missing" — matching
-            // AWS's own information-hiding intent.
+            // Surface 403 as a distinct error so operators can diagnose
+            // IAM / KMS / bucket-policy issues.  Note: when the IAM role
+            // lacks s3:ListBucket, AWS returns 403 for non-existent keys
+            // instead of 404 — but we intentionally do NOT hide that here,
+            // because the same 403 also fires for genuine access-denied on
+            // existing objects, and masking it would make real permission
+            // problems invisible.  The recommended fix is to grant
+            // s3:ListBucket so that AWS returns proper 404 for missing keys.
             if service_err.raw().status().as_u16() == 403 {
-                return super::response::not_found_response(
-                    "source image was not found in object storage",
+                return super::response::forbidden_response(
+                    "access denied by object storage — check IAM permissions",
                 );
             }
             bad_gateway_response("object storage returned an error")
