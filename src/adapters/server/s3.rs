@@ -31,6 +31,24 @@ impl std::fmt::Debug for S3Context {
     }
 }
 
+impl S3Context {
+    /// Returns `true` if the default bucket is reachable via a HeadBucket call.
+    /// Times out after 2 seconds to avoid blocking the health endpoint.
+    pub fn check_reachable(&self) -> bool {
+        use std::time::Duration;
+        let client = self.client.clone();
+        let bucket = self.default_bucket.clone();
+        self.runtime.block_on(async {
+            tokio::time::timeout(
+                Duration::from_secs(2),
+                client.head_bucket().bucket(&bucket).send(),
+            )
+            .await
+            .is_ok_and(|r| r.is_ok())
+        })
+    }
+}
+
 #[cfg(test)]
 impl S3Context {
     pub(crate) fn for_test(default_bucket: &str, endpoint_url: Option<&str>) -> Self {

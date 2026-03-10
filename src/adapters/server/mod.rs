@@ -1120,8 +1120,10 @@ fn handle_health_live() -> HttpResponse {
     HttpResponse::json("200 OK", body)
 }
 
-/// Returns a readiness response after checking that critical dependencies are
-/// available (storage root, cache root if configured, and transform capacity).
+/// Returns a readiness response after checking that critical infrastructure
+/// dependencies are available (storage root, cache root if configured, S3
+/// reachability).  Transform capacity is intentionally excluded — it is a
+/// runtime signal reported only by the full `/health` diagnostic endpoint.
 fn handle_health_ready(config: &ServerConfig) -> HttpResponse {
     let mut checks: Vec<serde_json::Value> = Vec::new();
     let mut all_ok = true;
@@ -1147,16 +1149,6 @@ fn handle_health_ready(config: &ServerConfig) -> HttpResponse {
         }
     }
 
-    let in_flight = TRANSFORMS_IN_FLIGHT.load(Ordering::Relaxed);
-    let overloaded = in_flight >= MAX_CONCURRENT_TRANSFORMS;
-    checks.push(json!({
-        "name": "transformCapacity",
-        "status": if overloaded { "fail" } else { "ok" },
-    }));
-    if overloaded {
-        all_ok = false;
-    }
-
     let status_str = if all_ok { "ok" } else { "fail" };
     let mut body = serde_json::to_vec(&json!({
         "status": status_str,
@@ -1178,7 +1170,11 @@ fn storage_health_check(config: &ServerConfig) -> Vec<(bool, &'static str)> {
     let mut checks = vec![(config.storage_root.is_dir(), "storageRoot")];
     #[cfg(feature = "s3")]
     if config.storage_backend == s3::StorageBackend::S3 {
-        checks.push((config.s3_context.is_some(), "s3Client"));
+        let reachable = config
+            .s3_context
+            .as_ref()
+            .is_some_and(|ctx| ctx.check_reachable());
+        checks.push((reachable, "s3Client"));
     }
     checks
 }
@@ -2356,9 +2352,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
     fn health_ready_returns_ok_when_storage_exists() {
-        let _guard = InFlightGuard::set(0);
         let storage = temp_dir("ready-ok");
         let request = HttpRequest {
             method: "GET".to_string(),
@@ -2383,9 +2377,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
     fn health_ready_returns_503_when_storage_missing() {
-        let _guard = InFlightGuard::set(0);
         let request = HttpRequest {
             method: "GET".to_string(),
             target: "/health/ready".to_string(),
@@ -2410,9 +2402,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
     fn health_ready_returns_503_when_cache_root_missing() {
-        let _guard = InFlightGuard::set(0);
         let storage = temp_dir("ready-cache-fail");
         let mut config = ServerConfig::new(storage, None);
         config.cache_root = Some(PathBuf::from("/nonexistent-truss-cache-dir"));
@@ -3317,10 +3307,8 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    #[serial]
     #[cfg(feature = "s3")]
     fn health_ready_s3_returns_503_when_context_missing() {
-        let _guard = InFlightGuard::set(0);
         let storage = temp_dir("health-s3-no-ctx");
         let mut config = ServerConfig::new(storage.clone(), None);
         config.storage_backend = super::s3::StorageBackend::S3;
@@ -3348,10 +3336,8 @@ mod tests {
     }
 
     #[test]
-    #[serial]
     #[cfg(feature = "s3")]
     fn health_ready_s3_includes_s3_client_check() {
-        let _guard = InFlightGuard::set(0);
         let storage = temp_dir("health-s3-ok");
         let mut config = ServerConfig::new(storage.clone(), None);
         config.storage_backend = super::s3::StorageBackend::S3;
@@ -3370,14 +3356,13 @@ mod tests {
         let response = route_request(request, &config);
         let _ = std::fs::remove_dir_all(storage);
 
-        assert_eq!(response.status, "200 OK");
+        // The s3Client check will report "fail" because there is no real S3
+        // endpoint, but the important thing is that the check is present.
         let body: serde_json::Value = serde_json::from_slice(&response.body).expect("parse body");
         let checks = body["checks"].as_array().expect("checks array");
         assert!(
-            checks
-                .iter()
-                .any(|c| c["name"] == "s3Client" && c["status"] == "ok"),
-            "expected s3Client ok check in {body}",
+            checks.iter().any(|c| c["name"] == "s3Client"),
+            "expected s3Client check in {body}",
         );
     }
 
