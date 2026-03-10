@@ -3611,7 +3611,7 @@ mod tests {
         with_s3_env(
             &[
                 ("TRUSS_STORAGE_ROOT", Some(&storage_str)),
-                ("TRUSS_STORAGE_BACKEND", Some("azure")),
+                ("TRUSS_STORAGE_BACKEND", Some("nosuchbackend")),
                 ("TRUSS_S3_BUCKET", None),
             ],
             || {

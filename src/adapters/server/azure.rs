@@ -282,4 +282,41 @@ mod tests {
         assert!(validate_azure_key("a..b/file.jpg").is_ok());
         assert!(validate_azure_key(".hidden/file.jpg").is_ok());
     }
+
+    /// Helper: build an `azure_core::Error` with the given HTTP status code.
+    fn http_error(status: azure_core::http::StatusCode) -> azure_core::Error {
+        azure_core::error::ErrorKind::HttpResponse {
+            status,
+            error_code: None,
+            raw_response: None,
+        }
+        .into_error()
+    }
+
+    #[test]
+    fn test_map_azure_error_404_returns_not_found() {
+        let resp = map_azure_error(http_error(azure_core::http::StatusCode::NotFound));
+        assert_eq!(resp.status, "404 Not Found");
+    }
+
+    #[test]
+    fn test_map_azure_error_403_returns_forbidden() {
+        let resp = map_azure_error(http_error(azure_core::http::StatusCode::Forbidden));
+        assert_eq!(resp.status, "403 Forbidden");
+    }
+
+    #[test]
+    fn test_map_azure_error_500_returns_bad_gateway() {
+        let resp = map_azure_error(http_error(
+            azure_core::http::StatusCode::InternalServerError,
+        ));
+        assert_eq!(resp.status, "502 Bad Gateway");
+    }
+
+    #[test]
+    fn test_map_azure_error_non_http_returns_bad_gateway() {
+        let err = azure_core::error::ErrorKind::Other.into_error();
+        let resp = map_azure_error(err);
+        assert_eq!(resp.status, "502 Bad Gateway");
+    }
 }

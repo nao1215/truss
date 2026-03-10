@@ -51,8 +51,14 @@ jobs:
       - name: Run GCS unit tests
         run: cargo test --features gcs --all-targets
 
+      - name: Run Azure unit tests
+        run: cargo test --features azure --all-targets
+
       - name: Run S3+GCS unit tests
         run: cargo test --features s3,gcs --all-targets
+
+      - name: Run S3+GCS+Azure unit tests
+        run: cargo test --features s3,gcs,azure --all-targets
 
   clippy:
     runs-on: ubuntu-latest
@@ -77,8 +83,14 @@ jobs:
       - name: Run clippy (GCS)
         run: cargo clippy --features gcs --all-targets -- -D warnings
 
+      - name: Run clippy (Azure)
+        run: cargo clippy --features azure --all-targets -- -D warnings
+
       - name: Run clippy (S3+GCS)
         run: cargo clippy --features s3,gcs --all-targets -- -D warnings
+
+      - name: Run clippy (S3+GCS+Azure)
+        run: cargo clippy --features s3,gcs,azure --all-targets -- -D warnings
 
   fmt:
     runs-on: ubuntu-latest

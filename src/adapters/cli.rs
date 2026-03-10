@@ -226,6 +226,7 @@ ENVIRONMENT VARIABLES:
         "\
   TRUSS_AZURE_BUCKET                  Default Azure container name (required when backend=azure)
   TRUSS_AZURE_ENDPOINT                Custom Azure Blob endpoint URL (for Azurite, etc.)
+  AZURE_STORAGE_ACCOUNT_NAME          Storage account name (derives endpoint when TRUSS_AZURE_ENDPOINT is unset)
 ",
     );
 
