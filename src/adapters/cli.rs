@@ -184,8 +184,9 @@ ENVIRONMENT VARIABLES:
   TRUSS_SIGNED_URL_SECRET             Signing shared secret
   TRUSS_ALLOW_INSECURE_URL_SOURCES    Enable insecure URL sources
   TRUSS_CACHE_ROOT                    On-disk transform cache directory
-  TRUSS_STORAGE_BACKEND               Storage backend: filesystem (default) or s3
+  TRUSS_STORAGE_BACKEND               Source for public by-path resolution: filesystem (default) or s3
   TRUSS_S3_BUCKET                     Default S3 bucket name (required when backend=s3)
+  TRUSS_S3_FORCE_PATH_STYLE           Use path-style S3 addressing (set to 1/true/yes/on for MinIO, etc.)
 
 EXAMPLES:
   truss serve --bind 0.0.0.0:8080 --storage-root /var/images
