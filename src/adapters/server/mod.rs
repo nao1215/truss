@@ -1068,7 +1068,14 @@ pub fn serve_with_config(listener: TcpListener, config: &ServerConfig) -> io::Re
         let rx = Arc::clone(&receiver);
         let cfg = Arc::clone(&config);
         workers.push(std::thread::spawn(move || {
-            while let Ok(stream) = rx.lock().expect("worker lock poisoned").recv() {
+            loop {
+                let stream = {
+                    let guard = rx.lock().expect("worker lock poisoned");
+                    match guard.recv() {
+                        Ok(stream) => stream,
+                        Err(_) => break,
+                    }
+                }; // MutexGuard dropped here — before handle_stream runs.
                 if let Err(err) = handle_stream(stream, &cfg) {
                     cfg.log(&format!("failed to handle connection: {err}"));
                 }
