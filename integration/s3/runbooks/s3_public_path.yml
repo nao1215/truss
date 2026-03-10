@@ -18,7 +18,7 @@ steps:
         canonical = 'GET\n{{ vars.authority }}\n/images/by-path\n' + qs
         sig = hmac.new(b'{{ vars.secret }}', canonical.encode(), hashlib.sha256).hexdigest()
         target = '/images/by-path?' + qs + '&signature=' + sig
-        print(target)
+        import sys; sys.stdout.write(target)
         "
     test: |
       current.stdout != ''
@@ -43,7 +43,7 @@ steps:
         canonical = 'GET\n{{ vars.authority }}\n/images/by-path\n' + qs
         sig = hmac.new(b'{{ vars.secret }}', canonical.encode(), hashlib.sha256).hexdigest()
         target = '/images/by-path?' + qs + '&signature=' + sig
-        print(target)
+        import sys; sys.stdout.write(target)
         "
     test: |
       current.stdout != ''
@@ -68,7 +68,7 @@ steps:
         canonical = 'GET\n{{ vars.authority }}\n/images/by-path\n' + qs
         sig = hmac.new(b'{{ vars.secret }}', canonical.encode(), hashlib.sha256).hexdigest()
         target = '/images/by-path?' + qs + '&signature=' + sig
-        print(target)
+        import sys; sys.stdout.write(target)
         "
     test: |
       current.stdout != ''
@@ -93,7 +93,7 @@ steps:
         canonical = 'GET\n{{ vars.authority }}\n/images/by-path\n' + qs
         sig = hmac.new(b'{{ vars.secret }}', canonical.encode(), hashlib.sha256).hexdigest()
         target = '/images/by-path?' + qs + '&signature=' + sig
-        print(target)
+        import sys; sys.stdout.write(target)
         "
     test: |
       current.stdout != ''
@@ -117,7 +117,7 @@ steps:
         canonical = 'GET\n{{ vars.authority }}\n/images/by-path\n' + qs
         sig = hmac.new(b'{{ vars.secret }}', canonical.encode(), hashlib.sha256).hexdigest()
         target = '/images/by-path?' + qs + '&signature=' + sig
-        print(target)
+        import sys; sys.stdout.write(target)
         "
     test: |
       current.stdout != ''

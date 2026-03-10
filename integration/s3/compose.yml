@@ -55,4 +55,4 @@ services:
       SERVER_HOST: nginx
       SERVER_PORT: "80"
     entrypoint: ["/bin/bash", "/setup-fixtures.sh"]
-    command: ["runn", "run", "/runbooks/*.yml", "--verbose", "--scopes", "read:parent"]
+    command: ["runn", "run", "/runbooks/*.yml", "--verbose", "--scopes", "read:parent,run:exec"]
