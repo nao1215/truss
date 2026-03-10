@@ -1477,9 +1477,7 @@ fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io::Result<()>
         if requires_auth
             && let Err(mut response) = authorize_request_headers(&partial.headers, config)
         {
-            response
-                .headers
-                .push(("X-Request-Id", request_id.clone()));
+            response.headers.push(("X-Request-Id", request_id.clone()));
             let sc = status_code(response.status).unwrap_or("unknown");
             let method_log = partial.method.clone();
             let path_log = partial.path().to_string();
@@ -1506,9 +1504,7 @@ fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io::Result<()>
         let request = match read_request_body(&mut stream, partial) {
             Ok(request) => request,
             Err(mut response) => {
-                response
-                    .headers
-                    .push(("X-Request-Id", request_id.clone()));
+                response.headers.push(("X-Request-Id", request_id.clone()));
                 let sc = status_code(response.status).unwrap_or("unknown");
                 let _ = write_response(&mut stream, response, true);
                 emit_access_log(
@@ -1530,9 +1526,7 @@ fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io::Result<()>
         let mut response = route_request(request, config);
         record_http_metrics(route, response.status);
 
-        response
-            .headers
-            .push(("X-Request-Id", request_id.clone()));
+        response.headers.push(("X-Request-Id", request_id.clone()));
 
         let cache_status = extract_cache_status(&response.headers);
 
@@ -2596,10 +2590,7 @@ mod tests {
             "Content-Disposition",
             "inline; filename=\"truss.webp\"".to_string()
         )));
-        assert!(headers.contains(&(
-            "Cache-Status",
-            "\"truss\"; fwd=miss".to_string()
-        )));
+        assert!(headers.contains(&("Cache-Status", "\"truss\"; fwd=miss".to_string())));
     }
 
     #[test]
@@ -2851,10 +2842,7 @@ mod tests {
             DEFAULT_PUBLIC_MAX_AGE_SECONDS,
             DEFAULT_PUBLIC_STALE_WHILE_REVALIDATE_SECONDS,
         );
-        assert!(headers.contains(&(
-            "Cache-Status",
-            "\"truss\"; fwd=miss".to_string()
-        )));
+        assert!(headers.contains(&("Cache-Status", "\"truss\"; fwd=miss".to_string())));
     }
 
     #[test]
@@ -3131,10 +3119,7 @@ mod tests {
         let response = route_request(request, &ServerConfig::new(temp_dir("not-found"), None));
 
         assert_eq!(response.status, "404 Not Found");
-        assert_eq!(
-            response.content_type.as_deref(),
-            Some("application/problem+json")
-        );
+        assert_eq!(response.content_type, Some("application/problem+json"));
         let body = response_body(&response);
         assert!(body.contains("\"type\":\"about:blank\""));
         assert!(body.contains("\"title\":\"Not Found\""));
@@ -3183,7 +3168,7 @@ mod tests {
         );
 
         assert_eq!(response.status, "200 OK");
-        assert_eq!(response.content_type.as_deref(), Some("image/jpeg"));
+        assert_eq!(response.content_type, Some("image/jpeg"));
 
         let artifact = sniff_artifact(RawArtifact::new(response.body, None)).expect("sniff output");
         assert_eq!(artifact.media_type, MediaType::Jpeg);
@@ -3219,7 +3204,7 @@ mod tests {
         handle.join().expect("join fixture server");
 
         assert_eq!(response.status, "200 OK");
-        assert_eq!(response.content_type.as_deref(), Some("image/jpeg"));
+        assert_eq!(response.content_type, Some("image/jpeg"));
 
         let artifact = sniff_artifact(RawArtifact::new(response.body, None)).expect("sniff output");
         assert_eq!(artifact.media_type, MediaType::Jpeg);
@@ -3261,7 +3246,7 @@ mod tests {
         );
 
         assert_eq!(response.status, "200 OK");
-        assert_eq!(response.content_type.as_deref(), Some("image/jpeg"));
+        assert_eq!(response.content_type, Some("image/jpeg"));
 
         let artifact = sniff_artifact(RawArtifact::new(response.body, None)).expect("sniff output");
         assert_eq!(artifact.media_type, MediaType::Jpeg);
@@ -3354,7 +3339,7 @@ mod tests {
 
         assert_eq!(response.status, "200 OK");
         assert_eq!(
-            response.content_type.as_deref(),
+            response.content_type,
             Some("text/plain; version=0.0.4; charset=utf-8")
         );
         assert!(body.contains("truss_http_requests_total"));
@@ -3454,14 +3439,11 @@ mod tests {
         let bad_request = bad_request_response("bad input");
 
         assert_eq!(
-            response.content_type.as_deref(),
+            response.content_type,
             Some("application/problem+json"),
             "error responses must use application/problem+json"
         );
-        assert_eq!(
-            bad_request.content_type.as_deref(),
-            Some("application/problem+json"),
-        );
+        assert_eq!(bad_request.content_type, Some("application/problem+json"),);
 
         let auth_body = response_body(&response);
         assert!(auth_body.contains("authorization required"));
@@ -5018,10 +5000,8 @@ mod tests {
 
     #[test]
     fn cache_status_miss_detected() {
-        let headers: Vec<(&str, String)> = vec![(
-            "Cache-Status",
-            "\"truss\"; fwd=miss".to_string(),
-        )];
+        let headers: Vec<(&str, String)> =
+            vec![("Cache-Status", "\"truss\"; fwd=miss".to_string())];
         assert_eq!(super::extract_cache_status(&headers), Some("miss"));
     }
 
