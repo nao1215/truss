@@ -881,6 +881,22 @@ mod tests {
     }
 
     #[test]
+    fn sanitize_removes_entity_escaped_external_css_url() {
+        // Entity-escaped text: `&amp;` in the URL and the scheme itself
+        // must still be detected as dangerous after unescape.
+        let svg = b"<svg xmlns=\"http://www.w3.org/2000/svg\"><style>rect { fill: url(https://evil.example/a?x=1&amp;y=2) }</style><rect width=\"10\" height=\"10\"/></svg>";
+        let result = sanitize_svg(svg).unwrap();
+        assert!(
+            !result.contains("evil.example"),
+            "entity-escaped external CSS url() should be removed"
+        );
+        assert!(
+            result.contains("url()"),
+            "dangerous url() should be emptied"
+        );
+    }
+
+    #[test]
     fn sanitize_removes_css_import() {
         let svg = b"<svg xmlns=\"http://www.w3.org/2000/svg\"><style>@import url(\"https://evil.com/style.css\"); rect { fill: red }</style></svg>";
         let result = sanitize_svg(svg).unwrap();

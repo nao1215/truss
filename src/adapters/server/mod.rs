@@ -1372,6 +1372,23 @@ struct AccessLogEntry<'a> {
     cache_status: Option<&'a str>,
 }
 
+/// Extracts the `X-Request-Id` header value from request headers.
+/// Returns `None` if the header is absent or empty.
+fn extract_request_id(headers: &[(String, String)]) -> Option<String> {
+    headers.iter().find_map(|(name, value)| {
+        (name == "x-request-id" && !value.is_empty()).then_some(value.clone())
+    })
+}
+
+/// Classifies the `Cache-Status` response header as `"hit"` or `"miss"`.
+/// Returns `None` when the header is absent.
+fn extract_cache_status(headers: &[(String, String)]) -> Option<&'static str> {
+    headers
+        .iter()
+        .find_map(|(name, value)| (name == "Cache-Status").then_some(value.as_str()))
+        .map(|v| if v.contains("hit") { "hit" } else { "miss" })
+}
+
 fn emit_access_log(config: &ServerConfig, entry: &AccessLogEntry<'_>) {
     config.log(
         &json!({
@@ -1400,8 +1417,6 @@ fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io::Result<()>
     let mut requests_served: usize = 0;
 
     loop {
-        let start = Instant::now();
-
         let partial = match read_request_headers(&mut stream) {
             Ok(partial) => partial,
             Err(response) => {
@@ -1413,13 +1428,12 @@ fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io::Result<()>
             }
         };
 
-        let request_id = partial
-            .headers
-            .iter()
-            .find_map(|(name, value)| {
-                (name == "x-request-id" && !value.is_empty()).then_some(value.clone())
-            })
-            .unwrap_or_else(|| Uuid::new_v4().to_string());
+        // Start timing after headers are read so latency reflects server
+        // processing time, not client send / socket-wait time.
+        let start = Instant::now();
+
+        let request_id =
+            extract_request_id(&partial.headers).unwrap_or_else(|| Uuid::new_v4().to_string());
 
         let client_wants_close = partial
             .headers
@@ -1445,6 +1459,7 @@ fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io::Result<()>
                 .split_whitespace()
                 .next()
                 .unwrap_or("unknown");
+            let _ = write_response(&mut stream, response, true);
             emit_access_log(
                 config,
                 &AccessLogEntry {
@@ -1457,7 +1472,6 @@ fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io::Result<()>
                     cache_status: None,
                 },
             );
-            let _ = write_response(&mut stream, response, true);
             return Ok(());
         }
 
@@ -1472,6 +1486,7 @@ fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io::Result<()>
                     .split_whitespace()
                     .next()
                     .unwrap_or("unknown");
+                let _ = write_response(&mut stream, response, true);
                 emit_access_log(
                     config,
                     &AccessLogEntry {
@@ -1484,7 +1499,6 @@ fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io::Result<()>
                         cache_status: None,
                     },
                 );
-                let _ = write_response(&mut stream, response, true);
                 return Ok(());
             }
         };
@@ -1499,17 +1513,22 @@ fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io::Result<()>
             .headers
             .push(("X-Request-Id".to_string(), request_id.clone()));
 
-        let cache_status = response
-            .headers
-            .iter()
-            .find_map(|(name, value)| (name == "Cache-Status").then_some(value.as_str()))
-            .map(|v| if v.contains("hit") { "hit" } else { "miss" });
+        let cache_status = extract_cache_status(&response.headers);
 
         let status_code = response
             .status
             .split_whitespace()
             .next()
             .unwrap_or("unknown");
+
+        if is_head {
+            response.body = Vec::new();
+        }
+
+        requests_served += 1;
+        let close_after = client_wants_close || requests_served >= KEEP_ALIVE_MAX_REQUESTS;
+
+        write_response(&mut stream, response, close_after)?;
 
         emit_access_log(
             config,
@@ -1523,15 +1542,6 @@ fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io::Result<()>
                 cache_status,
             },
         );
-
-        if is_head {
-            response.body = Vec::new();
-        }
-
-        requests_served += 1;
-        let close_after = client_wants_close || requests_served >= KEEP_ALIVE_MAX_REQUESTS;
-
-        write_response(&mut stream, response, close_after)?;
 
         if close_after {
             return Ok(());
@@ -4959,66 +4969,48 @@ mod tests {
 
     #[test]
     fn x_request_id_is_extracted_from_incoming_headers() {
-        let headers = [
+        let headers = vec![
             ("host".to_string(), "localhost".to_string()),
             ("x-request-id".to_string(), "custom-id-abc".to_string()),
         ];
-        let extracted = headers.iter().find_map(|(name, value)| {
-            (name == "x-request-id" && !value.is_empty()).then_some(value.clone())
-        });
-        assert_eq!(extracted, Some("custom-id-abc".to_string()));
+        assert_eq!(
+            super::extract_request_id(&headers),
+            Some("custom-id-abc".to_string())
+        );
     }
 
     #[test]
     fn x_request_id_not_extracted_when_empty() {
-        let headers = [("x-request-id".to_string(), "".to_string())];
-        let extracted = headers.iter().find_map(|(name, value)| {
-            (name == "x-request-id" && !value.is_empty()).then_some(value.clone())
-        });
-        assert!(extracted.is_none());
+        let headers = vec![("x-request-id".to_string(), "".to_string())];
+        assert!(super::extract_request_id(&headers).is_none());
     }
 
     #[test]
     fn x_request_id_not_extracted_when_absent() {
-        let headers = [("host".to_string(), "localhost".to_string())];
-        let extracted = headers.iter().find_map(|(name, value)| {
-            (name == "x-request-id" && !value.is_empty()).then_some(value.clone())
-        });
-        assert!(extracted.is_none());
+        let headers = vec![("host".to_string(), "localhost".to_string())];
+        assert!(super::extract_request_id(&headers).is_none());
     }
 
     // ── Cache status extraction ───────────────────────────────────────
 
     #[test]
     fn cache_status_hit_detected() {
-        let headers = [("Cache-Status".to_string(), "\"truss\"; hit".to_string())];
-        let status = headers
-            .iter()
-            .find_map(|(name, value)| (name == "Cache-Status").then_some(value.as_str()))
-            .map(|v| if v.contains("hit") { "hit" } else { "miss" });
-        assert_eq!(status, Some("hit"));
+        let headers = vec![("Cache-Status".to_string(), "\"truss\"; hit".to_string())];
+        assert_eq!(super::extract_cache_status(&headers), Some("hit"));
     }
 
     #[test]
     fn cache_status_miss_detected() {
-        let headers = [(
+        let headers = vec![(
             "Cache-Status".to_string(),
             "\"truss\"; fwd=miss".to_string(),
         )];
-        let status = headers
-            .iter()
-            .find_map(|(name, value)| (name == "Cache-Status").then_some(value.as_str()))
-            .map(|v| if v.contains("hit") { "hit" } else { "miss" });
-        assert_eq!(status, Some("miss"));
+        assert_eq!(super::extract_cache_status(&headers), Some("miss"));
     }
 
     #[test]
     fn cache_status_none_when_header_absent() {
-        let headers = [("Content-Type".to_string(), "image/png".to_string())];
-        let status = headers
-            .iter()
-            .find_map(|(name, value)| (name == "Cache-Status").then_some(value.as_str()))
-            .map(|v| if v.contains("hit") { "hit" } else { "miss" });
-        assert!(status.is_none());
+        let headers = vec![("Content-Type".to_string(), "image/png".to_string())];
+        assert!(super::extract_cache_status(&headers).is_none());
     }
 }
