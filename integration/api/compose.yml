@@ -28,4 +28,4 @@ services:
     volumes:
       - ./runbooks:/runbooks:ro
       - ../fixtures:/fixtures:ro
-    command: ["runn", "run", "/runbooks/*.yml", "--verbose", "--scopes", "read:parent"]
+    command: ["run", "/runbooks/*.yml", "--verbose", "--scopes", "read:parent"]
