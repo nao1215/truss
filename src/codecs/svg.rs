@@ -244,7 +244,8 @@ fn sanitize_svg(bytes: &[u8]) -> Result<String, TransformError> {
                     continue;
                 }
                 if in_style {
-                    let text = e.unescape().unwrap_or_default();
+                    let decoded = e.decode().unwrap_or_default();
+                    let text = quick_xml::escape::unescape(&decoded).unwrap_or_default();
                     let sanitized_css = sanitize_css_urls(&text);
                     let text_event = quick_xml::events::BytesText::new(&sanitized_css);
                     writer
