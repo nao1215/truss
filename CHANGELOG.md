@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v0.4.0
+
 ### Added
 
 - S3-compatible object storage backend (`--features s3`).
@@ -9,6 +11,25 @@
 - Azure Blob Storage backend (`--features azure`).
 - SSRF validation for S3/GCS/Azure backend endpoint URLs.
 - Signed URL support for S3/GCS/Azure source images.
+- Structured JSON access logs with request ID (`X-Request-Id`) and RAII concurrency guard.
+- Configurable server concurrency and deadline limits.
+- Startup health check for storage backends (fail-fast).
+- Configurable storage timeout via `TRUSS_STORAGE_TIMEOUT_SECS`.
+
+### Changed
+
+- Bump `quick-xml` 0.37→0.39 and `resvg` 0.45→0.47.
+- Azure environment variable renamed from `TRUSS_AZURE_BUCKET` to `TRUSS_AZURE_CONTAINER`.
+- Use `subtle::ConstantTimeEq` for bearer token comparison.
+- Graceful shutdown with 30-second deadline.
+- Backend 401 responses mapped to 502 Bad Gateway.
+- Health check name unified to `storageBackend` across all backends.
+- Debug output masks `bearer_token` and `signed_url_secret` as `[REDACTED]`.
+
+### Fixed
+
+- Access-log latency measured after header read and after response write.
+- Per-server in-flight counter and pool sizing.
 
 ## v0.3.0
 
