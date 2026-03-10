@@ -55,5 +55,7 @@ tokio = { version = "1", features = ["rt", "rt-multi-thread", "io-util"], option
 google-cloud-storage = { version = "1", optional = true }
 
 [dev-dependencies]
+bytes = "1"
+http = "1"
 serial_test = "3"
 tempfile = "3"

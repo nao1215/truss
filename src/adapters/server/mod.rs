@@ -592,6 +592,8 @@ impl ServerConfig {
             parse_optional_env_u32("TRUSS_PUBLIC_STALE_WHILE_REVALIDATE")?
                 .unwrap_or(DEFAULT_PUBLIC_STALE_WHILE_REVALIDATE_SECONDS);
 
+        let allow_insecure_url_sources = env_flag("TRUSS_ALLOW_INSECURE_URL_SOURCES");
+
         #[cfg(feature = "s3")]
         let s3_context = if storage_backend == StorageBackend::S3 {
             let bucket = env::var("TRUSS_S3_BUCKET")
@@ -603,7 +605,10 @@ impl ServerConfig {
                         "TRUSS_S3_BUCKET is required when TRUSS_STORAGE_BACKEND=s3",
                     )
                 })?;
-            Some(Arc::new(s3::build_s3_context(bucket)?))
+            Some(Arc::new(s3::build_s3_context(
+                bucket,
+                allow_insecure_url_sources,
+            )?))
         } else {
             None
         };
@@ -619,7 +624,10 @@ impl ServerConfig {
                         "TRUSS_GCS_BUCKET is required when TRUSS_STORAGE_BACKEND=gcs",
                     )
                 })?;
-            Some(Arc::new(gcs::build_gcs_context(bucket)?))
+            Some(Arc::new(gcs::build_gcs_context(
+                bucket,
+                allow_insecure_url_sources,
+            )?))
         } else {
             if env::var("TRUSS_GCS_BUCKET")
                 .ok()
@@ -641,7 +649,7 @@ impl ServerConfig {
             public_base_url,
             signed_url_key_id,
             signed_url_secret,
-            allow_insecure_url_sources: env_flag("TRUSS_ALLOW_INSECURE_URL_SOURCES"),
+            allow_insecure_url_sources,
             cache_root,
             public_max_age_seconds,
             public_stale_while_revalidate_seconds,

@@ -45,6 +45,15 @@ jobs:
       - name: Run doc tests
         run: cargo test --doc
 
+      - name: Run S3 unit tests
+        run: cargo test --features s3 --all-targets
+
+      - name: Run GCS unit tests
+        run: cargo test --features gcs --all-targets
+
+      - name: Run S3+GCS unit tests
+        run: cargo test --features s3,gcs --all-targets
+
   clippy:
     runs-on: ubuntu-latest
     steps:
@@ -61,6 +70,15 @@ jobs:
 
       - name: Run clippy
         run: cargo clippy --all-targets -- -D warnings
+
+      - name: Run clippy (S3)
+        run: cargo clippy --features s3 --all-targets -- -D warnings
+
+      - name: Run clippy (GCS)
+        run: cargo clippy --features gcs --all-targets -- -D warnings
+
+      - name: Run clippy (S3+GCS)
+        run: cargo clippy --features s3,gcs --all-targets -- -D warnings
 
   fmt:
     runs-on: ubuntu-latest

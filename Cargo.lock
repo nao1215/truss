@@ -4260,11 +4260,13 @@ version = "0.3.0"
 dependencies = [
  "aws-config",
  "aws-sdk-s3",
+ "bytes",
  "clap",
  "clap_complete",
  "google-cloud-storage",
  "hex",
  "hmac",
+ "http 1.4.0",
  "image",
  "kamadak-exif",
  "mp4parse",

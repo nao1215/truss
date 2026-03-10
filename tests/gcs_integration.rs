@@ -63,7 +63,7 @@ fn gcs_mock_context() -> GcsContext {
         std::env::set_var("GOOGLE_APPLICATION_CREDENTIALS_JSON", "{}");
     }
 
-    build_gcs_context(TEST_BUCKET.to_string()).expect("build gcs context for fake-gcs-server")
+    build_gcs_context(TEST_BUCKET.to_string(), true).expect("build gcs context for fake-gcs-server")
 }
 
 /// Create a persistent temp directory that is not automatically deleted.

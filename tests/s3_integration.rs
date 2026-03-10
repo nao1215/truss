@@ -65,7 +65,7 @@ fn s3mock_context() -> S3Context {
         std::env::set_var("TRUSS_S3_FORCE_PATH_STYLE", "true");
     }
 
-    build_s3_context(TEST_BUCKET.to_string()).expect("build s3 context for s3mock")
+    build_s3_context(TEST_BUCKET.to_string(), true).expect("build s3 context for s3mock")
 }
 
 /// Create a persistent temp directory that is not automatically deleted.

@@ -101,7 +101,10 @@ impl S3Context {
 /// the client uses path-style addressing (`http://endpoint/bucket/key`)
 /// instead of virtual-hosted-style (`http://bucket.endpoint/key`). This is
 /// required for most S3-compatible services (MinIO, LocalStack, adobe/s3mock).
-pub fn build_s3_context(default_bucket: String) -> Result<S3Context, std::io::Error> {
+pub fn build_s3_context(
+    default_bucket: String,
+    allow_insecure: bool,
+) -> Result<S3Context, std::io::Error> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(1)
         .enable_all()
@@ -110,6 +113,9 @@ pub fn build_s3_context(default_bucket: String) -> Result<S3Context, std::io::Er
         aws_config::BehaviorVersion::latest(),
     ));
     let endpoint_url = sdk_config.endpoint_url().map(|s| s.to_string());
+    if let Some(ref url) = endpoint_url {
+        super::remote::validate_backend_endpoint_url(url, "AWS_ENDPOINT_URL", allow_insecure)?;
+    }
     let force_path_style = matches!(
         std::env::var("TRUSS_S3_FORCE_PATH_STYLE")
             .unwrap_or_default()

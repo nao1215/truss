@@ -111,7 +111,10 @@ impl GcsContext {
 /// When `TRUSS_GCS_ENDPOINT` is set, the client uses that URL instead of
 /// the default GCS endpoint. This is required for emulators like
 /// `fake-gcs-server`.
-pub fn build_gcs_context(default_bucket: String) -> Result<GcsContext, std::io::Error> {
+pub fn build_gcs_context(
+    default_bucket: String,
+    allow_insecure: bool,
+) -> Result<GcsContext, std::io::Error> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(1)
         .enable_all()
@@ -122,7 +125,7 @@ pub fn build_gcs_context(default_bucket: String) -> Result<GcsContext, std::io::
         .filter(|v| !v.is_empty());
 
     if let Some(ref url) = endpoint_url {
-        validate_endpoint_url(url)?;
+        super::remote::validate_backend_endpoint_url(url, "TRUSS_GCS_ENDPOINT", allow_insecure)?;
     }
 
     let client = runtime
@@ -133,7 +136,7 @@ pub fn build_gcs_context(default_bucket: String) -> Result<GcsContext, std::io::
             }
             builder.build().await
         })
-        .map_err(|e| std::io::Error::other(e.to_string()))?;
+        .map_err(std::io::Error::other)?;
 
     Ok(GcsContext {
         client,
@@ -190,39 +193,6 @@ pub(super) fn read_gcs_source_bytes(
         }
         Ok(buf)
     })
-}
-
-/// Validates the custom endpoint URL to prevent SSRF against cloud metadata
-/// services and other internal endpoints.
-fn validate_endpoint_url(url: &str) -> Result<(), std::io::Error> {
-    let parsed: url::Url = url.parse().map_err(|e| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!("TRUSS_GCS_ENDPOINT is not a valid URL: {e}"),
-        )
-    })?;
-
-    match parsed.scheme() {
-        "http" | "https" => {}
-        other => {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("TRUSS_GCS_ENDPOINT must use http or https scheme, got `{other}`"),
-            ));
-        }
-    }
-
-    if let Some(host) = parsed.host_str() {
-        // Block the cloud metadata endpoint (169.254.169.254) used by AWS/GCP/Azure.
-        if host == "169.254.169.254" || host == "metadata.google.internal" {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "TRUSS_GCS_ENDPOINT must not point to a cloud metadata service",
-            ));
-        }
-    }
-
-    Ok(())
 }
 
 /// Validates that a GCS object name does not contain dangerous characters.
@@ -303,29 +273,26 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_endpoint_url_accepts_http() {
-        assert!(validate_endpoint_url("http://localhost:4443").is_ok());
+    fn test_map_gcs_error_404_returns_not_found() {
+        let err =
+            google_cloud_storage::Error::http(404, http::HeaderMap::new(), bytes::Bytes::new());
+        let resp = map_gcs_error(err);
+        assert_eq!(resp.status, "404 Not Found");
     }
 
     #[test]
-    fn test_validate_endpoint_url_accepts_https() {
-        assert!(validate_endpoint_url("https://storage.googleapis.com").is_ok());
+    fn test_map_gcs_error_403_returns_forbidden() {
+        let err =
+            google_cloud_storage::Error::http(403, http::HeaderMap::new(), bytes::Bytes::new());
+        let resp = map_gcs_error(err);
+        assert_eq!(resp.status, "403 Forbidden");
     }
 
     #[test]
-    fn test_validate_endpoint_url_rejects_non_http_scheme() {
-        assert!(validate_endpoint_url("ftp://example.com").is_err());
-        assert!(validate_endpoint_url("file:///etc/passwd").is_err());
-    }
-
-    #[test]
-    fn test_validate_endpoint_url_rejects_metadata_service() {
-        assert!(validate_endpoint_url("http://169.254.169.254/latest/meta-data").is_err());
-        assert!(validate_endpoint_url("http://metadata.google.internal/computeMetadata").is_err());
-    }
-
-    #[test]
-    fn test_validate_endpoint_url_rejects_invalid_url() {
-        assert!(validate_endpoint_url("not a url").is_err());
+    fn test_map_gcs_error_500_returns_bad_gateway() {
+        let err =
+            google_cloud_storage::Error::http(500, http::HeaderMap::new(), bytes::Bytes::new());
+        let resp = map_gcs_error(err);
+        assert_eq!(resp.status, "502 Bad Gateway");
     }
 }
