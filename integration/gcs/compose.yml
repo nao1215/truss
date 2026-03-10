@@ -1,0 +1,56 @@
+services:
+  fake-gcs:
+    image: fsouza/fake-gcs-server:latest
+    command: ["-scheme", "http", "-port", "4443"]
+    # fake-gcs-server exposes HTTP on 4443
+
+  truss:
+    image: ${TRUSS_IMAGE:-truss:local}
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    depends_on:
+      - fake-gcs
+    environment:
+      TRUSS_BEARER_TOKEN: test-token
+      TRUSS_STORAGE_ROOT: /data
+      TRUSS_BIND_ADDR: "0.0.0.0:8080"
+      TRUSS_STORAGE_BACKEND: gcs
+      TRUSS_GCS_BUCKET: truss-test
+      TRUSS_GCS_ENDPOINT: http://fake-gcs:4443
+      TRUSS_SIGNED_URL_KEY_ID: test-key
+      TRUSS_SIGNED_URL_SECRET: test-secret
+      TRUSS_PUBLIC_BASE_URL: http://nginx:80
+      GOOGLE_APPLICATION_CREDENTIALS_JSON: "{}"
+    volumes:
+      - ../fixtures:/data:ro
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+
+  nginx:
+    image: nginx:alpine
+    depends_on:
+      - truss
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    tmpfs:
+      - /tmp/nginx-cache
+    # nginx listens on port 80
+
+  runn:
+    image: ghcr.io/k1low/runn:latest
+    depends_on:
+      - nginx
+      - truss
+      - fake-gcs
+    volumes:
+      - ./runbooks:/runbooks:ro
+      - ./setup-fixtures.sh:/setup-fixtures.sh:ro
+      - ../api/wait-for-server.sh:/wait-for-server.sh:ro
+      - ../fixtures:/fixtures:ro
+    environment:
+      SERVER_HOST: nginx
+      SERVER_PORT: "80"
+    entrypoint: ["/bin/bash", "/setup-fixtures.sh"]
+    command: ["runn", "run", "/runbooks/*.yml", "--verbose", "--scopes", "read:parent,run:exec"]

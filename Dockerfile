@@ -4,7 +4,7 @@ WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY src/ src/
 
-RUN cargo build --release --locked --features s3
+RUN cargo build --release --locked --features "s3,gcs"
 
 FROM debian:bookworm-slim
 

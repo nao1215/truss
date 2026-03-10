@@ -46,8 +46,8 @@ paths:
 
         When the storage backend is `filesystem` (default), the `path` query
         parameter is resolved relative to `TRUSS_STORAGE_ROOT`; path traversal
-        and out-of-root access are rejected. When the backend is `s3`, the path
-        is used as the S3 object key (leading `/` is stripped automatically).
+        and out-of-root access are rejected. When the backend is `s3` or `gcs`,
+        the path is used as the object key (leading `/` is stripped automatically).
 
         This endpoint requires signed URL authentication through `keyId`,
         `expires`, and `signature`.
@@ -351,12 +351,12 @@ paths:
         is accessible, and the object-storage backend (if configured) is
         network-reachable.
 
-        The S3 reachability check confirms that the configured bucket exists and
-        the S3 service responds to requests. It does **not** verify IAM
-        permissions for individual objects — a 403 AccessDenied response from S3
-        still counts as "reachable" because it proves the service is up and the
-        bucket name is correct. Permission errors on actual object reads are
-        surfaced as 403 on the transform endpoints.
+        The object-storage reachability check (S3 or GCS) confirms that the
+        configured bucket exists and the service responds to requests. It does
+        **not** verify IAM permissions for individual objects — a 403
+        AccessDenied response still counts as "reachable" because it proves
+        the service is up and the bucket name is correct. Permission errors on
+        actual object reads are surfaced as 403 on the transform endpoints.
 
         Returns 503 Service Unavailable when any check fails, signalling that
         traffic should be routed elsewhere.
@@ -384,6 +384,15 @@ paths:
                       - name: storageRoot
                         status: ok
                       - name: s3Client
+                        status: ok
+                gcs:
+                  summary: GCS backend
+                  value:
+                    status: ok
+                    checks:
+                      - name: storageRoot
+                        status: ok
+                      - name: gcsClient
                         status: ok
         '503':
           description: Server is not ready to accept traffic
@@ -700,8 +709,9 @@ components:
     StorageImageSource:
       type: object
       description: |
-        Source image stored in an S3-compatible object storage backend.
-        Requires the `s3` feature and `TRUSS_STORAGE_BACKEND=s3`.
+        Source image stored in an S3-compatible or GCS object storage backend.
+        Requires the `s3` or `gcs` feature and `TRUSS_STORAGE_BACKEND=s3` or
+        `TRUSS_STORAGE_BACKEND=gcs`.
       additionalProperties: false
       required: [kind, key]
       properties:
@@ -711,7 +721,7 @@ components:
         bucket:
           type: string
           minLength: 1
-          description: Bucket name. Defaults to `TRUSS_S3_BUCKET` when omitted.
+          description: Bucket name. Defaults to `TRUSS_S3_BUCKET` or `TRUSS_GCS_BUCKET` when omitted.
         key:
           type: string
           minLength: 1

@@ -89,8 +89,20 @@ impl StorageBackend {
                 expected.push("s3");
                 #[cfg(feature = "gcs")]
                 expected.push("gcs");
+
+                #[allow(unused_mut)]
+                let mut hint = String::new();
+                #[cfg(not(feature = "s3"))]
+                if value.eq_ignore_ascii_case("s3") {
+                    hint = " (hint: rebuild with --features s3)".to_string();
+                }
+                #[cfg(not(feature = "gcs"))]
+                if value.eq_ignore_ascii_case("gcs") {
+                    hint = " (hint: rebuild with --features gcs)".to_string();
+                }
+
                 Err(format!(
-                    "unknown storage backend `{value}` (expected {})",
+                    "unknown storage backend `{value}` (expected {}){hint}",
                     expected.join(" or ")
                 ))
             }
@@ -487,14 +499,23 @@ impl ServerConfig {
     /// - `TRUSS_DISABLE_ACCEPT_NEGOTIATION`: when set to `1`, `true`, `yes`, or `on`, disables
     ///   Accept-based content negotiation on public GET endpoints. This is recommended when running
     ///   behind a CDN that does not forward the `Accept` header in its cache key.
-    /// - `TRUSS_STORAGE_BACKEND` *(requires the `s3` feature)*: storage backend for resolving
-    ///   `Path`-based public GET requests. Accepts `filesystem` (default) or `s3`.
+    /// - `TRUSS_STORAGE_BACKEND` *(requires the `s3` or `gcs` feature)*: storage backend for
+    ///   resolving `Path`-based public GET requests. Accepts `filesystem` (default), `s3`, or
+    ///   `gcs`.
     /// - `TRUSS_S3_BUCKET` *(requires the `s3` feature)*: default S3 bucket name. Required when
     ///   the storage backend is `s3`.
     /// - `TRUSS_S3_FORCE_PATH_STYLE` *(requires the `s3` feature)*: when set to `1`, `true`,
     ///   `yes`, or `on`, use path-style S3 addressing (`http://endpoint/bucket/key`) instead
     ///   of virtual-hosted-style. Required for S3-compatible services such as MinIO and
     ///   adobe/s3mock.
+    /// - `TRUSS_GCS_BUCKET` *(requires the `gcs` feature)*: default GCS bucket name. Required
+    ///   when the storage backend is `gcs`.
+    /// - `TRUSS_GCS_ENDPOINT` *(requires the `gcs` feature)*: custom GCS endpoint URL. Used for
+    ///   emulators such as `fake-gcs-server`. When absent, the default Google Cloud Storage
+    ///   endpoint is used.
+    /// - `GOOGLE_APPLICATION_CREDENTIALS`: path to a GCS service account JSON key file.
+    /// - `GOOGLE_APPLICATION_CREDENTIALS_JSON`: inline GCS service account JSON (alternative to
+    ///   file path).
     ///
     /// # Errors
     ///
@@ -600,6 +621,17 @@ impl ServerConfig {
                 })?;
             Some(Arc::new(gcs::build_gcs_context(bucket)?))
         } else {
+            if env::var("TRUSS_GCS_BUCKET")
+                .ok()
+                .filter(|v| !v.is_empty())
+                .is_some()
+            {
+                eprintln!(
+                    "truss: warning: TRUSS_GCS_BUCKET is set but TRUSS_STORAGE_BACKEND is not \
+                     `gcs`. The GCS bucket will be ignored. Set TRUSS_STORAGE_BACKEND=gcs to \
+                     enable the GCS backend."
+                );
+            }
             None
         };
 
@@ -3643,6 +3675,140 @@ mod tests {
     fn public_by_path_s3_remap_produces_storage_variant() {
         // Verify the remap converts Path to Storage with bucket: None.
         let source = remap_path_to_storage("/image.png", None);
+        match source {
+            TransformSourcePayload::Storage {
+                bucket,
+                key,
+                version,
+            } => {
+                assert!(bucket.is_none(), "bucket must be None (use default)");
+                assert_eq!(key, "image.png");
+                assert!(version.is_none());
+            }
+            _ => panic!("expected Storage variant"),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // GCS: health endpoint
+    // -----------------------------------------------------------------------
+
+    #[test]
+    #[cfg(feature = "gcs")]
+    fn health_ready_gcs_returns_503_when_context_missing() {
+        let storage = temp_dir("health-gcs-no-ctx");
+        let mut config = ServerConfig::new(storage.clone(), None);
+        config.storage_backend = super::StorageBackend::Gcs;
+        config.gcs_context = None;
+
+        let request = super::http_parse::HttpRequest {
+            method: "GET".to_string(),
+            target: "/health/ready".to_string(),
+            version: "HTTP/1.1".to_string(),
+            headers: Vec::new(),
+            body: Vec::new(),
+        };
+        let response = route_request(request, &config);
+        let _ = std::fs::remove_dir_all(storage);
+
+        assert_eq!(response.status, "503 Service Unavailable");
+        let body: serde_json::Value = serde_json::from_slice(&response.body).expect("parse body");
+        let checks = body["checks"].as_array().expect("checks array");
+        assert!(
+            checks
+                .iter()
+                .any(|c| c["name"] == "gcsClient" && c["status"] == "fail"),
+            "expected gcsClient fail check in {body}",
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "gcs")]
+    fn health_ready_gcs_includes_gcs_client_check() {
+        let storage = temp_dir("health-gcs-ok");
+        let mut config = ServerConfig::new(storage.clone(), None);
+        config.storage_backend = super::StorageBackend::Gcs;
+        config.gcs_context = Some(std::sync::Arc::new(super::gcs::GcsContext::for_test(
+            "test-bucket",
+            None,
+        )));
+
+        let request = super::http_parse::HttpRequest {
+            method: "GET".to_string(),
+            target: "/health/ready".to_string(),
+            version: "HTTP/1.1".to_string(),
+            headers: Vec::new(),
+            body: Vec::new(),
+        };
+        let response = route_request(request, &config);
+        let _ = std::fs::remove_dir_all(storage);
+
+        // The gcsClient check will report "fail" because there is no real GCS
+        // endpoint, but the important thing is that the check is present.
+        let body: serde_json::Value = serde_json::from_slice(&response.body).expect("parse body");
+        let checks = body["checks"].as_array().expect("checks array");
+        assert!(
+            checks.iter().any(|c| c["name"] == "gcsClient"),
+            "expected gcsClient check in {body}",
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // GCS: public by-path remap (leading slash trimmed, Storage variant used)
+    // -----------------------------------------------------------------------
+
+    #[cfg(feature = "gcs")]
+    fn remap_path_to_storage_gcs(path: &str, version: Option<&str>) -> TransformSourcePayload {
+        let source = TransformSourcePayload::Path {
+            path: path.to_string(),
+            version: version.map(|v| v.to_string()),
+        };
+        match source {
+            TransformSourcePayload::Path { path, version } => TransformSourcePayload::Storage {
+                bucket: None,
+                key: path.trim_start_matches('/').to_string(),
+                version,
+            },
+            other => other,
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "gcs")]
+    fn public_by_path_gcs_remap_trims_leading_slash() {
+        let source = remap_path_to_storage_gcs("/photos/hero.jpg", Some("v1"));
+        match &source {
+            TransformSourcePayload::Storage { key, .. } => {
+                assert_eq!(key, "photos/hero.jpg", "leading / must be trimmed");
+            }
+            _ => panic!("expected Storage variant after remap"),
+        }
+
+        let source2 = remap_path_to_storage_gcs("photos/hero.jpg", Some("v1"));
+        match &source2 {
+            TransformSourcePayload::Storage { key, .. } => {
+                assert_eq!(key, "photos/hero.jpg");
+            }
+            _ => panic!("expected Storage variant after remap"),
+        }
+
+        let mut cfg = make_test_config();
+        cfg.storage_backend = super::StorageBackend::Gcs;
+        cfg.gcs_context = Some(std::sync::Arc::new(super::gcs::GcsContext::for_test(
+            "my-bucket",
+            None,
+        )));
+        assert_eq!(
+            source.versioned_source_hash(&cfg),
+            source2.versioned_source_hash(&cfg),
+            "leading-slash and no-leading-slash paths must hash identically after trim",
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "gcs")]
+    fn public_by_path_gcs_remap_produces_storage_variant() {
+        let source = remap_path_to_storage_gcs("/image.png", None);
         match source {
             TransformSourcePayload::Storage {
                 bucket,

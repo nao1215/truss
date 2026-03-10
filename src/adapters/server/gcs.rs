@@ -56,7 +56,12 @@ impl GcsContext {
                     // wrong — treat as unreachable, matching S3's NoSuchBucket
                     // behavior.
                     if err.http_status_code() == Some(404) {
-                        let msg = err.to_string();
+                        // Check if this is a bucket-level 404 (not an object-level 404).
+                        // A 404 mentioning "bucket" indicates the bucket does not exist.
+                        // We intentionally avoid broader checks like "not found" because
+                        // object-level 404s (the expected case for a healthy bucket) would
+                        // also match and cause a false negative.
+                        let msg = err.to_string().to_ascii_lowercase();
                         if msg.contains("bucket") {
                             return false;
                         }
@@ -70,6 +75,29 @@ impl GcsContext {
                 Err(_) => false,
             }
         })
+    }
+}
+
+#[cfg(test)]
+impl GcsContext {
+    pub(crate) fn for_test(default_bucket: &str, endpoint_url: Option<&str>) -> Self {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let client = runtime.block_on(async {
+            let mut builder = google_cloud_storage::client::Storage::builder();
+            if let Some(endpoint) = endpoint_url {
+                builder = builder.with_endpoint(endpoint);
+            }
+            builder.build().await.unwrap()
+        });
+        GcsContext {
+            client,
+            default_bucket: default_bucket.to_string(),
+            endpoint_url: endpoint_url.map(|s| s.to_string()),
+            runtime,
+        }
     }
 }
 
@@ -92,6 +120,10 @@ pub fn build_gcs_context(default_bucket: String) -> Result<GcsContext, std::io::
     let endpoint_url = std::env::var("TRUSS_GCS_ENDPOINT")
         .ok()
         .filter(|v| !v.is_empty());
+
+    if let Some(ref url) = endpoint_url {
+        validate_endpoint_url(url)?;
+    }
 
     let client = runtime
         .block_on(async {
@@ -158,6 +190,39 @@ pub(super) fn read_gcs_source_bytes(
         }
         Ok(buf)
     })
+}
+
+/// Validates the custom endpoint URL to prevent SSRF against cloud metadata
+/// services and other internal endpoints.
+fn validate_endpoint_url(url: &str) -> Result<(), std::io::Error> {
+    let parsed: url::Url = url.parse().map_err(|e| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("TRUSS_GCS_ENDPOINT is not a valid URL: {e}"),
+        )
+    })?;
+
+    match parsed.scheme() {
+        "http" | "https" => {}
+        other => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("TRUSS_GCS_ENDPOINT must use http or https scheme, got `{other}`"),
+            ));
+        }
+    }
+
+    if let Some(host) = parsed.host_str() {
+        // Block the cloud metadata endpoint (169.254.169.254) used by AWS/GCP/Azure.
+        if host == "169.254.169.254" || host == "metadata.google.internal" {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "TRUSS_GCS_ENDPOINT must not point to a cloud metadata service",
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 /// Validates that a GCS object name does not contain dangerous characters.
@@ -235,5 +300,32 @@ mod tests {
         assert!(validate_gcs_key("..").is_ok());
         assert!(validate_gcs_key("a..b/file.jpg").is_ok());
         assert!(validate_gcs_key(".hidden/file.jpg").is_ok());
+    }
+
+    #[test]
+    fn test_validate_endpoint_url_accepts_http() {
+        assert!(validate_endpoint_url("http://localhost:4443").is_ok());
+    }
+
+    #[test]
+    fn test_validate_endpoint_url_accepts_https() {
+        assert!(validate_endpoint_url("https://storage.googleapis.com").is_ok());
+    }
+
+    #[test]
+    fn test_validate_endpoint_url_rejects_non_http_scheme() {
+        assert!(validate_endpoint_url("ftp://example.com").is_err());
+        assert!(validate_endpoint_url("file:///etc/passwd").is_err());
+    }
+
+    #[test]
+    fn test_validate_endpoint_url_rejects_metadata_service() {
+        assert!(validate_endpoint_url("http://169.254.169.254/latest/meta-data").is_err());
+        assert!(validate_endpoint_url("http://metadata.google.internal/computeMetadata").is_err());
+    }
+
+    #[test]
+    fn test_validate_endpoint_url_rejects_invalid_url() {
+        assert!(validate_endpoint_url("not a url").is_err());
     }
 }

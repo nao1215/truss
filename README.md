@@ -37,6 +37,18 @@ To enable S3 storage backend support, add `--features s3`:
 cargo install truss-image --features s3
 ```
 
+To enable Google Cloud Storage (GCS) backend support, add `--features gcs`:
+
+```sh
+cargo install truss-image --features gcs
+```
+
+To enable both S3 and GCS backends:
+
+```sh
+cargo install truss-image --features "s3,gcs"
+```
+
 This installs the `truss` command.
 
 ## Quick Start
@@ -155,13 +167,17 @@ Key environment variables:
 | `TRUSS_SIGNED_URL_SECRET` | Shared secret for signed public URLs |
 | `TRUSS_ALLOW_INSECURE_URL_SOURCES` | Allow private-network/loopback URL sources (`true`/`1`; dev/test only) |
 | `TRUSS_CACHE_ROOT` | Directory for the transform cache; caching is disabled when unset |
-| `TRUSS_STORAGE_BACKEND` | Storage backend for public `GET /images/by-path`: `filesystem` (default) or `s3`. When set to `s3`, the `path` query parameter is used as the S3 object key. Private endpoints can still use `kind: storage` regardless of this setting. |
+| `TRUSS_STORAGE_BACKEND` | Storage backend for public `GET /images/by-path`: `filesystem` (default), `s3`, or `gcs`. When set to `s3` or `gcs`, the `path` query parameter is used as the object key. Private endpoints can still use `kind: storage` regardless of this setting. |
 | `TRUSS_S3_BUCKET` | Default S3 bucket name (required when backend is `s3`) |
 | `TRUSS_S3_FORCE_PATH_STYLE` | Use path-style S3 addressing (`true`/`1`; required for MinIO, LocalStack, etc.) |
 | `AWS_REGION` | AWS region for the S3 client (e.g. `us-east-1`) |
 | `AWS_ACCESS_KEY_ID` | AWS access key for S3 authentication |
 | `AWS_SECRET_ACCESS_KEY` | AWS secret key for S3 authentication |
 | `AWS_ENDPOINT_URL` | Custom S3-compatible endpoint URL (e.g. `http://minio:9000` for MinIO) |
+| `TRUSS_GCS_BUCKET` | Default GCS bucket name (required when backend is `gcs`) |
+| `TRUSS_GCS_ENDPOINT` | Custom GCS endpoint URL (e.g. `http://fake-gcs:4443` for fake-gcs-server) |
+| `GOOGLE_APPLICATION_CREDENTIALS` | Path to GCS service account JSON key file |
+| `GOOGLE_APPLICATION_CREDENTIALS_JSON` | Inline GCS service account JSON (alternative to file path) |
 
 API reference:
 
