@@ -5,13 +5,20 @@ set -eu
 S3_HOST="${S3_HOST:-s3mock}"
 S3_PORT="${S3_PORT:-9090}"
 BUCKET="truss-test"
+BASE_URL="http://${S3_HOST}:${S3_PORT}"
 
 # ── Wait for s3mock (bucket must be accessible) ─────────────────
 echo "Waiting for s3mock..."
 for i in $(seq 1 30); do
-  # HEAD the bucket to confirm s3mock can serve requests, not just accept TCP.
-  status=$(wget -q -O /dev/null -S "http://${S3_HOST}:${S3_PORT}/${BUCKET}" 2>&1 \
-    | grep "HTTP/" | tail -1 | awk '{print $2}') || true
+  # GET the bucket to confirm s3mock can serve requests, not just accept TCP.
+  status=$(python3 -c "
+import urllib.request, sys
+try:
+    r = urllib.request.urlopen('${BASE_URL}/${BUCKET}', timeout=2)
+    print(r.status)
+except Exception:
+    print('0')
+" 2>/dev/null) || true
   if [ "$status" = "200" ]; then
     echo "s3mock is ready (attempt ${i})"
     break
@@ -27,11 +34,21 @@ done
 upload() {
   local key="$1"
   local file="$2"
-  local url="http://${S3_HOST}:${S3_PORT}/${BUCKET}/${key}"
+  local url="${BASE_URL}/${BUCKET}/${key}"
   local status
-  status=$(wget -q -O /dev/null --method=PUT --body-file="$file" \
-    --header="Content-Type: application/octet-stream" \
-    -S "$url" 2>&1 | grep "HTTP/" | tail -1 | awk '{print $2}')
+  status=$(python3 -c "
+import urllib.request, sys
+data = open('${file}', 'rb').read()
+req = urllib.request.Request('${url}', data=data, method='PUT')
+req.add_header('Content-Type', 'application/octet-stream')
+try:
+    r = urllib.request.urlopen(req, timeout=5)
+    print(r.status)
+except urllib.error.HTTPError as e:
+    print(e.code)
+except Exception:
+    print('0')
+" 2>/dev/null)
   if [ "$status" = "200" ] || [ "$status" = "201" ]; then
     echo "  uploaded: ${key}"
   else
