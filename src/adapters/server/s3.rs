@@ -178,13 +178,21 @@ pub(super) fn read_s3_source_bytes(
                 ));
             }
 
-            let body = s3
+            let capacity_hint = output
+                .content_length()
+                .map(|l| (l as usize).min(MAX_SOURCE_BYTES as usize + 1))
+                .unwrap_or(0);
+            let bytes = s3
                 .runtime
-                .block_on(async { output.body.collect().await })
+                .block_on(async {
+                    use tokio::io::AsyncReadExt;
+                    let mut limited = output.body.into_async_read().take(MAX_SOURCE_BYTES + 1);
+                    let mut buf = Vec::with_capacity(capacity_hint);
+                    limited.read_to_end(&mut buf).await.map(|_| buf)
+                })
                 .map_err(|e| {
                     bad_gateway_response(&format!("failed to read S3 object body: {e}"))
                 })?;
-            let bytes = body.into_bytes().to_vec();
             if bytes.len() as u64 > MAX_SOURCE_BYTES {
                 return Err(payload_too_large_response(
                     "S3 object exceeds the source size limit",

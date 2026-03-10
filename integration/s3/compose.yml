@@ -9,7 +9,7 @@ services:
     image: ${TRUSS_IMAGE:-truss:local}
     build:
       context: ../..
-      dockerfile: Dockerfile.s3
+      dockerfile: Dockerfile
     depends_on:
       - s3mock
     environment:

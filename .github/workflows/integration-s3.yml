@@ -8,7 +8,7 @@ on:
       - "integration/fixtures/**"
       - "Cargo.toml"
       - "Cargo.lock"
-      - "Dockerfile.s3"
+      - "Dockerfile"
       - ".github/workflows/integration-s3.yml"
   pull_request:
     paths:
@@ -17,7 +17,7 @@ on:
       - "integration/fixtures/**"
       - "Cargo.toml"
       - "Cargo.lock"
-      - "Dockerfile.s3"
+      - "Dockerfile"
       - ".github/workflows/integration-s3.yml"
 
 concurrency:
@@ -37,7 +37,7 @@ jobs:
         uses: docker/build-push-action@v7
         with:
           context: .
-          file: ./Dockerfile.s3
+          file: ./Dockerfile
           load: true
           tags: truss:local
           cache-from: type=gha,scope=integration-s3
