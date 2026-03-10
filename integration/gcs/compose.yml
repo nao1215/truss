@@ -32,44 +32,29 @@ services:
     volumes:
       - ../fixtures:/data:ro
     read_only: true
-    tmpfs:
-      - /tmp
     security_opt:
       - no-new-privileges:true
-    healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:8080/health/live"]
-      interval: 2s
-      timeout: 2s
-      retries: 15
-      start_period: 3s
 
   nginx:
     image: nginx:alpine
     depends_on:
-      truss:
-        condition: service_healthy
+      - truss
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
     tmpfs:
       - /tmp/nginx-cache
     # nginx listens on port 80
-    healthcheck:
-      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:80/health/live || exit 1"]
-      interval: 2s
-      timeout: 2s
-      retries: 15
-      start_period: 2s
 
   runn:
     image: ghcr.io/k1low/runn:latest
     depends_on:
-      nginx:
-        condition: service_healthy
-      fake-gcs:
-        condition: service_healthy
+      - nginx
+      - truss
+      - fake-gcs
     volumes:
       - ./runbooks:/runbooks:ro
       - ./setup-fixtures.sh:/setup-fixtures.sh:ro
+      - ../api/wait-for-server.sh:/wait-for-server.sh:ro
       - ../fixtures:/fixtures:ro
     environment:
       SERVER_HOST: nginx
