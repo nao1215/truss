@@ -191,7 +191,7 @@ ENVIRONMENT VARIABLES:
 
     // Build the TRUSS_STORAGE_BACKEND description dynamically based on enabled features.
     {
-        #[allow(unused_mut)]
+        #[allow(unused_mut, clippy::useless_vec)]
         let mut backends = vec!["filesystem (default)"];
         #[cfg(feature = "s3")]
         backends.push("s3");

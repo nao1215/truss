@@ -73,6 +73,11 @@ impl GcsContext {
 #[cfg(test)]
 impl GcsContext {
     pub(crate) fn for_test(default_bucket: &str, endpoint_url: Option<&str>) -> Self {
+        // Install a rustls CryptoProvider before building the GCS client.
+        // google-cloud-storage → reqwest → rustls requires an explicit provider
+        // when both `ring` and `aws-lc-rs` are in the dependency tree.
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
