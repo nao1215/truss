@@ -9,8 +9,8 @@ pub(super) const NOT_FOUND_BODY: &str =
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct HttpResponse {
     pub(super) status: &'static str,
-    pub(super) content_type: Option<String>,
-    pub(super) headers: Vec<(String, String)>,
+    pub(super) content_type: Option<&'static str>,
+    pub(super) headers: Vec<(&'static str, String)>,
     pub(super) body: Vec<u8>,
 }
 
@@ -18,7 +18,7 @@ impl HttpResponse {
     pub(super) fn json(status: &'static str, body: Vec<u8>) -> Self {
         Self {
             status,
-            content_type: Some("application/json".to_string()),
+            content_type: Some("application/json"),
             headers: Vec::new(),
             body,
         }
@@ -27,7 +27,7 @@ impl HttpResponse {
     pub(super) fn problem(status: &'static str, body: Vec<u8>) -> Self {
         Self {
             status,
-            content_type: Some("application/problem+json".to_string()),
+            content_type: Some("application/problem+json"),
             headers: Vec::new(),
             body,
         }
@@ -35,12 +35,12 @@ impl HttpResponse {
 
     pub(super) fn problem_with_headers(
         status: &'static str,
-        headers: Vec<(String, String)>,
+        headers: Vec<(&'static str, String)>,
         body: Vec<u8>,
     ) -> Self {
         Self {
             status,
-            content_type: Some("application/problem+json".to_string()),
+            content_type: Some("application/problem+json"),
             headers,
             body,
         }
@@ -48,28 +48,28 @@ impl HttpResponse {
 
     pub(super) fn binary_with_headers(
         status: &'static str,
-        content_type: &str,
-        headers: Vec<(String, String)>,
+        content_type: &'static str,
+        headers: Vec<(&'static str, String)>,
         body: Vec<u8>,
     ) -> Self {
         Self {
             status,
-            content_type: Some(content_type.to_string()),
+            content_type: Some(content_type),
             headers,
             body,
         }
     }
 
-    pub(super) fn text(status: &'static str, content_type: &str, body: Vec<u8>) -> Self {
+    pub(super) fn text(status: &'static str, content_type: &'static str, body: Vec<u8>) -> Self {
         Self {
             status,
-            content_type: Some(content_type.to_string()),
+            content_type: Some(content_type),
             headers: Vec::new(),
             body,
         }
     }
 
-    pub(super) fn empty(status: &'static str, headers: Vec<(String, String)>) -> Self {
+    pub(super) fn empty(status: &'static str, headers: Vec<(&'static str, String)>) -> Self {
         Self {
             status,
             content_type: None,
@@ -84,6 +84,8 @@ pub(super) fn write_response(
     response: HttpResponse,
     close: bool,
 ) -> io::Result<()> {
+    use std::fmt::Write as FmtWrite;
+
     let connection_value = if close { "close" } else { "keep-alive" };
     let mut header = format!(
         "HTTP/1.1 {}\r\nContent-Length: {}\r\nConnection: {connection_value}\r\n",
@@ -92,11 +94,11 @@ pub(super) fn write_response(
     );
 
     if let Some(content_type) = response.content_type {
-        header.push_str(&format!("Content-Type: {content_type}\r\n"));
+        let _ = write!(header, "Content-Type: {content_type}\r\n");
     }
 
     for (name, value) in response.headers {
-        header.push_str(&format!("{name}: {value}\r\n"));
+        let _ = write!(header, "{name}: {value}\r\n");
     }
 
     header.push_str("\r\n");
@@ -113,7 +115,7 @@ pub(super) fn bad_request_response(message: &str) -> HttpResponse {
 pub(super) fn auth_required_response(message: &str) -> HttpResponse {
     HttpResponse::problem_with_headers(
         "401 Unauthorized",
-        vec![("WWW-Authenticate".to_string(), "Bearer".to_string())],
+        vec![("WWW-Authenticate", "Bearer".to_string())],
         problem_detail_body(401, "Unauthorized", message),
     )
 }

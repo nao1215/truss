@@ -110,7 +110,7 @@ fn spawn_server(
 ) -> (SocketAddr, std::thread::JoinHandle<std::io::Result<()>>) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
     let addr = listener.local_addr().expect("addr");
-    let handle = std::thread::spawn(move || serve_once_with_config(listener, &config));
+    let handle = std::thread::spawn(move || serve_once_with_config(listener, config));
     (addr, handle)
 }
 

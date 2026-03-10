@@ -27,7 +27,7 @@ use http_parse::{
 };
 use metrics::{
     CACHE_HITS_TOTAL, CACHE_MISSES_TOTAL, DEFAULT_MAX_CONCURRENT_TRANSFORMS, RouteMetric,
-    record_http_metrics, render_metrics_text, uptime_seconds,
+    record_http_metrics, render_metrics_text, status_code, uptime_seconds,
 };
 use multipart::{parse_multipart_boundary, parse_upload_request};
 use negotiate::{
@@ -60,6 +60,20 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use url::Url;
 use uuid::Uuid;
+
+/// Writes a line to stderr using a raw file-descriptor write, bypassing Rust's
+/// `std::io::Stderr` type whose internal `ReentrantLock` can interfere with
+/// `MutexGuard` drop ordering in Rust 2024 edition, breaking HTTP keep-alive.
+fn stderr_write(msg: &str) {
+    use std::io::Write;
+    use std::os::fd::FromRawFd;
+    // SAFETY: fd 2 is always open for the lifetime of the process.
+    let mut f = unsafe { std::fs::File::from_raw_fd(2) };
+    let _ = f.write_all(msg.as_bytes());
+    let _ = f.write_all(b"\n");
+    // Do not drop `f` — that would close stderr.
+    std::mem::forget(f);
+}
 
 /// The storage backend that determines how `Path`-based public GET requests are
 /// resolved.
@@ -492,7 +506,7 @@ impl ServerConfig {
         if let Some(handler) = &self.log_handler {
             handler(msg);
         } else {
-            eprintln!("{msg}");
+            stderr_write(msg);
         }
     }
 
@@ -1040,7 +1054,7 @@ pub fn serve(listener: TcpListener) -> io::Result<()> {
         }
     }
 
-    serve_with_config(listener, &config)
+    serve_with_config(listener, config)
 }
 
 /// Serves requests with an explicit server configuration.
@@ -1052,8 +1066,8 @@ pub fn serve(listener: TcpListener) -> io::Result<()> {
 ///
 /// Returns an [`io::Error`] when accepting the next connection fails or when a response cannot
 /// be written to the socket.
-pub fn serve_with_config(listener: TcpListener, config: &ServerConfig) -> io::Result<()> {
-    let config = Arc::new(config.clone());
+pub fn serve_with_config(listener: TcpListener, config: ServerConfig) -> io::Result<()> {
+    let config = Arc::new(config);
     let (sender, receiver) = std::sync::mpsc::channel::<TcpStream>();
 
     // Spawn a pool of worker threads sized to the configured concurrency limit
@@ -1142,7 +1156,7 @@ pub fn serve_with_config(listener: TcpListener, config: &ServerConfig) -> io::Re
 /// connection fails, or when a response cannot be written to the socket.
 pub fn serve_once(listener: TcpListener) -> io::Result<()> {
     let config = ServerConfig::from_env()?;
-    serve_once_with_config(listener, &config)
+    serve_once_with_config(listener, config)
 }
 
 /// Serves exactly one request with an explicit server configuration.
@@ -1151,9 +1165,9 @@ pub fn serve_once(listener: TcpListener) -> io::Result<()> {
 ///
 /// Returns an [`io::Error`] when accepting the next connection fails or when a response cannot
 /// be written to the socket.
-pub fn serve_once_with_config(listener: TcpListener, config: &ServerConfig) -> io::Result<()> {
+pub fn serve_once_with_config(listener: TcpListener, config: ServerConfig) -> io::Result<()> {
     let (stream, _) = listener.accept()?;
-    handle_stream(stream, config)
+    handle_stream(stream, &config)
 }
 
 #[derive(Debug, Deserialize)]
@@ -1389,10 +1403,10 @@ fn extract_request_id(headers: &[(String, String)]) -> Option<String> {
 
 /// Classifies the `Cache-Status` response header as `"hit"` or `"miss"`.
 /// Returns `None` when the header is absent.
-fn extract_cache_status(headers: &[(String, String)]) -> Option<&'static str> {
+fn extract_cache_status(headers: &[(&'static str, String)]) -> Option<&'static str> {
     headers
         .iter()
-        .find_map(|(name, value)| (name == "Cache-Status").then_some(value.as_str()))
+        .find_map(|(name, value)| (*name == "Cache-Status").then_some(value.as_str()))
         .map(|v| if v.contains("hit") { "hit" } else { "miss" })
 }
 
@@ -1448,8 +1462,6 @@ fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io::Result<()>
             .any(|(name, value)| name == "connection" && value.eq_ignore_ascii_case("close"));
 
         let is_head = partial.method == "HEAD";
-        let method_early = partial.method.clone();
-        let path_early = partial.path().to_string();
 
         let requires_auth = matches!(
             (partial.method.as_str(), partial.path()),
@@ -1460,20 +1472,18 @@ fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io::Result<()>
         {
             response
                 .headers
-                .push(("X-Request-Id".to_string(), request_id.clone()));
-            let sc = response
-                .status
-                .split_whitespace()
-                .next()
-                .unwrap_or("unknown");
+                .push(("X-Request-Id", request_id.clone()));
+            let sc = status_code(response.status).unwrap_or("unknown");
+            let method_log = partial.method.clone();
+            let path_log = partial.path().to_string();
             let _ = write_response(&mut stream, response, true);
             emit_access_log(
                 config,
                 &AccessLogEntry {
                     request_id: &request_id,
-                    method: &method_early,
-                    path: &path_early,
-                    route: &path_early,
+                    method: &method_log,
+                    path: &path_log,
+                    route: &path_log,
                     status: sc,
                     start,
                     cache_status: None,
@@ -1482,25 +1492,25 @@ fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io::Result<()>
             return Ok(());
         }
 
+        // Clone method/path before `read_request_body` consumes `partial`.
+        let method = partial.method.clone();
+        let path = partial.path().to_string();
+
         let request = match read_request_body(&mut stream, partial) {
             Ok(request) => request,
             Err(mut response) => {
                 response
                     .headers
-                    .push(("X-Request-Id".to_string(), request_id.clone()));
-                let sc = response
-                    .status
-                    .split_whitespace()
-                    .next()
-                    .unwrap_or("unknown");
+                    .push(("X-Request-Id", request_id.clone()));
+                let sc = status_code(response.status).unwrap_or("unknown");
                 let _ = write_response(&mut stream, response, true);
                 emit_access_log(
                     config,
                     &AccessLogEntry {
                         request_id: &request_id,
-                        method: &method_early,
-                        path: &path_early,
-                        route: &path_early,
+                        method: &method,
+                        path: &path,
+                        route: &path,
                         status: sc,
                         start,
                         cache_status: None,
@@ -1509,24 +1519,17 @@ fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io::Result<()>
                 return Ok(());
             }
         };
-
-        let method = request.method.clone();
-        let path = request.path().to_string();
         let route = classify_route(&request);
         let mut response = route_request(request, config);
         record_http_metrics(route, response.status);
 
         response
             .headers
-            .push(("X-Request-Id".to_string(), request_id.clone()));
+            .push(("X-Request-Id", request_id.clone()));
 
         let cache_status = extract_cache_status(&response.headers);
 
-        let status_code = response
-            .status
-            .split_whitespace()
-            .next()
-            .unwrap_or("unknown");
+        let sc = status_code(response.status).unwrap_or("unknown");
 
         if is_head {
             response.body = Vec::new();
@@ -1544,7 +1547,7 @@ fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io::Result<()>
                 method: &method,
                 path: &path,
                 route: route.as_label(),
-                status: status_code,
+                status: sc,
                 start,
                 cache_status,
             },
@@ -1974,7 +1977,7 @@ fn transform_source_bytes(
                 config.public_max_age_seconds,
                 config.public_stale_while_revalidate_seconds,
             );
-            headers.push(("Age".to_string(), age.as_secs().to_string()));
+            headers.push(("Age", age.as_secs().to_string()));
             if matches!(response_policy, ImageResponsePolicy::PublicGet)
                 && if_none_match_matches(request.header("if-none-match"), &etag)
             {
@@ -2069,7 +2072,7 @@ fn transform_source_bytes_inner(
             response_config.public_cache_control.max_age,
             response_config.public_cache_control.stale_while_revalidate,
         );
-        headers.push(("Age".to_string(), age.as_secs().to_string()));
+        headers.push(("Age", age.as_secs().to_string()));
         if matches!(response_policy, ImageResponsePolicy::PublicGet)
             && if_none_match_matches(request.header("if-none-match"), &etag)
         {
@@ -2102,7 +2105,7 @@ fn transform_source_bytes_inner(
         {
             handler(&msg);
         } else {
-            eprintln!("{msg}");
+            stderr_write(&msg);
         }
     }
 
@@ -2482,8 +2485,8 @@ mod tests {
         }
     }
 
-    fn response_body(response: &HttpResponse) -> String {
-        String::from_utf8(response.body.clone()).expect("utf8 response body")
+    fn response_body(response: &HttpResponse) -> &str {
+        std::str::from_utf8(&response.body).expect("utf8 response body")
     }
 
     fn signed_public_request(target: &str, host: &str, secret: &str) -> HttpRequest {
@@ -2577,17 +2580,17 @@ mod tests {
         );
 
         assert!(headers.contains(&(
-            "Cache-Control".to_string(),
+            "Cache-Control",
             "public, max-age=3600, stale-while-revalidate=60".to_string()
         )));
-        assert!(headers.contains(&("Vary".to_string(), "Accept".to_string())));
-        assert!(headers.contains(&("X-Content-Type-Options".to_string(), "nosniff".to_string())));
+        assert!(headers.contains(&("Vary", "Accept".to_string())));
+        assert!(headers.contains(&("X-Content-Type-Options", "nosniff".to_string())));
         assert!(headers.contains(&(
-            "Content-Disposition".to_string(),
+            "Content-Disposition",
             "inline; filename=\"truss.webp\"".to_string()
         )));
         assert!(headers.contains(&(
-            "Cache-Status".to_string(),
+            "Cache-Status",
             "\"truss\"; fwd=miss".to_string()
         )));
     }
@@ -2604,7 +2607,7 @@ mod tests {
             DEFAULT_PUBLIC_STALE_WHILE_REVALIDATE_SECONDS,
         );
 
-        assert!(headers.contains(&("Content-Security-Policy".to_string(), "sandbox".to_string())));
+        assert!(headers.contains(&("Content-Security-Policy", "sandbox".to_string())));
     }
 
     #[test]
@@ -2619,7 +2622,7 @@ mod tests {
             DEFAULT_PUBLIC_STALE_WHILE_REVALIDATE_SECONDS,
         );
 
-        assert!(!headers.iter().any(|(k, _)| k == "Content-Security-Policy"));
+        assert!(!headers.iter().any(|(k, _)| *k == "Content-Security-Policy"));
     }
 
     #[test]
@@ -2827,7 +2830,7 @@ mod tests {
             DEFAULT_PUBLIC_MAX_AGE_SECONDS,
             DEFAULT_PUBLIC_STALE_WHILE_REVALIDATE_SECONDS,
         );
-        assert!(headers.contains(&("Cache-Status".to_string(), "\"truss\"; hit".to_string())));
+        assert!(headers.contains(&("Cache-Status", "\"truss\"; hit".to_string())));
     }
 
     #[test]
@@ -2842,7 +2845,7 @@ mod tests {
             DEFAULT_PUBLIC_STALE_WHILE_REVALIDATE_SECONDS,
         );
         assert!(headers.contains(&(
-            "Cache-Status".to_string(),
+            "Cache-Status",
             "\"truss\"; fwd=miss".to_string()
         )));
     }
@@ -3416,7 +3419,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind test listener");
         let addr = listener.local_addr().expect("read local addr");
 
-        let server = thread::spawn(move || serve_once_with_config(listener, &config));
+        let server = thread::spawn(move || serve_once_with_config(listener, config));
 
         let mut stream = TcpStream::connect(addr).expect("connect to test server");
         stream
@@ -5002,14 +5005,14 @@ mod tests {
 
     #[test]
     fn cache_status_hit_detected() {
-        let headers = vec![("Cache-Status".to_string(), "\"truss\"; hit".to_string())];
+        let headers: Vec<(&str, String)> = vec![("Cache-Status", "\"truss\"; hit".to_string())];
         assert_eq!(super::extract_cache_status(&headers), Some("hit"));
     }
 
     #[test]
     fn cache_status_miss_detected() {
-        let headers = vec![(
-            "Cache-Status".to_string(),
+        let headers: Vec<(&str, String)> = vec![(
+            "Cache-Status",
             "\"truss\"; fwd=miss".to_string(),
         )];
         assert_eq!(super::extract_cache_status(&headers), Some("miss"));
@@ -5017,7 +5020,7 @@ mod tests {
 
     #[test]
     fn cache_status_none_when_header_absent() {
-        let headers = vec![("Content-Type".to_string(), "image/png".to_string())];
+        let headers: Vec<(&str, String)> = vec![("Content-Type", "image/png".to_string())];
         assert!(super::extract_cache_status(&headers).is_none());
     }
 }

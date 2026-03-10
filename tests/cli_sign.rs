@@ -32,7 +32,7 @@ fn temp_dir(name: &str) -> PathBuf {
 fn spawn_server(config: ServerConfig) -> (SocketAddr, thread::JoinHandle<std::io::Result<()>>) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind test listener");
     let addr = listener.local_addr().expect("listener addr");
-    let handle = thread::spawn(move || serve_once_with_config(listener, &config));
+    let handle = thread::spawn(move || serve_once_with_config(listener, config));
 
     (addr, handle)
 }

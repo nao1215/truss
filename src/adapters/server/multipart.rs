@@ -21,7 +21,7 @@ pub(super) fn parse_upload_request(
     let mut file_range = None;
     let mut options = None;
 
-    for part in &parts {
+    for part in parts {
         match part.name.as_str() {
             "file" => {
                 if file_range.is_some() {
@@ -34,7 +34,7 @@ pub(super) fn parse_upload_request(
                         "multipart upload `file` field must not be empty",
                     ));
                 }
-                file_range = Some(part.body_range.clone());
+                file_range = Some(part.body_range);
             }
             "options" => {
                 if options.is_some() {
@@ -42,7 +42,7 @@ pub(super) fn parse_upload_request(
                         "multipart upload must not include multiple `options` fields",
                     ));
                 }
-                let part_body = &body[part.body_range.clone()];
+                let part_body = &body[part.body_range];
                 if let Some(content_type) = part.content_type.as_deref()
                     && !content_type_matches(content_type, "application/json")
                 {
