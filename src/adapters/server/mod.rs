@@ -540,6 +540,7 @@ impl ServerConfig {
         }
     }
 
+    #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
     fn storage_backend_label(&self) -> StorageBackendLabel {
         #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
         {
@@ -1334,12 +1335,12 @@ impl TransformSourcePayload {
     /// Returns the storage backend label for metrics based on the source kind,
     /// rather than the server config default.  Path → Filesystem, Storage →
     /// whatever the config backend is, Url → None (no storage backend).
-    fn metrics_backend_label(&self, config: &ServerConfig) -> Option<StorageBackendLabel> {
+    fn metrics_backend_label(&self, _config: &ServerConfig) -> Option<StorageBackendLabel> {
         match self {
             Self::Path { .. } => Some(StorageBackendLabel::Filesystem),
             Self::Url { .. } => None,
             #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
-            Self::Storage { .. } => Some(config.storage_backend_label()),
+            Self::Storage { .. } => Some(_config.storage_backend_label()),
         }
     }
 }
