@@ -240,6 +240,10 @@ pub(super) fn validate_public_query_names(
                 | "stripMetadata"
                 | "preserveExif"
                 | "blur"
+                | "watermarkUrl"
+                | "watermarkPosition"
+                | "watermarkOpacity"
+                | "watermarkMargin"
         ) || matches!(
             (source_kind, name.as_str()),
             (PublicSourceKind::Path, "path") | (PublicSourceKind::Url, "url")

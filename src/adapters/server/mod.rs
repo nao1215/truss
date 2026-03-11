@@ -20,7 +20,10 @@ use auth::{
     parse_query_params, required_query_param, signed_source_query, url_authority,
     validate_public_query_names,
 };
-use cache::{CacheLookup, TransformCache, compute_cache_key, try_versioned_cache_lookup};
+use cache::{
+    CacheLookup, TransformCache, compute_cache_key, compute_watermark_identity,
+    try_versioned_cache_lookup,
+};
 use http_parse::{
     HttpRequest, parse_named, parse_optional_named, read_request_body, read_request_headers,
     request_has_json_content_type,
@@ -36,7 +39,7 @@ use negotiate::{
     CacheHitStatus, ImageResponsePolicy, PublicSourceKind, build_image_etag,
     build_image_response_headers, if_none_match_matches, negotiate_output_format,
 };
-use remote::resolve_source_bytes;
+use remote::{read_remote_watermark_bytes, resolve_source_bytes};
 use response::{
     HttpResponse, NOT_FOUND_BODY, bad_request_response, service_unavailable_response,
     transform_error_response, unsupported_media_type_response, write_response,
@@ -44,7 +47,7 @@ use response::{
 
 use crate::{
     Fit, MediaType, Position, RawArtifact, Rgba8, Rotation, TransformOptions, TransformRequest,
-    sniff_artifact, transform_raster, transform_svg,
+    WatermarkInput, sniff_artifact, transform_raster, transform_svg,
 };
 use hmac::{Hmac, Mac};
 use serde::Deserialize;
@@ -1236,6 +1239,8 @@ struct TransformImageRequestPayload {
     source: TransformSourcePayload,
     #[serde(default)]
     options: TransformOptionsPayload,
+    #[serde(default)]
+    watermark: Option<WatermarkPayload>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1453,6 +1458,103 @@ impl TransformOptionsPayload {
             deadline: defaults.deadline,
         })
     }
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
+struct WatermarkPayload {
+    url: Option<String>,
+    position: Option<String>,
+    opacity: Option<u8>,
+    margin: Option<u32>,
+}
+
+fn resolve_watermark_payload(
+    payload: Option<&WatermarkPayload>,
+    config: &ServerConfig,
+) -> Result<Option<WatermarkInput>, HttpResponse> {
+    let Some(wm) = payload else {
+        return Ok(None);
+    };
+    let url = wm.url.as_deref().filter(|u| !u.is_empty()).ok_or_else(|| {
+        bad_request_response("watermark.url is required when watermark is present")
+    })?;
+
+    let bytes = read_remote_watermark_bytes(url, config)?;
+    let artifact = sniff_artifact(RawArtifact::new(bytes, None))
+        .map_err(|error| bad_request_response(&format!("watermark image is invalid: {error}")))?;
+    if !artifact.media_type.is_raster() {
+        return Err(bad_request_response(
+            "watermark image must be a raster format (not SVG)",
+        ));
+    }
+
+    let position = parse_optional_named(
+        wm.position.as_deref(),
+        "watermark.position",
+        Position::from_str,
+    )?
+    .unwrap_or(Position::BottomRight);
+
+    let opacity = wm.opacity.unwrap_or(50);
+    if opacity == 0 || opacity > 100 {
+        return Err(bad_request_response(
+            "watermark.opacity must be between 1 and 100",
+        ));
+    }
+    let margin = wm.margin.unwrap_or(10);
+
+    Ok(Some(WatermarkInput {
+        image: artifact,
+        position,
+        opacity,
+        margin,
+    }))
+}
+
+fn resolve_multipart_watermark(
+    bytes: Vec<u8>,
+    position: Option<String>,
+    opacity: Option<u8>,
+    margin: Option<u32>,
+) -> Result<WatermarkInput, HttpResponse> {
+    let artifact = sniff_artifact(RawArtifact::new(bytes, None))
+        .map_err(|error| bad_request_response(&format!("watermark image is invalid: {error}")))?;
+    if !artifact.media_type.is_raster() {
+        return Err(bad_request_response(
+            "watermark image must be a raster format (not SVG)",
+        ));
+    }
+    let position = parse_optional_named(
+        position.as_deref(),
+        "watermark_position",
+        Position::from_str,
+    )?
+    .unwrap_or(Position::BottomRight);
+    let opacity = opacity.unwrap_or(50);
+    if opacity == 0 || opacity > 100 {
+        return Err(bad_request_response(
+            "watermark_opacity must be between 1 and 100",
+        ));
+    }
+    let margin = margin.unwrap_or(10);
+    Ok(WatermarkInput {
+        image: artifact,
+        position,
+        opacity,
+        margin,
+    })
+}
+
+fn watermark_identity_from_payload(payload: Option<&WatermarkPayload>) -> Option<String> {
+    let wm = payload?;
+    let url = wm.url.as_deref().filter(|u| !u.is_empty())?;
+    Some(compute_watermark_identity(
+        url,
+        wm.position.as_deref().unwrap_or("bottom-right"),
+        wm.opacity.unwrap_or(50),
+        wm.margin.unwrap_or(10),
+    ))
 }
 
 struct AccessLogEntry<'a> {
@@ -1682,12 +1784,19 @@ fn handle_transform_request(request: HttpRequest, config: &ServerConfig) -> Http
     };
 
     let versioned_hash = payload.source.versioned_source_hash(config);
+    let watermark = match resolve_watermark_payload(payload.watermark.as_ref(), config) {
+        Ok(wm) => wm,
+        Err(response) => return response,
+    };
+    let watermark_id = watermark_identity_from_payload(payload.watermark.as_ref());
+
     if let Some(response) = try_versioned_cache_lookup(
         versioned_hash.as_deref(),
         &options,
         &request,
         ImageResponsePolicy::PrivateTransform,
         config,
+        watermark_id.as_deref(),
     ) {
         return response;
     }
@@ -1716,6 +1825,8 @@ fn handle_transform_request(request: HttpRequest, config: &ServerConfig) -> Http
         &request,
         ImageResponsePolicy::PrivateTransform,
         config,
+        watermark,
+        watermark_id.as_deref(),
     )
 }
 
@@ -1739,10 +1850,16 @@ fn handle_public_get_request(
     if let Err(response) = authorize_signed_request(&request, &query, config) {
         return response;
     }
-    let (source, options) = match parse_public_get_request(&query, source_kind) {
+    let (source, options, watermark_payload) = match parse_public_get_request(&query, source_kind) {
         Ok(parsed) => parsed,
         Err(response) => return response,
     };
+
+    let watermark = match resolve_watermark_payload(watermark_payload.as_ref(), config) {
+        Ok(wm) => wm,
+        Err(response) => return response,
+    };
+    let watermark_id = watermark_identity_from_payload(watermark_payload.as_ref());
 
     // When the storage backend is object storage (S3 or GCS), convert Path
     // sources to Storage sources so that the `path` query parameter is
@@ -1768,6 +1885,7 @@ fn handle_public_get_request(
         &request,
         ImageResponsePolicy::PublicGet,
         config,
+        watermark_id.as_deref(),
     ) {
         return response;
     }
@@ -1797,6 +1915,8 @@ fn handle_public_get_request(
         &request,
         ImageResponsePolicy::PublicGet,
         config,
+        watermark,
+        watermark_id.as_deref(),
     )
 }
 
@@ -1809,10 +1929,19 @@ fn handle_upload_request(request: HttpRequest, config: &ServerConfig) -> HttpRes
         Ok(boundary) => boundary,
         Err(response) => return response,
     };
-    let (file_bytes, options) = match parse_upload_request(&request.body, &boundary) {
+    let (file_bytes, options, watermark) = match parse_upload_request(&request.body, &boundary) {
         Ok(parts) => parts,
         Err(response) => return response,
     };
+    let watermark_identity = watermark.as_ref().map(|wm| {
+        let content_hash = hex::encode(sha2::Sha256::digest(&wm.image.bytes));
+        cache::compute_watermark_content_identity(
+            &content_hash,
+            wm.position.as_name(),
+            wm.opacity,
+            wm.margin,
+        )
+    });
     transform_source_bytes(
         file_bytes,
         options,
@@ -1820,6 +1949,8 @@ fn handle_upload_request(request: HttpRequest, config: &ServerConfig) -> HttpRes
         &request,
         ImageResponsePolicy::PrivateTransform,
         config,
+        watermark,
+        watermark_identity.as_deref(),
     )
 }
 
@@ -1975,7 +2106,14 @@ fn handle_metrics_request(_request: HttpRequest, config: &ServerConfig) -> HttpR
 fn parse_public_get_request(
     query: &BTreeMap<String, String>,
     source_kind: PublicSourceKind,
-) -> Result<(TransformSourcePayload, TransformOptions), HttpResponse> {
+) -> Result<
+    (
+        TransformSourcePayload,
+        TransformOptions,
+        Option<WatermarkPayload>,
+    ),
+    HttpResponse,
+> {
     validate_public_query_names(query, source_kind)?;
 
     let source = match source_kind {
@@ -1987,6 +2125,17 @@ fn parse_public_get_request(
             url: required_query_param(query, "url")?.to_string(),
             version: query.get("version").cloned(),
         },
+    };
+
+    let watermark = if query.contains_key("watermarkUrl") {
+        Some(WatermarkPayload {
+            url: query.get("watermarkUrl").cloned(),
+            position: query.get("watermarkPosition").cloned(),
+            opacity: parse_optional_u8_query(query, "watermarkOpacity")?,
+            margin: parse_optional_integer_query(query, "watermarkMargin")?,
+        })
+    } else {
+        None
     };
 
     let defaults = TransformOptions::default();
@@ -2024,9 +2173,10 @@ fn parse_public_get_request(
         deadline: defaults.deadline,
     };
 
-    Ok((source, options))
+    Ok((source, options, watermark))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn transform_source_bytes(
     source_bytes: Vec<u8>,
     options: TransformOptions,
@@ -2034,6 +2184,8 @@ fn transform_source_bytes(
     request: &HttpRequest,
     response_policy: ImageResponsePolicy,
     config: &ServerConfig,
+    watermark: Option<WatermarkInput>,
+    watermark_identity: Option<&str>,
 ) -> HttpResponse {
     let content_hash;
     let source_hash = match versioned_hash {
@@ -2052,7 +2204,7 @@ fn transform_source_bytes(
     if let Some(ref cache) = cache
         && options.format.is_some()
     {
-        let cache_key = compute_cache_key(source_hash, &options, None);
+        let cache_key = compute_cache_key(source_hash, &options, None, watermark_identity);
         if let CacheLookup::Hit {
             media_type,
             body,
@@ -2107,9 +2259,12 @@ fn transform_source_bytes(
             },
             transform_deadline: Duration::from_secs(config.transform_deadline_secs),
         },
+        watermark,
+        watermark_identity,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn transform_source_bytes_inner(
     source_bytes: Vec<u8>,
     mut options: TransformOptions,
@@ -2118,6 +2273,8 @@ fn transform_source_bytes_inner(
     cache: Option<&TransformCache>,
     source_hash: &str,
     response_config: ImageResponseConfig,
+    watermark: Option<WatermarkInput>,
+    watermark_identity: Option<&str>,
 ) -> HttpResponse {
     if options.deadline.is_none() {
         options.deadline = Some(response_config.transform_deadline);
@@ -2148,7 +2305,7 @@ fn transform_source_bytes_inner(
     } else {
         None
     };
-    let cache_key = compute_cache_key(source_hash, &options, negotiated_accept);
+    let cache_key = compute_cache_key(source_hash, &options, negotiated_accept, watermark_identity);
 
     if let Some(cache) = cache
         && let CacheLookup::Hit {
@@ -2183,8 +2340,10 @@ fn transform_source_bytes_inner(
 
     let is_svg = artifact.media_type == MediaType::Svg;
     let transform_start = Instant::now();
+    let mut request_obj = TransformRequest::new(artifact, options);
+    request_obj.watermark = watermark;
     let result = if is_svg {
-        match transform_svg(TransformRequest::new(artifact, options)) {
+        match transform_svg(request_obj) {
             Ok(result) => result,
             Err(error) => {
                 record_transform_error(&error);
@@ -2192,7 +2351,7 @@ fn transform_source_bytes_inner(
             }
         }
     } else {
-        match transform_raster(TransformRequest::new(artifact, options)) {
+        match transform_raster(request_obj) {
             Ok(result) => result,
             Err(error) => {
                 record_transform_error(&error);
@@ -2757,6 +2916,8 @@ mod tests {
             &request,
             ImageResponsePolicy::PrivateTransform,
             &config,
+            None,
+            None,
         );
 
         assert!(response.status.contains("503"));
@@ -2800,6 +2961,8 @@ mod tests {
             &request,
             ImageResponsePolicy::PrivateTransform,
             &config,
+            None,
+            None,
         );
 
         assert!(response.status.contains("503"));
@@ -2813,8 +2976,8 @@ mod tests {
             format: Some(MediaType::Webp),
             ..TransformOptions::default()
         };
-        let key1 = super::cache::compute_cache_key("source-abc", &opts, None);
-        let key2 = super::cache::compute_cache_key("source-abc", &opts, None);
+        let key1 = super::cache::compute_cache_key("source-abc", &opts, None, None);
+        let key2 = super::cache::compute_cache_key("source-abc", &opts, None, None);
         assert_eq!(key1, key2);
         assert_eq!(key1.len(), 64);
     }
@@ -2831,16 +2994,17 @@ mod tests {
             format: Some(MediaType::Webp),
             ..TransformOptions::default()
         };
-        let key1 = super::cache::compute_cache_key("same-source", &opts1, None);
-        let key2 = super::cache::compute_cache_key("same-source", &opts2, None);
+        let key1 = super::cache::compute_cache_key("same-source", &opts1, None, None);
+        let key2 = super::cache::compute_cache_key("same-source", &opts2, None, None);
         assert_ne!(key1, key2);
     }
 
     #[test]
     fn compute_cache_key_includes_accept_when_present() {
         let opts = TransformOptions::default();
-        let key_no_accept = super::cache::compute_cache_key("src", &opts, None);
-        let key_with_accept = super::cache::compute_cache_key("src", &opts, Some("image/webp"));
+        let key_no_accept = super::cache::compute_cache_key("src", &opts, None, None);
+        let key_with_accept =
+            super::cache::compute_cache_key("src", &opts, Some("image/webp"), None);
         assert_ne!(key_no_accept, key_with_accept);
     }
 
@@ -3411,7 +3575,7 @@ mod tests {
         let request = upload_request(&png_bytes(), Some(r#"{"width":8,"format":"jpeg"}"#));
         let boundary =
             super::multipart::parse_multipart_boundary(&request).expect("parse boundary");
-        let (file_bytes, options) =
+        let (file_bytes, options, _watermark) =
             super::multipart::parse_upload_request(&request.body, &boundary)
                 .expect("parse upload body");
 

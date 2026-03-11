@@ -16,6 +16,7 @@ use ureq::http;
 use url::Url;
 
 pub(super) const MAX_SOURCE_BYTES: u64 = 100 * 1024 * 1024;
+pub(super) const MAX_WATERMARK_BYTES: u64 = 10 * 1024 * 1024;
 pub(super) const MAX_REMOTE_REDIRECTS: usize = 5;
 #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
 pub(super) const STORAGE_DOWNLOAD_TIMEOUT_SECS: u64 = 30;
@@ -135,7 +136,8 @@ pub(super) fn read_remote_source_bytes(
                 if is_redirect_status(status) {
                     current_url = next_redirect_url(&target.url, &response, redirect_index)?;
                 } else if (200..=299).contains(&status) {
-                    let bytes = read_remote_response_body(target.url.as_str(), response)?;
+                    let bytes =
+                        read_remote_response_body(target.url.as_str(), response, MAX_SOURCE_BYTES)?;
                     if let Some(cache) = origin_cache {
                         cache.put(url, &bytes);
                     }
@@ -156,6 +158,73 @@ pub(super) fn read_remote_source_bytes(
 
     Err(too_many_redirects_response(
         "remote URL exceeded the redirect limit",
+    ))
+}
+
+pub(super) fn read_remote_watermark_bytes(
+    url: &str,
+    config: &ServerConfig,
+) -> Result<Vec<u8>, HttpResponse> {
+    let _ = prepare_remote_fetch_target(url, config)?;
+
+    let origin_cache = config
+        .cache_root
+        .as_ref()
+        .map(|root| OriginCache::new(root).with_log_handler(config.log_handler.clone()));
+
+    if let Some(ref cache) = origin_cache
+        && let Some(bytes) = cache.get(url)
+    {
+        ORIGIN_CACHE_HITS_TOTAL.fetch_add(1, Ordering::Relaxed);
+        if bytes.len() as u64 > MAX_WATERMARK_BYTES {
+            return Err(payload_too_large_response(
+                "cached watermark image exceeds 10 MB",
+            ));
+        }
+        return Ok(bytes);
+    }
+
+    if origin_cache.is_some() {
+        ORIGIN_CACHE_MISSES_TOTAL.fetch_add(1, Ordering::Relaxed);
+    }
+
+    let mut current_url = url.to_string();
+
+    for redirect_index in 0..=MAX_REMOTE_REDIRECTS {
+        let target = prepare_remote_fetch_target(&current_url, config)?;
+        let agent = build_remote_agent(&target);
+
+        match agent.get(target.url.as_str()).call() {
+            Ok(response) => {
+                let status = response.status().as_u16();
+                if is_redirect_status(status) {
+                    current_url = next_redirect_url(&target.url, &response, redirect_index)?;
+                } else if (200..=299).contains(&status) {
+                    let bytes = read_remote_response_body(
+                        target.url.as_str(),
+                        response,
+                        MAX_WATERMARK_BYTES,
+                    )?;
+                    if let Some(cache) = origin_cache {
+                        cache.put(url, &bytes);
+                    }
+                    return Ok(bytes);
+                } else {
+                    return Err(bad_gateway_response(&format!(
+                        "failed to fetch watermark URL: upstream HTTP {status}"
+                    )));
+                }
+            }
+            Err(error) => {
+                return Err(bad_gateway_response(&format!(
+                    "failed to fetch watermark URL: {error}"
+                )));
+            }
+        }
+    }
+
+    Err(too_many_redirects_response(
+        "watermark URL exceeded the redirect limit",
     ))
 }
 
@@ -348,6 +417,7 @@ pub(super) fn validate_remote_url(
 pub(super) fn read_remote_response_body(
     url: &str,
     response: http::Response<ureq::Body>,
+    max_bytes: u64,
 ) -> Result<Vec<u8>, HttpResponse> {
     validate_remote_content_encoding(&response)?;
 
@@ -356,25 +426,22 @@ pub(super) fn read_remote_response_body(
         .get("Content-Length")
         .and_then(|v: &http::HeaderValue| v.to_str().ok())
         .and_then(|value: &str| value.parse::<u64>().ok())
-        .is_some_and(|len| len > MAX_SOURCE_BYTES)
+        .is_some_and(|len| len > max_bytes)
     {
         return Err(payload_too_large_response(&format!(
-            "remote response exceeds {MAX_SOURCE_BYTES} bytes"
+            "remote response exceeds {max_bytes} bytes"
         )));
     }
 
-    let mut reader = response
-        .into_body()
-        .into_reader()
-        .take(MAX_SOURCE_BYTES + 1);
+    let mut reader = response.into_body().into_reader().take(max_bytes + 1);
     let mut bytes = Vec::new();
     reader.read_to_end(&mut bytes).map_err(|error| {
         bad_gateway_response(&format!("failed to read remote URL `{url}`: {error}"))
     })?;
 
-    if bytes.len() as u64 > MAX_SOURCE_BYTES {
+    if bytes.len() as u64 > max_bytes {
         return Err(payload_too_large_response(&format!(
-            "remote response exceeds {MAX_SOURCE_BYTES} bytes"
+            "remote response exceeds {max_bytes} bytes"
         )));
     }
 

@@ -308,6 +308,7 @@ pub(super) fn compute_cache_key(
     source_identifier: &str,
     options: &TransformOptions,
     negotiated_accept: Option<&str>,
+    watermark_identity: Option<&str>,
 ) -> String {
     let mut canonical = String::new();
     canonical.push_str(source_identifier);
@@ -377,9 +378,53 @@ pub(super) fn compute_cache_key(
     if let Some(accept) = negotiated_accept {
         canonical.push_str(accept);
     }
+    canonical.push('\n');
+    if let Some(wm) = watermark_identity {
+        canonical.push_str(wm);
+    }
 
     let digest = Sha256::digest(canonical.as_bytes());
     hex::encode(digest)
+}
+
+/// Computes a stable identity string for watermark parameters that can be
+/// included in cache key computation. The identity is a SHA-256 hex digest
+/// of the watermark URL, position, opacity, and margin concatenated with
+/// newline separators.
+pub(super) fn compute_watermark_identity(
+    url: &str,
+    position: &str,
+    opacity: u8,
+    margin: u32,
+) -> String {
+    let mut input = String::new();
+    input.push_str("watermark\n");
+    input.push_str(url);
+    input.push('\n');
+    input.push_str(position);
+    input.push('\n');
+    input.push_str(&opacity.to_string());
+    input.push('\n');
+    input.push_str(&margin.to_string());
+    hex::encode(Sha256::digest(input.as_bytes()))
+}
+
+pub(super) fn compute_watermark_content_identity(
+    content_hash: &str,
+    position: &str,
+    opacity: u8,
+    margin: u32,
+) -> String {
+    let mut input = String::new();
+    input.push_str("watermark-content\n");
+    input.push_str(content_hash);
+    input.push('\n');
+    input.push_str(position);
+    input.push('\n');
+    input.push_str(&opacity.to_string());
+    input.push('\n');
+    input.push_str(&margin.to_string());
+    hex::encode(Sha256::digest(input.as_bytes()))
 }
 
 /// Attempts a cache lookup using a version-based source hash, which avoids reading
@@ -392,6 +437,7 @@ pub(super) fn try_versioned_cache_lookup(
     request: &HttpRequest,
     response_policy: ImageResponsePolicy,
     config: &ServerConfig,
+    watermark_identity: Option<&str>,
 ) -> Option<HttpResponse> {
     let source_hash = versioned_hash?;
     let cache_root = config.cache_root.as_ref()?;
@@ -401,7 +447,7 @@ pub(super) fn try_versioned_cache_lookup(
 
     let cache =
         TransformCache::new(cache_root.clone()).with_log_handler(config.log_handler.clone());
-    let cache_key = compute_cache_key(source_hash, options, None);
+    let cache_key = compute_cache_key(source_hash, options, None, watermark_identity);
     if let CacheLookup::Hit {
         media_type,
         body,
@@ -449,8 +495,8 @@ mod tests {
             blur: Some(0.14),
             ..TransformOptions::default()
         };
-        let key_a = compute_cache_key("img.png", &opts_a, None);
-        let key_b = compute_cache_key("img.png", &opts_b, None);
+        let key_a = compute_cache_key("img.png", &opts_a, None, None);
+        let key_b = compute_cache_key("img.png", &opts_b, None, None);
         assert_ne!(
             key_a, key_b,
             "blur=0.11 and blur=0.14 must produce different cache keys"
