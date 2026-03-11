@@ -37,7 +37,7 @@ Feature comparison with [imgproxy](https://github.com/imgproxy/imgproxy) and [im
 | Signed URLs | Yes | Yes | Yes |
 | JPEG / PNG / WebP / AVIF | Yes | Yes | Yes |
 | JPEG XL (JXL) | No | Input only | Yes |
-| TIFF / HEIC | [Planned (#45)](https://github.com/nao1215/truss/issues/45) | Yes | Yes |
+| TIFF | Yes | Yes | Yes |
 | GIF animation processing | No (out of scope) | Yes | Yes |
 | SVG sanitization | Yes | Yes | No |
 | Smart crop | No | Yes | Yes |
@@ -226,14 +226,15 @@ truss completions powershell > truss.ps1
 
 ## Supported Formats
 
-| Input \ Output | JPEG | PNG | WebP | AVIF | BMP | SVG |
-|-------------|:----:|:---:|:----:|:----:|:---:|:---:|
-| JPEG        | Yes  | Yes | Yes  | Yes  | Yes | -   |
-| PNG         | Yes  | Yes | Yes  | Yes  | Yes | -   |
-| WebP        | Yes  | Yes | Yes  | Yes  | Yes | -   |
-| AVIF        | Yes  | Yes | Yes  | Yes  | Yes | -   |
-| BMP         | Yes  | Yes | Yes  | Yes  | Yes | -   |
-| SVG         | Yes  | Yes | Yes  | Yes  | Yes | Yes |
+| Input \ Output | JPEG | PNG | WebP | AVIF | BMP | TIFF | SVG |
+|-------------|:----:|:---:|:----:|:----:|:---:|:----:|:---:|
+| JPEG        | Yes  | Yes | Yes  | Yes  | Yes | Yes  | -   |
+| PNG         | Yes  | Yes | Yes  | Yes  | Yes | Yes  | -   |
+| WebP        | Yes  | Yes | Yes  | Yes  | Yes | Yes  | -   |
+| AVIF        | Yes  | Yes | Yes  | Yes  | Yes | Yes  | -   |
+| BMP         | Yes  | Yes | Yes  | Yes  | Yes | Yes  | -   |
+| TIFF        | Yes  | Yes | Yes  | Yes  | Yes | Yes  | -   |
+| SVG         | Yes  | Yes | Yes  | Yes  | Yes | Yes  | Yes |
 
 SVG to SVG performs sanitization only, removing scripts and external references.
 

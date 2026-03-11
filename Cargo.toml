@@ -36,7 +36,7 @@ clap = { version = "4", features = ["derive"], optional = true }
 clap_complete = { version = "4", optional = true }
 hmac = { version = "0.12.1", optional = true }
 hex = { version = "0.4.3", optional = true }
-image = { version = "0.25.10", default-features = false, features = ["avif", "bmp", "jpeg", "png", "webp"] }
+image = { version = "0.25.10", default-features = false, features = ["avif", "bmp", "jpeg", "png", "tiff", "webp"] }
 kamadak-exif = "0.6.1"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = { version = "1.0.145", optional = true }

@@ -283,6 +283,7 @@ fn decode_input(input: &Artifact) -> Result<DynamicImage, TransformError> {
         MediaType::Webp => ImageFormat::WebP,
         MediaType::Avif => return decode_avif(&input.bytes),
         MediaType::Bmp => ImageFormat::Bmp,
+        MediaType::Tiff => ImageFormat::Tiff,
         MediaType::Svg => {
             return Err(TransformError::UnsupportedInputMediaType(
                 "SVG input should be routed to transform_svg, not transform_raster".into(),
@@ -1047,6 +1048,14 @@ fn encode_output(
                 .write_image(&rgba, rgba.width(), rgba.height(), ColorType::Rgba8.into())
                 .map_err(|e: image::ImageError| TransformError::EncodeFailed(e.to_string()))?;
         }
+        MediaType::Tiff => {
+            let rgba = image.to_rgba8();
+            let mut cursor = Cursor::new(bytes);
+            image::codecs::tiff::TiffEncoder::new(&mut cursor)
+                .write_image(&rgba, rgba.width(), rgba.height(), ColorType::Rgba8.into())
+                .map_err(|e: image::ImageError| TransformError::EncodeFailed(e.to_string()))?;
+            bytes = cursor.into_inner();
+        }
         MediaType::Svg => {
             return Err(TransformError::EncodeFailed(
                 "SVG encoding should be handled by transform_svg".into(),
@@ -1431,16 +1440,21 @@ fn read_input_metadata(input: &Artifact) -> Result<RetainedMetadata, TransformEr
                     .map_err(|error| TransformError::DecodeFailed(error.to_string()))?,
             })
         }
-        MediaType::Avif | MediaType::Svg | MediaType::Bmp => Ok(RetainedMetadata::default()),
+        MediaType::Avif | MediaType::Svg | MediaType::Bmp | MediaType::Tiff => {
+            Ok(RetainedMetadata::default())
+        }
     }
 }
 
 fn output_has_alpha(image: &DynamicImage, media_type: MediaType) -> bool {
     match media_type {
         MediaType::Jpeg => false,
-        MediaType::Png | MediaType::Webp | MediaType::Avif | MediaType::Svg | MediaType::Bmp => {
-            image.color().has_alpha()
-        }
+        MediaType::Png
+        | MediaType::Webp
+        | MediaType::Avif
+        | MediaType::Svg
+        | MediaType::Bmp
+        | MediaType::Tiff => image.color().has_alpha(),
     }
 }
 

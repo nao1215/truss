@@ -32,7 +32,7 @@ pub struct WasmTransformOptions {
     pub fit: Option<String>,
     /// The crop anchor (`center`, `top-left`, and so on).
     pub position: Option<String>,
-    /// The requested output format (`jpeg`, `png`, `webp`, `avif`, `bmp`, or `svg`).
+    /// The requested output format (`jpeg`, `png`, `webp`, `avif`, `bmp`, `tiff`, or `svg`).
     pub format: Option<String>,
     /// The requested lossy quality from 1 to 100.
     pub quality: Option<u8>,
@@ -296,6 +296,7 @@ fn output_extension(media_type: MediaType) -> &'static str {
         MediaType::Avif => "avif",
         MediaType::Svg => "svg",
         MediaType::Bmp => "bmp",
+        MediaType::Tiff => "tiff",
     }
 }
 

@@ -576,6 +576,7 @@ function inferDeclaredMediaType(file) {
     "image/bmp": "bmp",
     "image/x-ms-bmp": "bmp",
     "image/x-windows-bmp": "bmp",
+    "image/tiff": "tiff",
     "image/svg+xml": "svg",
   };
   if (file.type && byMime[file.type]) {
@@ -590,6 +591,8 @@ function inferDeclaredMediaType(file) {
     webp: "webp",
     avif: "avif",
     bmp: "bmp",
+    tiff: "tiff",
+    tif: "tiff",
     svg: "svg",
   };
   return byExtension[extension] ?? null;

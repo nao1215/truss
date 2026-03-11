@@ -243,6 +243,7 @@ fn media_type_index(mt: MediaType) -> usize {
         MediaType::Avif => 3,
         MediaType::Svg => 4,
         MediaType::Bmp => 5,
+        MediaType::Tiff => 6,
     }
 }
 

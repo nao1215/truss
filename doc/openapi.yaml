@@ -618,7 +618,7 @@ components:
         `svg` output is only valid for SVG input.
       schema:
         type: string
-        enum: [jpeg, png, webp, avif, bmp, svg]
+        enum: [jpeg, png, webp, avif, bmp, tiff, svg]
       example: webp
     Quality:
       name: quality
@@ -876,7 +876,7 @@ components:
           description: Crop anchor or padding placement for bounded resizes.
         format:
           type: string
-          enum: [jpeg, png, webp, avif, bmp, svg]
+          enum: [jpeg, png, webp, avif, bmp, tiff, svg]
           description: Explicit output format. When omitted, the server negotiates or keeps the input format.
         quality:
           type: integer
@@ -1162,6 +1162,10 @@ components:
             type: string
             format: binary
         image/bmp:
+          schema:
+            type: string
+            format: binary
+        image/tiff:
           schema:
             type: string
             format: binary

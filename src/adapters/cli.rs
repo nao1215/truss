@@ -111,7 +111,7 @@ OPTIONS:
       --position <POS>     Crop anchor for cover mode (default: center)
                            center, top, right, bottom, left,
                            top-left, top-right, bottom-left, bottom-right
-      --format <FMT>       Output format: jpeg, png, webp, avif, bmp, svg
+      --format <FMT>       Output format: jpeg, png, webp, avif, bmp, tiff, svg
                            (default: inferred from output extension)
       --quality <1-100>    Encoding quality for lossy formats
       --background <COLOR> Background color as RRGGBB or RRGGBBAA hex

@@ -118,6 +118,8 @@ pub enum MediaType {
     Svg,
     /// BMP image data.
     Bmp,
+    /// TIFF image data.
+    Tiff,
 }
 
 impl MediaType {
@@ -130,6 +132,7 @@ impl MediaType {
             Self::Avif => "avif",
             Self::Svg => "svg",
             Self::Bmp => "bmp",
+            Self::Tiff => "tiff",
         }
     }
 
@@ -142,6 +145,7 @@ impl MediaType {
             Self::Avif => "image/avif",
             Self::Svg => "image/svg+xml",
             Self::Bmp => "image/bmp",
+            Self::Tiff => "image/tiff",
         }
     }
 
@@ -173,6 +177,7 @@ impl FromStr for MediaType {
             "avif" => Ok(Self::Avif),
             "svg" => Ok(Self::Svg),
             "bmp" => Ok(Self::Bmp),
+            "tiff" | "tif" => Ok(Self::Tiff),
             _ => Err(format!("unsupported media type `{value}`")),
         }
     }
@@ -967,6 +972,10 @@ fn detect_artifact(bytes: &[u8]) -> Result<(MediaType, ArtifactMetadata), Transf
         return Ok((MediaType::Bmp, sniff_bmp(bytes)?));
     }
 
+    if is_tiff(bytes) {
+        return Ok((MediaType::Tiff, sniff_tiff(bytes)?));
+    }
+
     // SVG check goes last: it relies on text scanning which is slower than binary
     // magic-number checks and could produce false positives on non-SVG XML.
     if is_svg(bytes) {
@@ -1080,6 +1089,38 @@ fn sniff_bmp(bytes: &[u8]) -> Result<ArtifactMetadata, TransformError> {
 
     let has_alpha = bits_per_pixel == 32;
 
+    Ok(ArtifactMetadata {
+        width: Some(width),
+        height: Some(height),
+        frame_count: 1,
+        duration: None,
+        has_alpha: Some(has_alpha),
+    })
+}
+
+/// Detects TIFF files by checking the byte-order marker and magic number.
+///
+/// Little-endian: `II` + 0x002A, big-endian: `MM` + 0x002A.
+fn is_tiff(bytes: &[u8]) -> bool {
+    bytes.len() >= 4
+        && ((bytes[0] == b'I' && bytes[1] == b'I' && bytes[2] == 0x2A && bytes[3] == 0x00)
+            || (bytes[0] == b'M' && bytes[1] == b'M' && bytes[2] == 0x00 && bytes[3] == 0x2A))
+}
+
+/// Extracts TIFF metadata by decoding the image header via the `image` crate.
+fn sniff_tiff(bytes: &[u8]) -> Result<ArtifactMetadata, TransformError> {
+    let cursor = std::io::Cursor::new(bytes);
+    let decoder = image::codecs::tiff::TiffDecoder::new(cursor)
+        .map_err(|e| TransformError::DecodeFailed(format!("tiff decode: {e}")))?;
+    let (width, height) = image::ImageDecoder::dimensions(&decoder);
+    let color = image::ImageDecoder::color_type(&decoder);
+    let has_alpha = matches!(
+        color,
+        image::ColorType::La8
+            | image::ColorType::Rgba8
+            | image::ColorType::La16
+            | image::ColorType::Rgba16
+    );
     Ok(ArtifactMetadata {
         width: Some(width),
         height: Some(height),

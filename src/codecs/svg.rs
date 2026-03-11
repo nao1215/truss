@@ -668,6 +668,13 @@ fn encode_raster_output(
                 .write_image(image.as_ref(), width, height, ColorType::Rgba8.into())
                 .map_err(|e| TransformError::EncodeFailed(format!("BMP encode failed: {e}")))?;
         }
+        MediaType::Tiff => {
+            let mut cursor = std::io::Cursor::new(bytes);
+            image::codecs::tiff::TiffEncoder::new(&mut cursor)
+                .write_image(image.as_ref(), width, height, ColorType::Rgba8.into())
+                .map_err(|e| TransformError::EncodeFailed(format!("TIFF encode failed: {e}")))?;
+            bytes = cursor.into_inner();
+        }
         MediaType::Svg => {
             return Err(TransformError::InvalidOptions(
                 "SVG-to-SVG rasterization is not meaningful".into(),
