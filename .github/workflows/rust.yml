@@ -135,9 +135,8 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
 
-  # ── main only: cross-platform tests ─────────────────────────────────
+  # ── Cross-platform tests (PR and main) ──────────────────────────────
   test-cross-platform:
-    if: github.event_name == 'push'
     strategy:
       matrix:
         os: [macos-latest, windows-latest]

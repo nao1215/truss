@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: Truss Image Server API
-  version: 0.4.0
+  version: 0.5.0
   description: |
     HTTP API for the Truss image toolkit.
 
@@ -315,7 +315,7 @@ paths:
               example:
                 status: ok
                 service: truss
-                version: 0.4.0
+                version: 0.5.0
                 uptimeSeconds: 3600
                 checks:
                   - name: storageRoot
@@ -343,7 +343,7 @@ paths:
               example:
                 status: ok
                 service: truss
-                version: 0.4.0
+                version: 0.5.0
 
   /health/ready:
     get:
@@ -427,10 +427,10 @@ paths:
       summary: Prometheus metrics
       description: |
         Returns metrics in Prometheus text exposition format (version 0.0.4).
-        Requires Bearer token authentication.
+        Does not require authentication so that Prometheus scrapers can collect
+        metrics without additional configuration.
       operationId: getMetrics
-      security:
-        - BearerAuth: []
+      security: []
       responses:
         '200':
           description: Prometheus text exposition format
@@ -442,8 +442,15 @@ paths:
                 # HELP truss_process_up Whether the process is running.
                 # TYPE truss_process_up gauge
                 truss_process_up 1
-        '401':
-          $ref: '#/components/responses/Unauthorized'
+                # HELP truss_http_requests_total Total HTTP requests handled.
+                # TYPE truss_http_requests_total counter
+                truss_http_requests_total 42
+                # HELP truss_http_request_duration_seconds HTTP request duration in seconds.
+                # TYPE truss_http_request_duration_seconds histogram
+                truss_http_request_duration_seconds_bucket{route="/health",le="0.005"} 10
+                truss_http_request_duration_seconds_bucket{route="/health",le="+Inf"} 10
+                truss_http_request_duration_seconds_sum{route="/health"} 0.002
+                truss_http_request_duration_seconds_count{route="/health"} 10
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
 
@@ -882,7 +889,7 @@ components:
         version:
           type: string
           description: Semantic version of the running binary.
-          example: "0.4.0"
+          example: "0.5.0"
     ReadinessResponse:
       type: object
       description: Readiness payload with individual dependency checks.
@@ -911,7 +918,7 @@ components:
         version:
           type: string
           description: Semantic version of the running binary.
-          example: "0.4.0"
+          example: "0.5.0"
         uptimeSeconds:
           type: integer
           format: int64

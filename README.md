@@ -217,6 +217,12 @@ The server echoes the request ID back in the `X-Request-Id` response header, mak
 
 Azure authentication: By default, truss uses anonymous access, which works for public containers and Azurite local development. For private containers, append a SAS token to `TRUSS_AZURE_ENDPOINT`. On Azure-hosted compute (App Service, AKS, VMs), managed identity is used automatically when no explicit credentials are provided.
 
+### Prometheus Metrics
+
+The server exposes a `/metrics` endpoint in Prometheus text exposition format. The endpoint does not require authentication, so Prometheus scrapers can collect metrics without additional configuration.
+
+For the full metrics reference, bucket boundaries, and example PromQL queries, see [doc/prometheus.md](doc/prometheus.md).
+
 API reference:
 
 - OpenAPI YAML: [doc/openapi.yaml](doc/openapi.yaml)
