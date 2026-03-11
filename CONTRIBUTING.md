@@ -138,6 +138,10 @@ The CLI uses structured exit codes. When changing CLI error handling, keep these
 | 3 | Input error (unsupported format, corrupt file) |
 | 4 | Transform error (encode failure, size limit) |
 
+### 9. GHCR package visibility
+
+The first GHCR package publish is private by default. To allow anonymous pulls (e.g. from ECS), change the package visibility to `Public` in GitHub Packages settings once after the first publish.
+
 ## Contributing Outside of Coding
 
 You can still make a huge impact even if you are not writing code:
