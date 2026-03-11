@@ -419,6 +419,13 @@ impl TransformOptions {
         validate_quality(self.quality)?;
         validate_blur(self.blur)?;
         validate_sharpen(self.sharpen)?;
+        if let Some(crop) = self.crop
+            && (crop.width == 0 || crop.height == 0)
+        {
+            return Err(TransformError::InvalidOptions(
+                "crop width and height must be greater than zero".to_string(),
+            ));
+        }
 
         let has_bounded_resize = self.width.is_some() && self.height.is_some();
 
@@ -2397,5 +2404,26 @@ mod tests {
             height: 4,
         };
         assert_eq!(crop.to_string(), "1,2,3,4");
+    }
+
+    #[test]
+    fn normalize_rejects_zero_dimension_crop() {
+        use super::{CropRegion, MediaType, TransformOptions};
+        let opts = TransformOptions {
+            crop: Some(CropRegion {
+                x: 0,
+                y: 0,
+                width: 0,
+                height: 100,
+            }),
+            ..TransformOptions::default()
+        };
+        let err = opts
+            .normalize(MediaType::Jpeg)
+            .expect_err("zero-width crop should fail");
+        assert!(
+            matches!(err, super::TransformError::InvalidOptions(_)),
+            "unexpected error: {err:?}"
+        );
     }
 }

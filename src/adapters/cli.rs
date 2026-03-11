@@ -1391,8 +1391,8 @@ fn execute_serve(command: ServeCommand) -> Result<(), CliError> {
     })?;
 
     // Signed URL verification status
-    let signed_url_enabled =
-        config.signed_url_key_id.is_some() && config.signed_url_secret.is_some();
+    let signed_url_enabled = !config.signing_keys.is_empty()
+        || (config.signed_url_key_id.is_some() && config.signed_url_secret.is_some());
     writeln!(
         stdout,
         "  signed URL verification: {}",

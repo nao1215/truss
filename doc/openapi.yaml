@@ -703,7 +703,7 @@ components:
         Not supported for SVG inputs.
       schema:
         type: string
-        pattern: '^\d+,\d+,\d+,\d+'
+        pattern: '^\d+,\d+,[1-9]\d*,[1-9]\d*$'
       example: "100,50,800,600"
     Preset:
       name: preset
@@ -935,7 +935,7 @@ components:
           description: Preserve EXIF only. Requires `stripMetadata=false`.
         crop:
           type: string
-          pattern: '^\d+,\d+,\d+,\d+'
+          pattern: '^\d+,\d+,[1-9]\d*,[1-9]\d*$'
           description: >-
             Explicit pixel crop as `x,y,width,height`. Applied after auto-orient
             and rotation but before resize. Not supported for SVG inputs.
