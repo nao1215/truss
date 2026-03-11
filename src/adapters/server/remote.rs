@@ -105,6 +105,47 @@ pub(super) fn read_remote_source_bytes(
     config: &ServerConfig,
     deadline: Option<Instant>,
 ) -> Result<Vec<u8>, HttpResponse> {
+    fetch_remote_bytes(
+        url,
+        config,
+        deadline,
+        &RemoteFetchPolicy {
+            max_bytes: MAX_SOURCE_BYTES,
+            cache_namespace: "src",
+            resource_label: "remote URL",
+        },
+    )
+}
+
+pub(super) fn read_remote_watermark_bytes(
+    url: &str,
+    config: &ServerConfig,
+    deadline: Option<Instant>,
+) -> Result<Vec<u8>, HttpResponse> {
+    fetch_remote_bytes(
+        url,
+        config,
+        deadline,
+        &RemoteFetchPolicy {
+            max_bytes: MAX_WATERMARK_BYTES,
+            cache_namespace: "wm",
+            resource_label: "watermark image",
+        },
+    )
+}
+
+struct RemoteFetchPolicy {
+    max_bytes: u64,
+    cache_namespace: &'static str,
+    resource_label: &'static str,
+}
+
+fn fetch_remote_bytes(
+    url: &str,
+    config: &ServerConfig,
+    deadline: Option<Instant>,
+    policy: &RemoteFetchPolicy,
+) -> Result<Vec<u8>, HttpResponse> {
     // Validate the URL against current security policy (scheme, port, IP range)
     // *before* checking the origin cache. This ensures that cached responses from
     // a permissive configuration cannot be served after tightening restrictions.
@@ -117,9 +158,15 @@ pub(super) fn read_remote_source_bytes(
         .map(|root| OriginCache::new(root).with_log_handler(config.log_handler.clone()));
 
     if let Some(ref cache) = origin_cache
-        && let Some(bytes) = cache.get("src", url)
+        && let Some(bytes) = cache.get(policy.cache_namespace, url)
     {
         ORIGIN_CACHE_HITS_TOTAL.fetch_add(1, Ordering::Relaxed);
+        if bytes.len() as u64 > policy.max_bytes {
+            return Err(payload_too_large_response(&format!(
+                "cached {} exceeds {} bytes",
+                policy.resource_label, policy.max_bytes
+            )));
+        }
         return Ok(bytes);
     }
 
@@ -140,96 +187,32 @@ pub(super) fn read_remote_source_bytes(
                     current_url = next_redirect_url(&target.url, &response, redirect_index)?;
                 } else if (200..=299).contains(&status) {
                     let bytes =
-                        read_remote_response_body(target.url.as_str(), response, MAX_SOURCE_BYTES)?;
+                        read_remote_response_body(target.url.as_str(), response, policy.max_bytes)?;
                     if let Some(cache) = origin_cache {
-                        cache.put("src", url, &bytes);
+                        cache.put(policy.cache_namespace, url, &bytes);
                     }
                     return Ok(bytes);
                 } else {
-                    return Err(bad_gateway_response(&format!(
-                        "failed to fetch remote URL: upstream HTTP {status}"
-                    )));
+                    let msg = format!(
+                        "failed to fetch {}: upstream HTTP {status}",
+                        policy.resource_label
+                    );
+                    stderr_write(&format!("truss: {msg} for {url}"));
+                    return Err(bad_gateway_response(&msg));
                 }
             }
             Err(error) => {
-                return Err(bad_gateway_response(&format!(
-                    "failed to fetch remote URL: {error}"
-                )));
+                let msg = format!("failed to fetch {}: {error}", policy.resource_label);
+                stderr_write(&format!("truss: {msg}"));
+                return Err(bad_gateway_response(&msg));
             }
         }
     }
 
-    Err(too_many_redirects_response(
-        "remote URL exceeded the redirect limit",
-    ))
-}
-
-pub(super) fn read_remote_watermark_bytes(
-    url: &str,
-    config: &ServerConfig,
-    deadline: Option<Instant>,
-) -> Result<Vec<u8>, HttpResponse> {
-    let _ = prepare_remote_fetch_target(url, config)?;
-
-    let origin_cache = config
-        .cache_root
-        .as_ref()
-        .map(|root| OriginCache::new(root).with_log_handler(config.log_handler.clone()));
-
-    if let Some(ref cache) = origin_cache
-        && let Some(bytes) = cache.get("wm", url)
-    {
-        ORIGIN_CACHE_HITS_TOTAL.fetch_add(1, Ordering::Relaxed);
-        if bytes.len() as u64 > MAX_WATERMARK_BYTES {
-            return Err(payload_too_large_response(
-                "cached watermark image exceeds 10 MB",
-            ));
-        }
-        return Ok(bytes);
-    }
-
-    if origin_cache.is_some() {
-        ORIGIN_CACHE_MISSES_TOTAL.fetch_add(1, Ordering::Relaxed);
-    }
-
-    let mut current_url = url.to_string();
-
-    for redirect_index in 0..=MAX_REMOTE_REDIRECTS {
-        let target = prepare_remote_fetch_target(&current_url, config)?;
-        let agent = build_remote_agent(&target, deadline);
-
-        match agent.get(target.url.as_str()).call() {
-            Ok(response) => {
-                let status = response.status().as_u16();
-                if is_redirect_status(status) {
-                    current_url = next_redirect_url(&target.url, &response, redirect_index)?;
-                } else if (200..=299).contains(&status) {
-                    let bytes = read_remote_response_body(
-                        target.url.as_str(),
-                        response,
-                        MAX_WATERMARK_BYTES,
-                    )?;
-                    if let Some(cache) = origin_cache {
-                        cache.put("wm", url, &bytes);
-                    }
-                    return Ok(bytes);
-                } else {
-                    stderr_write(&format!(
-                        "truss: watermark fetch failed: upstream HTTP {status} for {url}"
-                    ));
-                    return Err(bad_gateway_response("failed to fetch watermark image"));
-                }
-            }
-            Err(error) => {
-                stderr_write(&format!("truss: watermark fetch error: {error}"));
-                return Err(bad_gateway_response("failed to fetch watermark image"));
-            }
-        }
-    }
-
-    Err(too_many_redirects_response(
-        "watermark URL exceeded the redirect limit",
-    ))
+    Err(too_many_redirects_response(&format!(
+        "{} URL exceeded the redirect limit",
+        policy.resource_label
+    )))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

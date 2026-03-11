@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: Truss Image Server API
-  version: 0.6.0
+  version: 0.6.1
   description: |
     HTTP API for the Truss image toolkit.
 
@@ -333,7 +333,7 @@ paths:
               example:
                 status: ok
                 service: truss
-                version: 0.6.0
+                version: 0.6.1
                 uptimeSeconds: 3600
                 checks:
                   - name: storageRoot
@@ -361,7 +361,7 @@ paths:
               example:
                 status: ok
                 service: truss
-                version: 0.6.0
+                version: 0.6.1
 
   /health/ready:
     get:

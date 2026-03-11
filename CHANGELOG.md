@@ -1,5 +1,24 @@
 # Changelog
 
+## v0.6.1
+
+### Fixed
+
+- HTTP response splitting (CRLF injection) via `X-Request-Id` header — CR, LF, and NUL bytes are now rejected.
+- Integer overflow in AVIF decode when frame dimensions exceed address space (`width * height * 4`).
+- aarch64-unknown-linux-gnu release build failure caused by missing OpenSSL (`Cross.toml` pre-build step).
+
+### Changed
+
+- Extracted `ServerConfig` and related types into dedicated `config.rs` module (~980 lines out of `mod.rs`).
+- Deduplicated `read_remote_source_bytes` / `read_remote_watermark_bytes` into shared `fetch_remote_bytes` with `RemoteFetchPolicy`.
+- Cleaned up unused imports in server module after config extraction.
+
+### Added
+
+- Integration tests: health endpoint 200, unknown path 404, CRLF injection prevention, missing Content-Type 415, invalid JSON body 400, missing source file 404.
+- Characterization unit tests for `extract_request_id`, `ServerConfig` defaults/builder, `route_request`, and `TransformSlot` concurrency.
+
 ## v0.6.0
 
 ### Added
