@@ -297,6 +297,12 @@ pub struct TransformOptions {
     /// When set, a Gaussian blur with the given sigma is applied after resizing
     /// and before encoding. Valid range is 0.1–100.0.
     pub blur: Option<f32>,
+    /// Unsharp-mask (sharpen) sigma.
+    ///
+    /// When set, an unsharp mask with the given sigma is applied after resizing
+    /// and before encoding. Valid range is 0.1–100.0. The sharpening threshold
+    /// is fixed at 1.
+    pub sharpen: Option<f32>,
     /// Optional wall-clock deadline for the transform pipeline.
     ///
     /// When set, the transform checks elapsed time at each pipeline stage and returns
@@ -321,6 +327,7 @@ impl Default for TransformOptions {
             strip_metadata: true,
             preserve_exif: false,
             blur: None,
+            sharpen: None,
             deadline: None,
         }
     }
@@ -336,6 +343,7 @@ impl TransformOptions {
         validate_dimension("height", self.height)?;
         validate_quality(self.quality)?;
         validate_blur(self.blur)?;
+        validate_sharpen(self.sharpen)?;
 
         let has_bounded_resize = self.width.is_some() && self.height.is_some();
 
@@ -389,6 +397,7 @@ impl TransformOptions {
             auto_orient: self.auto_orient,
             metadata_policy: normalize_metadata_policy(self.strip_metadata, self.preserve_exif),
             blur: self.blur,
+            sharpen: self.sharpen,
             deadline: self.deadline,
         })
     }
@@ -419,6 +428,8 @@ pub struct NormalizedTransformOptions {
     pub metadata_policy: MetadataPolicy,
     /// Gaussian blur sigma, when requested.
     pub blur: Option<f32>,
+    /// Unsharp-mask (sharpen) sigma, when requested.
+    pub sharpen: Option<f32>,
     /// Optional wall-clock deadline for the transform pipeline.
     pub deadline: Option<Duration>,
 }
@@ -891,6 +902,18 @@ fn validate_blur(value: Option<f32>) -> Result<(), TransformError> {
     {
         return Err(TransformError::InvalidOptions(
             "blur sigma must be between 0.1 and 100.0".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
+fn validate_sharpen(value: Option<f32>) -> Result<(), TransformError> {
+    if let Some(sigma) = value
+        && !(0.1..=100.0).contains(&sigma)
+    {
+        return Err(TransformError::InvalidOptions(
+            "sharpen sigma must be between 0.1 and 100.0".to_string(),
         ));
     }
 
@@ -2103,6 +2126,59 @@ mod tests {
         .normalize(MediaType::Jpeg)
         .expect("blur sigma 100.0 should be accepted");
         assert_eq!(opts_max.blur, Some(100.0));
+    }
+
+    #[test]
+    fn normalize_rejects_sharpen_sigma_below_minimum() {
+        let err = TransformOptions {
+            sharpen: Some(0.0),
+            ..TransformOptions::default()
+        }
+        .normalize(MediaType::Jpeg)
+        .expect_err("sharpen sigma 0.0 should be rejected");
+
+        assert_eq!(
+            err,
+            TransformError::InvalidOptions(
+                "sharpen sigma must be between 0.1 and 100.0".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn normalize_rejects_sharpen_sigma_above_maximum() {
+        let err = TransformOptions {
+            sharpen: Some(100.1),
+            ..TransformOptions::default()
+        }
+        .normalize(MediaType::Jpeg)
+        .expect_err("sharpen sigma 100.1 should be rejected");
+
+        assert_eq!(
+            err,
+            TransformError::InvalidOptions(
+                "sharpen sigma must be between 0.1 and 100.0".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn normalize_accepts_sharpen_sigma_at_boundaries() {
+        let opts_min = TransformOptions {
+            sharpen: Some(0.1),
+            ..TransformOptions::default()
+        }
+        .normalize(MediaType::Jpeg)
+        .expect("sharpen sigma 0.1 should be accepted");
+        assert_eq!(opts_min.sharpen, Some(0.1));
+
+        let opts_max = TransformOptions {
+            sharpen: Some(100.0),
+            ..TransformOptions::default()
+        }
+        .normalize(MediaType::Jpeg)
+        .expect("sharpen sigma 100.0 should be accepted");
+        assert_eq!(opts_max.sharpen, Some(100.0));
     }
 
     #[test]

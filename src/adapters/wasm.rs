@@ -48,6 +48,8 @@ pub struct WasmTransformOptions {
     pub preserve_exif: Option<bool>,
     /// Gaussian blur sigma (0.1–100.0).
     pub blur: Option<f32>,
+    /// Sharpen sigma (0.1–100.0).
+    pub sharpen: Option<f32>,
 }
 
 /// Build-time capabilities exposed by the WASM adapter.
@@ -207,6 +209,7 @@ fn parse_wasm_options(options: WasmTransformOptions) -> Result<TransformOptions,
         strip_metadata,
         preserve_exif,
         blur: options.blur,
+        sharpen: options.sharpen,
         deadline: None,
     })
 }

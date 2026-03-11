@@ -214,6 +214,31 @@
               </div>
             </label>
 
+            <label class="sharpen-field" id="sharpen-field">
+              <span>Sharpen</span>
+              <div class="quality-pair">
+                <input
+                  id="sharpen-range"
+                  name="sharpenRange"
+                  type="range"
+                  min="0"
+                  max="100"
+                  step="0.1"
+                  value="0"
+                />
+                <input
+                  id="sharpen-number"
+                  name="sharpen"
+                  type="number"
+                  min="0"
+                  max="100"
+                  step="0.1"
+                  value="0"
+                  inputmode="decimal"
+                />
+              </div>
+            </label>
+
             <label class="checkbox">
               <input id="auto-orient" name="autoOrient" type="checkbox" checked />
               <span>Apply EXIF auto-orient</span>

@@ -10,7 +10,7 @@
 
 ![logo](./doc/img/logo-small.png)
 
-Resize, convert, blur, and watermark images from the CLI, an HTTP server, or the browser -- written in Rust with signed-URL authentication and SSRF protection built in.
+Resize, convert, blur, sharpen, and watermark images from the CLI, an HTTP server, or the browser -- written in Rust with signed-URL authentication and SSRF protection built in.
 
 [Try the WASM demo in your browser](https://nao1215.github.io/truss/) -- no install, no upload, runs 100 % client-side.
 
@@ -41,7 +41,7 @@ Feature comparison with [imgproxy](https://github.com/imgproxy/imgproxy) and [im
 | GIF animation processing | No (out of scope) | Yes | Yes |
 | SVG sanitization | Yes | Yes | No |
 | Smart crop | No | Yes | Yes |
-| Sharpen filter | [Planned (#44)](https://github.com/nao1215/truss/issues/44) | Yes | Yes |
+| Sharpen filter | Yes | Yes | Yes |
 | Crop / Trim / Padding | [Planned (#46)](https://github.com/nao1215/truss/issues/46) | Yes | Yes |
 | S3  | Yes | Yes | Yes |
 | GCS | Yes | Yes | Yes |
@@ -60,7 +60,7 @@ flowchart TB
 
     subgraph Core["Shared Rust core"]
         direction LR
-        Sniff["Detect format"] --> Transform["Resize / blur / watermark"]
+        Sniff["Detect format"] --> Transform["Resize / blur / sharpen / watermark"]
         Transform --> Encode["Encode output"]
     end
 
@@ -155,7 +155,7 @@ truss diagram.svg -o diagram.png --width 1024
 truss inspect photo.jpg
 ```
 
-#### Examples: Blur & Watermark
+#### Examples: Blur, Sharpen & Watermark
 
 | | Original | Gaussian Blur (`--blur 5.0`) | Watermark (`--watermark`) |
 |---|---|---|---|
@@ -164,6 +164,9 @@ truss inspect photo.jpg
 ```sh
 # Blur
 truss photo.jpg -o blurred.jpg --blur 5.0
+
+# Sharpen
+truss photo.jpg -o sharpened.jpg --sharpen 2.0
 
 # Watermark
 truss photo.jpg -o watermarked.jpg \
@@ -407,7 +410,7 @@ CDN cache keys must vary by the signed-URL authentication inputs and any transfo
 
 - Authentication: `keyId`, `expires`, `signature`
 - Source: `path` or `url`, `version`
-- Transform: `width`, `height`, `fit`, `position`, `format`, `quality`, `background`, `rotate`, `autoOrient`, `stripMetadata`, `preserveExif`, `blur`
+- Transform: `width`, `height`, `fit`, `position`, `format`, `quality`, `background`, `rotate`, `autoOrient`, `stripMetadata`, `preserveExif`, `blur`, `sharpen`
 
 This ensures that a cached response for one signed URL is not served to requests with different or expired signatures, and different transform options produce separate cache entries.
 

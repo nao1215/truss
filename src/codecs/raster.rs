@@ -217,6 +217,13 @@ pub fn transform_raster(request: TransformRequest) -> Result<TransformResult, Tr
         }
     }
 
+    if let Some(sigma) = normalized.options.sharpen {
+        image = image.unsharpen(sigma, 1);
+        if let (Some(start), Some(limit)) = (start, deadline) {
+            check_deadline(start.elapsed(), limit, "sharpen")?;
+        }
+    }
+
     if let Some(ref wm) = normalized.watermark {
         image = apply_watermark(image, wm)?;
         if let (Some(start), Some(limit)) = (start, deadline) {
@@ -1453,7 +1460,8 @@ mod tests {
     use image::codecs::webp::WebPEncoder;
     use image::metadata::Orientation;
     use image::{
-        ColorType, GenericImageView, ImageDecoder, ImageEncoder, ImageFormat, Rgba, RgbaImage,
+        ColorType, DynamicImage, GenericImageView, ImageDecoder, ImageEncoder, ImageFormat, Rgba,
+        RgbaImage,
     };
     use std::io::Cursor;
 
@@ -2693,6 +2701,56 @@ mod tests {
             edge_pixel[0] > 0 && edge_pixel[0] < 255,
             "expected blurred edge pixel to be a mid-tone, got r={}",
             edge_pixel[0]
+        );
+    }
+
+    #[test]
+    fn transform_raster_applies_sharpen() {
+        // Create a blurry image by first blurring a sharp edge.
+        let mut image = RgbaImage::from_pixel(8, 8, Rgba([255, 255, 255, 255]));
+        for y in 0..4 {
+            for x in 0..4 {
+                image.put_pixel(x, y, Rgba([0, 0, 0, 255]));
+            }
+        }
+        let blurred = DynamicImage::ImageRgba8(image).blur(2.0);
+        let mut bytes = Vec::new();
+        PngEncoder::new(&mut bytes)
+            .write_image(blurred.as_bytes(), 8, 8, ColorType::Rgba8.into())
+            .expect("encode png");
+        let artifact = Artifact::new(
+            bytes,
+            MediaType::Png,
+            ArtifactMetadata {
+                width: Some(8),
+                height: Some(8),
+                frame_count: 1,
+                duration: None,
+                has_alpha: Some(false),
+            },
+        );
+
+        let result = transform_raster(TransformRequest::new(
+            artifact,
+            TransformOptions {
+                sharpen: Some(5.0),
+                ..TransformOptions::default()
+            },
+        ))
+        .expect("sharpen transform");
+
+        assert_eq!(result.artifact.metadata.width, Some(8));
+        assert_eq!(result.artifact.metadata.height, Some(8));
+
+        // After sharpening, edges should become more pronounced.
+        let output = image::load_from_memory_with_format(&result.artifact.bytes, ImageFormat::Png)
+            .expect("decode output");
+        let corner = output.get_pixel(0, 0);
+        // The corner should still be dark after sharpening a blurred dark region.
+        assert!(
+            corner[0] < 128,
+            "expected sharpened corner to remain dark, got r={}",
+            corner[0]
         );
     }
 

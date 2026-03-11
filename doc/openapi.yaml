@@ -88,6 +88,7 @@ paths:
         - $ref: '#/components/parameters/StripMetadata'
         - $ref: '#/components/parameters/PreserveExif'
         - $ref: '#/components/parameters/Blur'
+        - $ref: '#/components/parameters/Sharpen'
         - $ref: '#/components/parameters/WatermarkUrl'
         - $ref: '#/components/parameters/WatermarkPosition'
         - $ref: '#/components/parameters/WatermarkOpacity'
@@ -165,6 +166,7 @@ paths:
         - $ref: '#/components/parameters/StripMetadata'
         - $ref: '#/components/parameters/PreserveExif'
         - $ref: '#/components/parameters/Blur'
+        - $ref: '#/components/parameters/Sharpen'
         - $ref: '#/components/parameters/WatermarkUrl'
         - $ref: '#/components/parameters/WatermarkPosition'
         - $ref: '#/components/parameters/WatermarkOpacity'
@@ -700,6 +702,20 @@ components:
         minimum: 0.1
         maximum: 100.0
       example: 3.0
+    Sharpen:
+      name: sharpen
+      in: query
+      required: false
+      description: |
+        Apply unsharp-mask (sharpen) filter with the given sigma value.
+        Valid range is 0.1 to 100.0. Higher values produce stronger sharpening.
+        Not supported for SVG inputs.
+      schema:
+        type: number
+        format: float
+        minimum: 0.1
+        maximum: 100.0
+      example: 2.0
     WatermarkUrl:
       name: watermarkUrl
       in: query
@@ -897,6 +913,15 @@ components:
             Gaussian blur sigma (0.1–100.0). Higher values produce a stronger blur.
             Not supported for SVG inputs; the server will reject the request
             with an error if blur is specified for an SVG source.
+        sharpen:
+          type: number
+          format: float
+          minimum: 0.1
+          maximum: 100.0
+          description: >-
+            Sharpen sigma (0.1–100.0). Higher values produce stronger sharpening.
+            Not supported for SVG inputs; the server will reject the request
+            with an error if sharpen is specified for an SVG source.
       example:
         width: 1600
         height: 900

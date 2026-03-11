@@ -398,7 +398,8 @@ a {
   background: rgba(127, 79, 66, 0.08);
 }
 
-.blur-field {
+.blur-field,
+.sharpen-field {
   grid-column: 1 / -1;
 }
 
