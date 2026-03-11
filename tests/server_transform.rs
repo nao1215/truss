@@ -1,6 +1,7 @@
 use hmac::{Hmac, Mac};
 use image::codecs::png::PngEncoder;
 use image::{ColorType, ImageEncoder, Rgba, RgbaImage};
+use serial_test::serial;
 use sha2::Sha256;
 use std::collections::BTreeMap;
 use std::fs;
@@ -227,6 +228,16 @@ fn split_response(response: &[u8]) -> (String, String, Vec<u8>) {
         .to_string();
 
     (header, content_type, response[(header_end + 4)..].to_vec())
+}
+
+fn send_raw_request(addr: SocketAddr, request: &str) -> Vec<u8> {
+    let mut stream = TcpStream::connect(addr).expect("connect to test server");
+    stream.write_all(request.as_bytes()).expect("write request");
+    stream.flush().expect("flush request");
+
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response).expect("read response");
+    response
 }
 
 fn sign_public_query(
@@ -1591,5 +1602,162 @@ fn test_watermark_url_redirect_followed() {
     assert!(
         body.starts_with(&[0x89, b'P', b'N', b'G']),
         "expected PNG magic bytes in response body"
+    );
+}
+
+// ── Health, routing, and error-path integration tests ───────────────
+
+#[test]
+#[serial]
+fn serve_once_health_endpoint_returns_200() {
+    let storage = temp_dir("health-200");
+    let config = ServerConfig::new(storage, None);
+    let (addr, handle) = spawn_server(config);
+
+    let response = send_raw_request(
+        addr,
+        "GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    );
+    handle
+        .join()
+        .expect("join server thread")
+        .expect("serve one request");
+
+    let (header, content_type, body) = split_response(&response);
+    assert!(
+        header.starts_with("HTTP/1.1 200"),
+        "expected 200 from /health, got: {header}"
+    );
+    assert_eq!(content_type, "application/json");
+    let body_str = String::from_utf8_lossy(&body);
+    assert!(
+        body_str.contains("\"status\":\"ok\""),
+        "expected JSON health body, got: {body_str}"
+    );
+}
+
+#[test]
+#[serial]
+fn serve_once_returns_404_for_unknown_path() {
+    let storage = temp_dir("not-found-404");
+    let config = ServerConfig::new(storage, Some("secret".to_string()));
+    let (addr, handle) = spawn_server(config);
+
+    let response = send_raw_request(
+        addr,
+        "GET /nonexistent HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    );
+    handle
+        .join()
+        .expect("join server thread")
+        .expect("serve one request");
+
+    let (header, _content_type, _body) = split_response(&response);
+    assert!(
+        header.starts_with("HTTP/1.1 404"),
+        "expected 404 for unknown path, got: {header}"
+    );
+}
+
+#[test]
+#[serial]
+fn serve_once_strips_crlf_from_x_request_id() {
+    let storage = temp_dir("crlf-strip");
+    fs::create_dir_all(storage.join("images")).expect("create images dir");
+    fs::write(storage.join("images/test.png"), png_bytes()).expect("write test image");
+
+    let config = ServerConfig::new(storage, Some("secret".to_string()));
+    let (addr, handle) = spawn_server(config);
+
+    let body = r#"{"source":{"kind":"path","path":"images/test.png"}}"#;
+    let request = format!(
+        "POST /images:transform HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nAuthorization: Bearer secret\r\nX-Request-Id: evil\r\ninjected-header: yes\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    );
+    let response = send_raw_request(addr, &request);
+    handle
+        .join()
+        .expect("join server thread")
+        .expect("serve one request");
+
+    let (header, _content_type, _body) = split_response(&response);
+    assert!(
+        !header.contains("injected-header"),
+        "CRLF injection should not produce new headers in response"
+    );
+    assert!(
+        !header.contains("X-Request-Id: evil\r\ninjected-header"),
+        "X-Request-Id with CRLF should be stripped"
+    );
+}
+
+#[test]
+#[serial]
+fn serve_once_rejects_post_transform_without_content_type() {
+    let storage = temp_dir("no-content-type");
+    let config = ServerConfig::new(storage, Some("secret".to_string()));
+    let (addr, handle) = spawn_server(config);
+
+    let body = r#"{"source":{"kind":"path","path":"test.png"}}"#;
+    let request = format!(
+        "POST /images:transform HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nAuthorization: Bearer secret\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    );
+    let response = send_raw_request(addr, &request);
+    handle
+        .join()
+        .expect("join server thread")
+        .expect("serve one request");
+
+    let (header, _content_type, _body) = split_response(&response);
+    assert!(
+        header.starts_with("HTTP/1.1 415"),
+        "expected 415 for missing Content-Type, got: {header}"
+    );
+}
+
+#[test]
+#[serial]
+fn serve_once_rejects_invalid_json_body() {
+    let storage = temp_dir("invalid-json");
+    let config = ServerConfig::new(storage, Some("secret".to_string()));
+    let (addr, handle) = spawn_server(config);
+
+    let body = "not valid json at all";
+    let request = format!(
+        "POST /images:transform HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nAuthorization: Bearer secret\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    );
+    let response = send_raw_request(addr, &request);
+    handle
+        .join()
+        .expect("join server thread")
+        .expect("serve one request");
+
+    let (header, _content_type, _body) = split_response(&response);
+    assert!(
+        header.starts_with("HTTP/1.1 400"),
+        "expected 400 for invalid JSON body, got: {header}"
+    );
+}
+
+#[test]
+#[serial]
+fn serve_once_returns_404_for_missing_source_path() {
+    let storage = temp_dir("missing-source");
+    let config = ServerConfig::new(storage, Some("secret".to_string()));
+    let (addr, handle) = spawn_server(config);
+
+    let body = r#"{"source":{"kind":"path","path":"does-not-exist.png"}}"#;
+    let response = send_transform_request(addr, body, Some("secret"));
+    handle
+        .join()
+        .expect("join server thread")
+        .expect("serve one request");
+
+    let (header, _content_type, _body) = split_response(&response);
+    assert!(
+        header.starts_with("HTTP/1.1 404"),
+        "expected 404 for missing source file, got: {header}"
     );
 }
