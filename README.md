@@ -14,8 +14,7 @@ Resize, convert, blur, and watermark images from the CLI, an HTTP server, or the
 
 [Try the WASM demo in your browser](https://nao1215.github.io/truss/) -- no install, no upload, runs 100 % client-side.
 
-![wasm-sample](./doc/img/wasm-sample.png)
-
+![WASM demo screenshot](./doc/img/wasm-sample.png)
 
 ## Why truss?
 
@@ -24,6 +23,51 @@ Resize, convert, blur, and watermark images from the CLI, an HTTP server, or the
 - **Broad format support** -- JPEG, PNG, WebP, AVIF, BMP, and SVG; retains EXIF, ICC, and XMP metadata where possible.
 - **Cross-platform** -- Linux, macOS, Windows.
 - **Tested contracts** -- CLI behavior is locked by [ShellSpec](https://github.com/shellspec/shellspec), HTTP API by [runn](https://github.com/k1LoW/runn).
+
+## Comparison
+
+Feature comparison with [imgproxy](https://github.com/imgproxy/imgproxy) and [imagor](https://github.com/cshum/imagor) as of March 2026.
+
+| Feature | truss | imgproxy | imagor |
+|---------|:-----:|:--------:|:------:|
+| Language | Rust | Go | Go |
+| Runtime dependencies | None | libvips (C) | libvips (C) |
+| CLI | Yes | No | No |
+| WASM browser demo | Yes | No | No |
+| Signed URLs | Yes | Yes | Yes |
+| JPEG / PNG / WebP / AVIF | Yes | Yes | Yes |
+| SVG sanitization | Yes | Yes | No |
+| S3 / GCS | Yes | Yes | Yes |
+| Azure Blob Storage | Yes | Yes | No |
+| Watermark | Yes | Yes | Yes |
+| Prometheus metrics | Yes | Yes | No |
+| License | MIT | MIT | Apache 2.0 |
+
+## Architecture
+
+```mermaid
+flowchart TB
+    CLI["CLI<br/>(truss convert)"] --> Core
+    Server["HTTP Server<br/>(truss serve)"] --> Core
+    WASM["WASM<br/>(browser)"] --> Core
+
+    subgraph Core["Shared Rust core"]
+        direction LR
+        Sniff["Detect format"] --> Transform["Resize / blur / watermark"]
+        Transform --> Encode["Encode output"]
+    end
+
+    Server --> Storage
+
+    subgraph Storage["Storage backends"]
+        FS["Local filesystem"]
+        S3["S3"]
+        GCS["GCS"]
+        Azure["Azure Blob"]
+    end
+```
+
+CLI reads local files or fetches remote URLs directly. The HTTP server resolves images from storage backends or client uploads. The WASM build processes files selected in the browser.
 
 ## Installation
 
@@ -262,7 +306,7 @@ A browser demo is available on GitHub Pages:
 
 https://nao1215.github.io/truss/
 
-The demo is a static browser application. Selected image files are processed in the browser, are not sent to a truss backend or any other external system, and are not stored by the demo.
+The demo is a static browser application built from the WASM target. Images are processed locally and never leave the browser.
 
 To build the demo locally, use [`scripts/build-wasm-demo.sh`](scripts/build-wasm-demo.sh):
 
