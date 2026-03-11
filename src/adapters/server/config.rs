@@ -4,6 +4,7 @@ use super::azure;
 #[cfg(feature = "gcs")]
 use super::gcs;
 use super::metrics::DEFAULT_MAX_CONCURRENT_TRANSFORMS;
+#[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
 use super::remote::STORAGE_DOWNLOAD_TIMEOUT_SECS;
 #[cfg(feature = "s3")]
 use super::s3;
