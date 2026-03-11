@@ -272,6 +272,69 @@ pub struct NormalizedTransformRequest {
     pub watermark: Option<WatermarkInput>,
 }
 
+/// An explicit crop region applied before resize.
+///
+/// Crop extracts a rectangular sub-image at the given pixel coordinates.
+/// The origin `(x, y)` is the top-left corner and `(width, height)` define
+/// the size of the extracted region. Both dimensions must be non-zero.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CropRegion {
+    /// Horizontal offset from the left edge.
+    pub x: u32,
+    /// Vertical offset from the top edge.
+    pub y: u32,
+    /// Width of the crop region.
+    pub width: u32,
+    /// Height of the crop region.
+    pub height: u32,
+}
+
+impl FromStr for CropRegion {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let parts: Vec<&str> = s.split(',').collect();
+        if parts.len() != 4 {
+            return Err(format!(
+                "crop must be x,y,w,h (four comma-separated integers), got '{s}'"
+            ));
+        }
+        let x = parts[0]
+            .parse::<u32>()
+            .map_err(|_| format!("crop x must be a non-negative integer, got '{}'", parts[0]))?;
+        let y = parts[1]
+            .parse::<u32>()
+            .map_err(|_| format!("crop y must be a non-negative integer, got '{}'", parts[1]))?;
+        let width = parts[2].parse::<u32>().map_err(|_| {
+            format!(
+                "crop width must be a non-negative integer, got '{}'",
+                parts[2]
+            )
+        })?;
+        let height = parts[3].parse::<u32>().map_err(|_| {
+            format!(
+                "crop height must be a non-negative integer, got '{}'",
+                parts[3]
+            )
+        })?;
+        if width == 0 || height == 0 {
+            return Err("crop width and height must be greater than zero".to_string());
+        }
+        Ok(CropRegion {
+            x,
+            y,
+            width,
+            height,
+        })
+    }
+}
+
+impl fmt::Display for CropRegion {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{},{},{},{}", self.x, self.y, self.width, self.height)
+    }
+}
+
 /// Raw transform options before defaulting and validation has completed.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TransformOptions {
@@ -308,6 +371,12 @@ pub struct TransformOptions {
     /// and before encoding. Valid range is 0.1–100.0. The sharpening threshold
     /// is fixed at 1.
     pub sharpen: Option<f32>,
+    /// Optional explicit crop region applied before resize.
+    ///
+    /// When set, the image is cropped to the specified rectangle before any resize
+    /// operation. The crop region is validated at runtime against the decoded image
+    /// dimensions.
+    pub crop: Option<CropRegion>,
     /// Optional wall-clock deadline for the transform pipeline.
     ///
     /// When set, the transform checks elapsed time at each pipeline stage and returns
@@ -333,6 +402,7 @@ impl Default for TransformOptions {
             preserve_exif: false,
             blur: None,
             sharpen: None,
+            crop: None,
             deadline: None,
         }
     }
@@ -403,6 +473,7 @@ impl TransformOptions {
             metadata_policy: normalize_metadata_policy(self.strip_metadata, self.preserve_exif),
             blur: self.blur,
             sharpen: self.sharpen,
+            crop: self.crop,
             deadline: self.deadline,
         })
     }
@@ -435,6 +506,8 @@ pub struct NormalizedTransformOptions {
     pub blur: Option<f32>,
     /// Unsharp-mask (sharpen) sigma, when requested.
     pub sharpen: Option<f32>,
+    /// Optional explicit crop region applied before resize.
+    pub crop: Option<CropRegion>,
     /// Optional wall-clock deadline for the transform pipeline.
     pub deadline: Option<Duration>,
 }
@@ -2281,5 +2354,48 @@ mod tests {
             margin: 10,
         };
         super::validate_watermark(&wm).expect("valid watermark should be accepted");
+    }
+
+    #[test]
+    fn crop_region_from_str_valid() {
+        use super::CropRegion;
+        let crop: CropRegion = "10,20,100,200".parse().expect("valid crop");
+        assert_eq!(crop.x, 10);
+        assert_eq!(crop.y, 20);
+        assert_eq!(crop.width, 100);
+        assert_eq!(crop.height, 200);
+    }
+
+    #[test]
+    fn crop_region_from_str_zero_width() {
+        use super::CropRegion;
+        let err = "10,20,0,200"
+            .parse::<CropRegion>()
+            .expect_err("zero width should fail");
+        assert!(err.contains("greater than zero"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn crop_region_from_str_wrong_parts() {
+        use super::CropRegion;
+        let err = "10,20,100"
+            .parse::<CropRegion>()
+            .expect_err("three parts should fail");
+        assert!(
+            err.contains("four comma-separated"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn crop_region_display() {
+        use super::CropRegion;
+        let crop = CropRegion {
+            x: 1,
+            y: 2,
+            width: 3,
+            height: 4,
+        };
+        assert_eq!(crop.to_string(), "1,2,3,4");
     }
 }

@@ -86,6 +86,11 @@ pub fn transform_svg(request: TransformRequest) -> Result<TransformResult, Trans
             "watermark is not supported for SVG inputs".to_string(),
         ));
     }
+    if request.options.crop.is_some() {
+        return Err(TransformError::InvalidOptions(
+            "crop is not supported for SVG inputs".to_string(),
+        ));
+    }
 
     let normalized = request.normalize()?;
     let deadline = normalized.options.deadline;

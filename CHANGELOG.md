@@ -1,9 +1,12 @@
 # Changelog
 
-## Unreleased
+## v0.6.0
 
 ### Added
 
+- Explicit crop operation (`--crop x,y,w,h` CLI flag, `crop` query parameter, JSON/WASM adapters). Applied after auto-orient and rotation but before resize. Not supported for SVG inputs.
+- Signed URL key rotation via `TRUSS_SIGNING_KEYS` JSON env var. Multiple key IDs can be active simultaneously for zero-downtime key rotation.
+- Server-side transform presets via `TRUSS_PRESETS` / `TRUSS_PRESETS_FILE` env vars with `preset` query parameter.
 - Sharpen filter (`--sharpen` CLI flag, `sharpen` query parameter, WASM adapter) using unsharp mask. Valid sigma range 0.1–100.0.
 - TIFF format support for input and output across CLI, HTTP server, and WASM.
 - Watermark overlay support for signed public URLs (`watermarkUrl`, `watermarkPosition`, `watermarkOpacity`, `watermarkMargin` query params).
@@ -15,6 +18,8 @@
 - Origin cache namespace separation (`src:` / `wm:`) prevents cross-contamination.
 - WASM UI: watermark file type validation, 10 MB size limit, loading/clear feedback.
 - Integration tests for orphaned watermark params, empty URL, SVG + watermark rejection, and redirect following.
+- Prebuilt release binaries with checksums for Linux (x86_64, aarch64), macOS (x86_64, aarch64), and Windows (x86_64).
+- Multi-arch container images (amd64, arm64) published to GHCR on release.
 
 ### Changed
 
@@ -25,6 +30,10 @@
 - WASM UI: blur values below 0.1 treated as no blur; "Blur sigma" label simplified to "Blur".
 - WASM UI: `.is-busy` scoped to interactive elements instead of entire page.
 - WASM UI: download filename includes `-watermarked` suffix when applicable.
+- Integration test workflow refactored from 4 duplicate jobs to a single matrix strategy.
+- `Dockerfile.release` uses `COPY --chown` and explicit `chmod` for binary permissions.
+- `parse_presets_from_env` treats empty `TRUSS_PRESETS_FILE` as unset; JSON parse errors include source info.
+- `ServerConfig::PartialEq` compares preset contents instead of only length.
 
 ### Fixed
 

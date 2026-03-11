@@ -335,6 +335,9 @@ pub(super) fn compute_cache_key(
     if let Some(blur) = options.blur {
         params.push(("blur", format!("{blur}")));
     }
+    if let Some(crop) = options.crop {
+        params.push(("crop", crop.to_string()));
+    }
     if has_bounded_resize {
         let fit = options.fit.unwrap_or(Fit::Contain);
         params.push(("fit", fit.as_name().to_string()));

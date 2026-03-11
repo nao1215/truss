@@ -1,6 +1,6 @@
 use crate::Rgba8;
 use crate::core::{
-    Artifact, ArtifactMetadata, Fit, MAX_DECODED_PIXELS, MAX_OUTPUT_PIXELS, MediaType,
+    Artifact, ArtifactMetadata, CropRegion, Fit, MAX_DECODED_PIXELS, MAX_OUTPUT_PIXELS, MediaType,
     MetadataKind, MetadataPolicy, Position, Rotation, TransformError, TransformRequest,
     TransformResult, TransformWarning, WatermarkInput,
 };
@@ -194,6 +194,13 @@ pub fn transform_raster(request: TransformRequest) -> Result<TransformResult, Tr
     image = apply_rotation(image, normalized.options.rotate);
     if let (Some(start), Some(limit)) = (start, deadline) {
         check_deadline(start.elapsed(), limit, "rotate")?;
+    }
+
+    if let Some(crop) = normalized.options.crop {
+        image = apply_crop(image, crop)?;
+        if let (Some(start), Some(limit)) = (start, deadline) {
+            check_deadline(start.elapsed(), limit, "crop")?;
+        }
     }
 
     check_output_pixel_limit(&image, normalized.options.width, normalized.options.height)?;
@@ -653,6 +660,17 @@ fn apply_rotation(image: DynamicImage, rotation: Rotation) -> DynamicImage {
         Rotation::Deg180 => image.rotate180(),
         Rotation::Deg270 => image.rotate270(),
     }
+}
+
+fn apply_crop(image: DynamicImage, crop: CropRegion) -> Result<DynamicImage, TransformError> {
+    let (iw, ih) = image.dimensions();
+    if crop.x.saturating_add(crop.width) > iw || crop.y.saturating_add(crop.height) > ih {
+        return Err(TransformError::InvalidOptions(format!(
+            "crop region {}x{}+{}+{} exceeds image bounds {}x{}",
+            crop.width, crop.height, crop.x, crop.y, iw, ih
+        )));
+    }
+    Ok(image.crop_imm(crop.x, crop.y, crop.width, crop.height))
 }
 
 fn apply_resize(
@@ -2891,6 +2909,52 @@ mod tests {
             matches!(err, TransformError::InvalidOptions(ref msg) if msg.contains("too large"))
                 || matches!(err, TransformError::LimitExceeded(ref msg) if msg.contains("pixels")),
             "expected InvalidOptions or LimitExceeded, got: {err}"
+        );
+    }
+
+    #[test]
+    fn transform_raster_applies_crop() {
+        use crate::core::CropRegion;
+        let artifact = png_artifact(4, 4, Rgba([10, 20, 30, 255]));
+        let result = transform_raster(TransformRequest::new(
+            artifact,
+            TransformOptions {
+                crop: Some(CropRegion {
+                    x: 1,
+                    y: 1,
+                    width: 2,
+                    height: 2,
+                }),
+                ..TransformOptions::default()
+            },
+        ))
+        .expect("crop should succeed");
+
+        assert_eq!(result.artifact.metadata.width, Some(2));
+        assert_eq!(result.artifact.metadata.height, Some(2));
+    }
+
+    #[test]
+    fn transform_raster_rejects_crop_exceeding_bounds() {
+        use crate::core::CropRegion;
+        let artifact = png_artifact(4, 4, Rgba([10, 20, 30, 255]));
+        let err = transform_raster(TransformRequest::new(
+            artifact,
+            TransformOptions {
+                crop: Some(CropRegion {
+                    x: 0,
+                    y: 0,
+                    width: 10,
+                    height: 10,
+                }),
+                ..TransformOptions::default()
+            },
+        ))
+        .expect_err("crop exceeding bounds should fail");
+
+        assert!(
+            matches!(err, TransformError::InvalidOptions(ref msg) if msg.contains("exceeds image bounds")),
+            "unexpected error: {err}"
         );
     }
 }
