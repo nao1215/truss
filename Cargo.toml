@@ -1,6 +1,6 @@
 [package]
 name = "truss-image"
-version = "0.6.1"
+version = "0.6.2"
 edition = "2024"
 description = "Image toolkit with a shared Rust core across the CLI, HTTP server, and WASM demo."
 license = "MIT"
@@ -60,6 +60,11 @@ google-cloud-auth = { version = "1", optional = true }
 azure_storage_blob = { version = "0.9", optional = true }
 azure_core = { version = "0.32", optional = true }
 futures = { version = "0.3", optional = true }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
 
 [dev-dependencies]
 aws-smithy-runtime-api = "1"

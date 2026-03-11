@@ -65,13 +65,15 @@ impl GcsContext {
                             // Any other HTTP status (5xx, etc.) is unexpected
                             // — treat as unreachable.
                             _ => {
-                                eprintln!("gcs health-check: unexpected status {status}: {err}");
+                                super::stderr_write(&format!(
+                                    "gcs health-check: unexpected status {status}: {err}"
+                                ));
                                 false
                             }
                         }
                     } else {
                         // No HTTP status → transport / DNS error.
-                        eprintln!("gcs health-check: transport error: {err}");
+                        super::stderr_write(&format!("gcs health-check: transport error: {err}"));
                         false
                     }
                 }
@@ -203,7 +205,7 @@ pub(super) fn read_gcs_source_bytes(
             let mut buf = Vec::with_capacity(capacity);
             while let Some(chunk) = resp.next().await {
                 let chunk = chunk.map_err(|e| {
-                    eprintln!("gcs error: failed to read object body: {e}");
+                    super::stderr_write(&format!("gcs error: failed to read object body: {e}"));
                     bad_gateway_response("failed to read GCS object body")
                 })?;
                 buf.extend_from_slice(&chunk);
@@ -219,7 +221,9 @@ pub(super) fn read_gcs_source_bytes(
         match result {
             Ok(inner) => inner,
             Err(_) => {
-                eprintln!("gcs error: download timed out after {timeout_secs}s");
+                super::stderr_write(&format!(
+                    "gcs error: download timed out after {timeout_secs}s"
+                ));
                 Err(bad_gateway_response("object storage download timed out"))
             }
         }
@@ -284,7 +288,7 @@ fn map_gcs_error(err: google_cloud_storage::Error) -> HttpResponse {
     if let Some(status) = err.http_status_code() {
         if status == 404 {
             if is_bucket_not_found(&err) {
-                eprintln!("gcs error: bucket not found: {err}");
+                super::stderr_write(&format!("gcs error: bucket not found: {err}"));
                 return bad_gateway_response(
                     "object storage bucket not found — check configuration",
                 );
@@ -302,7 +306,7 @@ fn map_gcs_error(err: google_cloud_storage::Error) -> HttpResponse {
             );
         }
     }
-    eprintln!("gcs error: {err}");
+    super::stderr_write(&format!("gcs error: {err}"));
     bad_gateway_response("object storage returned an error")
 }
 

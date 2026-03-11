@@ -40,6 +40,7 @@ impl HttpRequest {
 /// Partially parsed HTTP request containing only the request line and headers.
 /// The body has not been read yet. Used to perform early authentication before
 /// consuming the (potentially large) request body.
+#[derive(Debug)]
 pub(super) struct PartialHttpRequest {
     pub(super) method: String,
     pub(super) target: String,
@@ -403,4 +404,601 @@ pub(super) fn find_valid_boundary(haystack: &[u8], delimiter: &[u8]) -> Option<u
 
 pub(super) fn find_header_terminator(buffer: &[u8]) -> Option<usize> {
     buffer.windows(4).position(|window| window == b"\r\n\r\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── parse_request_line ─────────────────────────────────────────
+
+    #[test]
+    fn test_parse_request_line_valid_get() {
+        let (method, target, version) = parse_request_line("GET /image.png HTTP/1.1").unwrap();
+        assert_eq!(method, "GET");
+        assert_eq!(target, "/image.png");
+        assert_eq!(version, "HTTP/1.1");
+    }
+
+    #[test]
+    fn test_parse_request_line_valid_post() {
+        let (method, target, version) = parse_request_line("POST /upload HTTP/1.0").unwrap();
+        assert_eq!(method, "POST");
+        assert_eq!(target, "/upload");
+        assert_eq!(version, "HTTP/1.0");
+    }
+
+    #[test]
+    fn test_parse_request_line_missing_method() {
+        let err = parse_request_line("").unwrap_err();
+        assert_eq!(err.status, "400 Bad Request");
+    }
+
+    #[test]
+    fn test_parse_request_line_missing_target() {
+        let err = parse_request_line("GET").unwrap_err();
+        assert_eq!(err.status, "400 Bad Request");
+    }
+
+    #[test]
+    fn test_parse_request_line_missing_version() {
+        let err = parse_request_line("GET /path").unwrap_err();
+        assert_eq!(err.status, "400 Bad Request");
+    }
+
+    #[test]
+    fn test_parse_request_line_too_many_fields() {
+        let err = parse_request_line("GET /path HTTP/1.1 extra").unwrap_err();
+        assert_eq!(err.status, "400 Bad Request");
+    }
+
+    #[test]
+    fn test_parse_request_line_extra_whitespace_collapsed() {
+        // split_whitespace collapses multiple spaces — method/target/version still parsed
+        let (method, target, version) = parse_request_line("GET   /path   HTTP/1.1").unwrap();
+        assert_eq!(method, "GET");
+        assert_eq!(target, "/path");
+        assert_eq!(version, "HTTP/1.1");
+    }
+
+    // ── parse_headers ──────────────────────────────────────────────
+
+    fn header_lines(raw: &str) -> Vec<(String, String)> {
+        parse_headers(raw.split("\r\n")).unwrap()
+    }
+
+    #[test]
+    fn test_parse_headers_single_header() {
+        let headers = header_lines("Host: example.com");
+        assert_eq!(
+            headers,
+            vec![("host".to_string(), "example.com".to_string())]
+        );
+    }
+
+    #[test]
+    fn test_parse_headers_value_trimmed() {
+        let headers = header_lines("Content-Type:  application/json  ");
+        assert_eq!(headers[0].1, "application/json");
+    }
+
+    #[test]
+    fn test_parse_headers_name_lowercased() {
+        let headers = header_lines("X-Custom-Header: value");
+        assert_eq!(headers[0].0, "x-custom-header");
+    }
+
+    #[test]
+    fn test_parse_headers_empty_lines_skipped() {
+        let headers = header_lines("\r\nHost: a\r\n\r\nAccept: b");
+        assert_eq!(headers.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_headers_missing_colon_rejected() {
+        let err = parse_headers("BadHeader".split("\r\n")).unwrap_err();
+        assert_eq!(err.status, "400 Bad Request");
+    }
+
+    #[test]
+    fn test_parse_headers_empty_name_rejected() {
+        let err = parse_headers(": value".split("\r\n")).unwrap_err();
+        assert_eq!(err.status, "400 Bad Request");
+    }
+
+    #[test]
+    fn test_parse_headers_leading_whitespace_in_name_rejected() {
+        let err = parse_headers(" Host: value".split("\r\n")).unwrap_err();
+        assert_eq!(err.status, "400 Bad Request");
+    }
+
+    #[test]
+    fn test_parse_headers_trailing_whitespace_in_name_rejected() {
+        let err = parse_headers("Host : value".split("\r\n")).unwrap_err();
+        assert_eq!(err.status, "400 Bad Request");
+    }
+
+    #[test]
+    fn test_parse_headers_duplicate_host_rejected() {
+        let err = parse_headers("Host: a\r\nHost: b".split("\r\n")).unwrap_err();
+        assert_eq!(err.status, "400 Bad Request");
+    }
+
+    #[test]
+    fn test_parse_headers_duplicate_content_length_rejected() {
+        let err =
+            parse_headers("Content-Length: 10\r\nContent-Length: 20".split("\r\n")).unwrap_err();
+        assert_eq!(err.status, "400 Bad Request");
+    }
+
+    #[test]
+    fn test_parse_headers_duplicate_authorization_rejected() {
+        let err = parse_headers("Authorization: Bearer a\r\nAuthorization: Bearer b".split("\r\n"))
+            .unwrap_err();
+        assert_eq!(err.status, "400 Bad Request");
+    }
+
+    #[test]
+    fn test_parse_headers_transfer_encoding_rejected_501() {
+        let err = parse_headers("Transfer-Encoding: chunked".split("\r\n")).unwrap_err();
+        assert_eq!(err.status, "501 Not Implemented");
+    }
+
+    #[test]
+    fn test_parse_headers_non_singleton_duplicates_allowed() {
+        let headers = header_lines("X-Custom: a\r\nX-Custom: b");
+        assert_eq!(headers.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_headers_value_with_colon() {
+        // Values may contain colons (e.g. timestamps, URLs)
+        let headers = header_lines("X-Time: 12:30:00");
+        assert_eq!(headers[0].1, "12:30:00");
+    }
+
+    // ── parse_content_length ───────────────────────────────────────
+
+    #[test]
+    fn test_parse_content_length_absent_defaults_to_zero() {
+        let headers: Vec<(String, String)> = vec![];
+        assert_eq!(parse_content_length(&headers).unwrap(), 0);
+    }
+
+    #[test]
+    fn test_parse_content_length_valid() {
+        let headers = vec![("content-length".to_string(), "42".to_string())];
+        assert_eq!(parse_content_length(&headers).unwrap(), 42);
+    }
+
+    #[test]
+    fn test_parse_content_length_zero() {
+        let headers = vec![("content-length".to_string(), "0".to_string())];
+        assert_eq!(parse_content_length(&headers).unwrap(), 0);
+    }
+
+    #[test]
+    fn test_parse_content_length_non_numeric_rejected() {
+        let headers = vec![("content-length".to_string(), "abc".to_string())];
+        let err = parse_content_length(&headers).unwrap_err();
+        assert_eq!(err.status, "400 Bad Request");
+    }
+
+    #[test]
+    fn test_parse_content_length_negative_rejected() {
+        let headers = vec![("content-length".to_string(), "-1".to_string())];
+        let err = parse_content_length(&headers).unwrap_err();
+        assert_eq!(err.status, "400 Bad Request");
+    }
+
+    #[test]
+    fn test_parse_content_length_float_rejected() {
+        let headers = vec![("content-length".to_string(), "1.5".to_string())];
+        let err = parse_content_length(&headers).unwrap_err();
+        assert_eq!(err.status, "400 Bad Request");
+    }
+
+    // ── resolve_storage_path ───────────────────────────────────────
+
+    #[test]
+    fn test_resolve_storage_path_simple_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("image.png");
+        std::fs::File::create(&file_path).unwrap();
+
+        let resolved = resolve_storage_path(dir.path(), "/image.png").unwrap();
+        assert_eq!(resolved, file_path.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn test_resolve_storage_path_nested_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("sub/dir")).unwrap();
+        let file_path = dir.path().join("sub/dir/image.png");
+        std::fs::File::create(&file_path).unwrap();
+
+        let resolved = resolve_storage_path(dir.path(), "/sub/dir/image.png").unwrap();
+        assert_eq!(resolved, file_path.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn test_resolve_storage_path_no_leading_slash() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("image.png");
+        std::fs::File::create(&file_path).unwrap();
+
+        let resolved = resolve_storage_path(dir.path(), "image.png").unwrap();
+        assert_eq!(resolved, file_path.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn test_resolve_storage_path_empty_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = resolve_storage_path(dir.path(), "").unwrap_err();
+        assert_eq!(err.status, "400 Bad Request");
+    }
+
+    #[test]
+    fn test_resolve_storage_path_slash_only_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = resolve_storage_path(dir.path(), "/").unwrap_err();
+        assert_eq!(err.status, "400 Bad Request");
+    }
+
+    #[test]
+    fn test_resolve_storage_path_dot_dot_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = resolve_storage_path(dir.path(), "/../etc/passwd").unwrap_err();
+        assert_eq!(err.status, "400 Bad Request");
+    }
+
+    #[test]
+    fn test_resolve_storage_path_mid_traversal_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("sub")).unwrap();
+        let err = resolve_storage_path(dir.path(), "/sub/../../etc/passwd").unwrap_err();
+        assert_eq!(err.status, "400 Bad Request");
+    }
+
+    #[test]
+    fn test_resolve_storage_path_dot_segment_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = resolve_storage_path(dir.path(), "/./image.png").unwrap_err();
+        assert_eq!(err.status, "400 Bad Request");
+    }
+
+    #[test]
+    fn test_resolve_storage_path_encoded_dot_dot_via_components() {
+        // Even if someone passes ".." directly it is caught by Component::ParentDir
+        let dir = tempfile::tempdir().unwrap();
+        let err = resolve_storage_path(dir.path(), "..").unwrap_err();
+        assert_eq!(err.status, "400 Bad Request");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_resolve_storage_path_symlink_escape_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        // Create a symlink that points outside the storage root
+        let link_path = dir.path().join("escape");
+        std::os::unix::fs::symlink("/etc", &link_path).unwrap();
+
+        // The symlink target resolves outside the root -> rejected
+        let err = resolve_storage_path(dir.path(), "/escape/passwd").unwrap_err();
+        // Could be 400 (escapes root) or 404 (file not found) depending on OS,
+        // but it must NOT succeed
+        assert!(err.status.starts_with("4") || err.status.starts_with("5"));
+    }
+
+    #[test]
+    fn test_resolve_storage_path_nonexistent_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = resolve_storage_path(dir.path(), "/no_such_file.png").unwrap_err();
+        // canonicalize fails -> error response (404 from map_source_io_error)
+        assert!(err.status.starts_with("4") || err.status.starts_with("5"));
+    }
+
+    // ── content_type_matches ───────────────────────────────────────
+
+    #[test]
+    fn test_content_type_matches_exact() {
+        assert!(content_type_matches("application/json", "application/json"));
+    }
+
+    #[test]
+    fn test_content_type_matches_case_insensitive() {
+        assert!(content_type_matches("Application/JSON", "application/json"));
+    }
+
+    #[test]
+    fn test_content_type_matches_with_parameters() {
+        assert!(content_type_matches(
+            "application/json; charset=utf-8",
+            "application/json"
+        ));
+    }
+
+    #[test]
+    fn test_content_type_matches_with_whitespace_in_params() {
+        assert!(content_type_matches(
+            "multipart/form-data ; boundary=abc",
+            "multipart/form-data"
+        ));
+    }
+
+    #[test]
+    fn test_content_type_no_match() {
+        assert!(!content_type_matches("text/plain", "application/json"));
+    }
+
+    #[test]
+    fn test_content_type_empty_value() {
+        assert!(!content_type_matches("", "application/json"));
+    }
+
+    // ── find_subslice ──────────────────────────────────────────────
+
+    #[test]
+    fn test_find_subslice_found_at_start() {
+        assert_eq!(find_subslice(b"abcdef", b"abc"), Some(0));
+    }
+
+    #[test]
+    fn test_find_subslice_found_at_middle() {
+        assert_eq!(find_subslice(b"abcdef", b"cde"), Some(2));
+    }
+
+    #[test]
+    fn test_find_subslice_found_at_end() {
+        assert_eq!(find_subslice(b"abcdef", b"def"), Some(3));
+    }
+
+    #[test]
+    fn test_find_subslice_not_found() {
+        assert_eq!(find_subslice(b"abcdef", b"xyz"), None);
+    }
+
+    #[test]
+    fn test_find_subslice_needle_larger_than_haystack() {
+        assert_eq!(find_subslice(b"ab", b"abcd"), None);
+    }
+
+    #[test]
+    #[should_panic(expected = "window size must be non-zero")]
+    fn test_find_subslice_empty_needle_panics() {
+        // An empty needle causes windows(0) to panic. Callers must ensure
+        // the needle is non-empty.
+        let _ = find_subslice(b"abc", b"");
+    }
+
+    // ── find_valid_boundary ────────────────────────────────────────
+
+    #[test]
+    fn test_find_valid_boundary_with_crlf() {
+        let data = b"--boundary\r\ncontent here";
+        assert_eq!(find_valid_boundary(data, b"--boundary"), Some(0));
+    }
+
+    #[test]
+    fn test_find_valid_boundary_closing_with_dashes() {
+        let data = b"--boundary--";
+        assert_eq!(find_valid_boundary(data, b"--boundary"), Some(0));
+    }
+
+    #[test]
+    fn test_find_valid_boundary_false_match_without_suffix() {
+        // Boundary string appears but is NOT followed by \r\n or --
+        let data = b"--boundaryXXXX";
+        assert_eq!(find_valid_boundary(data, b"--boundary"), None);
+    }
+
+    #[test]
+    fn test_find_valid_boundary_false_match_then_real_match() {
+        // First occurrence is not valid, second is
+        let data = b"--boundaryXXXX--boundary\r\ndata";
+        assert_eq!(find_valid_boundary(data, b"--boundary"), Some(14));
+    }
+
+    #[test]
+    fn test_find_valid_boundary_at_offset() {
+        let data = b"preamble\r\n--boundary\r\npart data";
+        assert_eq!(find_valid_boundary(data, b"--boundary"), Some(10));
+    }
+
+    #[test]
+    fn test_find_valid_boundary_not_found() {
+        let data = b"no boundary here\r\n";
+        assert_eq!(find_valid_boundary(data, b"--boundary"), None);
+    }
+
+    #[test]
+    fn test_find_valid_boundary_truncated_suffix() {
+        // Boundary at end of buffer with only 1 byte after (not enough for \r\n or --)
+        let data = b"--boundary\r";
+        assert_eq!(find_valid_boundary(data, b"--boundary"), None);
+    }
+
+    // ── find_header_terminator ─────────────────────────────────────
+
+    #[test]
+    fn test_find_header_terminator_present() {
+        let data = b"Host: example.com\r\n\r\nbody";
+        assert_eq!(find_header_terminator(data), Some(17));
+    }
+
+    #[test]
+    fn test_find_header_terminator_absent() {
+        let data = b"Host: example.com\r\n";
+        assert_eq!(find_header_terminator(data), None);
+    }
+
+    #[test]
+    fn test_find_header_terminator_at_start() {
+        let data = b"\r\n\r\nbody";
+        assert_eq!(find_header_terminator(data), Some(0));
+    }
+
+    #[test]
+    fn test_find_header_terminator_lf_only_not_matched() {
+        let data = b"Host: x\n\nbody";
+        assert_eq!(find_header_terminator(data), None);
+    }
+
+    // ── max_body_for_headers ───────────────────────────────────────
+
+    #[test]
+    fn test_max_body_for_headers_default_limit() {
+        let headers = vec![("content-type".to_string(), "application/json".to_string())];
+        assert_eq!(max_body_for_headers(&headers), MAX_REQUEST_BODY_BYTES);
+    }
+
+    #[test]
+    fn test_max_body_for_headers_multipart_gets_upload_limit() {
+        let headers = vec![(
+            "content-type".to_string(),
+            "multipart/form-data; boundary=abc".to_string(),
+        )];
+        assert_eq!(max_body_for_headers(&headers), MAX_UPLOAD_BODY_BYTES);
+    }
+
+    #[test]
+    fn test_max_body_for_headers_no_content_type() {
+        let headers: Vec<(String, String)> = vec![];
+        assert_eq!(max_body_for_headers(&headers), MAX_REQUEST_BODY_BYTES);
+    }
+
+    // ── request_has_json_content_type ──────────────────────────────
+
+    #[test]
+    fn test_request_has_json_content_type_true() {
+        let req = HttpRequest {
+            method: "POST".to_string(),
+            target: "/convert".to_string(),
+            version: "HTTP/1.1".to_string(),
+            headers: vec![("content-type".to_string(), "application/json".to_string())],
+            body: vec![],
+        };
+        assert!(request_has_json_content_type(&req));
+    }
+
+    #[test]
+    fn test_request_has_json_content_type_with_charset() {
+        let req = HttpRequest {
+            method: "POST".to_string(),
+            target: "/convert".to_string(),
+            version: "HTTP/1.1".to_string(),
+            headers: vec![(
+                "content-type".to_string(),
+                "application/json; charset=utf-8".to_string(),
+            )],
+            body: vec![],
+        };
+        assert!(request_has_json_content_type(&req));
+    }
+
+    #[test]
+    fn test_request_has_json_content_type_false_for_other_types() {
+        let req = HttpRequest {
+            method: "POST".to_string(),
+            target: "/upload".to_string(),
+            version: "HTTP/1.1".to_string(),
+            headers: vec![(
+                "content-type".to_string(),
+                "multipart/form-data".to_string(),
+            )],
+            body: vec![],
+        };
+        assert!(!request_has_json_content_type(&req));
+    }
+
+    #[test]
+    fn test_request_has_json_content_type_missing_header() {
+        let req = HttpRequest {
+            method: "GET".to_string(),
+            target: "/health".to_string(),
+            version: "HTTP/1.1".to_string(),
+            headers: vec![],
+            body: vec![],
+        };
+        assert!(!request_has_json_content_type(&req));
+    }
+
+    // ── HttpRequest helper methods ─────────────────────────────────
+
+    #[test]
+    fn test_http_request_header_lookup() {
+        let req = HttpRequest {
+            method: "GET".to_string(),
+            target: "/".to_string(),
+            version: "HTTP/1.1".to_string(),
+            headers: vec![
+                ("host".to_string(), "example.com".to_string()),
+                ("accept".to_string(), "image/webp".to_string()),
+            ],
+            body: vec![],
+        };
+        assert_eq!(req.header("host"), Some("example.com"));
+        assert_eq!(req.header("accept"), Some("image/webp"));
+        assert_eq!(req.header("missing"), None);
+    }
+
+    #[test]
+    fn test_http_request_path_without_query() {
+        let req = HttpRequest {
+            method: "GET".to_string(),
+            target: "/images/photo.jpg".to_string(),
+            version: "HTTP/1.1".to_string(),
+            headers: vec![],
+            body: vec![],
+        };
+        assert_eq!(req.path(), "/images/photo.jpg");
+        assert_eq!(req.query(), None);
+    }
+
+    #[test]
+    fn test_http_request_path_with_query() {
+        let req = HttpRequest {
+            method: "GET".to_string(),
+            target: "/convert?width=100&format=webp".to_string(),
+            version: "HTTP/1.1".to_string(),
+            headers: vec![],
+            body: vec![],
+        };
+        assert_eq!(req.path(), "/convert");
+        assert_eq!(req.query(), Some("width=100&format=webp"));
+    }
+
+    // ── read_request_headers + read_request_body (integration) ────
+
+    #[test]
+    fn test_read_request_headers_and_body_roundtrip() {
+        let raw = b"POST /upload HTTP/1.1\r\nContent-Length: 5\r\nHost: localhost\r\n\r\nhello";
+        let mut cursor = std::io::Cursor::new(raw.to_vec());
+
+        let partial = read_request_headers(&mut cursor).unwrap();
+        assert_eq!(partial.method, "POST");
+        assert_eq!(partial.target, "/upload");
+        assert_eq!(partial.content_length, 5);
+
+        let req = read_request_body(&mut cursor, partial).unwrap();
+        assert_eq!(req.body, b"hello");
+    }
+
+    #[test]
+    fn test_read_request_headers_no_body() {
+        let raw = b"GET /health HTTP/1.1\r\nHost: localhost\r\n\r\n";
+        let mut cursor = std::io::Cursor::new(raw.to_vec());
+
+        let partial = read_request_headers(&mut cursor).unwrap();
+        assert_eq!(partial.method, "GET");
+        assert_eq!(partial.content_length, 0);
+    }
+
+    #[test]
+    fn test_read_request_headers_truncated_stream() {
+        let raw = b"GET /health HTTP/1.1\r\nHost: loc";
+        let mut cursor = std::io::Cursor::new(raw.to_vec());
+        let err = read_request_headers(&mut cursor).unwrap_err();
+        assert_eq!(err.status, "400 Bad Request");
+    }
 }

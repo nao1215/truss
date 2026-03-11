@@ -1,5 +1,23 @@
 # Changelog
 
+## v0.6.2
+
+### Fixed
+
+- aarch64 cross-compilation failure: `Cross.toml` pre-build now installs `libssl-dev:arm64` instead of the host-architecture package, so `openssl-sys` finds the correct headers.
+
+### Changed
+
+- Release profile: enable thin LTO, single codegen unit, and binary stripping for smaller, faster binaries.
+- Unified `stderr_write` usage across S3, GCS, and Azure backends to avoid Rust 2024 `ReentrantLock` issues with `eprintln!`.
+- Cache key computation uses streaming `Sha256` hasher and inline parameter builder, eliminating intermediate allocations and sort.
+- Watermark margin capped at 9999 with explicit validation on both JSON and multipart endpoints.
+- Docker Compose healthcheck added for the `truss` service.
+
+### Added
+
+- Unit tests for `auth`, `http_parse`, `multipart`, `negotiate`, and `response` modules (314 new tests).
+
 ## v0.6.1
 
 ### Fixed
