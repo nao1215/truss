@@ -61,25 +61,45 @@ use std::time::{Duration, Instant};
 use url::Url;
 use uuid::Uuid;
 
-/// Writes a line to stderr using a raw file-descriptor write, bypassing Rust's
-/// `std::io::Stderr` type whose internal `ReentrantLock` can interfere with
-/// `MutexGuard` drop ordering in Rust 2024 edition, breaking HTTP keep-alive.
+/// Writes a line to stderr using a raw file-descriptor/handle write, bypassing
+/// Rust's `std::io::Stderr` type whose internal `ReentrantLock` can interfere
+/// with `MutexGuard` drop ordering in Rust 2024 edition, breaking HTTP
+/// keep-alive.
 fn stderr_write(msg: &str) {
     use std::io::Write;
-    use std::os::fd::FromRawFd;
 
-    // SAFETY: fd 2 (stderr) is always valid for the lifetime of the process.
-    let mut f = unsafe { std::fs::File::from_raw_fd(2) };
-
-    // Build a single buffer to issue one write(2) syscall instead of two.
     let bytes = msg.as_bytes();
     let mut buf = Vec::with_capacity(bytes.len() + 1);
     buf.extend_from_slice(bytes);
     buf.push(b'\n');
-    let _ = f.write_all(&buf);
 
-    // Do not drop `f` — that would close fd 2 (stderr).
-    std::mem::forget(f);
+    #[cfg(unix)]
+    {
+        use std::os::fd::FromRawFd;
+        // SAFETY: fd 2 (stderr) is always valid for the lifetime of the process.
+        let mut f = unsafe { std::fs::File::from_raw_fd(2) };
+        let _ = f.write_all(&buf);
+        // Do not drop `f` — that would close fd 2 (stderr).
+        std::mem::forget(f);
+    }
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::FromRawHandle;
+
+        extern "system" {
+            fn GetStdHandle(nStdHandle: u32) -> *mut std::ffi::c_void;
+        }
+
+        const STD_ERROR_HANDLE: u32 = (-12_i32) as u32;
+        // SAFETY: GetStdHandle(STD_ERROR_HANDLE) returns the stderr handle
+        // which is always valid for the lifetime of the process.
+        let handle = unsafe { GetStdHandle(STD_ERROR_HANDLE) };
+        let mut f = unsafe { std::fs::File::from_raw_handle(handle) };
+        let _ = f.write_all(&buf);
+        // Do not drop `f` — that would close the stderr handle.
+        std::mem::forget(f);
+    }
 }
 
 /// The storage backend that determines how `Path`-based public GET requests are
