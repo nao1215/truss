@@ -187,6 +187,8 @@ ENVIRONMENT VARIABLES:
   TRUSS_SIGNED_URL_SECRET             Signing shared secret
   TRUSS_ALLOW_INSECURE_URL_SOURCES    Enable insecure URL sources
   TRUSS_CACHE_ROOT                    On-disk transform cache directory
+  TRUSS_PRESETS                       Named transform presets as inline JSON
+  TRUSS_PRESETS_FILE                  Path to a JSON file containing named transform presets
 ",
     );
 
@@ -287,6 +289,7 @@ OPTIONAL:
       --watermark-position <POS>     Watermark placement (default: bottom-right)
       --watermark-opacity <1-100>    Watermark opacity (default: 50)
       --watermark-margin <PX>        Watermark margin from edge in pixels (default: 10)
+      --preset <NAME>                Named transform preset (server-side)
 
 EXAMPLES:
   truss sign --base-url https://cdn.example.com \\
@@ -555,6 +558,9 @@ struct ClapSignArgs {
     /// Watermark margin from edge in pixels (default: 10)
     #[arg(long)]
     watermark_margin: Option<u32>,
+    /// Named transform preset to apply
+    #[arg(long)]
+    preset: Option<String>,
     /// Show help for sign
     #[arg(short = 'h', long = "help")]
     help: bool,
@@ -752,6 +758,7 @@ struct SignCommand {
     watermark_position: Option<Position>,
     watermark_opacity: Option<u8>,
     watermark_margin: Option<u32>,
+    preset: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1220,6 +1227,7 @@ fn sign_from_clap(args: ClapSignArgs) -> Result<Command, CliError> {
         watermark_position: args.watermark_position,
         watermark_opacity: args.watermark_opacity,
         watermark_margin: args.watermark_margin,
+        preset: args.preset,
     }))
 }
 
@@ -1582,6 +1590,7 @@ where
         &command.secret,
         command.expires,
         watermark_params.as_ref(),
+        command.preset.as_deref(),
     )
     .map_err(|reason| runtime_error(EXIT_TRANSFORM, &reason))?;
 
@@ -2636,6 +2645,7 @@ mod tests {
                 watermark_position: None,
                 watermark_opacity: None,
                 watermark_margin: None,
+                preset: None,
             })
         );
     }
@@ -2681,6 +2691,7 @@ mod tests {
                 watermark_position: None,
                 watermark_opacity: None,
                 watermark_margin: None,
+                preset: None,
             })
         );
     }

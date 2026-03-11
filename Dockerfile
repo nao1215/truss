@@ -1,9 +1,20 @@
+FROM rust:1-slim-bookworm AS planner
+RUN cargo install cargo-chef --locked
+WORKDIR /build
+COPY Cargo.toml Cargo.lock ./
+COPY src/ src/
+RUN cargo chef prepare --recipe-path recipe.json
+
 FROM rust:1-slim-bookworm AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends pkg-config libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 
+RUN cargo install cargo-chef --locked
 WORKDIR /build
+COPY --from=planner /build/recipe.json .
+RUN cargo chef cook --release --features "s3,gcs,azure" --recipe-path recipe.json
+
 COPY Cargo.toml Cargo.lock ./
 COPY src/ src/
 

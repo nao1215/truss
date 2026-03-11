@@ -40,31 +40,10 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Run tests
-        run: cargo test --all-targets
+        run: cargo test --all-features --all-targets
 
       - name: Run doc tests
-        run: cargo test --doc
-
-      - name: Run S3 unit tests
-        run: cargo test --features s3 --all-targets
-
-      - name: Run GCS unit tests
-        run: cargo test --features gcs --all-targets
-
-      - name: Run Azure unit tests
-        run: cargo test --features azure --all-targets
-
-      - name: Run S3+GCS unit tests
-        run: cargo test --features s3,gcs --all-targets
-
-      - name: Run S3+Azure unit tests
-        run: cargo test --features s3,azure --all-targets
-
-      - name: Run GCS+Azure unit tests
-        run: cargo test --features gcs,azure --all-targets
-
-      - name: Run S3+GCS+Azure unit tests
-        run: cargo test --features s3,gcs,azure --all-targets
+        run: cargo test --all-features --doc
 
   clippy:
     runs-on: ubuntu-latest
@@ -81,28 +60,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Run clippy
-        run: cargo clippy --all-targets -- -D warnings
-
-      - name: Run clippy (S3)
-        run: cargo clippy --features s3 --all-targets -- -D warnings
-
-      - name: Run clippy (GCS)
-        run: cargo clippy --features gcs --all-targets -- -D warnings
-
-      - name: Run clippy (Azure)
-        run: cargo clippy --features azure --all-targets -- -D warnings
-
-      - name: Run clippy (S3+GCS)
-        run: cargo clippy --features s3,gcs --all-targets -- -D warnings
-
-      - name: Run clippy (S3+Azure)
-        run: cargo clippy --features s3,azure --all-targets -- -D warnings
-
-      - name: Run clippy (GCS+Azure)
-        run: cargo clippy --features gcs,azure --all-targets -- -D warnings
-
-      - name: Run clippy (S3+GCS+Azure)
-        run: cargo clippy --features s3,gcs,azure --all-targets -- -D warnings
+        run: cargo clippy --all-features --all-targets -- -D warnings
 
   fmt:
     runs-on: ubuntu-latest

@@ -53,7 +53,7 @@ use hmac::{Hmac, Mac};
 use serde::Deserialize;
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::env;
 use std::fmt;
 use std::io;
@@ -325,6 +325,11 @@ pub struct ServerConfig {
     /// cross-server interference when multiple listeners run in the same process
     /// or during tests.
     pub transforms_in_flight: Arc<AtomicU64>,
+    /// Named transform presets that can be referenced by name on public endpoints.
+    ///
+    /// Configurable via `TRUSS_PRESETS` (inline JSON) or `TRUSS_PRESETS_FILE` (path to JSON file).
+    /// Each key is a preset name and the value is a set of transform options.
+    pub presets: HashMap<String, TransformOptionsPayload>,
     /// Download timeout in seconds for object storage backends (S3, GCS, Azure).
     ///
     /// Configurable via `TRUSS_STORAGE_TIMEOUT_SECS`. Defaults to 30.
@@ -361,6 +366,7 @@ impl Clone for ServerConfig {
             max_concurrent_transforms: self.max_concurrent_transforms,
             transform_deadline_secs: self.transform_deadline_secs,
             transforms_in_flight: Arc::clone(&self.transforms_in_flight),
+            presets: self.presets.clone(),
             #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
             storage_timeout_secs: self.storage_timeout_secs,
             #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
@@ -405,7 +411,8 @@ impl fmt::Debug for ServerConfig {
             )
             .field("log_handler", &self.log_handler.as_ref().map(|_| ".."))
             .field("max_concurrent_transforms", &self.max_concurrent_transforms)
-            .field("transform_deadline_secs", &self.transform_deadline_secs);
+            .field("transform_deadline_secs", &self.transform_deadline_secs)
+            .field("presets", &self.presets.keys().collect::<Vec<_>>());
         #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
         {
             d.field("storage_backend", &self.storage_backend);
@@ -441,6 +448,7 @@ impl PartialEq for ServerConfig {
             && self.disable_accept_negotiation == other.disable_accept_negotiation
             && self.max_concurrent_transforms == other.max_concurrent_transforms
             && self.transform_deadline_secs == other.transform_deadline_secs
+            && self.presets.len() == other.presets.len()
             && cfg_storage_eq(self, other)
     }
 }
@@ -530,6 +538,7 @@ impl ServerConfig {
             max_concurrent_transforms: DEFAULT_MAX_CONCURRENT_TRANSFORMS,
             transform_deadline_secs: DEFAULT_TRANSFORM_DEADLINE_SECS,
             transforms_in_flight: Arc::new(AtomicU64::new(0)),
+            presets: HashMap::new(),
             #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
             storage_timeout_secs: remote::STORAGE_DOWNLOAD_TIMEOUT_SECS,
             #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
@@ -662,6 +671,12 @@ impl ServerConfig {
     pub fn with_azure_context(mut self, context: azure::AzureContext) -> Self {
         self.storage_backend = StorageBackend::Azure;
         self.azure_context = Some(Arc::new(context));
+        self
+    }
+
+    /// Returns a copy of the configuration with named transform presets attached.
+    pub fn with_presets(mut self, presets: HashMap<String, TransformOptionsPayload>) -> Self {
+        self.presets = presets;
         self
     }
 
@@ -943,6 +958,8 @@ impl ServerConfig {
             None
         };
 
+        let presets = parse_presets_from_env()?;
+
         Ok(Self {
             storage_root,
             bearer_token,
@@ -958,6 +975,7 @@ impl ServerConfig {
             max_concurrent_transforms,
             transform_deadline_secs,
             transforms_in_flight: Arc::new(AtomicU64::new(0)),
+            presets,
             #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
             storage_timeout_secs,
             #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
@@ -1026,6 +1044,7 @@ pub enum SignedUrlSource {
 ///     "secret-value",
 ///     4_102_444_800,
 ///     None,
+///     None,
 /// )
 /// .unwrap();
 ///
@@ -1042,6 +1061,7 @@ pub struct SignedWatermarkParams {
     pub margin: Option<u32>,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn sign_public_url(
     base_url: &str,
     source: SignedUrlSource,
@@ -1050,6 +1070,7 @@ pub fn sign_public_url(
     secret: &str,
     expires: u64,
     watermark: Option<&SignedWatermarkParams>,
+    preset: Option<&str>,
 ) -> Result<String, String> {
     let base_url = Url::parse(base_url).map_err(|error| format!("base URL is invalid: {error}"))?;
     match base_url.scheme() {
@@ -1066,6 +1087,9 @@ pub fn sign_public_url(
         .map_err(|error| format!("failed to resolve the public endpoint URL: {error}"))?;
     let authority = url_authority(&endpoint)?;
     let mut query = signed_source_query(source);
+    if let Some(name) = preset {
+        query.insert("preset".to_string(), name.to_string());
+    }
     extend_transform_query(&mut query, options);
     if let Some(wm) = watermark {
         query.insert("watermarkUrl".to_string(), wm.url.clone());
@@ -1433,25 +1457,45 @@ fn storage_backend_label(config: &ServerConfig) -> &'static str {
     }
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 #[serde(default, rename_all = "camelCase", deny_unknown_fields)]
-struct TransformOptionsPayload {
-    width: Option<u32>,
-    height: Option<u32>,
-    fit: Option<String>,
-    position: Option<String>,
-    format: Option<String>,
-    quality: Option<u8>,
-    background: Option<String>,
-    rotate: Option<u16>,
-    auto_orient: Option<bool>,
-    strip_metadata: Option<bool>,
-    preserve_exif: Option<bool>,
-    blur: Option<f32>,
-    sharpen: Option<f32>,
+pub struct TransformOptionsPayload {
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub fit: Option<String>,
+    pub position: Option<String>,
+    pub format: Option<String>,
+    pub quality: Option<u8>,
+    pub background: Option<String>,
+    pub rotate: Option<u16>,
+    pub auto_orient: Option<bool>,
+    pub strip_metadata: Option<bool>,
+    pub preserve_exif: Option<bool>,
+    pub blur: Option<f32>,
+    pub sharpen: Option<f32>,
 }
 
 impl TransformOptionsPayload {
+    /// Merges per-request overrides on top of preset defaults.
+    /// Each field in `overrides` takes precedence when set (`Some`).
+    fn with_overrides(self, overrides: &TransformOptionsPayload) -> Self {
+        Self {
+            width: overrides.width.or(self.width),
+            height: overrides.height.or(self.height),
+            fit: overrides.fit.clone().or(self.fit),
+            position: overrides.position.clone().or(self.position),
+            format: overrides.format.clone().or(self.format),
+            quality: overrides.quality.or(self.quality),
+            background: overrides.background.clone().or(self.background),
+            rotate: overrides.rotate.or(self.rotate),
+            auto_orient: overrides.auto_orient.or(self.auto_orient),
+            strip_metadata: overrides.strip_metadata.or(self.strip_metadata),
+            preserve_exif: overrides.preserve_exif.or(self.preserve_exif),
+            blur: overrides.blur.or(self.blur),
+            sharpen: overrides.sharpen.or(self.sharpen),
+        }
+    }
+
     fn into_options(self) -> Result<TransformOptions, HttpResponse> {
         let defaults = TransformOptions::default();
 
@@ -1926,10 +1970,11 @@ fn handle_public_get_request(
     if let Err(response) = authorize_signed_request(&request, &query, config) {
         return response;
     }
-    let (source, options, watermark_payload) = match parse_public_get_request(&query, source_kind) {
-        Ok(parsed) => parsed,
-        Err(response) => return response,
-    };
+    let (source, options, watermark_payload) =
+        match parse_public_get_request(&query, source_kind, config) {
+            Ok(parsed) => parsed,
+            Err(response) => return response,
+        };
 
     let validated_wm = match validate_watermark_payload(watermark_payload.as_ref()) {
         Ok(wm) => wm,
@@ -2184,6 +2229,7 @@ fn handle_metrics_request(_request: HttpRequest, config: &ServerConfig) -> HttpR
 fn parse_public_get_request(
     query: &BTreeMap<String, String>,
     source_kind: PublicSourceKind,
+    config: &ServerConfig,
 ) -> Result<
     (
         TransformSourcePayload,
@@ -2223,41 +2269,39 @@ fn parse_public_get_request(
         None
     };
 
-    let defaults = TransformOptions::default();
-    let options = TransformOptions {
+    // Build per-request overrides from query parameters.
+    let per_request = TransformOptionsPayload {
         width: parse_optional_integer_query(query, "width")?,
         height: parse_optional_integer_query(query, "height")?,
-        fit: parse_optional_named(query.get("fit").map(String::as_str), "fit", Fit::from_str)?,
-        position: parse_optional_named(
-            query.get("position").map(String::as_str),
-            "position",
-            Position::from_str,
-        )?,
-        format: parse_optional_named(
-            query.get("format").map(String::as_str),
-            "format",
-            MediaType::from_str,
-        )?,
+        fit: query.get("fit").cloned(),
+        position: query.get("position").cloned(),
+        format: query.get("format").cloned(),
         quality: parse_optional_u8_query(query, "quality")?,
-        background: parse_optional_named(
-            query.get("background").map(String::as_str),
-            "background",
-            Rgba8::from_hex,
-        )?,
-        rotate: match query.get("rotate") {
-            Some(value) => parse_named(value, "rotate", Rotation::from_str)?,
-            None => defaults.rotate,
-        },
-        auto_orient: parse_optional_bool_query(query, "autoOrient")?
-            .unwrap_or(defaults.auto_orient),
-        strip_metadata: parse_optional_bool_query(query, "stripMetadata")?
-            .unwrap_or(defaults.strip_metadata),
-        preserve_exif: parse_optional_bool_query(query, "preserveExif")?
-            .unwrap_or(defaults.preserve_exif),
+        background: query.get("background").cloned(),
+        rotate: query
+            .get("rotate")
+            .map(|v| v.parse::<u16>())
+            .transpose()
+            .map_err(|_| bad_request_response("rotate must be 0, 90, 180, or 270"))?,
+        auto_orient: parse_optional_bool_query(query, "autoOrient")?,
+        strip_metadata: parse_optional_bool_query(query, "stripMetadata")?,
+        preserve_exif: parse_optional_bool_query(query, "preserveExif")?,
         blur: parse_optional_float_query(query, "blur")?,
         sharpen: parse_optional_float_query(query, "sharpen")?,
-        deadline: defaults.deadline,
     };
+
+    // Resolve preset and merge with per-request overrides.
+    let merged = if let Some(preset_name) = query.get("preset") {
+        let preset = config
+            .presets
+            .get(preset_name)
+            .ok_or_else(|| bad_request_response(&format!("unknown preset `{preset_name}`")))?;
+        preset.clone().with_overrides(&per_request)
+    } else {
+        per_request
+    };
+
+    let options = merged.into_options()?;
 
     Ok((source, options, watermark))
 }
@@ -2581,6 +2625,35 @@ fn parse_optional_env_u32(name: &str) -> io::Result<Option<u32>> {
     }
 }
 
+fn parse_presets_from_env() -> io::Result<HashMap<String, TransformOptionsPayload>> {
+    let json_str = if let Ok(path) = env::var("TRUSS_PRESETS_FILE") {
+        if !path.is_empty() {
+            std::fs::read_to_string(&path).map_err(|e| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("failed to read TRUSS_PRESETS_FILE `{path}`: {e}"),
+                )
+            })?
+        } else {
+            return Ok(HashMap::new());
+        }
+    } else if let Ok(value) = env::var("TRUSS_PRESETS") {
+        if value.is_empty() {
+            return Ok(HashMap::new());
+        }
+        value
+    } else {
+        return Ok(HashMap::new());
+    };
+
+    serde_json::from_str::<HashMap<String, TransformOptionsPayload>>(&json_str).map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("TRUSS_PRESETS must be valid JSON: {e}"),
+        )
+    })
+}
+
 fn validate_public_base_url(value: String) -> io::Result<String> {
     let parsed = Url::parse(&value).map_err(|error| {
         io::Error::new(
@@ -2614,19 +2687,21 @@ mod tests {
         CacheHitStatus, DEFAULT_BIND_ADDR, DEFAULT_MAX_CONCURRENT_TRANSFORMS,
         DEFAULT_PUBLIC_MAX_AGE_SECONDS, DEFAULT_PUBLIC_STALE_WHILE_REVALIDATE_SECONDS,
         ImageResponsePolicy, PublicSourceKind, ServerConfig, SignedUrlSource,
-        TransformSourcePayload, WatermarkSource, authorize_signed_request, bind_addr,
-        build_image_etag, build_image_response_headers, canonical_query_without_signature,
-        negotiate_output_format, parse_public_get_request, route_request, serve_once_with_config,
-        sign_public_url, transform_source_bytes,
+        TransformOptionsPayload, TransformSourcePayload, WatermarkSource, authorize_signed_request,
+        bind_addr, build_image_etag, build_image_response_headers,
+        canonical_query_without_signature, negotiate_output_format, parse_presets_from_env,
+        parse_public_get_request, route_request, serve_once_with_config, sign_public_url,
+        transform_source_bytes,
     };
     use crate::{
-        Artifact, ArtifactMetadata, MediaType, RawArtifact, TransformOptions, sniff_artifact,
+        Artifact, ArtifactMetadata, Fit, MediaType, RawArtifact, TransformOptions, sniff_artifact,
     };
     use hmac::{Hmac, Mac};
     use image::codecs::png::PngEncoder;
     use image::{ColorType, ImageEncoder, Rgba, RgbaImage};
     use sha2::Sha256;
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, HashMap};
+    use std::env;
     use std::fs;
     use std::io::{Cursor, Read, Write};
     use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -3331,6 +3406,7 @@ mod tests {
             "secret-value",
             4_102_444_800,
             None,
+            None,
         )
         .expect("sign public URL");
 
@@ -3354,11 +3430,125 @@ mod tests {
             ("unexpected".to_string(), "value".to_string()),
         ]);
 
-        let response = parse_public_get_request(&query, PublicSourceKind::Path)
+        let config = ServerConfig::new(temp_dir("parse-query"), None);
+        let response = parse_public_get_request(&query, PublicSourceKind::Path, &config)
             .expect_err("unknown query should fail");
 
         assert_eq!(response.status, "400 Bad Request");
         assert!(response_body(&response).contains("is not supported"));
+    }
+
+    #[test]
+    fn parse_public_get_request_resolves_preset() {
+        let mut presets = HashMap::new();
+        presets.insert(
+            "thumbnail".to_string(),
+            TransformOptionsPayload {
+                width: Some(150),
+                height: Some(150),
+                fit: Some("cover".to_string()),
+                ..TransformOptionsPayload::default()
+            },
+        );
+        let config = ServerConfig::new(temp_dir("preset"), None).with_presets(presets);
+
+        let query = BTreeMap::from([
+            ("path".to_string(), "/image.png".to_string()),
+            ("preset".to_string(), "thumbnail".to_string()),
+        ]);
+        let (_, options, _) =
+            parse_public_get_request(&query, PublicSourceKind::Path, &config).unwrap();
+
+        assert_eq!(options.width, Some(150));
+        assert_eq!(options.height, Some(150));
+        assert_eq!(options.fit, Some(Fit::Cover));
+    }
+
+    #[test]
+    fn parse_public_get_request_preset_with_override() {
+        let mut presets = HashMap::new();
+        presets.insert(
+            "thumbnail".to_string(),
+            TransformOptionsPayload {
+                width: Some(150),
+                height: Some(150),
+                fit: Some("cover".to_string()),
+                format: Some("webp".to_string()),
+                ..TransformOptionsPayload::default()
+            },
+        );
+        let config = ServerConfig::new(temp_dir("preset-override"), None).with_presets(presets);
+
+        let query = BTreeMap::from([
+            ("path".to_string(), "/image.png".to_string()),
+            ("preset".to_string(), "thumbnail".to_string()),
+            ("width".to_string(), "200".to_string()),
+            ("format".to_string(), "jpeg".to_string()),
+        ]);
+        let (_, options, _) =
+            parse_public_get_request(&query, PublicSourceKind::Path, &config).unwrap();
+
+        assert_eq!(options.width, Some(200));
+        assert_eq!(options.height, Some(150));
+        assert_eq!(options.format, Some(MediaType::Jpeg));
+    }
+
+    #[test]
+    fn parse_public_get_request_rejects_unknown_preset() {
+        let config = ServerConfig::new(temp_dir("preset-unknown"), None);
+
+        let query = BTreeMap::from([
+            ("path".to_string(), "/image.png".to_string()),
+            ("preset".to_string(), "nonexistent".to_string()),
+        ]);
+        let response = parse_public_get_request(&query, PublicSourceKind::Path, &config)
+            .expect_err("unknown preset should fail");
+
+        assert_eq!(response.status, "400 Bad Request");
+        assert!(response_body(&response).contains("unknown preset"));
+    }
+
+    #[test]
+    fn sign_public_url_includes_preset_in_signed_url() {
+        let url = sign_public_url(
+            "https://cdn.example.com",
+            SignedUrlSource::Path {
+                path: "/image.png".to_string(),
+                version: None,
+            },
+            &crate::TransformOptions::default(),
+            "public-dev",
+            "secret-value",
+            4_102_444_800,
+            None,
+            Some("thumbnail"),
+        )
+        .expect("sign public URL with preset");
+
+        assert!(url.contains("preset=thumbnail"));
+        assert!(url.contains("signature="));
+    }
+
+    #[test]
+    #[serial]
+    fn parse_presets_from_env_parses_json() {
+        unsafe {
+            env::set_var(
+                "TRUSS_PRESETS",
+                r#"{"thumb":{"width":100,"height":100,"fit":"cover"}}"#,
+            );
+            env::remove_var("TRUSS_PRESETS_FILE");
+        }
+        let presets = parse_presets_from_env().unwrap();
+        unsafe {
+            env::remove_var("TRUSS_PRESETS");
+        }
+
+        assert_eq!(presets.len(), 1);
+        let thumb = presets.get("thumb").unwrap();
+        assert_eq!(thumb.width, Some(100));
+        assert_eq!(thumb.height, Some(100));
+        assert_eq!(thumb.fit.as_deref(), Some("cover"));
     }
 
     #[test]

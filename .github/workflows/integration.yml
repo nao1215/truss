@@ -1,0 +1,159 @@
+name: Integration Tests
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "integration/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "Dockerfile"
+      - ".github/workflows/integration.yml"
+  pull_request:
+    paths:
+      - "src/**"
+      - "integration/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "Dockerfile"
+      - ".github/workflows/integration.yml"
+
+concurrency:
+  group: integration-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build truss image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./Dockerfile
+          load: true
+          tags: truss:local
+          cache-from: type=gha,scope=integration-build
+          cache-to: type=gha,mode=max,scope=integration-build
+          outputs: type=docker,dest=/tmp/truss.tar
+
+      - name: Upload image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: truss-image
+          path: /tmp/truss.tar
+          retention-days: 1
+
+  api-integration:
+    needs: build-image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: truss-image
+          path: /tmp
+
+      - run: docker load -i /tmp/truss.tar
+
+      - name: Run API integration tests
+        run: |
+          cd integration/api
+          docker compose up --no-build --abort-on-container-exit --exit-code-from runn
+        timeout-minutes: 10
+        env:
+          TRUSS_IMAGE: truss:local
+
+      - name: Cleanup
+        if: always()
+        run: |
+          cd integration/api
+          docker compose down --volumes --remove-orphans
+
+  s3-integration:
+    needs: build-image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: truss-image
+          path: /tmp
+
+      - run: docker load -i /tmp/truss.tar
+
+      - name: Run S3 integration tests
+        run: |
+          cd integration/s3
+          docker compose up --no-build --abort-on-container-exit --exit-code-from runn
+        timeout-minutes: 10
+        env:
+          TRUSS_IMAGE: truss:local
+
+      - name: Cleanup
+        if: always()
+        run: |
+          cd integration/s3
+          docker compose down --volumes --remove-orphans
+
+  gcs-integration:
+    needs: build-image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: truss-image
+          path: /tmp
+
+      - run: docker load -i /tmp/truss.tar
+
+      - name: Run GCS integration tests
+        run: |
+          cd integration/gcs
+          docker compose up --no-build --abort-on-container-exit --exit-code-from runn
+        timeout-minutes: 10
+        env:
+          TRUSS_IMAGE: truss:local
+
+      - name: Cleanup
+        if: always()
+        run: |
+          cd integration/gcs
+          docker compose down --volumes --remove-orphans
+
+  azure-integration:
+    needs: build-image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: truss-image
+          path: /tmp
+
+      - run: docker load -i /tmp/truss.tar
+
+      - name: Run Azure integration tests
+        run: |
+          cd integration/azure
+          docker compose up --no-build --abort-on-container-exit --exit-code-from runn
+        timeout-minutes: 10
+        env:
+          TRUSS_IMAGE: truss:local
+
+      - name: Cleanup
+        if: always()
+        run: |
+          cd integration/azure
+          docker compose down --volumes --remove-orphans

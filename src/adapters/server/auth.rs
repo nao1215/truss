@@ -248,6 +248,7 @@ pub(super) fn validate_public_query_names(
                 | "watermarkPosition"
                 | "watermarkOpacity"
                 | "watermarkMargin"
+                | "preset"
         ) || matches!(
             (source_kind, name.as_str()),
             (PublicSourceKind::Path, "path") | (PublicSourceKind::Url, "url")
