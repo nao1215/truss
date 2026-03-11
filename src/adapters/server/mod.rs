@@ -1460,6 +1460,10 @@ impl TransformOptionsPayload {
     }
 }
 
+const WATERMARK_DEFAULT_POSITION: Position = Position::BottomRight;
+const WATERMARK_DEFAULT_OPACITY: u8 = 50;
+const WATERMARK_DEFAULT_MARGIN: u32 = 10;
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, rename_all = "camelCase", deny_unknown_fields)]
 struct WatermarkPayload {
@@ -1494,15 +1498,15 @@ fn resolve_watermark_payload(
         "watermark.position",
         Position::from_str,
     )?
-    .unwrap_or(Position::BottomRight);
+    .unwrap_or(WATERMARK_DEFAULT_POSITION);
 
-    let opacity = wm.opacity.unwrap_or(50);
+    let opacity = wm.opacity.unwrap_or(WATERMARK_DEFAULT_OPACITY);
     if opacity == 0 || opacity > 100 {
         return Err(bad_request_response(
             "watermark.opacity must be between 1 and 100",
         ));
     }
-    let margin = wm.margin.unwrap_or(10);
+    let margin = wm.margin.unwrap_or(WATERMARK_DEFAULT_MARGIN);
 
     Ok(Some(WatermarkInput {
         image: artifact,
@@ -1530,14 +1534,14 @@ fn resolve_multipart_watermark(
         "watermark_position",
         Position::from_str,
     )?
-    .unwrap_or(Position::BottomRight);
-    let opacity = opacity.unwrap_or(50);
+    .unwrap_or(WATERMARK_DEFAULT_POSITION);
+    let opacity = opacity.unwrap_or(WATERMARK_DEFAULT_OPACITY);
     if opacity == 0 || opacity > 100 {
         return Err(bad_request_response(
             "watermark_opacity must be between 1 and 100",
         ));
     }
-    let margin = margin.unwrap_or(10);
+    let margin = margin.unwrap_or(WATERMARK_DEFAULT_MARGIN);
     Ok(WatermarkInput {
         image: artifact,
         position,
@@ -1551,9 +1555,11 @@ fn watermark_identity_from_payload(payload: Option<&WatermarkPayload>) -> Option
     let url = wm.url.as_deref().filter(|u| !u.is_empty())?;
     Some(compute_watermark_identity(
         url,
-        wm.position.as_deref().unwrap_or("bottom-right"),
-        wm.opacity.unwrap_or(50),
-        wm.margin.unwrap_or(10),
+        wm.position
+            .as_deref()
+            .unwrap_or(WATERMARK_DEFAULT_POSITION.as_name()),
+        wm.opacity.unwrap_or(WATERMARK_DEFAULT_OPACITY),
+        wm.margin.unwrap_or(WATERMARK_DEFAULT_MARGIN),
     ))
 }
 
@@ -2127,6 +2133,9 @@ fn parse_public_get_request(
         },
     };
 
+    let has_orphaned_watermark_params = query.contains_key("watermarkPosition")
+        || query.contains_key("watermarkOpacity")
+        || query.contains_key("watermarkMargin");
     let watermark = if query.contains_key("watermarkUrl") {
         Some(WatermarkPayload {
             url: query.get("watermarkUrl").cloned(),
@@ -2134,6 +2143,10 @@ fn parse_public_get_request(
             opacity: parse_optional_u8_query(query, "watermarkOpacity")?,
             margin: parse_optional_integer_query(query, "watermarkMargin")?,
         })
+    } else if has_orphaned_watermark_params {
+        return Err(bad_request_response(
+            "watermarkPosition, watermarkOpacity, and watermarkMargin require watermarkUrl",
+        ));
     } else {
         None
     };

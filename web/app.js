@@ -164,6 +164,25 @@ function wireEvents() {
     const [file] = event.target.files ?? [];
     if (file) await loadWatermark(file);
   });
+
+  ["dragenter", "dragover"].forEach((type) => {
+    elements.watermarkDropzone.addEventListener(type, (event) => {
+      event.preventDefault();
+      elements.watermarkDropzone.classList.add("dragover");
+    });
+  });
+
+  ["dragleave", "drop"].forEach((type) => {
+    elements.watermarkDropzone.addEventListener(type, (event) => {
+      event.preventDefault();
+      elements.watermarkDropzone.classList.remove("dragover");
+    });
+  });
+
+  elements.watermarkDropzone.addEventListener("drop", async (event) => {
+    const [file] = event.dataTransfer?.files ?? [];
+    if (file) await loadWatermark(file);
+  });
   elements.watermarkClear.addEventListener("click", clearWatermark);
   elements.watermarkOpacityRange.addEventListener("input", () => {
     elements.watermarkOpacityNumber.value = elements.watermarkOpacityRange.value;
