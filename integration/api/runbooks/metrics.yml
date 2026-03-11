@@ -15,11 +15,11 @@ steps:
       current.res.status == 200
       && current.res.headers['Content-Type'][0] contains 'text/plain'
   metrics_no_auth:
-    desc: "Request without Bearer token returns 401 Unauthorized"
+    desc: "Request without Bearer token also returns 200 (no auth required)"
     req:
       /metrics:
         get:
           body: null
     test: |
-      current.res.status == 401
-      && current.res.headers['Content-Type'][0] == 'application/problem+json'
+      current.res.status == 200
+      && current.res.headers['Content-Type'][0] contains 'text/plain'

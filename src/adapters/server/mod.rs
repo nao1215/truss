@@ -89,7 +89,7 @@ fn stderr_write(msg: &str) {
     {
         use std::os::windows::io::FromRawHandle;
 
-        extern "system" {
+        unsafe extern "system" {
             fn GetStdHandle(nStdHandle: u32) -> *mut std::ffi::c_void;
         }
 
