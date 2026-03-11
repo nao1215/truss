@@ -75,6 +75,109 @@ jobs:
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.crates-auth.outputs.token }}
 
+  # ── 2b. Build release binaries ──────────────────────────────────────
+  build-binaries:
+    needs: verify
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            archive: tar.gz
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            archive: tar.gz
+            cross: true
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            archive: tar.gz
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            archive: tar.gz
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            archive: zip
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install cross
+        if: matrix.cross
+        run: cargo install cross --locked
+
+      - name: Install cross-compilation toolchain
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Build release binary
+        run: ${{ matrix.cross && 'cross' || 'cargo' }} build --release --locked --target ${{ matrix.target }}
+
+      - name: Determine binary path
+        id: bin
+        shell: bash
+        run: |
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            echo "path=target/${{ matrix.target }}/release/truss.exe" >> "$GITHUB_OUTPUT"
+            echo "name=truss.exe" >> "$GITHUB_OUTPUT"
+          else
+            echo "path=target/${{ matrix.target }}/release/truss" >> "$GITHUB_OUTPUT"
+            echo "name=truss" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Strip binary (Linux/macOS)
+        if: matrix.os != 'windows-latest' && !matrix.cross
+        run: strip ${{ steps.bin.outputs.path }}
+
+      - name: Strip binary (cross aarch64)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: aarch64-linux-gnu-strip ${{ steps.bin.outputs.path }}
+
+      - name: Create archive (tar.gz)
+        if: matrix.archive == 'tar.gz'
+        run: |
+          archive_name="truss-${GITHUB_REF_NAME}-${{ matrix.target }}.tar.gz"
+          tar czf "${archive_name}" -C "$(dirname ${{ steps.bin.outputs.path }})" ${{ steps.bin.outputs.name }}
+          echo "ARCHIVE=${archive_name}" >> "$GITHUB_ENV"
+
+      - name: Create archive (zip)
+        if: matrix.archive == 'zip'
+        shell: bash
+        run: |
+          archive_name="truss-${GITHUB_REF_NAME}-${{ matrix.target }}.zip"
+          (cd "$(dirname "${{ steps.bin.outputs.path }}")" && 7z a "${GITHUB_WORKSPACE}/${archive_name}" "${{ steps.bin.outputs.name }}")
+          echo "ARCHIVE=${archive_name}" >> "$GITHUB_ENV"
+
+      - name: Generate checksum
+        shell: bash
+        run: |
+          if [ "${{ matrix.os }}" = "macos-latest" ]; then
+            shasum -a 256 "${ARCHIVE}" > "${ARCHIVE}.sha256"
+          else
+            sha256sum "${ARCHIVE}" > "${ARCHIVE}.sha256"
+          fi
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ matrix.target }}
+          path: |
+            ${{ env.ARCHIVE }}
+            ${{ env.ARCHIVE }}.sha256
+
   # ── 3. Build & push container image ─────────────────────────────────
   publish-container:
     runs-on: ubuntu-latest
@@ -130,7 +233,7 @@ jobs:
   # ── 4. Create GitHub Release ────────────────────────────────────────
   create-release:
     runs-on: ubuntu-latest
-    needs: publish-container
+    needs: [publish-container, build-binaries]
     permissions:
       contents: write
     steps:
@@ -138,6 +241,19 @@ jobs:
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
+
+      - name: Download all binary artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: binary-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Generate combined checksums
+        run: |
+          cd release-assets
+          cat *.sha256 | sort > checksums.txt
+          rm -f *.sha256
 
       - name: Extract tag name
         id: tag
@@ -181,5 +297,6 @@ jobs:
           draft: false
           prerelease: ${{ contains(steps.tag.outputs.TAG_NAME, '-') }}
           generate_release_notes: false
+          files: release-assets/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

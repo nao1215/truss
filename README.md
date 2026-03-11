@@ -71,6 +71,20 @@ CLI reads local files or fetches remote URLs directly. The HTTP server resolves 
 
 ## Installation
 
+### Prebuilt binaries
+
+Download a prebuilt binary from the [GitHub Releases](https://github.com/nao1215/truss/releases) page. Archives and SHA256 checksums are published for each release.
+
+| Target | Archive |
+|--------|---------|
+| Linux x86_64 | `truss-v*-x86_64-unknown-linux-gnu.tar.gz` |
+| Linux aarch64 | `truss-v*-aarch64-unknown-linux-gnu.tar.gz` |
+| macOS x86_64 | `truss-v*-x86_64-apple-darwin.tar.gz` |
+| macOS aarch64 (Apple Silicon) | `truss-v*-aarch64-apple-darwin.tar.gz` |
+| Windows x86_64 | `truss-v*-x86_64-pc-windows-msvc.zip` |
+
+### From source
+
 ```sh
 cargo install truss-image
 ```
