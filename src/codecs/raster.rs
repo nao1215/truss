@@ -217,6 +217,13 @@ pub fn transform_raster(request: TransformRequest) -> Result<TransformResult, Tr
         }
     }
 
+    if let Some(sigma) = normalized.options.sharpen {
+        image = image.unsharpen(sigma, 1);
+        if let (Some(start), Some(limit)) = (start, deadline) {
+            check_deadline(start.elapsed(), limit, "sharpen")?;
+        }
+    }
+
     if let Some(ref wm) = normalized.watermark {
         image = apply_watermark(image, wm)?;
         if let (Some(start), Some(limit)) = (start, deadline) {
@@ -276,6 +283,7 @@ fn decode_input(input: &Artifact) -> Result<DynamicImage, TransformError> {
         MediaType::Webp => ImageFormat::WebP,
         MediaType::Avif => return decode_avif(&input.bytes),
         MediaType::Bmp => ImageFormat::Bmp,
+        MediaType::Tiff => ImageFormat::Tiff,
         MediaType::Svg => {
             return Err(TransformError::UnsupportedInputMediaType(
                 "SVG input should be routed to transform_svg, not transform_raster".into(),
@@ -1040,6 +1048,14 @@ fn encode_output(
                 .write_image(&rgba, rgba.width(), rgba.height(), ColorType::Rgba8.into())
                 .map_err(|e: image::ImageError| TransformError::EncodeFailed(e.to_string()))?;
         }
+        MediaType::Tiff => {
+            let rgba = image.to_rgba8();
+            let mut cursor = Cursor::new(bytes);
+            image::codecs::tiff::TiffEncoder::new(&mut cursor)
+                .write_image(&rgba, rgba.width(), rgba.height(), ColorType::Rgba8.into())
+                .map_err(|e: image::ImageError| TransformError::EncodeFailed(e.to_string()))?;
+            bytes = cursor.into_inner();
+        }
         MediaType::Svg => {
             return Err(TransformError::EncodeFailed(
                 "SVG encoding should be handled by transform_svg".into(),
@@ -1424,16 +1440,21 @@ fn read_input_metadata(input: &Artifact) -> Result<RetainedMetadata, TransformEr
                     .map_err(|error| TransformError::DecodeFailed(error.to_string()))?,
             })
         }
-        MediaType::Avif | MediaType::Svg | MediaType::Bmp => Ok(RetainedMetadata::default()),
+        MediaType::Avif | MediaType::Svg | MediaType::Bmp | MediaType::Tiff => {
+            Ok(RetainedMetadata::default())
+        }
     }
 }
 
 fn output_has_alpha(image: &DynamicImage, media_type: MediaType) -> bool {
     match media_type {
         MediaType::Jpeg => false,
-        MediaType::Png | MediaType::Webp | MediaType::Avif | MediaType::Svg | MediaType::Bmp => {
-            image.color().has_alpha()
-        }
+        MediaType::Png
+        | MediaType::Webp
+        | MediaType::Avif
+        | MediaType::Svg
+        | MediaType::Bmp
+        | MediaType::Tiff => image.color().has_alpha(),
     }
 }
 
@@ -1453,7 +1474,8 @@ mod tests {
     use image::codecs::webp::WebPEncoder;
     use image::metadata::Orientation;
     use image::{
-        ColorType, GenericImageView, ImageDecoder, ImageEncoder, ImageFormat, Rgba, RgbaImage,
+        ColorType, DynamicImage, GenericImageView, ImageDecoder, ImageEncoder, ImageFormat, Rgba,
+        RgbaImage,
     };
     use std::io::Cursor;
 
@@ -2693,6 +2715,63 @@ mod tests {
             edge_pixel[0] > 0 && edge_pixel[0] < 255,
             "expected blurred edge pixel to be a mid-tone, got r={}",
             edge_pixel[0]
+        );
+    }
+
+    #[test]
+    fn transform_raster_applies_sharpen() {
+        // Create a blurry image by first blurring a sharp edge.
+        let mut image = RgbaImage::from_pixel(8, 8, Rgba([255, 255, 255, 255]));
+        for y in 0..4 {
+            for x in 0..4 {
+                image.put_pixel(x, y, Rgba([0, 0, 0, 255]));
+            }
+        }
+        let blurred = DynamicImage::ImageRgba8(image).blur(2.0);
+
+        // Measure pre-sharpen contrast across the edge.
+        let pre_dark = blurred.get_pixel(3, 3)[0] as i32;
+        let pre_light = blurred.get_pixel(4, 3)[0] as i32;
+        let pre_contrast = (pre_light - pre_dark).abs();
+
+        let mut bytes = Vec::new();
+        PngEncoder::new(&mut bytes)
+            .write_image(blurred.as_bytes(), 8, 8, ColorType::Rgba8.into())
+            .expect("encode png");
+        let artifact = Artifact::new(
+            bytes,
+            MediaType::Png,
+            ArtifactMetadata {
+                width: Some(8),
+                height: Some(8),
+                frame_count: 1,
+                duration: None,
+                has_alpha: Some(false),
+            },
+        );
+
+        let result = transform_raster(TransformRequest::new(
+            artifact,
+            TransformOptions {
+                sharpen: Some(5.0),
+                ..TransformOptions::default()
+            },
+        ))
+        .expect("sharpen transform");
+
+        assert_eq!(result.artifact.metadata.width, Some(8));
+        assert_eq!(result.artifact.metadata.height, Some(8));
+
+        // After sharpening, the contrast across the edge should increase.
+        let output = image::load_from_memory_with_format(&result.artifact.bytes, ImageFormat::Png)
+            .expect("decode output");
+        let post_dark = output.get_pixel(3, 3)[0] as i32;
+        let post_light = output.get_pixel(4, 3)[0] as i32;
+        let post_contrast = (post_light - post_dark).abs();
+
+        assert!(
+            post_contrast > pre_contrast,
+            "expected sharpening to increase edge contrast: pre={pre_contrast}, post={post_contrast}"
         );
     }
 

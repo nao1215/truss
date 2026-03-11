@@ -4,6 +4,8 @@
 
 ### Added
 
+- Sharpen filter (`--sharpen` CLI flag, `sharpen` query parameter, WASM adapter) using unsharp mask. Valid sigma range 0.1–100.0.
+- TIFF format support for input and output across CLI, HTTP server, and WASM.
 - Watermark overlay support for signed public URLs (`watermarkUrl`, `watermarkPosition`, `watermarkOpacity`, `watermarkMargin` query params).
 - `sign_public_url` and CLI `sign` command now accept watermark parameters.
 - `truss_watermark_transforms_total` Prometheus counter.

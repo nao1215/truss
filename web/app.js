@@ -30,6 +30,8 @@ const elements = {
   metadataMode: document.querySelector("#metadata-mode"),
   blurRange: document.querySelector("#blur-range"),
   blurNumber: document.querySelector("#blur-number"),
+  sharpenRange: document.querySelector("#sharpen-range"),
+  sharpenNumber: document.querySelector("#sharpen-number"),
   watermarkFile: document.querySelector("#watermark-file"),
   watermarkDropzone: document.querySelector("#watermark-dropzone"),
   watermarkPreviewRow: document.querySelector("#watermark-preview-row"),
@@ -157,6 +159,18 @@ function wireEvents() {
       const clamped = Math.min(100, Math.max(0, v));
       elements.blurNumber.value = clamped;
       elements.blurRange.value = clamped;
+    }
+  });
+
+  elements.sharpenRange.addEventListener("input", () => {
+    elements.sharpenNumber.value = elements.sharpenRange.value;
+  });
+  elements.sharpenNumber.addEventListener("input", () => {
+    const v = parseFloat(elements.sharpenNumber.value);
+    if (Number.isFinite(v)) {
+      const clamped = Math.min(100, Math.max(0, v));
+      elements.sharpenNumber.value = clamped;
+      elements.sharpenRange.value = clamped;
     }
   });
 
@@ -338,6 +352,7 @@ function collectOptions() {
     keepMetadata: metadataMode === "keep",
     preserveExif: metadataMode === "exif",
     blur: (() => { const v = Math.max(0, parseFloat(elements.blurNumber.value) || 0); return v >= 0.1 ? v : null; })(),
+    sharpen: (() => { const v = Math.max(0, parseFloat(elements.sharpenNumber.value) || 0); return v >= 0.1 ? v : null; })(),
   };
 }
 
@@ -561,6 +576,7 @@ function inferDeclaredMediaType(file) {
     "image/bmp": "bmp",
     "image/x-ms-bmp": "bmp",
     "image/x-windows-bmp": "bmp",
+    "image/tiff": "tiff",
     "image/svg+xml": "svg",
   };
   if (file.type && byMime[file.type]) {
@@ -575,6 +591,8 @@ function inferDeclaredMediaType(file) {
     webp: "webp",
     avif: "avif",
     bmp: "bmp",
+    tiff: "tiff",
+    tif: "tiff",
     svg: "svg",
   };
   return byExtension[extension] ?? null;

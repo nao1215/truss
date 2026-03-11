@@ -358,6 +358,9 @@ pub(super) fn compute_cache_key(
     if options.rotate != Rotation::Deg0 {
         params.push(("rotate", options.rotate.as_degrees().to_string()));
     }
+    if let Some(sharpen) = options.sharpen {
+        params.push(("sharpen", format!("{sharpen}")));
+    }
     if options.strip_metadata {
         params.push(("stripMetadata", "true".to_string()));
     }

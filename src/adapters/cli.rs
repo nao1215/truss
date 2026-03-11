@@ -39,7 +39,7 @@ fn help_top_level() -> String {
         "\
 truss {version} - an image transformation tool and server
 
-Converts, resizes, and re-encodes images (JPEG, PNG, WebP, AVIF, BMP, SVG).
+Converts, resizes, and re-encodes images (JPEG, PNG, WebP, AVIF, BMP, TIFF, SVG).
 Can also run as an HTTP image-transform server.
 
 USAGE:
@@ -111,7 +111,7 @@ OPTIONS:
       --position <POS>     Crop anchor for cover mode (default: center)
                            center, top, right, bottom, left,
                            top-left, top-right, bottom-left, bottom-right
-      --format <FMT>       Output format: jpeg, png, webp, avif, bmp, svg
+      --format <FMT>       Output format: jpeg, png, webp, avif, bmp, tiff, svg
                            (default: inferred from output extension)
       --quality <1-100>    Encoding quality for lossy formats
       --background <COLOR> Background color as RRGGBB or RRGGBBAA hex
@@ -122,6 +122,7 @@ OPTIONS:
       --keep-metadata      Preserve EXIF, ICC, and other supported metadata
       --preserve-exif      Preserve EXIF only (strip ICC and others)
       --blur <SIGMA>       Gaussian blur sigma (0.1-100.0; raster-only, not supported for SVG inputs)
+      --sharpen <SIGMA>    Sharpen sigma (0.1-100.0; raster-only, not supported for SVG inputs)
       --watermark <FILE>   Watermark image to composite onto the output (raster-only, not supported for SVG inputs)
       --watermark-position <POS>  Watermark placement (default: bottom-right; raster-only)
                            center, top, right, bottom, left,
@@ -281,7 +282,7 @@ OPTIONAL:
       --version <VALUE>    Cache-busting version tag
       --width, --height, --fit, --position, --format, --quality,
       --background, --rotate, --auto-orient, --no-auto-orient,
-      --strip-metadata, --keep-metadata, --preserve-exif, --blur
+      --strip-metadata, --keep-metadata, --preserve-exif, --blur, --sharpen
       --watermark-url <URL>          Watermark image URL to embed in the signed URL
       --watermark-position <POS>     Watermark placement (default: bottom-right)
       --watermark-opacity <1-100>    Watermark opacity (default: 50)
@@ -416,6 +417,9 @@ struct ClapConvertArgs {
     /// Apply Gaussian blur (sigma: 0.1-100.0)
     #[arg(long, value_parser = parse_blur)]
     blur: Option<f32>,
+    /// Apply sharpen filter (sigma: 0.1-100.0)
+    #[arg(long, value_parser = parse_sharpen)]
+    sharpen: Option<f32>,
     /// Watermark image file path
     #[arg(long)]
     watermark: Option<PathBuf>,
@@ -536,6 +540,9 @@ struct ClapSignArgs {
     /// Apply Gaussian blur (sigma: 0.1-100.0)
     #[arg(long, value_parser = parse_blur)]
     blur: Option<f32>,
+    /// Apply sharpen filter (sigma: 0.1-100.0)
+    #[arg(long, value_parser = parse_sharpen)]
+    sharpen: Option<f32>,
     /// Watermark image URL to composite onto the output
     #[arg(long, value_parser = parse_url_value)]
     watermark_url: Option<String>,
@@ -583,6 +590,16 @@ fn parse_blur(s: &str) -> Result<f32, String> {
         .map_err(|_| format!("invalid blur value: '{s}'"))?;
     if !v.is_finite() || !(0.1..=100.0).contains(&v) {
         return Err("blur must be between 0.1 and 100.0".to_string());
+    }
+    Ok(v)
+}
+
+fn parse_sharpen(s: &str) -> Result<f32, String> {
+    let v: f32 = s
+        .parse()
+        .map_err(|_| format!("invalid sharpen value: '{s}'"))?;
+    if !v.is_finite() || !(0.1..=100.0).contains(&v) {
+        return Err("sharpen must be between 0.1 and 100.0".to_string());
     }
     Ok(v)
 }
@@ -1069,6 +1086,7 @@ fn convert_from_clap(args: ClapConvertArgs) -> Result<Command, CliError> {
         keep_metadata: args.keep_metadata,
         preserve_exif: args.preserve_exif,
         blur: args.blur,
+        sharpen: args.sharpen,
     }
     .into_options()
     .map_err(map_transform_error)?;
@@ -1186,6 +1204,7 @@ fn sign_from_clap(args: ClapSignArgs) -> Result<Command, CliError> {
         keep_metadata: args.keep_metadata,
         preserve_exif: args.preserve_exif,
         blur: args.blur,
+        sharpen: args.sharpen,
     }
     .into_options()
     .map_err(map_transform_error)?;
@@ -1220,6 +1239,7 @@ struct TransformFields {
     keep_metadata: bool,
     preserve_exif: bool,
     blur: Option<f32>,
+    sharpen: Option<f32>,
 }
 
 impl TransformFields {
@@ -1254,6 +1274,7 @@ impl TransformFields {
             strip_metadata,
             preserve_exif,
             blur: self.blur,
+            sharpen: self.sharpen,
             deadline: None,
         })
     }

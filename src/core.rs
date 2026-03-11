@@ -118,6 +118,8 @@ pub enum MediaType {
     Svg,
     /// BMP image data.
     Bmp,
+    /// TIFF image data.
+    Tiff,
 }
 
 impl MediaType {
@@ -130,6 +132,7 @@ impl MediaType {
             Self::Avif => "avif",
             Self::Svg => "svg",
             Self::Bmp => "bmp",
+            Self::Tiff => "tiff",
         }
     }
 
@@ -142,6 +145,7 @@ impl MediaType {
             Self::Avif => "image/avif",
             Self::Svg => "image/svg+xml",
             Self::Bmp => "image/bmp",
+            Self::Tiff => "image/tiff",
         }
     }
 
@@ -173,6 +177,7 @@ impl FromStr for MediaType {
             "avif" => Ok(Self::Avif),
             "svg" => Ok(Self::Svg),
             "bmp" => Ok(Self::Bmp),
+            "tiff" | "tif" => Ok(Self::Tiff),
             _ => Err(format!("unsupported media type `{value}`")),
         }
     }
@@ -297,6 +302,12 @@ pub struct TransformOptions {
     /// When set, a Gaussian blur with the given sigma is applied after resizing
     /// and before encoding. Valid range is 0.1–100.0.
     pub blur: Option<f32>,
+    /// Unsharp-mask (sharpen) sigma.
+    ///
+    /// When set, an unsharp mask with the given sigma is applied after resizing
+    /// and before encoding. Valid range is 0.1–100.0. The sharpening threshold
+    /// is fixed at 1.
+    pub sharpen: Option<f32>,
     /// Optional wall-clock deadline for the transform pipeline.
     ///
     /// When set, the transform checks elapsed time at each pipeline stage and returns
@@ -321,6 +332,7 @@ impl Default for TransformOptions {
             strip_metadata: true,
             preserve_exif: false,
             blur: None,
+            sharpen: None,
             deadline: None,
         }
     }
@@ -336,6 +348,7 @@ impl TransformOptions {
         validate_dimension("height", self.height)?;
         validate_quality(self.quality)?;
         validate_blur(self.blur)?;
+        validate_sharpen(self.sharpen)?;
 
         let has_bounded_resize = self.width.is_some() && self.height.is_some();
 
@@ -389,6 +402,7 @@ impl TransformOptions {
             auto_orient: self.auto_orient,
             metadata_policy: normalize_metadata_policy(self.strip_metadata, self.preserve_exif),
             blur: self.blur,
+            sharpen: self.sharpen,
             deadline: self.deadline,
         })
     }
@@ -419,6 +433,8 @@ pub struct NormalizedTransformOptions {
     pub metadata_policy: MetadataPolicy,
     /// Gaussian blur sigma, when requested.
     pub blur: Option<f32>,
+    /// Unsharp-mask (sharpen) sigma, when requested.
+    pub sharpen: Option<f32>,
     /// Optional wall-clock deadline for the transform pipeline.
     pub deadline: Option<Duration>,
 }
@@ -897,6 +913,18 @@ fn validate_blur(value: Option<f32>) -> Result<(), TransformError> {
     Ok(())
 }
 
+fn validate_sharpen(value: Option<f32>) -> Result<(), TransformError> {
+    if let Some(sigma) = value
+        && !(0.1..=100.0).contains(&sigma)
+    {
+        return Err(TransformError::InvalidOptions(
+            "sharpen sigma must be between 0.1 and 100.0".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
 fn validate_watermark(wm: &WatermarkInput) -> Result<(), TransformError> {
     if wm.opacity == 0 || wm.opacity > 100 {
         return Err(TransformError::InvalidOptions(
@@ -942,6 +970,10 @@ fn detect_artifact(bytes: &[u8]) -> Result<(MediaType, ArtifactMetadata), Transf
 
     if is_bmp(bytes) {
         return Ok((MediaType::Bmp, sniff_bmp(bytes)?));
+    }
+
+    if is_tiff(bytes) {
+        return Ok((MediaType::Tiff, sniff_tiff(bytes)?));
     }
 
     // SVG check goes last: it relies on text scanning which is slower than binary
@@ -1057,6 +1089,39 @@ fn sniff_bmp(bytes: &[u8]) -> Result<ArtifactMetadata, TransformError> {
 
     let has_alpha = bits_per_pixel == 32;
 
+    Ok(ArtifactMetadata {
+        width: Some(width),
+        height: Some(height),
+        frame_count: 1,
+        duration: None,
+        has_alpha: Some(has_alpha),
+    })
+}
+
+/// Detects TIFF files by checking the byte-order marker and magic number.
+///
+/// Little-endian: `II` + 0x002A, big-endian: `MM` + 0x002A.
+fn is_tiff(bytes: &[u8]) -> bool {
+    bytes.len() >= 4
+        && ((bytes[0] == b'I' && bytes[1] == b'I' && bytes[2] == 0x2A && bytes[3] == 0x00)
+            || (bytes[0] == b'M' && bytes[1] == b'M' && bytes[2] == 0x00 && bytes[3] == 0x2A))
+}
+
+/// Extracts TIFF metadata by decoding the image header via the `image` crate.
+fn sniff_tiff(bytes: &[u8]) -> Result<ArtifactMetadata, TransformError> {
+    let cursor = std::io::Cursor::new(bytes);
+    let decoder = image::codecs::tiff::TiffDecoder::new(cursor)
+        .map_err(|e| TransformError::DecodeFailed(format!("tiff decode: {e}")))?;
+    let (width, height) = image::ImageDecoder::dimensions(&decoder);
+    let color = image::ImageDecoder::color_type(&decoder);
+    let has_alpha = matches!(
+        color,
+        image::ColorType::La8
+            | image::ColorType::Rgba8
+            | image::ColorType::La16
+            | image::ColorType::Rgba16
+            | image::ColorType::Rgba32F
+    );
     Ok(ArtifactMetadata {
         width: Some(width),
         height: Some(height),
@@ -2103,6 +2168,59 @@ mod tests {
         .normalize(MediaType::Jpeg)
         .expect("blur sigma 100.0 should be accepted");
         assert_eq!(opts_max.blur, Some(100.0));
+    }
+
+    #[test]
+    fn normalize_rejects_sharpen_sigma_below_minimum() {
+        let err = TransformOptions {
+            sharpen: Some(0.0),
+            ..TransformOptions::default()
+        }
+        .normalize(MediaType::Jpeg)
+        .expect_err("sharpen sigma 0.0 should be rejected");
+
+        assert_eq!(
+            err,
+            TransformError::InvalidOptions(
+                "sharpen sigma must be between 0.1 and 100.0".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn normalize_rejects_sharpen_sigma_above_maximum() {
+        let err = TransformOptions {
+            sharpen: Some(100.1),
+            ..TransformOptions::default()
+        }
+        .normalize(MediaType::Jpeg)
+        .expect_err("sharpen sigma 100.1 should be rejected");
+
+        assert_eq!(
+            err,
+            TransformError::InvalidOptions(
+                "sharpen sigma must be between 0.1 and 100.0".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn normalize_accepts_sharpen_sigma_at_boundaries() {
+        let opts_min = TransformOptions {
+            sharpen: Some(0.1),
+            ..TransformOptions::default()
+        }
+        .normalize(MediaType::Jpeg)
+        .expect("sharpen sigma 0.1 should be accepted");
+        assert_eq!(opts_min.sharpen, Some(0.1));
+
+        let opts_max = TransformOptions {
+            sharpen: Some(100.0),
+            ..TransformOptions::default()
+        }
+        .normalize(MediaType::Jpeg)
+        .expect("sharpen sigma 100.0 should be accepted");
+        assert_eq!(opts_max.sharpen, Some(100.0));
     }
 
     #[test]

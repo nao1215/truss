@@ -43,7 +43,7 @@
             <input id="source-file" type="file" accept="image/*,.svg" />
             <span class="dropzone-title">Choose an image or drop it here</span>
             <span class="dropzone-copy"
-              >JPEG, PNG, WebP, AVIF, BMP, and SVG when enabled in this build.</span
+              >JPEG, PNG, WebP, AVIF, BMP, TIFF, and SVG when enabled in this build.</span
             >
           </label>
 
@@ -90,6 +90,7 @@
                 <option value="webp">WebP</option>
                 <option value="avif">AVIF</option>
                 <option value="bmp">BMP</option>
+                <option value="tiff">TIFF</option>
                 <option value="svg">SVG</option>
               </select>
             </label>
@@ -204,6 +205,31 @@
                 <input
                   id="blur-number"
                   name="blur"
+                  type="number"
+                  min="0"
+                  max="100"
+                  step="0.1"
+                  value="0"
+                  inputmode="decimal"
+                />
+              </div>
+            </label>
+
+            <label class="sharpen-field" id="sharpen-field">
+              <span>Sharpen</span>
+              <div class="quality-pair">
+                <input
+                  id="sharpen-range"
+                  name="sharpenRange"
+                  type="range"
+                  min="0"
+                  max="100"
+                  step="0.1"
+                  value="0"
+                />
+                <input
+                  id="sharpen-number"
+                  name="sharpen"
                   type="number"
                   min="0"
                   max="100"

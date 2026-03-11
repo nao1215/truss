@@ -32,7 +32,7 @@ pub struct WasmTransformOptions {
     pub fit: Option<String>,
     /// The crop anchor (`center`, `top-left`, and so on).
     pub position: Option<String>,
-    /// The requested output format (`jpeg`, `png`, `webp`, `avif`, `bmp`, or `svg`).
+    /// The requested output format (`jpeg`, `png`, `webp`, `avif`, `bmp`, `tiff`, or `svg`).
     pub format: Option<String>,
     /// The requested lossy quality from 1 to 100.
     pub quality: Option<u8>,
@@ -48,6 +48,8 @@ pub struct WasmTransformOptions {
     pub preserve_exif: Option<bool>,
     /// Gaussian blur sigma (0.1–100.0).
     pub blur: Option<f32>,
+    /// Sharpen sigma (0.1–100.0).
+    pub sharpen: Option<f32>,
 }
 
 /// Build-time capabilities exposed by the WASM adapter.
@@ -207,6 +209,7 @@ fn parse_wasm_options(options: WasmTransformOptions) -> Result<TransformOptions,
         strip_metadata,
         preserve_exif,
         blur: options.blur,
+        sharpen: options.sharpen,
         deadline: None,
     })
 }
@@ -293,6 +296,7 @@ fn output_extension(media_type: MediaType) -> &'static str {
         MediaType::Avif => "avif",
         MediaType::Svg => "svg",
         MediaType::Bmp => "bmp",
+        MediaType::Tiff => "tiff",
     }
 }
 

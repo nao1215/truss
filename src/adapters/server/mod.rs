@@ -1448,6 +1448,7 @@ struct TransformOptionsPayload {
     strip_metadata: Option<bool>,
     preserve_exif: Option<bool>,
     blur: Option<f32>,
+    sharpen: Option<f32>,
 }
 
 impl TransformOptionsPayload {
@@ -1478,6 +1479,7 @@ impl TransformOptionsPayload {
             strip_metadata: self.strip_metadata.unwrap_or(defaults.strip_metadata),
             preserve_exif: self.preserve_exif.unwrap_or(defaults.preserve_exif),
             blur: self.blur,
+            sharpen: self.sharpen,
             deadline: defaults.deadline,
         })
     }
@@ -2253,6 +2255,7 @@ fn parse_public_get_request(
         preserve_exif: parse_optional_bool_query(query, "preserveExif")?
             .unwrap_or(defaults.preserve_exif),
         blur: parse_optional_float_query(query, "blur")?,
+        sharpen: parse_optional_float_query(query, "sharpen")?,
         deadline: defaults.deadline,
     };
 

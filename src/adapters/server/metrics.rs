@@ -232,8 +232,9 @@ fn transform_error_index(error: &TransformError) -> usize {
 
 // ── MediaType index ──────────────────────────────────────────────────
 
-const MEDIA_TYPE_COUNT: usize = 6;
-const MEDIA_TYPE_LABELS: [&str; MEDIA_TYPE_COUNT] = ["jpeg", "png", "webp", "avif", "svg", "bmp"];
+const MEDIA_TYPE_COUNT: usize = 7;
+const MEDIA_TYPE_LABELS: [&str; MEDIA_TYPE_COUNT] =
+    ["jpeg", "png", "webp", "avif", "svg", "bmp", "tiff"];
 
 fn media_type_index(mt: MediaType) -> usize {
     match mt {
@@ -243,6 +244,7 @@ fn media_type_index(mt: MediaType) -> usize {
         MediaType::Avif => 3,
         MediaType::Svg => 4,
         MediaType::Bmp => 5,
+        MediaType::Tiff => 6,
     }
 }
 

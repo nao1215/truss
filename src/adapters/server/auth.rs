@@ -204,6 +204,9 @@ pub(super) fn extend_transform_query(
     if let Some(blur) = options.blur {
         query.insert("blur".to_string(), format!("{blur}"));
     }
+    if let Some(sharpen) = options.sharpen {
+        query.insert("sharpen".to_string(), format!("{sharpen}"));
+    }
 }
 
 pub(super) fn encode_background(color: Rgba8) -> String {
@@ -240,6 +243,7 @@ pub(super) fn validate_public_query_names(
                 | "stripMetadata"
                 | "preserveExif"
                 | "blur"
+                | "sharpen"
                 | "watermarkUrl"
                 | "watermarkPosition"
                 | "watermarkOpacity"

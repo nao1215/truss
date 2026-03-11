@@ -76,6 +76,11 @@ pub fn transform_svg(request: TransformRequest) -> Result<TransformResult, Trans
             "blur is not supported for SVG inputs".to_string(),
         ));
     }
+    if request.options.sharpen.is_some() {
+        return Err(TransformError::InvalidOptions(
+            "sharpen is not supported for SVG inputs".to_string(),
+        ));
+    }
     if request.watermark.is_some() {
         return Err(TransformError::InvalidOptions(
             "watermark is not supported for SVG inputs".to_string(),
@@ -663,6 +668,13 @@ fn encode_raster_output(
                 .write_image(image.as_ref(), width, height, ColorType::Rgba8.into())
                 .map_err(|e| TransformError::EncodeFailed(format!("BMP encode failed: {e}")))?;
         }
+        MediaType::Tiff => {
+            let mut cursor = std::io::Cursor::new(bytes);
+            image::codecs::tiff::TiffEncoder::new(&mut cursor)
+                .write_image(image.as_ref(), width, height, ColorType::Rgba8.into())
+                .map_err(|e| TransformError::EncodeFailed(format!("TIFF encode failed: {e}")))?;
+            bytes = cursor.into_inner();
+        }
         MediaType::Svg => {
             return Err(TransformError::InvalidOptions(
                 "SVG-to-SVG rasterization is not meaningful".into(),
@@ -1231,6 +1243,24 @@ mod tests {
         assert!(
             matches!(err, TransformError::InvalidOptions(ref msg) if msg.contains("blur")),
             "expected InvalidOptions about blur, got: {err}"
+        );
+    }
+
+    #[test]
+    fn svg_rejects_sharpen() {
+        let input = sniff_artifact(RawArtifact::new(simple_svg(), None)).unwrap();
+        let request = TransformRequest::new(
+            input,
+            TransformOptions {
+                format: Some(MediaType::Png),
+                sharpen: Some(2.0),
+                ..TransformOptions::default()
+            },
+        );
+        let err = transform_svg(request).unwrap_err();
+        assert!(
+            matches!(err, TransformError::InvalidOptions(ref msg) if msg.contains("sharpen")),
+            "expected InvalidOptions about sharpen, got: {err}"
         );
     }
 
