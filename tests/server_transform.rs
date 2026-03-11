@@ -62,7 +62,7 @@ fn spawn_fixture_server(responses: Vec<FixtureResponse>) -> (String, thread::Joi
         let mut served_any = false;
         for (status, headers, body) in responses {
             let timeout = if served_any {
-                Duration::from_secs(2)
+                Duration::from_secs(5)
             } else {
                 Duration::from_secs(10)
             };
