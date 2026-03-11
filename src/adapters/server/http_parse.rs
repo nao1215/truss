@@ -676,6 +676,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn test_resolve_storage_path_symlink_escape_rejected() {
         let dir = tempfile::tempdir().unwrap();
         // Create a symlink that points outside the storage root
