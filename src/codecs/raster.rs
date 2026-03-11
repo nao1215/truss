@@ -2728,6 +2728,12 @@ mod tests {
             }
         }
         let blurred = DynamicImage::ImageRgba8(image).blur(2.0);
+
+        // Measure pre-sharpen contrast across the edge.
+        let pre_dark = blurred.get_pixel(3, 3)[0] as i32;
+        let pre_light = blurred.get_pixel(4, 3)[0] as i32;
+        let pre_contrast = (pre_light - pre_dark).abs();
+
         let mut bytes = Vec::new();
         PngEncoder::new(&mut bytes)
             .write_image(blurred.as_bytes(), 8, 8, ColorType::Rgba8.into())
@@ -2756,15 +2762,16 @@ mod tests {
         assert_eq!(result.artifact.metadata.width, Some(8));
         assert_eq!(result.artifact.metadata.height, Some(8));
 
-        // After sharpening, edges should become more pronounced.
+        // After sharpening, the contrast across the edge should increase.
         let output = image::load_from_memory_with_format(&result.artifact.bytes, ImageFormat::Png)
             .expect("decode output");
-        let corner = output.get_pixel(0, 0);
-        // The corner should still be dark after sharpening a blurred dark region.
+        let post_dark = output.get_pixel(3, 3)[0] as i32;
+        let post_light = output.get_pixel(4, 3)[0] as i32;
+        let post_contrast = (post_light - post_dark).abs();
+
         assert!(
-            corner[0] < 128,
-            "expected sharpened corner to remain dark, got r={}",
-            corner[0]
+            post_contrast > pre_contrast,
+            "expected sharpening to increase edge contrast: pre={pre_contrast}, post={post_contrast}"
         );
     }
 

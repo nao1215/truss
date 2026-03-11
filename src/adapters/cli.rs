@@ -39,7 +39,7 @@ fn help_top_level() -> String {
         "\
 truss {version} - an image transformation tool and server
 
-Converts, resizes, and re-encodes images (JPEG, PNG, WebP, AVIF, BMP, SVG).
+Converts, resizes, and re-encodes images (JPEG, PNG, WebP, AVIF, BMP, TIFF, SVG).
 Can also run as an HTTP image-transform server.
 
 USAGE:

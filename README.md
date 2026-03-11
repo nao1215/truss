@@ -155,7 +155,7 @@ truss diagram.svg -o diagram.png --width 1024
 truss inspect photo.jpg
 ```
 
-#### Examples: Blur, Sharpen & Watermark
+#### Examples: Blur & Watermark
 
 | | Original | Gaussian Blur (`--blur 5.0`) | Watermark (`--watermark`) |
 |---|---|---|---|

@@ -1120,6 +1120,7 @@ fn sniff_tiff(bytes: &[u8]) -> Result<ArtifactMetadata, TransformError> {
             | image::ColorType::Rgba8
             | image::ColorType::La16
             | image::ColorType::Rgba16
+            | image::ColorType::Rgba32F
     );
     Ok(ArtifactMetadata {
         width: Some(width),

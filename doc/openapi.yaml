@@ -722,7 +722,7 @@ components:
       required: false
       description: |
         HTTP(S) URL of a watermark image to composite onto the output.
-        Must be a raster format (PNG, JPEG, WebP, BMP); SVG is not supported.
+        Must be a raster format (PNG, JPEG, WebP, BMP, TIFF); SVG is not supported.
         Subject to SSRF protection and a 10 MB size limit.
         For multipart uploads the watermark file field also has a 10 MB cap.
       schema:
@@ -935,7 +935,7 @@ components:
       type: object
       description: |
         Watermark overlay configuration for the JSON transform endpoint.
-        The `url` field is required and must point to a raster image (PNG, JPEG, WebP, BMP).
+        The `url` field is required and must point to a raster image (PNG, JPEG, WebP, BMP, TIFF).
         SVG watermarks are not supported.
       additionalProperties: false
       required: [url]
@@ -1002,7 +1002,7 @@ components:
         watermark:
           type: string
           format: binary
-          description: Watermark image file (PNG, JPEG, WebP, or BMP). SVG is not supported.
+          description: Watermark image file (PNG, JPEG, WebP, BMP, or TIFF). SVG is not supported.
         watermark_position:
           type: string
           enum: [center, top, right, bottom, left, top-left, top-right, bottom-left, bottom-right]
