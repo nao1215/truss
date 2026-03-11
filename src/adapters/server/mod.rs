@@ -27,7 +27,9 @@ use http_parse::{
 };
 use metrics::{
     CACHE_HITS_TOTAL, CACHE_MISSES_TOTAL, DEFAULT_MAX_CONCURRENT_TRANSFORMS, RouteMetric,
-    record_http_metrics, render_metrics_text, status_code, uptime_seconds,
+    record_http_metrics, record_http_request_duration, record_storage_duration,
+    record_transform_duration, record_transform_error, render_metrics_text, status_code,
+    storage_backend_index_from_config, uptime_seconds,
 };
 use multipart::{parse_multipart_boundary, parse_upload_request};
 use negotiate::{
@@ -100,6 +102,17 @@ fn stderr_write(msg: &str) {
         // Do not drop `f` — that would close the stderr handle.
         std::mem::forget(f);
     }
+}
+
+/// Feature-flag-independent label for the active storage backend, used only
+/// by the metrics subsystem to tag duration histograms.
+#[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
+pub(super) enum StorageBackendLabel {
+    Filesystem,
+    S3,
+    Gcs,
+    Azure,
 }
 
 /// The storage backend that determines how `Path`-based public GET requests are
@@ -524,6 +537,25 @@ impl ServerConfig {
             gcs_context: None,
             #[cfg(feature = "azure")]
             azure_context: None,
+        }
+    }
+
+    fn storage_backend_label(&self) -> StorageBackendLabel {
+        #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
+        {
+            match self.storage_backend {
+                StorageBackend::Filesystem => StorageBackendLabel::Filesystem,
+                #[cfg(feature = "s3")]
+                StorageBackend::S3 => StorageBackendLabel::S3,
+                #[cfg(feature = "gcs")]
+                StorageBackend::Gcs => StorageBackendLabel::Gcs,
+                #[cfg(feature = "azure")]
+                StorageBackend::Azure => StorageBackendLabel::Azure,
+            }
+        }
+        #[cfg(not(any(feature = "s3", feature = "gcs", feature = "azure")))]
+        {
+            StorageBackendLabel::Filesystem
         }
     }
 
@@ -1545,6 +1577,7 @@ fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io::Result<()>
         let route = classify_route(&request);
         let mut response = route_request(request, config);
         record_http_metrics(route, response.status);
+        record_http_request_duration(route, start);
 
         response.headers.push(("X-Request-Id", request_id.clone()));
 
@@ -1642,9 +1675,17 @@ fn handle_transform_request(request: HttpRequest, config: &ServerConfig) -> Http
         return response;
     }
 
+    let storage_start = Instant::now();
+    let backend_idx = storage_backend_index_from_config(&config.storage_backend_label());
     let source_bytes = match resolve_source_bytes(payload.source, config) {
-        Ok(bytes) => bytes,
-        Err(response) => return response,
+        Ok(bytes) => {
+            record_storage_duration(backend_idx, storage_start);
+            bytes
+        }
+        Err(response) => {
+            record_storage_duration(backend_idx, storage_start);
+            return response;
+        }
     };
     transform_source_bytes(
         source_bytes,
@@ -1709,9 +1750,17 @@ fn handle_public_get_request(
         return response;
     }
 
+    let storage_start = Instant::now();
+    let backend_idx = storage_backend_index_from_config(&config.storage_backend_label());
     let source_bytes = match resolve_source_bytes(source, config) {
-        Ok(bytes) => bytes,
-        Err(response) => return response,
+        Ok(bytes) => {
+            record_storage_duration(backend_idx, storage_start);
+            bytes
+        }
+        Err(response) => {
+            record_storage_duration(backend_idx, storage_start);
+            return response;
+        }
     };
 
     transform_source_bytes(
@@ -1884,11 +1933,7 @@ fn handle_health(config: &ServerConfig) -> HttpResponse {
     HttpResponse::json("200 OK", body)
 }
 
-fn handle_metrics_request(request: HttpRequest, config: &ServerConfig) -> HttpResponse {
-    if let Err(response) = authorize_request(&request, config) {
-        return response;
-    }
-
+fn handle_metrics_request(_request: HttpRequest, config: &ServerConfig) -> HttpResponse {
     HttpResponse::text(
         "200 OK",
         "text/plain; version=0.0.4; charset=utf-8",
@@ -2052,7 +2097,10 @@ fn transform_source_bytes_inner(
     }
     let artifact = match sniff_artifact(RawArtifact::new(source_bytes, None)) {
         Ok(artifact) => artifact,
-        Err(error) => return transform_error_response(error),
+        Err(error) => {
+            record_transform_error(&error);
+            return transform_error_response(error);
+        }
     };
     let negotiation_used =
         if options.format.is_none() && !response_config.disable_accept_negotiation {
@@ -2107,17 +2155,25 @@ fn transform_source_bytes_inner(
     }
 
     let is_svg = artifact.media_type == MediaType::Svg;
+    let transform_start = Instant::now();
     let result = if is_svg {
         match transform_svg(TransformRequest::new(artifact, options)) {
             Ok(result) => result,
-            Err(error) => return transform_error_response(error),
+            Err(error) => {
+                record_transform_error(&error);
+                return transform_error_response(error);
+            }
         }
     } else {
         match transform_raster(TransformRequest::new(artifact, options)) {
             Ok(result) => result,
-            Err(error) => return transform_error_response(error),
+            Err(error) => {
+                record_transform_error(&error);
+                return transform_error_response(error);
+            }
         }
     };
+    record_transform_duration(result.artifact.media_type, transform_start);
 
     for warning in &result.warnings {
         let msg = format!("truss: {warning}");
@@ -3338,14 +3394,13 @@ mod tests {
     }
 
     #[test]
-    fn metrics_endpoint_requires_authentication() {
+    fn metrics_endpoint_does_not_require_authentication() {
         let response = route_request(
             metrics_request(false),
-            &ServerConfig::new(temp_dir("metrics-auth"), Some("secret".to_string())),
+            &ServerConfig::new(temp_dir("metrics-no-auth"), Some("secret".to_string())),
         );
 
-        assert_eq!(response.status, "401 Unauthorized");
-        assert!(response_body(&response).contains("authorization required"));
+        assert_eq!(response.status, "200 OK");
     }
 
     #[test]
@@ -3365,6 +3420,18 @@ mod tests {
         assert!(body.contains("truss_http_requests_total"));
         assert!(body.contains("truss_http_requests_by_route_total{route=\"/health\"}"));
         assert!(body.contains("truss_http_responses_total{status=\"200\"}"));
+        // Histogram metrics
+        assert!(body.contains("# TYPE truss_http_request_duration_seconds histogram"));
+        assert!(
+            body.contains(
+                "truss_http_request_duration_seconds_bucket{route=\"/health\",le=\"+Inf\"}"
+            )
+        );
+        assert!(body.contains("# TYPE truss_transform_duration_seconds histogram"));
+        assert!(body.contains("# TYPE truss_storage_request_duration_seconds histogram"));
+        // Transform error counter
+        assert!(body.contains("# TYPE truss_transform_errors_total counter"));
+        assert!(body.contains("truss_transform_errors_total{error_type=\"decode_failed\"}"));
     }
 
     #[test]
