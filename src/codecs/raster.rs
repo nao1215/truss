@@ -396,8 +396,16 @@ fn yuv_frame_to_rgba(
     range: YuvRange,
     matrix: YuvStandardMatrix,
 ) -> Result<Vec<u8>, TransformError> {
-    let rgba_stride = width * 4;
-    let mut rgba = vec![255u8; (width * height * 4) as usize];
+    let rgba_stride = width.checked_mul(4).ok_or_else(|| {
+        TransformError::DecodeFailed("AVIF frame dimensions overflow address space".into())
+    })?;
+    let total_bytes = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|n| n.checked_mul(4))
+        .ok_or_else(|| {
+            TransformError::DecodeFailed("AVIF frame dimensions overflow address space".into())
+        })?;
+    let mut rgba = vec![255u8; total_bytes];
     let layout = frame.pixel_layout();
 
     match frame.planes() {

@@ -1730,10 +1730,20 @@ struct AccessLogEntry<'a> {
 }
 
 /// Extracts the `X-Request-Id` header value from request headers.
-/// Returns `None` if the header is absent or empty.
+/// Returns `None` if the header is absent, empty, or contains
+/// characters unsafe for HTTP headers (CR, LF, NUL).
 fn extract_request_id(headers: &[(String, String)]) -> Option<String> {
     headers.iter().find_map(|(name, value)| {
-        (name == "x-request-id" && !value.is_empty()).then_some(value.clone())
+        if name != "x-request-id" || value.is_empty() {
+            return None;
+        }
+        if value
+            .bytes()
+            .any(|b| b == b'\r' || b == b'\n' || b == b'\0')
+        {
+            return None;
+        }
+        Some(value.clone())
     })
 }
 
@@ -5756,5 +5766,152 @@ mod tests {
         let query = super::auth::parse_query_params(&request).expect("parse query");
         authorize_signed_request(&request, &query, &config)
             .expect_err("unknown key should be rejected");
+    }
+
+    // ── Security: X-Request-Id CRLF injection prevention ─────────────
+
+    #[test]
+    fn x_request_id_rejects_crlf_injection() {
+        let headers = vec![(
+            "x-request-id".to_string(),
+            "evil\r\nX-Injected: true".to_string(),
+        )];
+        assert!(
+            super::extract_request_id(&headers).is_none(),
+            "CRLF in request ID must be rejected"
+        );
+    }
+
+    #[test]
+    fn x_request_id_rejects_lone_cr() {
+        let headers = vec![("x-request-id".to_string(), "evil\rid".to_string())];
+        assert!(super::extract_request_id(&headers).is_none());
+    }
+
+    #[test]
+    fn x_request_id_rejects_lone_lf() {
+        let headers = vec![("x-request-id".to_string(), "evil\nid".to_string())];
+        assert!(super::extract_request_id(&headers).is_none());
+    }
+
+    #[test]
+    fn x_request_id_rejects_nul_byte() {
+        let headers = vec![("x-request-id".to_string(), "evil\0id".to_string())];
+        assert!(super::extract_request_id(&headers).is_none());
+    }
+
+    #[test]
+    fn x_request_id_accepts_normal_uuid() {
+        let headers = vec![(
+            "x-request-id".to_string(),
+            "550e8400-e29b-41d4-a716-446655440000".to_string(),
+        )];
+        assert_eq!(
+            super::extract_request_id(&headers),
+            Some("550e8400-e29b-41d4-a716-446655440000".to_string())
+        );
+    }
+
+    // ── Characterization: ServerConfig defaults ──────────────────────
+
+    #[test]
+    fn server_config_new_has_expected_defaults() {
+        let root = temp_dir("cfg-defaults");
+        let config = ServerConfig::new(root.clone(), None);
+        assert_eq!(config.storage_root, root);
+        assert!(config.bearer_token.is_none());
+        assert!(config.signed_url_secret.is_none());
+        assert!(config.signing_keys.is_empty());
+        assert!(config.presets.is_empty());
+        assert_eq!(
+            config.max_concurrent_transforms,
+            DEFAULT_MAX_CONCURRENT_TRANSFORMS
+        );
+        assert_eq!(
+            config.public_max_age_seconds,
+            DEFAULT_PUBLIC_MAX_AGE_SECONDS
+        );
+        assert_eq!(
+            config.public_stale_while_revalidate_seconds,
+            DEFAULT_PUBLIC_STALE_WHILE_REVALIDATE_SECONDS
+        );
+        assert!(!config.allow_insecure_url_sources);
+    }
+
+    #[test]
+    fn server_config_builder_with_signed_url_credentials_overwrites() {
+        let root = temp_dir("cfg-builder");
+        let config = ServerConfig::new(root, None)
+            .with_signed_url_credentials("key1", "secret1")
+            .with_signed_url_credentials("key2", "secret2");
+        assert!(config.signing_keys.contains_key("key1"));
+        assert!(config.signing_keys.contains_key("key2"));
+    }
+
+    // ── Characterization: route_request classification ───────────────
+
+    #[test]
+    fn route_request_returns_not_found_for_unknown_path() {
+        let root = temp_dir("route-unknown");
+        let config = ServerConfig::new(root, None);
+        let request = HttpRequest {
+            method: "GET".to_string(),
+            target: "/nonexistent".to_string(),
+            version: "HTTP/1.1".to_string(),
+            headers: vec![("host".to_string(), "localhost".to_string())],
+            body: Vec::new(),
+        };
+        let response = route_request(request, &config);
+        assert_eq!(response.status, "404 Not Found");
+    }
+
+    #[test]
+    fn route_request_health_returns_200() {
+        let root = temp_dir("route-health");
+        let config = ServerConfig::new(root, None);
+        let request = HttpRequest {
+            method: "GET".to_string(),
+            target: "/health".to_string(),
+            version: "HTTP/1.1".to_string(),
+            headers: vec![("host".to_string(), "localhost".to_string())],
+            body: Vec::new(),
+        };
+        let response = route_request(request, &config);
+        assert_eq!(response.status, "200 OK");
+    }
+
+    // ── Characterization: TransformSlot thread safety ────────────────
+
+    #[test]
+    fn transform_slot_concurrent_acquire_respects_limit() {
+        use std::sync::Arc;
+        use std::sync::Barrier;
+        use std::sync::atomic::AtomicU64;
+
+        let counter = Arc::new(AtomicU64::new(0));
+        let limit = 4u64;
+        let num_threads = 16;
+        let barrier = Arc::new(Barrier::new(num_threads));
+        let acquired = Arc::new(AtomicU64::new(0));
+
+        let handles: Vec<_> = (0..num_threads)
+            .map(|_| {
+                let counter = Arc::clone(&counter);
+                let barrier = Arc::clone(&barrier);
+                let acquired = Arc::clone(&acquired);
+                thread::spawn(move || {
+                    barrier.wait();
+                    if let Some(_slot) = super::TransformSlot::try_acquire(&counter, limit) {
+                        acquired.fetch_add(1, Ordering::Relaxed);
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                })
+            })
+            .collect();
+
+        for h in handles {
+            h.join().unwrap();
+        }
+        assert_eq!(counter.load(Ordering::Relaxed), 0);
     }
 }
