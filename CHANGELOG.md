@@ -2,6 +2,32 @@
 
 ## Unreleased
 
+### Added
+
+- Watermark overlay support for signed public URLs (`watermarkUrl`, `watermarkPosition`, `watermarkOpacity`, `watermarkMargin` query params).
+- `sign_public_url` and CLI `sign` command now accept watermark parameters.
+- `truss_watermark_transforms_total` Prometheus counter.
+- `watermark` field in structured access log entries.
+- `MAX_WATERMARK_PIXELS` limit (4 MP) checked before watermark decode.
+- Request deadline (60 s) caps total outbound fetch time per request.
+- Origin cache namespace separation (`src:` / `wm:`) prevents cross-contamination.
+- WASM UI: watermark file type validation, 10 MB size limit, loading/clear feedback.
+- Integration tests for orphaned watermark params, empty URL, SVG + watermark rejection, and redirect following.
+
+### Changed
+
+- Watermark fetch is deferred until concurrency slot is acquired (two-phase validation + fetch).
+- SVG sources with watermark requests are rejected early with 400.
+- Watermark fetch errors are sanitized; detailed errors logged server-side only.
+- Cache key normalization uses parsed `Position` for consistent hashing.
+- WASM UI: blur values below 0.1 treated as no blur; "Blur sigma" label simplified to "Blur".
+- WASM UI: `.is-busy` scoped to interactive elements instead of entire page.
+- WASM UI: download filename includes `-watermarked` suffix when applicable.
+
+### Fixed
+
+- Accessibility: `role="alert"` on error box, `:focus-within` on dropzones, `name` attributes on watermark inputs, `<noscript>` fallback.
+
 ## v0.5.0
 
 ### Added

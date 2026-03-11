@@ -21,9 +21,11 @@ info:
     Common transform options are shared across endpoints. When `format` is omitted,
     the server first tries `Accept` negotiation and otherwise keeps the input format.
 
-    **Note:** Watermark compositing is currently available in CLI mode only
-    (`truss convert --watermark`). Server-side watermark support is planned
-    (see [#33](https://github.com/nao1215/truss/issues/33)).
+    **Watermark compositing** is available on all transform endpoints. Public GET
+    endpoints accept `watermarkUrl`, `watermarkPosition`, `watermarkOpacity`, and
+    `watermarkMargin` query parameters. The JSON endpoint accepts a `watermark`
+    object. The multipart endpoint accepts `watermark`, `watermark_position`,
+    `watermark_opacity`, and `watermark_margin` form fields.
   license:
     name: MIT
     url: https://opensource.org/licenses/MIT
@@ -86,6 +88,10 @@ paths:
         - $ref: '#/components/parameters/StripMetadata'
         - $ref: '#/components/parameters/PreserveExif'
         - $ref: '#/components/parameters/Blur'
+        - $ref: '#/components/parameters/WatermarkUrl'
+        - $ref: '#/components/parameters/WatermarkPosition'
+        - $ref: '#/components/parameters/WatermarkOpacity'
+        - $ref: '#/components/parameters/WatermarkMargin'
       responses:
         '200':
           $ref: '#/components/responses/ImageBinary'
@@ -113,6 +119,8 @@ paths:
           $ref: '#/components/responses/BadGateway'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
+        '508':
+          $ref: '#/components/responses/LoopDetected'
 
   /images/by-url:
     get:
@@ -157,6 +165,10 @@ paths:
         - $ref: '#/components/parameters/StripMetadata'
         - $ref: '#/components/parameters/PreserveExif'
         - $ref: '#/components/parameters/Blur'
+        - $ref: '#/components/parameters/WatermarkUrl'
+        - $ref: '#/components/parameters/WatermarkPosition'
+        - $ref: '#/components/parameters/WatermarkOpacity'
+        - $ref: '#/components/parameters/WatermarkMargin'
       responses:
         '200':
           $ref: '#/components/responses/ImageBinary'
@@ -688,6 +700,56 @@ components:
         minimum: 0.1
         maximum: 100.0
       example: 3.0
+    WatermarkUrl:
+      name: watermarkUrl
+      in: query
+      required: false
+      description: |
+        HTTP(S) URL of a watermark image to composite onto the output.
+        Must be a raster format (PNG, JPEG, WebP, BMP); SVG is not supported.
+        Subject to SSRF protection and a 10 MB size limit.
+        For multipart uploads the watermark file field also has a 10 MB cap.
+      schema:
+        type: string
+        format: uri
+      example: https://example.com/logo.png
+    WatermarkPosition:
+      name: watermarkPosition
+      in: query
+      required: false
+      description: |
+        Where to place the watermark on the output image.
+        Requires `watermarkUrl` to be set; ignored otherwise.
+      schema:
+        type: string
+        enum: [center, top, right, bottom, left, top-left, top-right, bottom-left, bottom-right]
+        default: bottom-right
+      example: bottom-right
+    WatermarkOpacity:
+      name: watermarkOpacity
+      in: query
+      required: false
+      description: |
+        Watermark opacity (1–100).
+        Requires `watermarkUrl` to be set; ignored otherwise.
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 50
+      example: 50
+    WatermarkMargin:
+      name: watermarkMargin
+      in: query
+      required: false
+      description: |
+        Margin in pixels from the nearest edge.
+        Requires `watermarkUrl` to be set; ignored otherwise.
+      schema:
+        type: integer
+        minimum: 0
+        default: 10
+      example: 10
 
   schemas:
     PathImageSource:
@@ -844,6 +906,40 @@ components:
         quality: 82
         autoOrient: true
         stripMetadata: true
+    WatermarkPayload:
+      type: object
+      description: |
+        Watermark overlay configuration for the JSON transform endpoint.
+        The `url` field is required and must point to a raster image (PNG, JPEG, WebP, BMP).
+        SVG watermarks are not supported.
+      additionalProperties: false
+      required: [url]
+      properties:
+        url:
+          type: string
+          format: uri
+          description: HTTP(S) URL of the watermark image. Subject to SSRF protection.
+        position:
+          type: string
+          enum: [center, top, right, bottom, left, top-left, top-right, bottom-left, bottom-right]
+          default: bottom-right
+          description: Where to place the watermark on the output image.
+        opacity:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 50
+          description: Watermark opacity (1–100).
+        margin:
+          type: integer
+          minimum: 0
+          default: 10
+          description: Margin in pixels from the nearest edge.
+      example:
+        url: https://example.com/logo.png
+        position: bottom-right
+        opacity: 50
+        margin: 10
     TransformImageRequest:
       type: object
       description: JSON request body for transforming a path- or URL-based source.
@@ -854,6 +950,8 @@ components:
           $ref: '#/components/schemas/ImageSource'
         options:
           $ref: '#/components/schemas/ImageTransformOptions'
+        watermark:
+          $ref: '#/components/schemas/WatermarkPayload'
       example:
         source:
           kind: path
@@ -864,7 +962,9 @@ components:
           quality: 82
     UploadImageTransformRequest:
       type: object
-      description: Multipart request body containing the source file and optional transform options.
+      description: |
+        Multipart request body containing the source file, optional transform options,
+        and optional watermark overlay fields.
       additionalProperties: false
       required: [file]
       properties:
@@ -874,6 +974,26 @@ components:
           description: The image or SVG file to transform.
         options:
           $ref: '#/components/schemas/ImageTransformOptions'
+        watermark:
+          type: string
+          format: binary
+          description: Watermark image file (PNG, JPEG, WebP, or BMP). SVG is not supported.
+        watermark_position:
+          type: string
+          enum: [center, top, right, bottom, left, top-left, top-right, bottom-left, bottom-right]
+          default: bottom-right
+          description: Where to place the watermark on the output image.
+        watermark_opacity:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 50
+          description: Watermark opacity (1–100).
+        watermark_margin:
+          type: integer
+          minimum: 0
+          default: 10
+          description: Margin in pixels from the nearest edge.
     LivenessResponse:
       type: object
       description: Minimal liveness payload confirming the process is running.

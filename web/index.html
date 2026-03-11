@@ -189,11 +189,101 @@
               </select>
             </label>
 
+            <label class="blur-field" id="blur-field">
+              <span>Blur</span>
+              <div class="quality-pair">
+                <input
+                  id="blur-range"
+                  name="blurRange"
+                  type="range"
+                  min="0"
+                  max="100"
+                  step="0.1"
+                  value="0"
+                />
+                <input
+                  id="blur-number"
+                  name="blur"
+                  type="number"
+                  min="0"
+                  max="100"
+                  step="0.1"
+                  value="0"
+                  inputmode="decimal"
+                />
+              </div>
+            </label>
+
             <label class="checkbox">
               <input id="auto-orient" name="autoOrient" type="checkbox" checked />
               <span>Apply EXIF auto-orient</span>
             </label>
           </form>
+
+          <details class="watermark-details" id="watermark-details">
+            <summary class="watermark-summary">Watermark overlay</summary>
+            <div class="watermark-controls">
+              <label class="dropzone watermark-dropzone" for="watermark-file" id="watermark-dropzone">
+                <input id="watermark-file" type="file" accept="image/png,image/jpeg,image/webp,image/bmp" />
+                <span class="dropzone-title">Choose a watermark image</span>
+                <span class="dropzone-copy">PNG, JPEG, WebP, or BMP. SVG is not supported.</span>
+              </label>
+              <div class="watermark-preview-row" id="watermark-preview-row" hidden>
+                <img id="watermark-preview" alt="Watermark preview" class="watermark-preview-img" />
+                <button id="watermark-clear" type="button" class="watermark-clear-button" aria-label="Remove watermark">Remove watermark</button>
+              </div>
+              <div class="form-grid">
+                <label>
+                  <span>Placement</span>
+                  <select id="watermark-position" name="watermarkPosition">
+                    <option value="bottom-right" selected>Bottom right</option>
+                    <option value="bottom-left">Bottom left</option>
+                    <option value="top-right">Top right</option>
+                    <option value="top-left">Top left</option>
+                    <option value="center">Center</option>
+                    <option value="top">Top</option>
+                    <option value="bottom">Bottom</option>
+                    <option value="left">Left</option>
+                    <option value="right">Right</option>
+                  </select>
+                </label>
+                <label>
+                  <span>Opacity (1–100)</span>
+                  <div class="quality-pair">
+                    <input
+                      id="watermark-opacity-range"
+                      name="watermarkOpacityRange"
+                      type="range"
+                      min="1"
+                      max="100"
+                      value="50"
+                    />
+                    <input
+                      id="watermark-opacity-number"
+                      name="watermarkOpacity"
+                      type="number"
+                      min="1"
+                      max="100"
+                      value="50"
+                      inputmode="numeric"
+                    />
+                  </div>
+                </label>
+                <label>
+                  <span>Margin (px)</span>
+                  <input
+                    id="watermark-margin"
+                    name="watermarkMargin"
+                    type="number"
+                    min="0"
+                    max="9999"
+                    value="10"
+                    inputmode="numeric"
+                  />
+                </label>
+              </div>
+            </div>
+          </details>
 
           <div class="action-row">
             <button id="transform-button" class="action-button" type="button">
@@ -250,12 +340,13 @@
           <div class="status-stack" aria-live="polite">
             <p id="status-line" class="status-line">WASM runtime is loading.</p>
             <ul id="warning-list" class="warning-list" hidden></ul>
-            <div id="error-box" class="error-box" hidden></div>
+            <div id="error-box" class="error-box" role="alert" hidden></div>
           </div>
         </section>
       </main>
     </div>
 
+    <noscript><p style="text-align:center;padding:2rem;color:#746b61">JavaScript is required to run the truss browser workshop.</p></noscript>
     <script type="module" src="./app.js"></script>
   </body>
 </html>

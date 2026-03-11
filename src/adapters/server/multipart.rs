@@ -3,7 +3,7 @@ use super::http_parse::{
     parse_headers,
 };
 use super::response::{HttpResponse, bad_request_response, unsupported_media_type_response};
-use crate::TransformOptions;
+use crate::{TransformOptions, WatermarkInput};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct MultipartPart {
@@ -16,10 +16,14 @@ pub(super) struct MultipartPart {
 pub(super) fn parse_upload_request(
     body: &[u8],
     boundary: &str,
-) -> Result<(Vec<u8>, TransformOptions), HttpResponse> {
+) -> Result<(Vec<u8>, TransformOptions, Option<WatermarkInput>), HttpResponse> {
     let parts = parse_multipart_form_data(body, boundary)?;
     let mut file_range = None;
     let mut options = None;
+    let mut watermark_range = None;
+    let mut watermark_position = None;
+    let mut watermark_opacity = None;
+    let mut watermark_margin = None;
 
     for part in parts {
         match part.name.as_str() {
@@ -63,6 +67,61 @@ pub(super) fn parse_upload_request(
                 };
                 options = Some(payload.into_options()?);
             }
+            "watermark" => {
+                if watermark_range.is_some() {
+                    return Err(bad_request_response(
+                        "multipart upload must not include multiple `watermark` fields",
+                    ));
+                }
+                if part.body_range.is_empty() {
+                    return Err(bad_request_response(
+                        "multipart upload `watermark` field must not be empty",
+                    ));
+                }
+                let watermark_size = part.body_range.len() as u64;
+                if watermark_size > super::remote::MAX_WATERMARK_BYTES {
+                    return Err(bad_request_response(
+                        "multipart upload `watermark` field exceeds the 10 MB size limit",
+                    ));
+                }
+                watermark_range = Some(part.body_range);
+            }
+            "watermark_position" => {
+                if watermark_position.is_some() {
+                    return Err(bad_request_response(
+                        "multipart upload must not include multiple `watermark_position` fields",
+                    ));
+                }
+                let text = std::str::from_utf8(&body[part.body_range])
+                    .map_err(|_| bad_request_response("watermark_position must be valid UTF-8"))?;
+                watermark_position = Some(text.trim().to_string());
+            }
+            "watermark_opacity" => {
+                if watermark_opacity.is_some() {
+                    return Err(bad_request_response(
+                        "multipart upload must not include multiple `watermark_opacity` fields",
+                    ));
+                }
+                let text = std::str::from_utf8(&body[part.body_range])
+                    .map_err(|_| bad_request_response("watermark_opacity must be valid UTF-8"))?;
+                watermark_opacity =
+                    Some(text.trim().parse::<u8>().map_err(|_| {
+                        bad_request_response("watermark_opacity must be an integer")
+                    })?);
+            }
+            "watermark_margin" => {
+                if watermark_margin.is_some() {
+                    return Err(bad_request_response(
+                        "multipart upload must not include multiple `watermark_margin` fields",
+                    ));
+                }
+                let text = std::str::from_utf8(&body[part.body_range])
+                    .map_err(|_| bad_request_response("watermark_margin must be valid UTF-8"))?;
+                watermark_margin =
+                    Some(text.trim().parse::<u32>().map_err(|_| {
+                        bad_request_response("watermark_margin must be an integer")
+                    })?);
+            }
             field_name => {
                 return Err(bad_request_response(&format!(
                     "multipart upload contains an unsupported field `{field_name}`"
@@ -74,7 +133,28 @@ pub(super) fn parse_upload_request(
     let file_range = file_range
         .ok_or_else(|| bad_request_response("multipart upload requires a `file` field"))?;
 
-    Ok((body[file_range].to_vec(), options.unwrap_or_default()))
+    let has_orphaned_watermark_params =
+        watermark_position.is_some() || watermark_opacity.is_some() || watermark_margin.is_some();
+    let watermark = if let Some(wm_range) = watermark_range {
+        Some(super::resolve_multipart_watermark(
+            body[wm_range].to_vec(),
+            watermark_position,
+            watermark_opacity,
+            watermark_margin,
+        )?)
+    } else if has_orphaned_watermark_params {
+        return Err(super::bad_request_response(
+            "watermark_position, watermark_opacity, and watermark_margin require a `watermark` file field",
+        ));
+    } else {
+        None
+    };
+
+    Ok((
+        body[file_range].to_vec(),
+        options.unwrap_or_default(),
+        watermark,
+    ))
 }
 
 pub(super) fn parse_multipart_boundary(request: &HttpRequest) -> Result<String, HttpResponse> {

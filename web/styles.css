@@ -186,7 +186,8 @@ a {
 }
 
 .dropzone:hover,
-.dropzone.dragover {
+.dropzone.dragover,
+.dropzone:focus-within {
   border-color: var(--accent);
   background: linear-gradient(135deg, rgba(106, 112, 87, 0.12), transparent 58%), var(--paper-strong);
   transform: translateY(-1px);
@@ -397,8 +398,73 @@ a {
   background: rgba(127, 79, 66, 0.08);
 }
 
-.is-busy {
-  opacity: 0.75;
+.blur-field {
+  grid-column: 1 / -1;
+}
+
+.watermark-details {
+  margin-top: 0.25rem;
+}
+
+.watermark-summary {
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 0.95rem;
+  padding: 0.6rem 0;
+  color: var(--ink);
+}
+
+.watermark-controls {
+  display: grid;
+  gap: 0.9rem;
+  padding-top: 0.65rem;
+}
+
+.watermark-dropzone {
+  padding: 0.9rem;
+}
+
+.watermark-preview-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+}
+
+.watermark-preview-img {
+  max-height: 64px;
+  max-width: 120px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  object-fit: contain;
+}
+
+.watermark-clear-button {
+  padding: 0.4rem 0.8rem;
+  border-radius: 8px;
+  border: 1px solid rgba(87, 79, 71, 0.16);
+  background: rgba(255, 255, 255, 0.58);
+  color: var(--danger);
+  cursor: pointer;
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.watermark-clear-button:hover {
+  border-color: var(--danger);
+}
+
+.watermark-clear-button:focus-visible {
+  outline: 2px solid rgba(106, 112, 87, 0.28);
+  outline-offset: 2px;
+}
+
+.is-busy button,
+.is-busy input,
+.is-busy select,
+.is-busy .dropzone,
+.is-busy .download-link {
+  opacity: 0.55;
   pointer-events: none;
 }
 

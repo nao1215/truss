@@ -738,6 +738,18 @@ fn apply_watermark(
         }
     }
 
+    if let (Some(w), Some(h)) = (
+        watermark.image.metadata.width,
+        watermark.image.metadata.height,
+    ) {
+        let pixels = u64::from(w) * u64::from(h);
+        if pixels > crate::MAX_WATERMARK_PIXELS {
+            return Err(TransformError::LimitExceeded(format!(
+                "watermark image has {pixels} pixels, limit is {}",
+                crate::MAX_WATERMARK_PIXELS
+            )));
+        }
+    }
     check_input_pixel_limit(&watermark.image)?;
     let wm_image = decode_input(&watermark.image)?;
     let mut wm_rgba = wm_image.to_rgba8();

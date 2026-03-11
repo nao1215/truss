@@ -5,8 +5,8 @@
 //! reusing the shared transformation pipeline.
 
 use crate::{
-    Artifact, MediaType, RawArtifact, Rgba8, Rotation, TransformError, TransformOptions,
-    TransformRequest, TransformResult, sniff_artifact, transform_raster,
+    Artifact, MediaType, Position, RawArtifact, Rgba8, Rotation, TransformError, TransformOptions,
+    TransformRequest, TransformResult, WatermarkInput, sniff_artifact, transform_raster,
 };
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
@@ -159,20 +159,7 @@ pub fn transform_browser_artifact(
 ) -> Result<WasmTransformResponse, TransformError> {
     let artifact = sniff_browser_artifact(input_bytes, declared_media_type)?;
     let options = parse_wasm_options(options)?;
-    let output = dispatch_browser_transform(artifact, options)?;
-    let TransformResult { artifact, warnings } = output;
-    let artifact_info = artifact_info(&artifact);
-    let suggested_extension = output_extension(artifact.media_type).to_string();
-
-    Ok(WasmTransformResponse {
-        bytes: artifact.bytes,
-        artifact: artifact_info,
-        warnings: warnings
-            .into_iter()
-            .map(|warning| warning.to_string())
-            .collect(),
-        suggested_extension,
-    })
+    build_transform_response(artifact, options, None)
 }
 
 fn sniff_browser_artifact(
@@ -254,15 +241,21 @@ fn parse_rotation(value: Option<u16>) -> Result<Rotation, TransformError> {
     }
 }
 
-fn dispatch_browser_transform(
+fn dispatch_browser_transform_with_watermark(
     artifact: Artifact,
     options: TransformOptions,
+    watermark: Option<WatermarkInput>,
 ) -> Result<TransformResult, TransformError> {
     if artifact.media_type != MediaType::Svg && options.format == Some(MediaType::Svg) {
         return Err(TransformError::UnsupportedOutputMediaType(MediaType::Svg));
     }
 
     if artifact.media_type == MediaType::Svg {
+        if watermark.is_some() {
+            return Err(TransformError::InvalidOptions(
+                "watermark is not supported for SVG inputs".to_string(),
+            ));
+        }
         #[cfg(feature = "svg")]
         {
             return transform_svg(TransformRequest::new(artifact, options));
@@ -276,7 +269,9 @@ fn dispatch_browser_transform(
         }
     }
 
-    transform_raster(TransformRequest::new(artifact, options))
+    let mut request = TransformRequest::new(artifact, options);
+    request.watermark = watermark;
+    transform_raster(request)
 }
 
 fn artifact_info(artifact: &Artifact) -> WasmArtifactInfo {
@@ -331,6 +326,88 @@ fn transform_error_to_js(error: TransformError) -> JsValue {
     serialize_json(&payload)
         .map(JsValue::from)
         .unwrap_or_else(|_| JsValue::from_str(&format!("{}: {}", payload.kind, payload.message)))
+}
+
+/// Browser-facing watermark options accepted by the WASM adapter.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WasmWatermarkOptions {
+    /// Watermark placement position (e.g. `bottom-right`, `center`).
+    pub position: Option<String>,
+    /// Watermark opacity (1–100). Default: 50.
+    pub opacity: Option<u8>,
+    /// Margin in pixels from the nearest edge. Default: 10.
+    pub margin: Option<u32>,
+}
+
+fn resolve_wasm_watermark(
+    watermark_bytes: Vec<u8>,
+    watermark_options: WasmWatermarkOptions,
+) -> Result<WatermarkInput, TransformError> {
+    let artifact = sniff_artifact(RawArtifact::new(watermark_bytes, None))?;
+    if !artifact.media_type.is_raster() {
+        return Err(TransformError::InvalidOptions(
+            "watermark image must be a raster format, not SVG".to_string(),
+        ));
+    }
+    let position = watermark_options
+        .position
+        .map(|v| {
+            Position::from_str(&v).map_err(|reason| {
+                TransformError::InvalidOptions(format!("watermark position is invalid: {reason}"))
+            })
+        })
+        .transpose()?
+        .unwrap_or(Position::BottomRight);
+    let opacity = watermark_options.opacity.unwrap_or(50);
+    if opacity == 0 || opacity > 100 {
+        return Err(TransformError::InvalidOptions(
+            "watermark opacity must be between 1 and 100".to_string(),
+        ));
+    }
+    let margin = watermark_options.margin.unwrap_or(10);
+
+    Ok(WatermarkInput {
+        image: artifact,
+        position,
+        opacity,
+        margin,
+    })
+}
+
+/// Transforms browser-provided bytes with an optional watermark overlay.
+pub fn transform_browser_artifact_with_watermark(
+    input_bytes: Vec<u8>,
+    declared_media_type: Option<&str>,
+    options: WasmTransformOptions,
+    watermark_bytes: Vec<u8>,
+    watermark_options: WasmWatermarkOptions,
+) -> Result<WasmTransformResponse, TransformError> {
+    let artifact = sniff_browser_artifact(input_bytes, declared_media_type)?;
+    let options = parse_wasm_options(options)?;
+    let watermark = resolve_wasm_watermark(watermark_bytes, watermark_options)?;
+    build_transform_response(artifact, options, Some(watermark))
+}
+
+fn build_transform_response(
+    artifact: Artifact,
+    options: TransformOptions,
+    watermark: Option<WatermarkInput>,
+) -> Result<WasmTransformResponse, TransformError> {
+    let output = dispatch_browser_transform_with_watermark(artifact, options, watermark)?;
+    let TransformResult { artifact, warnings } = output;
+    let artifact_info = artifact_info(&artifact);
+    let suggested_extension = output_extension(artifact.media_type).to_string();
+
+    Ok(WasmTransformResponse {
+        bytes: artifact.bytes,
+        artifact: artifact_info,
+        warnings: warnings
+            .into_iter()
+            .map(|warning| warning.to_string())
+            .collect(),
+        suggested_extension,
+    })
 }
 
 /// Browser-facing transform output returned by [`transform_image`].
@@ -404,6 +481,46 @@ pub fn transform_image(
         input_bytes.to_vec(),
         declared_media_type.as_deref(),
         options,
+    )
+    .map_err(transform_error_to_js)?;
+    let response_json = serialize_json(&response)?;
+
+    Ok(WasmTransformOutput {
+        bytes: response.bytes,
+        response_json,
+    })
+}
+
+/// Transforms image bytes with a watermark overlay supplied by JavaScript.
+///
+/// `watermark_bytes` must contain valid raster image bytes (not SVG).
+/// `watermark_options_json` must match the JSON shape of [`WasmWatermarkOptions`].
+#[cfg(feature = "wasm")]
+#[wasm_bindgen(js_name = transformImageWithWatermark)]
+pub fn transform_image_with_watermark(
+    input_bytes: &[u8],
+    declared_media_type: Option<String>,
+    options_json: &str,
+    watermark_bytes: &[u8],
+    watermark_options_json: &str,
+) -> Result<WasmTransformOutput, JsValue> {
+    let options = serde_json::from_str::<WasmTransformOptions>(options_json).map_err(|error| {
+        transform_error_to_js(TransformError::InvalidOptions(format!(
+            "failed to parse transform options: {error}"
+        )))
+    })?;
+    let watermark_options = serde_json::from_str::<WasmWatermarkOptions>(watermark_options_json)
+        .map_err(|error| {
+            transform_error_to_js(TransformError::InvalidOptions(format!(
+                "failed to parse watermark options: {error}"
+            )))
+        })?;
+    let response = transform_browser_artifact_with_watermark(
+        input_bytes.to_vec(),
+        declared_media_type.as_deref(),
+        options,
+        watermark_bytes.to_vec(),
+        watermark_options,
     )
     .map_err(transform_error_to_js)?;
     let response_json = serialize_json(&response)?;
@@ -503,5 +620,91 @@ mod tests {
             error,
             TransformError::UnsupportedOutputMediaType(MediaType::Svg)
         );
+    }
+
+    #[test]
+    fn test_resolve_wasm_watermark_rejects_svg() {
+        // Minimal valid SVG
+        let svg_bytes = b"<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>".to_vec();
+        let error = resolve_wasm_watermark(svg_bytes, WasmWatermarkOptions::default())
+            .expect_err("SVG watermark should be rejected");
+
+        assert_eq!(
+            error,
+            TransformError::InvalidOptions(
+                "watermark image must be a raster format, not SVG".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn test_resolve_wasm_watermark_rejects_opacity_zero() {
+        let error = resolve_wasm_watermark(
+            png_bytes(2, 2),
+            WasmWatermarkOptions {
+                opacity: Some(0),
+                ..WasmWatermarkOptions::default()
+            },
+        )
+        .expect_err("opacity 0 should be rejected");
+
+        assert_eq!(
+            error,
+            TransformError::InvalidOptions(
+                "watermark opacity must be between 1 and 100".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn test_resolve_wasm_watermark_rejects_opacity_over_100() {
+        let error = resolve_wasm_watermark(
+            png_bytes(2, 2),
+            WasmWatermarkOptions {
+                opacity: Some(101),
+                ..WasmWatermarkOptions::default()
+            },
+        )
+        .expect_err("opacity 101 should be rejected");
+
+        assert_eq!(
+            error,
+            TransformError::InvalidOptions(
+                "watermark opacity must be between 1 and 100".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn test_resolve_wasm_watermark_defaults() {
+        let wm = resolve_wasm_watermark(png_bytes(2, 2), WasmWatermarkOptions::default())
+            .expect("valid watermark with defaults");
+
+        assert_eq!(wm.position, Position::BottomRight);
+        assert_eq!(wm.opacity, 50);
+        assert_eq!(wm.margin, 10);
+    }
+
+    #[test]
+    fn test_transform_with_watermark_basic() {
+        let response = transform_browser_artifact_with_watermark(
+            png_bytes(16, 16),
+            None,
+            WasmTransformOptions::default(),
+            png_bytes(4, 4),
+            WasmWatermarkOptions {
+                position: Some("center".to_string()),
+                opacity: Some(80),
+                margin: Some(0),
+            },
+        )
+        .expect("transform with watermark should succeed");
+
+        assert_eq!(response.artifact.media_type, "png");
+        assert_eq!(response.artifact.width, Some(16));
+        assert_eq!(response.artifact.height, Some(16));
+        assert!(!response.bytes.is_empty());
+        // Verify the output is a valid PNG (magic bytes)
+        assert!(response.bytes.starts_with(&[0x89, b'P', b'N', b'G']));
     }
 }

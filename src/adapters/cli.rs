@@ -282,6 +282,10 @@ OPTIONAL:
       --width, --height, --fit, --position, --format, --quality,
       --background, --rotate, --auto-orient, --no-auto-orient,
       --strip-metadata, --keep-metadata, --preserve-exif, --blur
+      --watermark-url <URL>          Watermark image URL to embed in the signed URL
+      --watermark-position <POS>     Watermark placement (default: bottom-right)
+      --watermark-opacity <1-100>    Watermark opacity (default: 50)
+      --watermark-margin <PX>        Watermark margin from edge in pixels (default: 10)
 
 EXAMPLES:
   truss sign --base-url https://cdn.example.com \\
@@ -532,6 +536,18 @@ struct ClapSignArgs {
     /// Apply Gaussian blur (sigma: 0.1-100.0)
     #[arg(long, value_parser = parse_blur)]
     blur: Option<f32>,
+    /// Watermark image URL to composite onto the output
+    #[arg(long, value_parser = parse_url_value)]
+    watermark_url: Option<String>,
+    /// Watermark placement (default: bottom-right)
+    #[arg(long, value_parser = parse_position)]
+    watermark_position: Option<Position>,
+    /// Watermark opacity 1-100 (default: 50)
+    #[arg(long, value_parser = parse_watermark_opacity)]
+    watermark_opacity: Option<u8>,
+    /// Watermark margin from edge in pixels (default: 10)
+    #[arg(long)]
+    watermark_margin: Option<u32>,
     /// Show help for sign
     #[arg(short = 'h', long = "help")]
     help: bool,
@@ -715,6 +731,10 @@ struct SignCommand {
     secret: String,
     expires: u64,
     options: TransformOptions,
+    watermark_url: Option<String>,
+    watermark_position: Option<Position>,
+    watermark_opacity: Option<u8>,
+    watermark_margin: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1177,6 +1197,10 @@ fn sign_from_clap(args: ClapSignArgs) -> Result<Command, CliError> {
         secret,
         expires,
         options,
+        watermark_url: args.watermark_url,
+        watermark_position: args.watermark_position,
+        watermark_opacity: args.watermark_opacity,
+        watermark_margin: args.watermark_margin,
     }))
 }
 
@@ -1508,6 +1532,27 @@ fn execute_sign<W>(command: SignCommand, stdout: &mut W) -> Result<(), CliError>
 where
     W: Write,
 {
+    if command.watermark_url.is_none()
+        && (command.watermark_position.is_some()
+            || command.watermark_opacity.is_some()
+            || command.watermark_margin.is_some())
+    {
+        return Err(runtime_error(
+            EXIT_USAGE,
+            "--watermark-position, --watermark-opacity, and --watermark-margin require --watermark-url",
+        ));
+    }
+
+    let watermark_params =
+        command
+            .watermark_url
+            .as_ref()
+            .map(|url| server::SignedWatermarkParams {
+                url: url.clone(),
+                position: command.watermark_position.map(|p| p.as_name().to_string()),
+                opacity: command.watermark_opacity,
+                margin: command.watermark_margin,
+            });
     let url = sign_public_url(
         &command.base_url,
         command.source,
@@ -1515,6 +1560,7 @@ where
         &command.key_id,
         &command.secret,
         command.expires,
+        watermark_params.as_ref(),
     )
     .map_err(|reason| runtime_error(EXIT_TRANSFORM, &reason))?;
 
@@ -2564,7 +2610,11 @@ mod tests {
                 options: TransformOptions {
                     format: Some(MediaType::Jpeg),
                     ..TransformOptions::default()
-                }
+                },
+                watermark_url: None,
+                watermark_position: None,
+                watermark_opacity: None,
+                watermark_margin: None,
             })
         );
     }
@@ -2605,7 +2655,11 @@ mod tests {
                 options: TransformOptions {
                     width: Some(120),
                     ..TransformOptions::default()
-                }
+                },
+                watermark_url: None,
+                watermark_position: None,
+                watermark_opacity: None,
+                watermark_margin: None,
             })
         );
     }

@@ -8,14 +8,16 @@ use super::response::{
     HttpResponse, bad_gateway_response, bad_request_response, forbidden_response,
     payload_too_large_response, too_many_redirects_response,
 };
+use super::stderr_write;
 use std::io::Read;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::atomic::Ordering;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use ureq::http;
 use url::Url;
 
 pub(super) const MAX_SOURCE_BYTES: u64 = 100 * 1024 * 1024;
+pub(super) const MAX_WATERMARK_BYTES: u64 = 10 * 1024 * 1024;
 pub(super) const MAX_REMOTE_REDIRECTS: usize = 5;
 #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
 pub(super) const STORAGE_DOWNLOAD_TIMEOUT_SECS: u64 = 30;
@@ -23,6 +25,7 @@ pub(super) const STORAGE_DOWNLOAD_TIMEOUT_SECS: u64 = 30;
 pub(super) fn resolve_source_bytes(
     source: TransformSourcePayload,
     config: &ServerConfig,
+    deadline: Option<Instant>,
 ) -> Result<Vec<u8>, HttpResponse> {
     match source {
         TransformSourcePayload::Path { path, .. } => {
@@ -34,7 +37,7 @@ pub(super) fn resolve_source_bytes(
 
             std::fs::read(&path).map_err(map_source_io_error)
         }
-        TransformSourcePayload::Url { url, .. } => read_remote_source_bytes(&url, config),
+        TransformSourcePayload::Url { url, .. } => read_remote_source_bytes(&url, config, deadline),
         #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
         TransformSourcePayload::Storage { bucket, key, .. } => {
             resolve_storage_source_bytes(bucket.as_deref(), &key, config)
@@ -100,6 +103,7 @@ fn resolve_storage_source_bytes(
 pub(super) fn read_remote_source_bytes(
     url: &str,
     config: &ServerConfig,
+    deadline: Option<Instant>,
 ) -> Result<Vec<u8>, HttpResponse> {
     // Validate the URL against current security policy (scheme, port, IP range)
     // *before* checking the origin cache. This ensures that cached responses from
@@ -113,7 +117,7 @@ pub(super) fn read_remote_source_bytes(
         .map(|root| OriginCache::new(root).with_log_handler(config.log_handler.clone()));
 
     if let Some(ref cache) = origin_cache
-        && let Some(bytes) = cache.get(url)
+        && let Some(bytes) = cache.get("src", url)
     {
         ORIGIN_CACHE_HITS_TOTAL.fetch_add(1, Ordering::Relaxed);
         return Ok(bytes);
@@ -127,7 +131,7 @@ pub(super) fn read_remote_source_bytes(
 
     for redirect_index in 0..=MAX_REMOTE_REDIRECTS {
         let target = prepare_remote_fetch_target(&current_url, config)?;
-        let agent = build_remote_agent(&target);
+        let agent = build_remote_agent(&target, deadline);
 
         match agent.get(target.url.as_str()).call() {
             Ok(response) => {
@@ -135,9 +139,10 @@ pub(super) fn read_remote_source_bytes(
                 if is_redirect_status(status) {
                     current_url = next_redirect_url(&target.url, &response, redirect_index)?;
                 } else if (200..=299).contains(&status) {
-                    let bytes = read_remote_response_body(target.url.as_str(), response)?;
+                    let bytes =
+                        read_remote_response_body(target.url.as_str(), response, MAX_SOURCE_BYTES)?;
                     if let Some(cache) = origin_cache {
-                        cache.put(url, &bytes);
+                        cache.put("src", url, &bytes);
                     }
                     return Ok(bytes);
                 } else {
@@ -156,6 +161,74 @@ pub(super) fn read_remote_source_bytes(
 
     Err(too_many_redirects_response(
         "remote URL exceeded the redirect limit",
+    ))
+}
+
+pub(super) fn read_remote_watermark_bytes(
+    url: &str,
+    config: &ServerConfig,
+    deadline: Option<Instant>,
+) -> Result<Vec<u8>, HttpResponse> {
+    let _ = prepare_remote_fetch_target(url, config)?;
+
+    let origin_cache = config
+        .cache_root
+        .as_ref()
+        .map(|root| OriginCache::new(root).with_log_handler(config.log_handler.clone()));
+
+    if let Some(ref cache) = origin_cache
+        && let Some(bytes) = cache.get("wm", url)
+    {
+        ORIGIN_CACHE_HITS_TOTAL.fetch_add(1, Ordering::Relaxed);
+        if bytes.len() as u64 > MAX_WATERMARK_BYTES {
+            return Err(payload_too_large_response(
+                "cached watermark image exceeds 10 MB",
+            ));
+        }
+        return Ok(bytes);
+    }
+
+    if origin_cache.is_some() {
+        ORIGIN_CACHE_MISSES_TOTAL.fetch_add(1, Ordering::Relaxed);
+    }
+
+    let mut current_url = url.to_string();
+
+    for redirect_index in 0..=MAX_REMOTE_REDIRECTS {
+        let target = prepare_remote_fetch_target(&current_url, config)?;
+        let agent = build_remote_agent(&target, deadline);
+
+        match agent.get(target.url.as_str()).call() {
+            Ok(response) => {
+                let status = response.status().as_u16();
+                if is_redirect_status(status) {
+                    current_url = next_redirect_url(&target.url, &response, redirect_index)?;
+                } else if (200..=299).contains(&status) {
+                    let bytes = read_remote_response_body(
+                        target.url.as_str(),
+                        response,
+                        MAX_WATERMARK_BYTES,
+                    )?;
+                    if let Some(cache) = origin_cache {
+                        cache.put("wm", url, &bytes);
+                    }
+                    return Ok(bytes);
+                } else {
+                    stderr_write(&format!(
+                        "truss: watermark fetch failed: upstream HTTP {status} for {url}"
+                    ));
+                    return Err(bad_gateway_response("failed to fetch watermark image"));
+                }
+            }
+            Err(error) => {
+                stderr_write(&format!("truss: watermark fetch error: {error}"));
+                return Err(bad_gateway_response("failed to fetch watermark image"));
+            }
+        }
+    }
+
+    Err(too_many_redirects_response(
+        "watermark URL exceeded the redirect limit",
     ))
 }
 
@@ -229,12 +302,26 @@ pub(super) fn prepare_remote_fetch_target(
     })
 }
 
-pub(super) fn build_remote_agent(target: &RemoteFetchTarget) -> ureq::Agent {
+pub(super) fn build_remote_agent(
+    target: &RemoteFetchTarget,
+    deadline: Option<Instant>,
+) -> ureq::Agent {
+    let remaining = deadline.map(|d| d.saturating_duration_since(Instant::now()));
+    let body_timeout = match remaining {
+        Some(r) if r.is_zero() => Duration::from_millis(1),
+        Some(r) => r.min(Duration::from_secs(30)),
+        None => Duration::from_secs(30),
+    };
+    let connect_timeout = match remaining {
+        Some(r) if r.is_zero() => Duration::from_millis(1),
+        Some(r) => r.min(Duration::from_secs(10)),
+        None => Duration::from_secs(10),
+    };
     let config = ureq::config::Config::builder()
         .max_redirects(0)
         .http_status_as_error(false)
-        .timeout_connect(Some(Duration::from_secs(10)))
-        .timeout_recv_body(Some(Duration::from_secs(30)))
+        .timeout_connect(Some(connect_timeout))
+        .timeout_recv_body(Some(body_timeout))
         .proxy(None)
         .max_idle_connections(0)
         .max_idle_connections_per_host(0)
@@ -348,6 +435,7 @@ pub(super) fn validate_remote_url(
 pub(super) fn read_remote_response_body(
     url: &str,
     response: http::Response<ureq::Body>,
+    max_bytes: u64,
 ) -> Result<Vec<u8>, HttpResponse> {
     validate_remote_content_encoding(&response)?;
 
@@ -356,25 +444,22 @@ pub(super) fn read_remote_response_body(
         .get("Content-Length")
         .and_then(|v: &http::HeaderValue| v.to_str().ok())
         .and_then(|value: &str| value.parse::<u64>().ok())
-        .is_some_and(|len| len > MAX_SOURCE_BYTES)
+        .is_some_and(|len| len > max_bytes)
     {
         return Err(payload_too_large_response(&format!(
-            "remote response exceeds {MAX_SOURCE_BYTES} bytes"
+            "remote response exceeds {max_bytes} bytes"
         )));
     }
 
-    let mut reader = response
-        .into_body()
-        .into_reader()
-        .take(MAX_SOURCE_BYTES + 1);
+    let mut reader = response.into_body().into_reader().take(max_bytes + 1);
     let mut bytes = Vec::new();
     reader.read_to_end(&mut bytes).map_err(|error| {
         bad_gateway_response(&format!("failed to read remote URL `{url}`: {error}"))
     })?;
 
-    if bytes.len() as u64 > MAX_SOURCE_BYTES {
+    if bytes.len() as u64 > max_bytes {
         return Err(payload_too_large_response(&format!(
-            "remote response exceeds {MAX_SOURCE_BYTES} bytes"
+            "remote response exceeds {max_bytes} bytes"
         )));
     }
 

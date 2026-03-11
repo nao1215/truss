@@ -25,6 +25,16 @@ pub const MAX_OUTPUT_PIXELS: u64 = 67_108_864;
 /// ```
 pub const MAX_DECODED_PIXELS: u64 = 100_000_000;
 
+/// Maximum number of decoded pixels allowed for a watermark image.
+///
+/// This prevents a single watermark overlay from dominating memory during
+/// compositing. The value (4 MP) is generous for typical watermarks.
+///
+/// ```
+/// assert_eq!(truss::MAX_WATERMARK_PIXELS, 4_000_000);
+/// ```
+pub const MAX_WATERMARK_PIXELS: u64 = 4_000_000;
+
 /// Raw input bytes before media-type detection has completed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RawArtifact {

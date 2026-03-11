@@ -2,6 +2,7 @@ import init, {
   getCapabilitiesJson,
   inspectImageJson,
   transformImage,
+  transformImageWithWatermark,
 } from "./pkg/truss.js";
 
 const elements = {
@@ -27,6 +28,17 @@ const elements = {
   lockAspect: document.querySelector("#lock-aspect"),
   background: document.querySelector("#background"),
   metadataMode: document.querySelector("#metadata-mode"),
+  blurRange: document.querySelector("#blur-range"),
+  blurNumber: document.querySelector("#blur-number"),
+  watermarkFile: document.querySelector("#watermark-file"),
+  watermarkDropzone: document.querySelector("#watermark-dropzone"),
+  watermarkPreviewRow: document.querySelector("#watermark-preview-row"),
+  watermarkPreview: document.querySelector("#watermark-preview"),
+  watermarkClear: document.querySelector("#watermark-clear"),
+  watermarkPosition: document.querySelector("#watermark-position"),
+  watermarkOpacityRange: document.querySelector("#watermark-opacity-range"),
+  watermarkOpacityNumber: document.querySelector("#watermark-opacity-number"),
+  watermarkMargin: document.querySelector("#watermark-margin"),
   autoOrient: document.querySelector("#auto-orient"),
   transformButton: document.querySelector("#transform-button"),
   downloadLink: document.querySelector("#download-link"),
@@ -44,6 +56,8 @@ const state = {
   inputArtifact: null,
   inputObjectUrl: null,
   outputObjectUrl: null,
+  watermarkBytes: null,
+  watermarkObjectUrl: null,
   aspectRatio: null,
   updatingAspect: false,
 };
@@ -134,6 +148,54 @@ function wireEvents() {
     elements.qualityRange.value = bounded;
   });
 
+  elements.blurRange.addEventListener("input", () => {
+    elements.blurNumber.value = elements.blurRange.value;
+  });
+  elements.blurNumber.addEventListener("input", () => {
+    const v = parseFloat(elements.blurNumber.value);
+    if (Number.isFinite(v)) {
+      const clamped = Math.min(100, Math.max(0, v));
+      elements.blurNumber.value = clamped;
+      elements.blurRange.value = clamped;
+    }
+  });
+
+  elements.watermarkFile.addEventListener("change", async (event) => {
+    const [file] = event.target.files ?? [];
+    if (file) await loadWatermark(file);
+  });
+
+  ["dragenter", "dragover"].forEach((type) => {
+    elements.watermarkDropzone.addEventListener(type, (event) => {
+      event.preventDefault();
+      elements.watermarkDropzone.classList.add("dragover");
+    });
+  });
+
+  ["dragleave", "drop"].forEach((type) => {
+    elements.watermarkDropzone.addEventListener(type, (event) => {
+      event.preventDefault();
+      elements.watermarkDropzone.classList.remove("dragover");
+    });
+  });
+
+  elements.watermarkDropzone.addEventListener("drop", async (event) => {
+    const [file] = event.dataTransfer?.files ?? [];
+    if (file) await loadWatermark(file);
+  });
+  elements.watermarkClear.addEventListener("click", clearWatermark);
+  elements.watermarkOpacityRange.addEventListener("input", () => {
+    elements.watermarkOpacityNumber.value = elements.watermarkOpacityRange.value;
+  });
+  elements.watermarkOpacityNumber.addEventListener("input", () => {
+    const v = parseInt(elements.watermarkOpacityNumber.value, 10);
+    if (Number.isFinite(v)) {
+      const clamped = Math.min(100, Math.max(1, v));
+      elements.watermarkOpacityNumber.value = clamped;
+      elements.watermarkOpacityRange.value = clamped;
+    }
+  });
+
   [elements.inputPreview, elements.outputPreview].forEach((img) => {
     img.addEventListener("error", () => {
       if (!img.getAttribute("src")) return;
@@ -212,11 +274,24 @@ async function runTransform() {
   await nextFrame();
 
   try {
-    const result = transformImage(
-      state.inputBytes,
-      state.declaredMediaType ?? undefined,
-      JSON.stringify(options),
-    );
+    const hasWatermark = state.watermarkBytes !== null;
+    const result = hasWatermark
+      ? transformImageWithWatermark(
+          state.inputBytes,
+          state.declaredMediaType ?? undefined,
+          JSON.stringify(options),
+          state.watermarkBytes,
+          JSON.stringify({
+            position: elements.watermarkPosition.value,
+            opacity: Number(elements.watermarkOpacityNumber.value),
+            margin: Number(elements.watermarkMargin.value),
+          }),
+        )
+      : transformImage(
+          state.inputBytes,
+          state.declaredMediaType ?? undefined,
+          JSON.stringify(options),
+        );
     const response = JSON.parse(result.responseJson);
     const outputBytes = result.bytes;
     const outputBlob = new Blob([outputBytes], { type: response.artifact.mimeType });
@@ -227,11 +302,12 @@ async function runTransform() {
     showPreview(elements.outputPreview, elements.outputPlaceholder, state.outputObjectUrl);
     renderArtifactMeta(elements.outputMeta, response.artifact);
     renderWarnings(response.warnings);
-    updateDownloadLink(response, state.outputObjectUrl);
+    updateDownloadLink(response, state.outputObjectUrl, hasWatermark);
+    const suffix = hasWatermark ? " (with watermark)" : "";
     setStatus(
       response.warnings.length
-        ? "Transform finished with warnings."
-        : "Transform finished.",
+        ? `Transform finished with warnings${suffix}.`
+        : `Transform finished${suffix}.`,
     );
   } catch (error) {
     const payload = parseWasmError(error);
@@ -261,6 +337,7 @@ function collectOptions() {
     autoOrient: elements.autoOrient.checked,
     keepMetadata: metadataMode === "keep",
     preserveExif: metadataMode === "exif",
+    blur: (() => { const v = Math.max(0, parseFloat(elements.blurNumber.value) || 0); return v >= 0.1 ? v : null; })(),
   };
 }
 
@@ -371,15 +448,50 @@ function renderWarnings(warnings) {
   elements.warningList.hidden = false;
 }
 
-function updateDownloadLink(response, href) {
+function updateDownloadLink(response, href, hasWatermark) {
   const extension = response.suggestedExtension;
   const stem = state.inputFile?.name?.replace(/\.[^.]+$/, "") || "truss-output";
-  const filename = `${stem}-truss.${extension}`;
+  const suffix = hasWatermark ? "-watermarked" : "";
+  const filename = `${stem}-truss${suffix}.${extension}`;
 
   elements.downloadLink.href = href;
   elements.downloadLink.download = filename;
   elements.downloadLink.classList.remove("disabled");
   elements.downloadNote.textContent = filename;
+}
+
+const WATERMARK_ACCEPTED_TYPES = new Set([
+  "image/png", "image/jpeg", "image/webp", "image/bmp", "image/x-ms-bmp", "image/x-windows-bmp",
+]);
+const WATERMARK_MAX_BYTES = 10 * 1024 * 1024;
+
+async function loadWatermark(file) {
+  if (file.type && !WATERMARK_ACCEPTED_TYPES.has(file.type)) {
+    showError("Watermark must be PNG, JPEG, WebP, or BMP. SVG is not supported.");
+    return;
+  }
+  if (file.size > WATERMARK_MAX_BYTES) {
+    showError(`Watermark file is too large (${(file.size / 1024 / 1024).toFixed(1)} MB). Maximum is 10 MB.`);
+    return;
+  }
+  setStatus("Loading watermark\u2026");
+  state.watermarkBytes = new Uint8Array(await file.arrayBuffer());
+  releaseUrl("watermarkObjectUrl");
+  state.watermarkObjectUrl = URL.createObjectURL(file);
+  elements.watermarkPreview.src = state.watermarkObjectUrl;
+  elements.watermarkPreviewRow.hidden = false;
+  elements.errorBox.hidden = true;
+  elements.errorBox.textContent = "";
+  setStatus(`Watermark "${file.name}" loaded.`);
+}
+
+function clearWatermark() {
+  state.watermarkBytes = null;
+  releaseUrl("watermarkObjectUrl");
+  elements.watermarkPreviewRow.hidden = true;
+  elements.watermarkPreview.removeAttribute("src");
+  elements.watermarkFile.value = "";
+  setStatus("Watermark removed.");
 }
 
 function resetOutput() {
