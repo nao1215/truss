@@ -480,6 +480,8 @@ async function loadWatermark(file) {
   state.watermarkObjectUrl = URL.createObjectURL(file);
   elements.watermarkPreview.src = state.watermarkObjectUrl;
   elements.watermarkPreviewRow.hidden = false;
+  elements.errorBox.hidden = true;
+  elements.errorBox.textContent = "";
   setStatus(`Watermark "${file.name}" loaded.`);
 }
 

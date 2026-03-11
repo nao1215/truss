@@ -282,6 +282,10 @@ OPTIONAL:
       --width, --height, --fit, --position, --format, --quality,
       --background, --rotate, --auto-orient, --no-auto-orient,
       --strip-metadata, --keep-metadata, --preserve-exif, --blur
+      --watermark-url <URL>          Watermark image URL to embed in the signed URL
+      --watermark-position <POS>     Watermark placement (default: bottom-right)
+      --watermark-opacity <1-100>    Watermark opacity (default: 50)
+      --watermark-margin <PX>        Watermark margin from edge in pixels (default: 10)
 
 EXAMPLES:
   truss sign --base-url https://cdn.example.com \\
@@ -1528,6 +1532,17 @@ fn execute_sign<W>(command: SignCommand, stdout: &mut W) -> Result<(), CliError>
 where
     W: Write,
 {
+    if command.watermark_url.is_none()
+        && (command.watermark_position.is_some()
+            || command.watermark_opacity.is_some()
+            || command.watermark_margin.is_some())
+    {
+        return Err(runtime_error(
+            EXIT_USAGE,
+            "--watermark-position, --watermark-opacity, and --watermark-margin require --watermark-url",
+        ));
+    }
+
     let watermark_params =
         command
             .watermark_url

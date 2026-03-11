@@ -454,6 +454,11 @@ a {
   border-color: var(--danger);
 }
 
+.watermark-clear-button:focus-visible {
+  outline: 2px solid rgba(106, 112, 87, 0.28);
+  outline-offset: 2px;
+}
+
 .is-busy button,
 .is-busy input,
 .is-busy select,

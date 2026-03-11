@@ -87,11 +87,21 @@ pub(super) fn parse_upload_request(
                 watermark_range = Some(part.body_range);
             }
             "watermark_position" => {
+                if watermark_position.is_some() {
+                    return Err(bad_request_response(
+                        "multipart upload must not include multiple `watermark_position` fields",
+                    ));
+                }
                 let text = std::str::from_utf8(&body[part.body_range])
                     .map_err(|_| bad_request_response("watermark_position must be valid UTF-8"))?;
                 watermark_position = Some(text.trim().to_string());
             }
             "watermark_opacity" => {
+                if watermark_opacity.is_some() {
+                    return Err(bad_request_response(
+                        "multipart upload must not include multiple `watermark_opacity` fields",
+                    ));
+                }
                 let text = std::str::from_utf8(&body[part.body_range])
                     .map_err(|_| bad_request_response("watermark_opacity must be valid UTF-8"))?;
                 watermark_opacity =
@@ -100,6 +110,11 @@ pub(super) fn parse_upload_request(
                     })?);
             }
             "watermark_margin" => {
+                if watermark_margin.is_some() {
+                    return Err(bad_request_response(
+                        "multipart upload must not include multiple `watermark_margin` fields",
+                    ));
+                }
                 let text = std::str::from_utf8(&body[part.body_range])
                     .map_err(|_| bad_request_response("watermark_margin must be valid UTF-8"))?;
                 watermark_margin =

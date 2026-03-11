@@ -251,13 +251,18 @@ fn dispatch_browser_transform_with_watermark(
     }
 
     if artifact.media_type == MediaType::Svg {
+        if watermark.is_some() {
+            return Err(TransformError::InvalidOptions(
+                "watermark is not supported for SVG inputs".to_string(),
+            ));
+        }
         #[cfg(feature = "svg")]
         {
             return transform_svg(TransformRequest::new(artifact, options));
         }
         #[cfg(not(feature = "svg"))]
         {
-            let _ = (options, watermark);
+            let _ = options;
             return Err(TransformError::CapabilityMissing(
                 "SVG processing is not enabled in this build".to_string(),
             ));

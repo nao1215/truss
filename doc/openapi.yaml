@@ -119,6 +119,8 @@ paths:
           $ref: '#/components/responses/BadGateway'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
+        '508':
+          $ref: '#/components/responses/LoopDetected'
 
   /images/by-url:
     get:
@@ -706,6 +708,7 @@ components:
         HTTP(S) URL of a watermark image to composite onto the output.
         Must be a raster format (PNG, JPEG, WebP, BMP); SVG is not supported.
         Subject to SSRF protection and a 10 MB size limit.
+        For multipart uploads the watermark file field also has a 10 MB cap.
       schema:
         type: string
         format: uri
@@ -714,7 +717,9 @@ components:
       name: watermarkPosition
       in: query
       required: false
-      description: Where to place the watermark on the output image.
+      description: |
+        Where to place the watermark on the output image.
+        Requires `watermarkUrl` to be set; ignored otherwise.
       schema:
         type: string
         enum: [center, top, right, bottom, left, top-left, top-right, bottom-left, bottom-right]
@@ -724,7 +729,9 @@ components:
       name: watermarkOpacity
       in: query
       required: false
-      description: Watermark opacity (1–100).
+      description: |
+        Watermark opacity (1–100).
+        Requires `watermarkUrl` to be set; ignored otherwise.
       schema:
         type: integer
         minimum: 1
@@ -735,7 +742,9 @@ components:
       name: watermarkMargin
       in: query
       required: false
-      description: Margin in pixels from the nearest edge.
+      description: |
+        Margin in pixels from the nearest edge.
+        Requires `watermarkUrl` to be set; ignored otherwise.
       schema:
         type: integer
         minimum: 0
