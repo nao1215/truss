@@ -190,7 +190,7 @@
             </label>
 
             <label class="blur-field" id="blur-field">
-              <span>Blur sigma</span>
+              <span>Blur</span>
               <div class="quality-pair">
                 <input
                   id="blur-range"
@@ -252,6 +252,7 @@
                   <div class="quality-pair">
                     <input
                       id="watermark-opacity-range"
+                      name="watermarkOpacityRange"
                       type="range"
                       min="1"
                       max="100"
@@ -259,6 +260,7 @@
                     />
                     <input
                       id="watermark-opacity-number"
+                      name="watermarkOpacity"
                       type="number"
                       min="1"
                       max="100"
@@ -271,6 +273,7 @@
                   <span>Margin (px)</span>
                   <input
                     id="watermark-margin"
+                    name="watermarkMargin"
                     type="number"
                     min="0"
                     max="9999"
@@ -337,12 +340,13 @@
           <div class="status-stack" aria-live="polite">
             <p id="status-line" class="status-line">WASM runtime is loading.</p>
             <ul id="warning-list" class="warning-list" hidden></ul>
-            <div id="error-box" class="error-box" hidden></div>
+            <div id="error-box" class="error-box" role="alert" hidden></div>
           </div>
         </section>
       </main>
     </div>
 
+    <noscript><p style="text-align:center;padding:2rem;color:#746b61">JavaScript is required to run the truss browser workshop.</p></noscript>
     <script type="module" src="./app.js"></script>
   </body>
 </html>

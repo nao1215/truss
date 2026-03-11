@@ -225,18 +225,18 @@ impl OriginCache {
         }
     }
 
-    /// Returns the sharded file path for the given URL.
-    fn entry_path(&self, url: &str) -> PathBuf {
-        let key = hex::encode(Sha256::digest(url.as_bytes()));
+    /// Returns the sharded file path for the given URL and namespace.
+    fn entry_path(&self, namespace: &str, url: &str) -> PathBuf {
+        let key = hex::encode(Sha256::digest(format!("{namespace}:{url}").as_bytes()));
         let a = &key[0..2];
         let b = &key[2..4];
         let c = &key[4..6];
         self.root.join(a).join(b).join(c).join(&key)
     }
 
-    /// Looks up cached source bytes for a remote URL.
-    pub(super) fn get(&self, url: &str) -> Option<Vec<u8>> {
-        let path = self.entry_path(url);
+    /// Looks up cached source bytes for a remote URL within the given namespace.
+    pub(super) fn get(&self, namespace: &str, url: &str) -> Option<Vec<u8>> {
+        let path = self.entry_path(namespace, url);
         let file = fs::File::open(&path).ok()?;
 
         let age = file
@@ -254,9 +254,9 @@ impl OriginCache {
         Some(data)
     }
 
-    /// Writes fetched source bytes to the origin cache.
-    pub(super) fn put(&self, url: &str, body: &[u8]) {
-        let path = self.entry_path(url);
+    /// Writes fetched source bytes to the origin cache within the given namespace.
+    pub(super) fn put(&self, namespace: &str, url: &str, body: &[u8]) {
+        let path = self.entry_path(namespace, url);
         if let Some(parent) = path.parent()
             && let Err(err) = fs::create_dir_all(parent)
         {

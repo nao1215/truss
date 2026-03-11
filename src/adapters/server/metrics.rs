@@ -37,6 +37,7 @@ pub(super) static CACHE_HITS_TOTAL: AtomicU64 = AtomicU64::new(0);
 pub(super) static CACHE_MISSES_TOTAL: AtomicU64 = AtomicU64::new(0);
 pub(super) static ORIGIN_CACHE_HITS_TOTAL: AtomicU64 = AtomicU64::new(0);
 pub(super) static ORIGIN_CACHE_MISSES_TOTAL: AtomicU64 = AtomicU64::new(0);
+pub(super) static WATERMARK_TRANSFORMS_TOTAL: AtomicU64 = AtomicU64::new(0);
 
 pub(super) const DEFAULT_MAX_CONCURRENT_TRANSFORMS: u64 = 64;
 
@@ -297,6 +298,10 @@ pub(super) fn record_storage_duration(backend_index: usize, start: Instant) {
     STORAGE_DURATION[backend_index].observe(start.elapsed());
 }
 
+pub(super) fn record_watermark_transform() {
+    WATERMARK_TRANSFORMS_TOTAL.fetch_add(1, Ordering::Relaxed);
+}
+
 // ── Render ────────────────────────────────────────────────────────────
 
 pub(super) fn render_metrics_text(max_concurrent: u64, transforms_in_flight: &AtomicU64) -> String {
@@ -377,6 +382,16 @@ pub(super) fn render_metrics_text(max_concurrent: u64, transforms_in_flight: &At
         body,
         "truss_origin_cache_misses_total {}",
         ORIGIN_CACHE_MISSES_TOTAL.load(Ordering::Relaxed)
+    );
+
+    body.push_str(
+        "# HELP truss_watermark_transforms_total Total transforms that included a watermark.\n",
+    );
+    body.push_str("# TYPE truss_watermark_transforms_total counter\n");
+    let _ = writeln!(
+        body,
+        "truss_watermark_transforms_total {}",
+        WATERMARK_TRANSFORMS_TOTAL.load(Ordering::Relaxed)
     );
 
     body.push_str(

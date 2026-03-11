@@ -302,7 +302,7 @@ async function runTransform() {
     showPreview(elements.outputPreview, elements.outputPlaceholder, state.outputObjectUrl);
     renderArtifactMeta(elements.outputMeta, response.artifact);
     renderWarnings(response.warnings);
-    updateDownloadLink(response, state.outputObjectUrl);
+    updateDownloadLink(response, state.outputObjectUrl, hasWatermark);
     const suffix = hasWatermark ? " (with watermark)" : "";
     setStatus(
       response.warnings.length
@@ -337,7 +337,7 @@ function collectOptions() {
     autoOrient: elements.autoOrient.checked,
     keepMetadata: metadataMode === "keep",
     preserveExif: metadataMode === "exif",
-    blur: (() => { const v = Math.max(0, parseFloat(elements.blurNumber.value) || 0); return v > 0 ? v : null; })(),
+    blur: (() => { const v = Math.max(0, parseFloat(elements.blurNumber.value) || 0); return v >= 0.1 ? v : null; })(),
   };
 }
 
@@ -448,10 +448,11 @@ function renderWarnings(warnings) {
   elements.warningList.hidden = false;
 }
 
-function updateDownloadLink(response, href) {
+function updateDownloadLink(response, href, hasWatermark) {
   const extension = response.suggestedExtension;
   const stem = state.inputFile?.name?.replace(/\.[^.]+$/, "") || "truss-output";
-  const filename = `${stem}-truss.${extension}`;
+  const suffix = hasWatermark ? "-watermarked" : "";
+  const filename = `${stem}-truss${suffix}.${extension}`;
 
   elements.downloadLink.href = href;
   elements.downloadLink.download = filename;
@@ -459,12 +460,27 @@ function updateDownloadLink(response, href) {
   elements.downloadNote.textContent = filename;
 }
 
+const WATERMARK_ACCEPTED_TYPES = new Set([
+  "image/png", "image/jpeg", "image/webp", "image/bmp", "image/x-ms-bmp", "image/x-windows-bmp",
+]);
+const WATERMARK_MAX_BYTES = 10 * 1024 * 1024;
+
 async function loadWatermark(file) {
+  if (file.type && !WATERMARK_ACCEPTED_TYPES.has(file.type)) {
+    showError("Watermark must be PNG, JPEG, WebP, or BMP. SVG is not supported.");
+    return;
+  }
+  if (file.size > WATERMARK_MAX_BYTES) {
+    showError(`Watermark file is too large (${(file.size / 1024 / 1024).toFixed(1)} MB). Maximum is 10 MB.`);
+    return;
+  }
+  setStatus("Loading watermark\u2026");
   state.watermarkBytes = new Uint8Array(await file.arrayBuffer());
   releaseUrl("watermarkObjectUrl");
   state.watermarkObjectUrl = URL.createObjectURL(file);
   elements.watermarkPreview.src = state.watermarkObjectUrl;
   elements.watermarkPreviewRow.hidden = false;
+  setStatus(`Watermark "${file.name}" loaded.`);
 }
 
 function clearWatermark() {
@@ -473,6 +489,7 @@ function clearWatermark() {
   elements.watermarkPreviewRow.hidden = true;
   elements.watermarkPreview.removeAttribute("src");
   elements.watermarkFile.value = "";
+  setStatus("Watermark removed.");
 }
 
 function resetOutput() {

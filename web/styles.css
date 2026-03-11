@@ -186,7 +186,8 @@ a {
 }
 
 .dropzone:hover,
-.dropzone.dragover {
+.dropzone.dragover,
+.dropzone:focus-within {
   border-color: var(--accent);
   background: linear-gradient(135deg, rgba(106, 112, 87, 0.12), transparent 58%), var(--paper-strong);
   transform: translateY(-1px);
@@ -453,8 +454,12 @@ a {
   border-color: var(--danger);
 }
 
-.is-busy {
-  opacity: 0.75;
+.is-busy button,
+.is-busy input,
+.is-busy select,
+.is-busy .dropzone,
+.is-busy .download-link {
+  opacity: 0.55;
   pointer-events: none;
 }
 

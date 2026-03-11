@@ -8,10 +8,11 @@ use super::response::{
     HttpResponse, bad_gateway_response, bad_request_response, forbidden_response,
     payload_too_large_response, too_many_redirects_response,
 };
+use super::stderr_write;
 use std::io::Read;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::atomic::Ordering;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use ureq::http;
 use url::Url;
 
@@ -24,6 +25,7 @@ pub(super) const STORAGE_DOWNLOAD_TIMEOUT_SECS: u64 = 30;
 pub(super) fn resolve_source_bytes(
     source: TransformSourcePayload,
     config: &ServerConfig,
+    deadline: Option<Instant>,
 ) -> Result<Vec<u8>, HttpResponse> {
     match source {
         TransformSourcePayload::Path { path, .. } => {
@@ -35,7 +37,7 @@ pub(super) fn resolve_source_bytes(
 
             std::fs::read(&path).map_err(map_source_io_error)
         }
-        TransformSourcePayload::Url { url, .. } => read_remote_source_bytes(&url, config),
+        TransformSourcePayload::Url { url, .. } => read_remote_source_bytes(&url, config, deadline),
         #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
         TransformSourcePayload::Storage { bucket, key, .. } => {
             resolve_storage_source_bytes(bucket.as_deref(), &key, config)
@@ -101,6 +103,7 @@ fn resolve_storage_source_bytes(
 pub(super) fn read_remote_source_bytes(
     url: &str,
     config: &ServerConfig,
+    deadline: Option<Instant>,
 ) -> Result<Vec<u8>, HttpResponse> {
     // Validate the URL against current security policy (scheme, port, IP range)
     // *before* checking the origin cache. This ensures that cached responses from
@@ -114,7 +117,7 @@ pub(super) fn read_remote_source_bytes(
         .map(|root| OriginCache::new(root).with_log_handler(config.log_handler.clone()));
 
     if let Some(ref cache) = origin_cache
-        && let Some(bytes) = cache.get(url)
+        && let Some(bytes) = cache.get("src", url)
     {
         ORIGIN_CACHE_HITS_TOTAL.fetch_add(1, Ordering::Relaxed);
         return Ok(bytes);
@@ -128,7 +131,7 @@ pub(super) fn read_remote_source_bytes(
 
     for redirect_index in 0..=MAX_REMOTE_REDIRECTS {
         let target = prepare_remote_fetch_target(&current_url, config)?;
-        let agent = build_remote_agent(&target);
+        let agent = build_remote_agent(&target, deadline);
 
         match agent.get(target.url.as_str()).call() {
             Ok(response) => {
@@ -139,7 +142,7 @@ pub(super) fn read_remote_source_bytes(
                     let bytes =
                         read_remote_response_body(target.url.as_str(), response, MAX_SOURCE_BYTES)?;
                     if let Some(cache) = origin_cache {
-                        cache.put(url, &bytes);
+                        cache.put("src", url, &bytes);
                     }
                     return Ok(bytes);
                 } else {
@@ -164,6 +167,7 @@ pub(super) fn read_remote_source_bytes(
 pub(super) fn read_remote_watermark_bytes(
     url: &str,
     config: &ServerConfig,
+    deadline: Option<Instant>,
 ) -> Result<Vec<u8>, HttpResponse> {
     let _ = prepare_remote_fetch_target(url, config)?;
 
@@ -173,7 +177,7 @@ pub(super) fn read_remote_watermark_bytes(
         .map(|root| OriginCache::new(root).with_log_handler(config.log_handler.clone()));
 
     if let Some(ref cache) = origin_cache
-        && let Some(bytes) = cache.get(url)
+        && let Some(bytes) = cache.get("wm", url)
     {
         ORIGIN_CACHE_HITS_TOTAL.fetch_add(1, Ordering::Relaxed);
         if bytes.len() as u64 > MAX_WATERMARK_BYTES {
@@ -192,7 +196,7 @@ pub(super) fn read_remote_watermark_bytes(
 
     for redirect_index in 0..=MAX_REMOTE_REDIRECTS {
         let target = prepare_remote_fetch_target(&current_url, config)?;
-        let agent = build_remote_agent(&target);
+        let agent = build_remote_agent(&target, deadline);
 
         match agent.get(target.url.as_str()).call() {
             Ok(response) => {
@@ -206,19 +210,19 @@ pub(super) fn read_remote_watermark_bytes(
                         MAX_WATERMARK_BYTES,
                     )?;
                     if let Some(cache) = origin_cache {
-                        cache.put(url, &bytes);
+                        cache.put("wm", url, &bytes);
                     }
                     return Ok(bytes);
                 } else {
-                    return Err(bad_gateway_response(&format!(
-                        "failed to fetch watermark URL: upstream HTTP {status}"
-                    )));
+                    stderr_write(&format!(
+                        "truss: watermark fetch failed: upstream HTTP {status} for {url}"
+                    ));
+                    return Err(bad_gateway_response("failed to fetch watermark image"));
                 }
             }
             Err(error) => {
-                return Err(bad_gateway_response(&format!(
-                    "failed to fetch watermark URL: {error}"
-                )));
+                stderr_write(&format!("truss: watermark fetch error: {error}"));
+                return Err(bad_gateway_response("failed to fetch watermark image"));
             }
         }
     }
@@ -298,12 +302,26 @@ pub(super) fn prepare_remote_fetch_target(
     })
 }
 
-pub(super) fn build_remote_agent(target: &RemoteFetchTarget) -> ureq::Agent {
+pub(super) fn build_remote_agent(
+    target: &RemoteFetchTarget,
+    deadline: Option<Instant>,
+) -> ureq::Agent {
+    let remaining = deadline.map(|d| d.saturating_duration_since(Instant::now()));
+    let body_timeout = match remaining {
+        Some(r) if r.is_zero() => Duration::from_millis(1),
+        Some(r) => r.min(Duration::from_secs(30)),
+        None => Duration::from_secs(30),
+    };
+    let connect_timeout = match remaining {
+        Some(r) if r.is_zero() => Duration::from_millis(1),
+        Some(r) => r.min(Duration::from_secs(10)),
+        None => Duration::from_secs(10),
+    };
     let config = ureq::config::Config::builder()
         .max_redirects(0)
         .http_status_as_error(false)
-        .timeout_connect(Some(Duration::from_secs(10)))
-        .timeout_recv_body(Some(Duration::from_secs(30)))
+        .timeout_connect(Some(connect_timeout))
+        .timeout_recv_body(Some(body_timeout))
         .proxy(None)
         .max_idle_connections(0)
         .max_idle_connections_per_host(0)

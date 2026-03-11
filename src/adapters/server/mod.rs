@@ -31,8 +31,8 @@ use http_parse::{
 use metrics::{
     CACHE_HITS_TOTAL, CACHE_MISSES_TOTAL, DEFAULT_MAX_CONCURRENT_TRANSFORMS, RouteMetric,
     record_http_metrics, record_http_request_duration, record_storage_duration,
-    record_transform_duration, record_transform_error, render_metrics_text, status_code,
-    storage_backend_index_from_config, uptime_seconds,
+    record_transform_duration, record_transform_error, record_watermark_transform,
+    render_metrics_text, status_code, storage_backend_index_from_config, uptime_seconds,
 };
 use multipart::{parse_multipart_boundary, parse_upload_request};
 use negotiate::{
@@ -1025,6 +1025,7 @@ pub enum SignedUrlSource {
 ///     "public-dev",
 ///     "secret-value",
 ///     4_102_444_800,
+///     None,
 /// )
 /// .unwrap();
 ///
@@ -1032,6 +1033,15 @@ pub enum SignedUrlSource {
 /// assert!(url.contains("keyId=public-dev"));
 /// assert!(url.contains("signature="));
 /// ```
+/// Optional watermark parameters for signed URL generation.
+#[derive(Debug, Default)]
+pub struct SignedWatermarkParams {
+    pub url: String,
+    pub position: Option<String>,
+    pub opacity: Option<u8>,
+    pub margin: Option<u32>,
+}
+
 pub fn sign_public_url(
     base_url: &str,
     source: SignedUrlSource,
@@ -1039,6 +1049,7 @@ pub fn sign_public_url(
     key_id: &str,
     secret: &str,
     expires: u64,
+    watermark: Option<&SignedWatermarkParams>,
 ) -> Result<String, String> {
     let base_url = Url::parse(base_url).map_err(|error| format!("base URL is invalid: {error}"))?;
     match base_url.scheme() {
@@ -1056,6 +1067,18 @@ pub fn sign_public_url(
     let authority = url_authority(&endpoint)?;
     let mut query = signed_source_query(source);
     extend_transform_query(&mut query, options);
+    if let Some(wm) = watermark {
+        query.insert("watermarkUrl".to_string(), wm.url.clone());
+        if let Some(ref pos) = wm.position {
+            query.insert("watermarkPosition".to_string(), pos.clone());
+        }
+        if let Some(opacity) = wm.opacity {
+            query.insert("watermarkOpacity".to_string(), opacity.to_string());
+        }
+        if let Some(margin) = wm.margin {
+            query.insert("watermarkMargin".to_string(), margin.to_string());
+        }
+    }
     query.insert("keyId".to_string(), key_id.to_string());
     query.insert("expires".to_string(), expires.to_string());
 
@@ -1460,6 +1483,9 @@ impl TransformOptionsPayload {
     }
 }
 
+/// Overall request deadline for outbound fetches (source + watermark combined).
+const REQUEST_DEADLINE_SECS: u64 = 60;
+
 const WATERMARK_DEFAULT_POSITION: Position = Position::BottomRight;
 const WATERMARK_DEFAULT_OPACITY: u8 = 50;
 const WATERMARK_DEFAULT_MARGIN: u32 = 10;
@@ -1473,25 +1499,35 @@ struct WatermarkPayload {
     margin: Option<u32>,
 }
 
-fn resolve_watermark_payload(
+/// Validated watermark parameters ready for fetching. No network I/O performed.
+struct ValidatedWatermarkPayload {
+    url: String,
+    position: Position,
+    opacity: u8,
+    margin: u32,
+}
+
+impl ValidatedWatermarkPayload {
+    fn cache_identity(&self) -> String {
+        compute_watermark_identity(
+            &self.url,
+            self.position.as_name(),
+            self.opacity,
+            self.margin,
+        )
+    }
+}
+
+/// Validates watermark payload fields without performing network I/O.
+fn validate_watermark_payload(
     payload: Option<&WatermarkPayload>,
-    config: &ServerConfig,
-) -> Result<Option<WatermarkInput>, HttpResponse> {
+) -> Result<Option<ValidatedWatermarkPayload>, HttpResponse> {
     let Some(wm) = payload else {
         return Ok(None);
     };
     let url = wm.url.as_deref().filter(|u| !u.is_empty()).ok_or_else(|| {
         bad_request_response("watermark.url is required when watermark is present")
     })?;
-
-    let bytes = read_remote_watermark_bytes(url, config)?;
-    let artifact = sniff_artifact(RawArtifact::new(bytes, None))
-        .map_err(|error| bad_request_response(&format!("watermark image is invalid: {error}")))?;
-    if !artifact.media_type.is_raster() {
-        return Err(bad_request_response(
-            "watermark image must be a raster format (not SVG)",
-        ));
-    }
 
     let position = parse_optional_named(
         wm.position.as_deref(),
@@ -1508,12 +1544,34 @@ fn resolve_watermark_payload(
     }
     let margin = wm.margin.unwrap_or(WATERMARK_DEFAULT_MARGIN);
 
-    Ok(Some(WatermarkInput {
-        image: artifact,
+    Ok(Some(ValidatedWatermarkPayload {
+        url: url.to_string(),
         position,
         opacity,
         margin,
     }))
+}
+
+/// Fetches watermark image and builds WatermarkInput. Called after try_acquire.
+fn fetch_watermark(
+    validated: ValidatedWatermarkPayload,
+    config: &ServerConfig,
+    deadline: Option<Instant>,
+) -> Result<WatermarkInput, HttpResponse> {
+    let bytes = read_remote_watermark_bytes(&validated.url, config, deadline)?;
+    let artifact = sniff_artifact(RawArtifact::new(bytes, None))
+        .map_err(|error| bad_request_response(&format!("watermark image is invalid: {error}")))?;
+    if !artifact.media_type.is_raster() {
+        return Err(bad_request_response(
+            "watermark image must be a raster format (not SVG)",
+        ));
+    }
+    Ok(WatermarkInput {
+        image: artifact,
+        position: validated.position,
+        opacity: validated.opacity,
+        margin: validated.margin,
+    })
 }
 
 fn resolve_multipart_watermark(
@@ -1550,19 +1608,6 @@ fn resolve_multipart_watermark(
     })
 }
 
-fn watermark_identity_from_payload(payload: Option<&WatermarkPayload>) -> Option<String> {
-    let wm = payload?;
-    let url = wm.url.as_deref().filter(|u| !u.is_empty())?;
-    Some(compute_watermark_identity(
-        url,
-        wm.position
-            .as_deref()
-            .unwrap_or(WATERMARK_DEFAULT_POSITION.as_name()),
-        wm.opacity.unwrap_or(WATERMARK_DEFAULT_OPACITY),
-        wm.margin.unwrap_or(WATERMARK_DEFAULT_MARGIN),
-    ))
-}
-
 struct AccessLogEntry<'a> {
     request_id: &'a str,
     method: &'a str,
@@ -1571,6 +1616,7 @@ struct AccessLogEntry<'a> {
     status: &'a str,
     start: Instant,
     cache_status: Option<&'a str>,
+    watermark: bool,
 }
 
 /// Extracts the `X-Request-Id` header value from request headers.
@@ -1590,6 +1636,19 @@ fn extract_cache_status(headers: &[(&'static str, String)]) -> Option<&'static s
         .map(|v| if v.contains("hit") { "hit" } else { "miss" })
 }
 
+/// Extracts and removes the internal `X-Truss-Watermark` header, returning whether it was set.
+fn extract_watermark_flag(headers: &mut Vec<(&'static str, String)>) -> bool {
+    let pos = headers
+        .iter()
+        .position(|(name, _)| *name == "X-Truss-Watermark");
+    if let Some(idx) = pos {
+        headers.swap_remove(idx);
+        true
+    } else {
+        false
+    }
+}
+
 fn emit_access_log(config: &ServerConfig, entry: &AccessLogEntry<'_>) {
     config.log(
         &json!({
@@ -1601,6 +1660,7 @@ fn emit_access_log(config: &ServerConfig, entry: &AccessLogEntry<'_>) {
             "status": entry.status,
             "latency_ms": entry.start.elapsed().as_millis() as u64,
             "cache_status": entry.cache_status,
+            "watermark": entry.watermark,
         })
         .to_string(),
     );
@@ -1667,6 +1727,7 @@ fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io::Result<()>
                     status: sc,
                     start,
                     cache_status: None,
+                    watermark: false,
                 },
             );
             return Ok(());
@@ -1694,6 +1755,7 @@ fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io::Result<()>
                         status: sc,
                         start,
                         cache_status: None,
+                        watermark: false,
                     },
                 );
                 return Ok(());
@@ -1706,6 +1768,7 @@ fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io::Result<()>
         response.headers.push(("X-Request-Id", request_id.clone()));
 
         let cache_status = extract_cache_status(&response.headers);
+        let had_watermark = extract_watermark_flag(&mut response.headers);
 
         let sc = status_code(response.status).unwrap_or("unknown");
 
@@ -1729,6 +1792,7 @@ fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io::Result<()>
                 status: sc,
                 start,
                 cache_status,
+                watermark: had_watermark,
             },
         );
 
@@ -1770,6 +1834,8 @@ fn classify_route(request: &HttpRequest) -> RouteMetric {
 }
 
 fn handle_transform_request(request: HttpRequest, config: &ServerConfig) -> HttpResponse {
+    let request_deadline = Some(Instant::now() + Duration::from_secs(REQUEST_DEADLINE_SECS));
+
     if let Err(response) = authorize_request(&request, config) {
         return response;
     }
@@ -1790,11 +1856,11 @@ fn handle_transform_request(request: HttpRequest, config: &ServerConfig) -> Http
     };
 
     let versioned_hash = payload.source.versioned_source_hash(config);
-    let watermark = match resolve_watermark_payload(payload.watermark.as_ref(), config) {
+    let validated_wm = match validate_watermark_payload(payload.watermark.as_ref()) {
         Ok(wm) => wm,
         Err(response) => return response,
     };
-    let watermark_id = watermark_identity_from_payload(payload.watermark.as_ref());
+    let watermark_id = validated_wm.as_ref().map(|v| v.cache_identity());
 
     if let Some(response) = try_versioned_cache_lookup(
         versioned_hash.as_deref(),
@@ -1810,7 +1876,7 @@ fn handle_transform_request(request: HttpRequest, config: &ServerConfig) -> Http
     let storage_start = Instant::now();
     let backend_label = payload.source.metrics_backend_label(config);
     let backend_idx = backend_label.map(|l| storage_backend_index_from_config(&l));
-    let source_bytes = match resolve_source_bytes(payload.source, config) {
+    let source_bytes = match resolve_source_bytes(payload.source, config, request_deadline) {
         Ok(bytes) => {
             if let Some(idx) = backend_idx {
                 record_storage_duration(idx, storage_start);
@@ -1831,8 +1897,9 @@ fn handle_transform_request(request: HttpRequest, config: &ServerConfig) -> Http
         &request,
         ImageResponsePolicy::PrivateTransform,
         config,
-        watermark,
+        WatermarkSource::from_validated(validated_wm),
         watermark_id.as_deref(),
+        request_deadline,
     )
 }
 
@@ -1849,6 +1916,7 @@ fn handle_public_get_request(
     config: &ServerConfig,
     source_kind: PublicSourceKind,
 ) -> HttpResponse {
+    let request_deadline = Some(Instant::now() + Duration::from_secs(REQUEST_DEADLINE_SECS));
     let query = match parse_query_params(&request) {
         Ok(query) => query,
         Err(response) => return response,
@@ -1861,11 +1929,11 @@ fn handle_public_get_request(
         Err(response) => return response,
     };
 
-    let watermark = match resolve_watermark_payload(watermark_payload.as_ref(), config) {
+    let validated_wm = match validate_watermark_payload(watermark_payload.as_ref()) {
         Ok(wm) => wm,
         Err(response) => return response,
     };
-    let watermark_id = watermark_identity_from_payload(watermark_payload.as_ref());
+    let watermark_id = validated_wm.as_ref().map(|v| v.cache_identity());
 
     // When the storage backend is object storage (S3 or GCS), convert Path
     // sources to Storage sources so that the `path` query parameter is
@@ -1899,7 +1967,7 @@ fn handle_public_get_request(
     let storage_start = Instant::now();
     let backend_label = source.metrics_backend_label(config);
     let backend_idx = backend_label.map(|l| storage_backend_index_from_config(&l));
-    let source_bytes = match resolve_source_bytes(source, config) {
+    let source_bytes = match resolve_source_bytes(source, config, request_deadline) {
         Ok(bytes) => {
             if let Some(idx) = backend_idx {
                 record_storage_duration(idx, storage_start);
@@ -1921,8 +1989,9 @@ fn handle_public_get_request(
         &request,
         ImageResponsePolicy::PublicGet,
         config,
-        watermark,
+        WatermarkSource::from_validated(validated_wm),
         watermark_id.as_deref(),
+        request_deadline,
     )
 }
 
@@ -1955,8 +2024,9 @@ fn handle_upload_request(request: HttpRequest, config: &ServerConfig) -> HttpRes
         &request,
         ImageResponsePolicy::PrivateTransform,
         config,
-        watermark,
+        WatermarkSource::from_ready(watermark),
         watermark_identity.as_deref(),
+        None,
     )
 }
 
@@ -2189,6 +2259,33 @@ fn parse_public_get_request(
     Ok((source, options, watermark))
 }
 
+/// Watermark source: either already resolved (multipart upload) or deferred (URL fetch).
+enum WatermarkSource {
+    Deferred(ValidatedWatermarkPayload),
+    Ready(WatermarkInput),
+    None,
+}
+
+impl WatermarkSource {
+    fn from_validated(validated: Option<ValidatedWatermarkPayload>) -> Self {
+        match validated {
+            Some(v) => Self::Deferred(v),
+            None => Self::None,
+        }
+    }
+
+    fn from_ready(input: Option<WatermarkInput>) -> Self {
+        match input {
+            Some(w) => Self::Ready(w),
+            None => Self::None,
+        }
+    }
+
+    fn is_some(&self) -> bool {
+        !matches!(self, Self::None)
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn transform_source_bytes(
     source_bytes: Vec<u8>,
@@ -2197,8 +2294,9 @@ fn transform_source_bytes(
     request: &HttpRequest,
     response_policy: ImageResponsePolicy,
     config: &ServerConfig,
-    watermark: Option<WatermarkInput>,
+    watermark: WatermarkSource,
     watermark_identity: Option<&str>,
+    request_deadline: Option<Instant>,
 ) -> HttpResponse {
     let content_hash;
     let source_hash = match versioned_hash {
@@ -2274,6 +2372,8 @@ fn transform_source_bytes(
         },
         watermark,
         watermark_identity,
+        config,
+        request_deadline,
     )
 }
 
@@ -2286,8 +2386,10 @@ fn transform_source_bytes_inner(
     cache: Option<&TransformCache>,
     source_hash: &str,
     response_config: ImageResponseConfig,
-    watermark: Option<WatermarkInput>,
+    watermark_source: WatermarkSource,
     watermark_identity: Option<&str>,
+    config: &ServerConfig,
+    request_deadline: Option<Instant>,
 ) -> HttpResponse {
     if options.deadline.is_none() {
         options.deadline = Some(response_config.transform_deadline);
@@ -2352,6 +2454,31 @@ fn transform_source_bytes_inner(
     }
 
     let is_svg = artifact.media_type == MediaType::Svg;
+
+    // Resolve watermark: reject SVG+watermark early (before fetch), then fetch if deferred.
+    let watermark = if is_svg && watermark_source.is_some() {
+        return bad_request_response("watermark is not supported for SVG source images");
+    } else {
+        match watermark_source {
+            WatermarkSource::Deferred(validated) => {
+                match fetch_watermark(validated, config, request_deadline) {
+                    Ok(wm) => {
+                        record_watermark_transform();
+                        Some(wm)
+                    }
+                    Err(response) => return response,
+                }
+            }
+            WatermarkSource::Ready(wm) => {
+                record_watermark_transform();
+                Some(wm)
+            }
+            WatermarkSource::None => None,
+        }
+    };
+
+    let had_watermark = watermark.is_some();
+
     let transform_start = Instant::now();
     let mut request_obj = TransformRequest::new(artifact, options);
     request_obj.watermark = watermark;
@@ -2414,7 +2541,18 @@ fn transform_source_bytes_inner(
         return HttpResponse::empty("304 Not Modified", headers);
     }
 
-    HttpResponse::binary_with_headers("200 OK", output.media_type.as_mime(), headers, output.bytes)
+    let mut response = HttpResponse::binary_with_headers(
+        "200 OK",
+        output.media_type.as_mime(),
+        headers,
+        output.bytes,
+    );
+    if had_watermark {
+        response
+            .headers
+            .push(("X-Truss-Watermark", "true".to_string()));
+    }
+    response
 }
 
 fn env_flag(name: &str) -> bool {
@@ -2473,10 +2611,10 @@ mod tests {
         CacheHitStatus, DEFAULT_BIND_ADDR, DEFAULT_MAX_CONCURRENT_TRANSFORMS,
         DEFAULT_PUBLIC_MAX_AGE_SECONDS, DEFAULT_PUBLIC_STALE_WHILE_REVALIDATE_SECONDS,
         ImageResponsePolicy, PublicSourceKind, ServerConfig, SignedUrlSource,
-        TransformSourcePayload, authorize_signed_request, bind_addr, build_image_etag,
-        build_image_response_headers, canonical_query_without_signature, negotiate_output_format,
-        parse_public_get_request, route_request, serve_once_with_config, sign_public_url,
-        transform_source_bytes,
+        TransformSourcePayload, WatermarkSource, authorize_signed_request, bind_addr,
+        build_image_etag, build_image_response_headers, canonical_query_without_signature,
+        negotiate_output_format, parse_public_get_request, route_request, serve_once_with_config,
+        sign_public_url, transform_source_bytes,
     };
     use crate::{
         Artifact, ArtifactMetadata, MediaType, RawArtifact, TransformOptions, sniff_artifact,
@@ -2929,6 +3067,7 @@ mod tests {
             &request,
             ImageResponsePolicy::PrivateTransform,
             &config,
+            WatermarkSource::None,
             None,
             None,
         );
@@ -2974,6 +3113,7 @@ mod tests {
             &request,
             ImageResponsePolicy::PrivateTransform,
             &config,
+            WatermarkSource::None,
             None,
             None,
         );
@@ -3130,8 +3270,8 @@ mod tests {
         let dir = tempfile::tempdir().expect("create tempdir");
         let cache = super::cache::OriginCache::new(dir.path());
 
-        cache.put("https://example.com/image.png", b"raw-source-bytes");
-        let result = cache.get("https://example.com/image.png");
+        cache.put("src", "https://example.com/image.png", b"raw-source-bytes");
+        let result = cache.get("src", "https://example.com/image.png");
 
         assert_eq!(result.as_deref(), Some(b"raw-source-bytes".as_ref()));
     }
@@ -3143,7 +3283,7 @@ mod tests {
 
         assert!(
             cache
-                .get("https://unknown.example.com/missing.png")
+                .get("src", "https://unknown.example.com/missing.png")
                 .is_none()
         );
     }
@@ -3154,10 +3294,10 @@ mod tests {
         let mut cache = super::cache::OriginCache::new(dir.path());
         cache.ttl = Duration::from_secs(0);
 
-        cache.put("https://example.com/img.png", b"data");
+        cache.put("src", "https://example.com/img.png", b"data");
         std::thread::sleep(Duration::from_millis(10));
 
-        assert!(cache.get("https://example.com/img.png").is_none());
+        assert!(cache.get("src", "https://example.com/img.png").is_none());
     }
 
     #[test]
@@ -3165,7 +3305,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("create tempdir");
         let cache = super::cache::OriginCache::new(dir.path());
 
-        cache.put("https://example.com/test.png", b"bytes");
+        cache.put("src", "https://example.com/test.png", b"bytes");
 
         let origin_dir = dir.path().join("origin");
         assert!(origin_dir.exists(), "origin subdirectory should exist");
@@ -3187,6 +3327,7 @@ mod tests {
             "public-dev",
             "secret-value",
             4_102_444_800,
+            None,
         )
         .expect("sign public URL");
 
@@ -5209,6 +5350,7 @@ mod tests {
                 status: "200",
                 start,
                 cache_status: Some("hit"),
+                watermark: false,
             },
         );
 
@@ -5247,6 +5389,7 @@ mod tests {
                 status: "201",
                 start: Instant::now(),
                 cache_status: None,
+                watermark: false,
             },
         );
 
