@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+## v0.5.0
+
+### Added
+
+- Prometheus `/metrics` endpoint with histograms (HTTP request duration, transform duration, storage duration) and error counters.
+- Prometheus metrics documentation (`doc/prometheus.md`).
+- Dedicated 304 status counter for cache-validation traffic tracking.
+
+### Changed
+
+- `/metrics` endpoint no longer requires bearer token authentication for Prometheus scraper compatibility.
+- Cross-platform CI tests (macOS/Windows) now run on pull requests, not only on main pushes.
+- Storage duration metrics now reflect actual source kind (filesystem/S3/GCS/Azure) instead of server config default.
+- HTTP request duration histogram records on all exit paths including auth and body-read errors.
+
+### Fixed
+
+- Windows compilation error: `unsafe extern "system"` block for Rust 2024 edition.
+- Cross-platform `stderr_write` using `GetStdHandle` on Windows.
+
 ## v0.4.0
 
 ### Added
