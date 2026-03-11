@@ -14,18 +14,71 @@ Resize, convert, blur, and watermark images from the CLI, an HTTP server, or the
 
 [Try the WASM demo in your browser](https://nao1215.github.io/truss/) -- no install, no upload, runs 100 % client-side.
 
-![wasm-sample](./doc/img/wasm-sample.png)
-
+![WASM demo screenshot](./doc/img/wasm-sample.png)
 
 ## Why truss?
 
-- **One binary, three interfaces** -- the same Rust core powers the CLI, an HTTP image-transform server, and a WASM browser demo.
-- **Security by default** -- signed URLs, SSRF protections, and SVG sanitization are built in.
-- **Broad format support** -- JPEG, PNG, WebP, AVIF, BMP, and SVG; retains EXIF, ICC, and XMP metadata where possible.
-- **Cross-platform** -- Linux, macOS, Windows.
-- **Tested contracts** -- CLI behavior is locked by [ShellSpec](https://github.com/shellspec/shellspec), HTTP API by [runn](https://github.com/k1LoW/runn).
+- One binary, three interfaces -- the same Rust core powers the CLI, an HTTP image-transform server, and a WASM browser demo.
+- Security by default -- signed URLs, SSRF protections, and SVG sanitization are built in.
+- Broad format support -- JPEG, PNG, WebP, AVIF, BMP, and SVG; retains EXIF, ICC, and XMP metadata where possible.
+- Cross-platform -- Linux, macOS, Windows.
+- Tested contracts -- CLI behavior is locked by [ShellSpec](https://github.com/shellspec/shellspec), HTTP API by [runn](https://github.com/k1LoW/runn).
+
+## Comparison
+
+Feature comparison with [imgproxy](https://github.com/imgproxy/imgproxy) and [imagor](https://github.com/cshum/imagor) as of March 2026.
+
+| Feature | truss | imgproxy | imagor |
+|---------|:-----:|:--------:|:------:|
+| Language | Rust | Go | Go |
+| Runtime dependencies | None | libvips (C) | libvips (C) |
+| CLI | Yes | No | No |
+| WASM browser demo | Yes | No | No |
+| Signed URLs | Yes | Yes | Yes |
+| JPEG / PNG / WebP / AVIF | Yes | Yes | Yes |
+| JPEG XL (JXL) | No | Input only | Yes |
+| TIFF / HEIC | [Planned (#45)](https://github.com/nao1215/truss/issues/45) | Yes | Yes |
+| GIF animation processing | No (out of scope) | Yes | Yes |
+| SVG sanitization | Yes | Yes | No |
+| Smart crop | No | Yes | Yes |
+| Sharpen filter | [Planned (#44)](https://github.com/nao1215/truss/issues/44) | Yes | Yes |
+| Crop / Trim / Padding | [Planned (#46)](https://github.com/nao1215/truss/issues/46) | Yes | Yes |
+| S3  | Yes | Yes | Yes |
+| GCS | Yes | Yes | Yes |
+| Azure Blob Storage | Yes | Yes | No |
+| Watermark | Yes | Yes | Yes |
+| Prometheus metrics | Yes | Yes | Yes |
+| License | MIT | MIT | Apache 2.0 |
+
+## Architecture
+
+```mermaid
+flowchart TB
+    CLI["CLI<br/>(truss convert)"] --> Core
+    Server["HTTP Server<br/>(truss serve)"] --> Core
+    WASM["WASM<br/>(browser)"] --> Core
+
+    subgraph Core["Shared Rust core"]
+        direction LR
+        Sniff["Detect format"] --> Transform["Resize / blur / watermark"]
+        Transform --> Encode["Encode output"]
+    end
+
+    Server --> Storage
+
+    subgraph Storage["Storage backends"]
+        FS["Local filesystem"]
+        S3["S3"]
+        GCS["GCS"]
+        Azure["Azure Blob"]
+    end
+```
+
+CLI reads local files or fetches remote URLs directly. The HTTP server resolves images from storage backends or client uploads. The WASM build processes files selected in the browser.
 
 ## Installation
+
+### From source
 
 ```sh
 cargo install truss-image
@@ -57,11 +110,30 @@ cargo install truss-image --features "s3,gcs,azure"
 
 This installs the `truss` command.
 
+### Prebuilt binaries
+
+Download a prebuilt binary from the [GitHub Releases](https://github.com/nao1215/truss/releases) page. Archives and SHA256 checksums are published for each release.
+
+| Target | Archive |
+|--------|---------|
+| Linux x86_64 | `truss-v*-x86_64-unknown-linux-gnu.tar.gz` |
+| Linux aarch64 | `truss-v*-aarch64-unknown-linux-gnu.tar.gz` |
+| macOS x86_64 | `truss-v*-x86_64-apple-darwin.tar.gz` |
+| macOS aarch64 (Apple Silicon) | `truss-v*-aarch64-apple-darwin.tar.gz` |
+| Windows x86_64 | `truss-v*-x86_64-pc-windows-msvc.zip` |
+
+Example (Linux x86_64):
+
+```sh
+tar xzf truss-v*.tar.gz
+sudo mv truss /usr/local/bin/
+```
+
 ## Quick Start
 
 ### CLI
 
-Run `truss --help` to see the full set of options.
+The `convert` subcommand can be omitted: `truss photo.png -o photo.jpg` is equivalent to `truss convert photo.png -o photo.jpg`. Run `truss --help` to see the full set of options.
 
 ```sh
 # Convert format
@@ -83,7 +155,7 @@ truss diagram.svg -o diagram.png --width 1024
 truss inspect photo.jpg
 ```
 
-#### Filter: Before / After
+#### Examples: Blur & Watermark
 
 | | Original | Gaussian Blur (`--blur 5.0`) | Watermark (`--watermark`) |
 |---|---|---|---|
@@ -99,18 +171,11 @@ truss photo.jpg -o watermarked.jpg \
   --watermark-opacity 50 --watermark-margin 10
 ```
 
-
-
 ### HTTP Server -- one curl to transform
 
 ```sh
-# Start the server
-docker run -p 8080:8080 \
-  -e TRUSS_BIND_ADDR=0.0.0.0:8080 \
-  -e TRUSS_BEARER_TOKEN=changeme \
-  -v ./images:/data:ro \
-  -e TRUSS_STORAGE_ROOT=/data \
-  ghcr.io/nao1215/truss:latest
+# Start the server (binary)
+truss serve --bind 0.0.0.0:8080 --storage-root ./images --bearer-token changeme
 
 # Resize a local image to 400 px wide WebP in one request
 curl -X POST http://localhost:8080/images:transform \
@@ -122,23 +187,39 @@ curl -X POST http://localhost:8080/images:transform \
 # Signed public URL (no Bearer token needed)
 truss sign --base-url http://localhost:8080 \
   --path photos/hero.jpg --key-id mykey --secret s3cret \
-  --expires 1700000000 --width 800 --format webp
-# => http://localhost:8080/images/by-path?path=photos/hero.jpg&width=800&format=webp&keyId=mykey&expires=1700000000&signature=...
+  --expires 1900000000 --width 800 --format webp  # Unix timestamp (2030-03-17)
+# => http://localhost:8080/images/by-path?path=photos/hero.jpg&width=800&format=webp&keyId=mykey&expires=1900000000&signature=...
 ```
+
+See the [Docker](#docker) section for running with Docker instead.
 
 ## Commands
 
 | Command | Description |
 |---------|-------------|
-| `convert` | Convert and transform an image file |
+| `convert` | Convert and transform an image file (can be omitted; see above) |
 | `inspect` | Show metadata (format, dimensions, alpha) of an image |
-| `serve` | Start the HTTP image-transform server |
+| `serve` | Start the HTTP image-transform server (implied when server flags are used at the top level) |
 | `sign` | Generate a signed public URL for the server |
 | `completions` | Generate shell completion scripts |
 | `version` | Print version information |
 | `help` | Show help for a command (e.g. `truss help convert`) |
 
-The `convert` subcommand can be omitted: `truss photo.png -o photo.jpg` is equivalent to `truss convert photo.png -o photo.jpg`. Similarly, server flags at the top level imply `serve`: `truss --bind 0.0.0.0:8080` is equivalent to `truss serve --bind 0.0.0.0:8080`.
+### Shell Completions
+
+```sh
+# Bash
+truss completions bash > ~/.local/share/bash-completion/completions/truss
+
+# Zsh (add ~/.zfunc to your fpath)
+truss completions zsh > ~/.zfunc/_truss
+
+# Fish
+truss completions fish > ~/.config/fish/completions/truss.fish
+
+# PowerShell
+truss completions powershell > truss.ps1
+```
 
 ## Supported Formats
 
@@ -161,38 +242,62 @@ By default, the server listens on `127.0.0.1:8080`. Configuration can be supplie
 truss serve --bind 0.0.0.0:8080 --storage-root /var/images
 ```
 
-Key environment variables:
+### Core settings
 
 | Variable | Description |
 |------|------|
 | `TRUSS_BIND_ADDR` | Bind address (default: `127.0.0.1:8080`) |
 | `TRUSS_STORAGE_ROOT` | Root directory for local image sources |
 | `TRUSS_BEARER_TOKEN` | Bearer token for private endpoints |
+| `TRUSS_STORAGE_BACKEND` | `filesystem` (default), `s3`, `gcs`, or `azure` |
+| `TRUSS_MAX_CONCURRENT_TRANSFORMS` | Max concurrent transforms; excess requests receive 503 (default: `64`, range: 1-1024) |
+| `TRUSS_TRANSFORM_DEADLINE_SECS` | Per-transform deadline in seconds (default: `30`, range: 1-300) |
+| `TRUSS_STORAGE_TIMEOUT_SECS` | Download timeout for object storage backends in seconds (default: `30`, range: 1-300) |
+
+`TRUSS_STORAGE_BACKEND` selects the source for public `GET /images/by-path`. When set to `s3`, `gcs`, or `azure`, the `path` query parameter is used as the object key. Only one backend can be active at a time. Private endpoints can still use `kind: storage` regardless of this setting.
+
+### Signed URLs & caching
+
+| Variable | Description |
+|------|------|
 | `TRUSS_PUBLIC_BASE_URL` | External base URL for signed-URL authority (for reverse proxy / CDN setups) |
 | `TRUSS_SIGNED_URL_KEY_ID` | Key ID for signed public URLs |
 | `TRUSS_SIGNED_URL_SECRET` | Shared secret for signed public URLs |
-| `TRUSS_ALLOW_INSECURE_URL_SOURCES` | Allow private-network/loopback URL sources (`true`/`1`; dev/test only) |
 | `TRUSS_CACHE_ROOT` | Directory for the transform cache; caching is disabled when unset |
 | `TRUSS_PUBLIC_MAX_AGE` | `Cache-Control: max-age` for public GET responses in seconds (default: `3600`) |
 | `TRUSS_PUBLIC_STALE_WHILE_REVALIDATE` | `Cache-Control: stale-while-revalidate` for public GET responses in seconds (default: `60`) |
 | `TRUSS_DISABLE_ACCEPT_NEGOTIATION` | Disable Accept-based content negotiation (`true`/`1`; recommended behind CDNs that don't forward Accept) |
-| `TRUSS_STORAGE_BACKEND` | Storage backend for public `GET /images/by-path`: `filesystem` (default), `s3`, `gcs`, or `azure`. Only one backend can be active at a time. When set to `s3`, `gcs`, or `azure`, the `path` query parameter is used as the object key. Private endpoints can still use `kind: storage` regardless of this setting. |
+| `TRUSS_ALLOW_INSECURE_URL_SOURCES` | Allow private-network/loopback URL sources (`true`/`1`; dev/test only) |
+
+### S3
+
+| Variable | Description |
+|------|------|
 | `TRUSS_S3_BUCKET` | Default S3 bucket name (required when backend is `s3`) |
 | `TRUSS_S3_FORCE_PATH_STYLE` | Use path-style S3 addressing (`true`/`1`; required for MinIO, LocalStack, etc.) |
 | `AWS_REGION` | AWS region for the S3 client (e.g. `us-east-1`) |
 | `AWS_ACCESS_KEY_ID` | AWS access key for S3 authentication |
 | `AWS_SECRET_ACCESS_KEY` | AWS secret key for S3 authentication |
 | `AWS_ENDPOINT_URL` | Custom S3-compatible endpoint URL (e.g. `http://minio:9000` for MinIO) |
+
+### GCS
+
+| Variable | Description |
+|------|------|
 | `TRUSS_GCS_BUCKET` | Default GCS bucket name (required when backend is `gcs`) |
 | `TRUSS_GCS_ENDPOINT` | Custom GCS endpoint URL (e.g. `http://fake-gcs:4443` for fake-gcs-server) |
 | `GOOGLE_APPLICATION_CREDENTIALS` | Path to GCS service account JSON key file |
 | `GOOGLE_APPLICATION_CREDENTIALS_JSON` | Inline GCS service account JSON (alternative to file path) |
-| `TRUSS_AZURE_CONTAINER` | Default Azure Blob Storage container name (required when backend is `azure`) |
-| `TRUSS_AZURE_ENDPOINT` | Custom Azure Blob endpoint URL (e.g. `http://azurite:10000/devstoreaccount1` for Azurite) |
-| `AZURE_STORAGE_ACCOUNT_NAME` | Azure storage account name (used to derive the default endpoint when `TRUSS_AZURE_ENDPOINT` is not set; must be 3-24 lowercase alphanumeric characters) |
-| `TRUSS_MAX_CONCURRENT_TRANSFORMS` | Maximum concurrent image transforms; requests exceeding this limit receive 503 (default: `64`, range: 1–1024). Start conservative (e.g. #CPUs × 2) and increase until CPU/memory saturation or 503s appear. |
-| `TRUSS_TRANSFORM_DEADLINE_SECS` | Per-transform wall-clock deadline in seconds (default: `30`, range: 1–300). Set slightly above your p95 transform latency but below any upstream/client timeout to avoid cascading failures. |
-| `TRUSS_STORAGE_TIMEOUT_SECS` | Download timeout in seconds for object storage backends (default: `30`, range: 1–300) |
+
+### Azure Blob Storage
+
+| Variable | Description |
+|------|------|
+| `TRUSS_AZURE_CONTAINER` | Default container name (required when backend is `azure`) |
+| `TRUSS_AZURE_ENDPOINT` | Custom endpoint URL (e.g. `http://azurite:10000/devstoreaccount1` for Azurite) |
+| `AZURE_STORAGE_ACCOUNT_NAME` | Storage account name (3-24 lowercase alphanumeric; used to derive the default endpoint when `TRUSS_AZURE_ENDPOINT` is not set) |
+
+By default, truss uses anonymous access, which works for public containers and Azurite local development. For private containers, append a SAS token to `TRUSS_AZURE_ENDPOINT`. On Azure-hosted compute (App Service, AKS, VMs), managed identity is used automatically when no explicit credentials are provided.
 
 ### Structured Access Logs
 
@@ -215,15 +320,13 @@ Every request emits a JSON access log line through the server's log handler (std
 
 The server echoes the request ID back in the `X-Request-Id` response header, making it easy to correlate client-side logs with server-side entries. To propagate your own trace context, send an `X-Request-Id` header with your request and the server will reuse it.
 
-Azure authentication: By default, truss uses anonymous access, which works for public containers and Azurite local development. For private containers, append a SAS token to `TRUSS_AZURE_ENDPOINT`. On Azure-hosted compute (App Service, AKS, VMs), managed identity is used automatically when no explicit credentials are provided.
-
 ### Prometheus Metrics
 
 The server exposes a `/metrics` endpoint in Prometheus text exposition format. The endpoint does not require authentication, so Prometheus scrapers can collect metrics without additional configuration.
 
 For the full metrics reference, bucket boundaries, and example PromQL queries, see [doc/prometheus.md](doc/prometheus.md).
 
-API reference:
+### API Reference
 
 - OpenAPI YAML: [doc/openapi.yaml](doc/openapi.yaml)
 - Swagger UI on GitHub Pages: https://nao1215.github.io/truss/swagger/
@@ -254,15 +357,9 @@ Prebuilt container images are published to GHCR:
 docker pull ghcr.io/nao1215/truss:latest
 ```
 
-The first GHCR package publish is private by default. To allow anonymous pulls from ECS, change the package visibility to `Public` in GitHub Packages settings once after the first publish.
-
 ## WASM Demo
 
-A browser demo is available on GitHub Pages:
-
-https://nao1215.github.io/truss/
-
-The demo is a static browser application. Selected image files are processed in the browser, are not sent to a truss backend or any other external system, and are not stored by the demo.
+The [browser demo](https://nao1215.github.io/truss/) is a static application built from the WASM target. Images are processed locally and never leave the browser.
 
 To build the demo locally, use [`scripts/build-wasm-demo.sh`](scripts/build-wasm-demo.sh):
 
@@ -274,22 +371,6 @@ cargo install wasm-bindgen-cli --version 0.2.114
 ```
 
 The build output is written to `web/dist/`.
-
-## Shell Completions
-
-```sh
-# Bash
-truss completions bash > ~/.local/share/bash-completion/completions/truss
-
-# Zsh (add ~/.zfunc to your fpath)
-truss completions zsh > ~/.zfunc/_truss
-
-# Fish
-truss completions fish > ~/.config/fish/completions/truss.fish
-
-# PowerShell
-truss completions powershell > truss.ps1
-```
 
 ## CDN / Reverse-Proxy Integration
 
@@ -353,28 +434,16 @@ Measured with `doc/img/logo.png` (1536 x 1024 PNG, 1.6 MB) on AMD Ryzen 7 5800U.
 
 | Operation | Avg | Min | Max |
 |---|---|---|---|
-| PNG → JPEG | 60 ms | 58 ms | 73 ms |
-| PNG → WebP | 46 ms | 45 ms | 50 ms |
-| PNG → AVIF | 6 956 ms | 6 427 ms | 8 092 ms |
-| PNG → BMP | 40 ms | 38 ms | 42 ms |
+| PNG -> JPEG | 60 ms | 58 ms | 73 ms |
+| PNG -> WebP | 46 ms | 45 ms | 50 ms |
+| PNG -> AVIF | 6 956 ms | 6 427 ms | 8 092 ms |
+| PNG -> BMP | 40 ms | 38 ms | 42 ms |
 | Resize 800w + JPEG | 69 ms | 67 ms | 75 ms |
 | Resize 400w + WebP | 46 ms | 44 ms | 51 ms |
 | Resize 200w + AVIF | 190 ms | 185 ms | 205 ms |
 | Resize 500x500 cover + JPEG | 64 ms | 63 ms | 66 ms |
 | JPEG quality 50 | 54 ms | 53 ms | 61 ms |
 | Inspect metadata | 5 ms | 5 ms | 6 ms |
-
-### Output file size
-
-| Output | Size |
-|---|---|
-| PNG → JPEG | 124 KB |
-| PNG → WebP | 1.2 MB |
-| PNG → AVIF | 32 KB |
-| PNG → BMP | 6.1 MB |
-| Resize 800w → JPEG | 44 KB |
-| Resize 400w → WebP | 108 KB |
-| Resize 200w → AVIF | 4.0 KB |
 
 ## Roadmap
 
