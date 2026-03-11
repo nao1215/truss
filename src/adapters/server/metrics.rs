@@ -30,6 +30,7 @@ pub(super) static HTTP_RESPONSES_501_TOTAL: AtomicU64 = AtomicU64::new(0);
 pub(super) static HTTP_RESPONSES_502_TOTAL: AtomicU64 = AtomicU64::new(0);
 pub(super) static HTTP_RESPONSES_503_TOTAL: AtomicU64 = AtomicU64::new(0);
 pub(super) static HTTP_RESPONSES_508_TOTAL: AtomicU64 = AtomicU64::new(0);
+pub(super) static HTTP_RESPONSES_304_TOTAL: AtomicU64 = AtomicU64::new(0);
 pub(super) static HTTP_RESPONSES_OTHER_TOTAL: AtomicU64 = AtomicU64::new(0);
 
 pub(super) static CACHE_HITS_TOTAL: AtomicU64 = AtomicU64::new(0);
@@ -383,8 +384,8 @@ pub(super) fn render_metrics_text(max_concurrent: u64, transforms_in_flight: &At
     );
     body.push_str("# TYPE truss_http_responses_total counter\n");
     for status in [
-        "200", "400", "401", "403", "404", "406", "413", "415", "500", "501", "502", "503", "508",
-        "other",
+        "200", "304", "400", "401", "403", "404", "406", "413", "415", "500", "501", "502", "503",
+        "508", "other",
     ] {
         let _ = writeln!(
             body,
@@ -475,6 +476,7 @@ pub(super) fn status_counter(status: &str) -> &'static AtomicU64 {
         Some("501") => &HTTP_RESPONSES_501_TOTAL,
         Some("502") => &HTTP_RESPONSES_502_TOTAL,
         Some("503") => &HTTP_RESPONSES_503_TOTAL,
+        Some("304") => &HTTP_RESPONSES_304_TOTAL,
         Some("508") => &HTTP_RESPONSES_508_TOTAL,
         _ => &HTTP_RESPONSES_OTHER_TOTAL,
     }
@@ -494,6 +496,7 @@ pub(super) fn status_counter_value(status: &str) -> u64 {
         "501" => HTTP_RESPONSES_501_TOTAL.load(Ordering::Relaxed),
         "502" => HTTP_RESPONSES_502_TOTAL.load(Ordering::Relaxed),
         "503" => HTTP_RESPONSES_503_TOTAL.load(Ordering::Relaxed),
+        "304" => HTTP_RESPONSES_304_TOTAL.load(Ordering::Relaxed),
         "508" => HTTP_RESPONSES_508_TOTAL.load(Ordering::Relaxed),
         _ => HTTP_RESPONSES_OTHER_TOTAL.load(Ordering::Relaxed),
     }

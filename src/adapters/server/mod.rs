@@ -1330,6 +1330,18 @@ impl TransformSourcePayload {
         }
         Some(hex::encode(Sha256::digest(id.as_bytes())))
     }
+
+    /// Returns the storage backend label for metrics based on the source kind,
+    /// rather than the server config default.  Path → Filesystem, Storage →
+    /// whatever the config backend is, Url → None (no storage backend).
+    fn metrics_backend_label(&self, config: &ServerConfig) -> Option<StorageBackendLabel> {
+        match self {
+            Self::Path { .. } => Some(StorageBackendLabel::Filesystem),
+            Self::Url { .. } => None,
+            #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
+            Self::Storage { .. } => Some(config.storage_backend_label()),
+        }
+    }
 }
 
 #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
@@ -1530,10 +1542,12 @@ fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io::Result<()>
             && let Err(mut response) = authorize_request_headers(&partial.headers, config)
         {
             response.headers.push(("X-Request-Id", request_id.clone()));
+            record_http_metrics(RouteMetric::Unknown, response.status);
             let sc = status_code(response.status).unwrap_or("unknown");
             let method_log = partial.method.clone();
             let path_log = partial.path().to_string();
             let _ = write_response(&mut stream, response, true);
+            record_http_request_duration(RouteMetric::Unknown, start);
             emit_access_log(
                 config,
                 &AccessLogEntry {
@@ -1557,8 +1571,10 @@ fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io::Result<()>
             Ok(request) => request,
             Err(mut response) => {
                 response.headers.push(("X-Request-Id", request_id.clone()));
+                record_http_metrics(RouteMetric::Unknown, response.status);
                 let sc = status_code(response.status).unwrap_or("unknown");
                 let _ = write_response(&mut stream, response, true);
+                record_http_request_duration(RouteMetric::Unknown, start);
                 emit_access_log(
                     config,
                     &AccessLogEntry {
@@ -1577,7 +1593,6 @@ fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io::Result<()>
         let route = classify_route(&request);
         let mut response = route_request(request, config);
         record_http_metrics(route, response.status);
-        record_http_request_duration(route, start);
 
         response.headers.push(("X-Request-Id", request_id.clone()));
 
@@ -1593,6 +1608,7 @@ fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io::Result<()>
         let close_after = client_wants_close || requests_served >= KEEP_ALIVE_MAX_REQUESTS;
 
         write_response(&mut stream, response, close_after)?;
+        record_http_request_duration(route, start);
 
         emit_access_log(
             config,
@@ -1676,14 +1692,19 @@ fn handle_transform_request(request: HttpRequest, config: &ServerConfig) -> Http
     }
 
     let storage_start = Instant::now();
-    let backend_idx = storage_backend_index_from_config(&config.storage_backend_label());
+    let backend_label = payload.source.metrics_backend_label(config);
+    let backend_idx = backend_label.map(|l| storage_backend_index_from_config(&l));
     let source_bytes = match resolve_source_bytes(payload.source, config) {
         Ok(bytes) => {
-            record_storage_duration(backend_idx, storage_start);
+            if let Some(idx) = backend_idx {
+                record_storage_duration(idx, storage_start);
+            }
             bytes
         }
         Err(response) => {
-            record_storage_duration(backend_idx, storage_start);
+            if let Some(idx) = backend_idx {
+                record_storage_duration(idx, storage_start);
+            }
             return response;
         }
     };
@@ -1751,14 +1772,19 @@ fn handle_public_get_request(
     }
 
     let storage_start = Instant::now();
-    let backend_idx = storage_backend_index_from_config(&config.storage_backend_label());
+    let backend_label = source.metrics_backend_label(config);
+    let backend_idx = backend_label.map(|l| storage_backend_index_from_config(&l));
     let source_bytes = match resolve_source_bytes(source, config) {
         Ok(bytes) => {
-            record_storage_duration(backend_idx, storage_start);
+            if let Some(idx) = backend_idx {
+                record_storage_duration(idx, storage_start);
+            }
             bytes
         }
         Err(response) => {
-            record_storage_duration(backend_idx, storage_start);
+            if let Some(idx) = backend_idx {
+                record_storage_duration(idx, storage_start);
+            }
             return response;
         }
     };
