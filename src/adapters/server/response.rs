@@ -232,3 +232,452 @@ pub(super) fn map_source_io_error(error: io::Error) -> HttpResponse {
         _ => internal_error_response(&format!("failed to access source artifact: {error}")),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{MediaType, TransformError};
+    use serde_json::Value;
+
+    /// Parse the body of an HttpResponse as JSON.
+    fn parse_body(response: &HttpResponse) -> Value {
+        serde_json::from_slice(&response.body).expect("body should be valid JSON")
+    }
+
+    // ---------------------------------------------------------------
+    // problem_detail_body
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn test_problem_detail_body_contains_required_fields() {
+        let body = problem_detail_body(404, "Not Found", "resource missing");
+        let v: Value = serde_json::from_slice(&body).expect("valid JSON");
+
+        assert_eq!(v["type"], "about:blank");
+        assert_eq!(v["title"], "Not Found");
+        assert_eq!(v["status"], 404);
+        assert_eq!(v["detail"], "resource missing");
+    }
+
+    #[test]
+    fn test_problem_detail_body_ends_with_newline() {
+        let body = problem_detail_body(500, "Error", "boom");
+        assert_eq!(*body.last().unwrap(), b'\n');
+    }
+
+    #[test]
+    fn test_problem_detail_body_special_characters_in_detail() {
+        let body = problem_detail_body(400, "Bad Request", "invalid <script>alert(1)</script>");
+        let v: Value = serde_json::from_slice(&body).expect("valid JSON");
+        assert_eq!(v["detail"], "invalid <script>alert(1)</script>");
+    }
+
+    // ---------------------------------------------------------------
+    // bad_request_response
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn test_bad_request_response_status_and_content_type() {
+        let resp = bad_request_response("missing parameter");
+        assert_eq!(resp.status, "400 Bad Request");
+        assert_eq!(resp.content_type, Some("application/problem+json"));
+
+        let v = parse_body(&resp);
+        assert_eq!(v["status"], 400);
+        assert_eq!(v["title"], "Bad Request");
+        assert_eq!(v["detail"], "missing parameter");
+    }
+
+    // ---------------------------------------------------------------
+    // not_found_response
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn test_not_found_response_status_and_body() {
+        let resp = not_found_response("image not found");
+        assert_eq!(resp.status, "404 Not Found");
+        assert_eq!(resp.content_type, Some("application/problem+json"));
+
+        let v = parse_body(&resp);
+        assert_eq!(v["status"], 404);
+        assert_eq!(v["title"], "Not Found");
+        assert_eq!(v["detail"], "image not found");
+    }
+
+    // ---------------------------------------------------------------
+    // internal_error_response
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn test_internal_error_response_status_and_body() {
+        let resp = internal_error_response("disk full");
+        assert_eq!(resp.status, "500 Internal Server Error");
+
+        let v = parse_body(&resp);
+        assert_eq!(v["status"], 500);
+        assert_eq!(v["title"], "Internal Server Error");
+        assert_eq!(v["detail"], "disk full");
+    }
+
+    // ---------------------------------------------------------------
+    // forbidden_response
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn test_forbidden_response_status_and_body() {
+        let resp = forbidden_response("access denied");
+        assert_eq!(resp.status, "403 Forbidden");
+
+        let v = parse_body(&resp);
+        assert_eq!(v["status"], 403);
+        assert_eq!(v["title"], "Forbidden");
+        assert_eq!(v["detail"], "access denied");
+    }
+
+    // ---------------------------------------------------------------
+    // unsupported_media_type_response
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn test_unsupported_media_type_response() {
+        let resp = unsupported_media_type_response("image/gif is not supported");
+        assert_eq!(resp.status, "415 Unsupported Media Type");
+
+        let v = parse_body(&resp);
+        assert_eq!(v["status"], 415);
+        assert_eq!(v["title"], "Unsupported Media Type");
+    }
+
+    // ---------------------------------------------------------------
+    // not_acceptable_response
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn test_not_acceptable_response() {
+        let resp = not_acceptable_response("no acceptable format");
+        assert_eq!(resp.status, "406 Not Acceptable");
+
+        let v = parse_body(&resp);
+        assert_eq!(v["status"], 406);
+        assert_eq!(v["title"], "Not Acceptable");
+    }
+
+    // ---------------------------------------------------------------
+    // payload_too_large_response
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn test_payload_too_large_response() {
+        let resp = payload_too_large_response("exceeds 10MB limit");
+        assert_eq!(resp.status, "413 Payload Too Large");
+
+        let v = parse_body(&resp);
+        assert_eq!(v["status"], 413);
+        assert_eq!(v["title"], "Payload Too Large");
+        assert_eq!(v["detail"], "exceeds 10MB limit");
+    }
+
+    // ---------------------------------------------------------------
+    // bad_gateway_response
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn test_bad_gateway_response() {
+        let resp = bad_gateway_response("upstream error");
+        assert_eq!(resp.status, "502 Bad Gateway");
+
+        let v = parse_body(&resp);
+        assert_eq!(v["status"], 502);
+        assert_eq!(v["title"], "Bad Gateway");
+    }
+
+    // ---------------------------------------------------------------
+    // service_unavailable_response
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn test_service_unavailable_response() {
+        let resp = service_unavailable_response("overloaded");
+        assert_eq!(resp.status, "503 Service Unavailable");
+
+        let v = parse_body(&resp);
+        assert_eq!(v["status"], 503);
+        assert_eq!(v["title"], "Service Unavailable");
+    }
+
+    // ---------------------------------------------------------------
+    // too_many_redirects_response
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn test_too_many_redirects_response() {
+        let resp = too_many_redirects_response("redirect loop");
+        assert_eq!(resp.status, "508 Loop Detected");
+
+        let v = parse_body(&resp);
+        assert_eq!(v["status"], 508);
+        assert_eq!(v["title"], "Loop Detected");
+    }
+
+    // ---------------------------------------------------------------
+    // not_implemented_response
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn test_not_implemented_response() {
+        let resp = not_implemented_response("feature unavailable");
+        assert_eq!(resp.status, "501 Not Implemented");
+
+        let v = parse_body(&resp);
+        assert_eq!(v["status"], 501);
+        assert_eq!(v["title"], "Not Implemented");
+        assert_eq!(v["detail"], "feature unavailable");
+    }
+
+    // ---------------------------------------------------------------
+    // signed_url_unauthorized_response
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn test_signed_url_unauthorized_response_no_www_authenticate() {
+        let resp = signed_url_unauthorized_response("bad signature");
+        assert_eq!(resp.status, "401 Unauthorized");
+        assert_eq!(resp.content_type, Some("application/problem+json"));
+        // Unlike auth_required_response, this should NOT have WWW-Authenticate.
+        assert!(resp.headers.is_empty());
+
+        let v = parse_body(&resp);
+        assert_eq!(v["status"], 401);
+        assert_eq!(v["detail"], "bad signature");
+    }
+
+    // ---------------------------------------------------------------
+    // auth_required_response - WWW-Authenticate header
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn test_auth_required_response_includes_www_authenticate_header() {
+        let resp = auth_required_response("token required");
+        assert_eq!(resp.status, "401 Unauthorized");
+        assert_eq!(resp.content_type, Some("application/problem+json"));
+
+        let www_auth = resp
+            .headers
+            .iter()
+            .find(|(name, _)| *name == "WWW-Authenticate");
+        assert!(www_auth.is_some(), "must include WWW-Authenticate header");
+        assert_eq!(www_auth.unwrap().1, "Bearer");
+
+        let v = parse_body(&resp);
+        assert_eq!(v["status"], 401);
+        assert_eq!(v["title"], "Unauthorized");
+        assert_eq!(v["detail"], "token required");
+    }
+
+    // ---------------------------------------------------------------
+    // transform_error_response
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn test_transform_error_response_invalid_input() {
+        let resp = transform_error_response(TransformError::InvalidInput("bad input".into()));
+        assert_eq!(resp.status, "400 Bad Request");
+        let v = parse_body(&resp);
+        assert_eq!(v["detail"], "bad input");
+    }
+
+    #[test]
+    fn test_transform_error_response_invalid_options() {
+        let resp = transform_error_response(TransformError::InvalidOptions("bad opts".into()));
+        assert_eq!(resp.status, "400 Bad Request");
+        let v = parse_body(&resp);
+        assert_eq!(v["detail"], "bad opts");
+    }
+
+    #[test]
+    fn test_transform_error_response_decode_failed() {
+        let resp = transform_error_response(TransformError::DecodeFailed("corrupt".into()));
+        assert_eq!(resp.status, "400 Bad Request");
+        let v = parse_body(&resp);
+        assert_eq!(v["detail"], "corrupt");
+    }
+
+    #[test]
+    fn test_transform_error_response_unsupported_input_media_type() {
+        let resp = transform_error_response(TransformError::UnsupportedInputMediaType(
+            "image/gif".into(),
+        ));
+        assert_eq!(resp.status, "415 Unsupported Media Type");
+        let v = parse_body(&resp);
+        assert_eq!(v["detail"], "image/gif");
+    }
+
+    #[test]
+    fn test_transform_error_response_unsupported_output_media_type() {
+        let resp =
+            transform_error_response(TransformError::UnsupportedOutputMediaType(MediaType::Bmp));
+        assert_eq!(resp.status, "415 Unsupported Media Type");
+        let v = parse_body(&resp);
+        assert_eq!(v["detail"], "output format `bmp` is not supported");
+    }
+
+    #[test]
+    fn test_transform_error_response_encode_failed() {
+        let resp = transform_error_response(TransformError::EncodeFailed("out of memory".into()));
+        assert_eq!(resp.status, "500 Internal Server Error");
+        let v = parse_body(&resp);
+        assert_eq!(
+            v["detail"],
+            "failed to encode transformed artifact: out of memory"
+        );
+    }
+
+    #[test]
+    fn test_transform_error_response_capability_missing() {
+        let resp = transform_error_response(TransformError::CapabilityMissing(
+            "AVIF not compiled".into(),
+        ));
+        assert_eq!(resp.status, "501 Not Implemented");
+        let v = parse_body(&resp);
+        assert_eq!(v["detail"], "AVIF not compiled");
+    }
+
+    #[test]
+    fn test_transform_error_response_limit_exceeded() {
+        let resp = transform_error_response(TransformError::LimitExceeded("too large".into()));
+        assert_eq!(resp.status, "413 Payload Too Large");
+        let v = parse_body(&resp);
+        assert_eq!(v["detail"], "too large");
+    }
+
+    // ---------------------------------------------------------------
+    // map_source_io_error
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn test_map_source_io_error_not_found() {
+        let err = io::Error::new(io::ErrorKind::NotFound, "no such file");
+        let resp = map_source_io_error(err);
+        assert_eq!(resp.status, "404 Not Found");
+        let v = parse_body(&resp);
+        assert_eq!(v["detail"], "source artifact was not found");
+    }
+
+    #[test]
+    fn test_map_source_io_error_permission_denied() {
+        let err = io::Error::new(io::ErrorKind::PermissionDenied, "forbidden");
+        let resp = map_source_io_error(err);
+        assert_eq!(resp.status, "500 Internal Server Error");
+        let v = parse_body(&resp);
+        let detail = v["detail"].as_str().unwrap();
+        assert!(
+            detail.starts_with("failed to access source artifact:"),
+            "detail should describe the IO error, got: {detail}"
+        );
+    }
+
+    #[test]
+    fn test_map_source_io_error_other() {
+        let err = io::Error::new(io::ErrorKind::ConnectionRefused, "refused");
+        let resp = map_source_io_error(err);
+        assert_eq!(resp.status, "500 Internal Server Error");
+    }
+
+    // ---------------------------------------------------------------
+    // NOT_FOUND_BODY constant
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn test_not_found_body_is_valid_rfc7807_json() {
+        let v: Value = serde_json::from_str(NOT_FOUND_BODY).expect("NOT_FOUND_BODY is valid JSON");
+        assert_eq!(v["type"], "about:blank");
+        assert_eq!(v["title"], "Not Found");
+        assert_eq!(v["status"], 404);
+        assert_eq!(v["detail"], "not found");
+    }
+
+    // ---------------------------------------------------------------
+    // HttpResponse constructors
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn test_http_response_json_constructor() {
+        let resp = HttpResponse::json("200 OK", b"{}".to_vec());
+        assert_eq!(resp.status, "200 OK");
+        assert_eq!(resp.content_type, Some("application/json"));
+        assert!(resp.headers.is_empty());
+        assert_eq!(resp.body, b"{}");
+    }
+
+    #[test]
+    fn test_http_response_problem_constructor() {
+        let resp = HttpResponse::problem("400 Bad Request", b"err".to_vec());
+        assert_eq!(resp.content_type, Some("application/problem+json"));
+        assert!(resp.headers.is_empty());
+    }
+
+    #[test]
+    fn test_http_response_empty_constructor() {
+        let headers = vec![("X-Custom", "val".to_string())];
+        let resp = HttpResponse::empty("204 No Content", headers);
+        assert_eq!(resp.status, "204 No Content");
+        assert!(resp.content_type.is_none());
+        assert!(resp.body.is_empty());
+        assert_eq!(resp.headers.len(), 1);
+    }
+
+    #[test]
+    fn test_http_response_text_constructor() {
+        let resp = HttpResponse::text("200 OK", "text/plain", b"hello".to_vec());
+        assert_eq!(resp.content_type, Some("text/plain"));
+        assert_eq!(resp.body, b"hello");
+    }
+
+    #[test]
+    fn test_http_response_binary_with_headers_constructor() {
+        let headers = vec![("Cache-Control", "no-cache".to_string())];
+        let resp =
+            HttpResponse::binary_with_headers("200 OK", "image/png", headers, vec![0x89, 0x50]);
+        assert_eq!(resp.content_type, Some("image/png"));
+        assert_eq!(resp.headers.len(), 1);
+        assert_eq!(resp.body, vec![0x89, 0x50]);
+    }
+
+    // ---------------------------------------------------------------
+    // RFC 7807: all problem responses use about:blank type
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn test_all_problem_responses_use_about_blank_type() {
+        let responses = vec![
+            bad_request_response("x"),
+            not_found_response("x"),
+            internal_error_response("x"),
+            forbidden_response("x"),
+            unsupported_media_type_response("x"),
+            not_acceptable_response("x"),
+            payload_too_large_response("x"),
+            bad_gateway_response("x"),
+            service_unavailable_response("x"),
+            too_many_redirects_response("x"),
+            not_implemented_response("x"),
+            auth_required_response("x"),
+            signed_url_unauthorized_response("x"),
+        ];
+
+        for resp in &responses {
+            assert_eq!(
+                resp.content_type,
+                Some("application/problem+json"),
+                "response with status '{}' should use problem+json content type",
+                resp.status
+            );
+            let v = parse_body(resp);
+            assert_eq!(
+                v["type"], "about:blank",
+                "response with status '{}' should use about:blank type",
+                resp.status
+            );
+        }
+    }
+}

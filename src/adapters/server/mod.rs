@@ -74,7 +74,7 @@ use uuid::Uuid;
 /// Rust's `std::io::Stderr` type whose internal `ReentrantLock` can interfere
 /// with `MutexGuard` drop ordering in Rust 2024 edition, breaking HTTP
 /// keep-alive.
-fn stderr_write(msg: &str) {
+pub(crate) fn stderr_write(msg: &str) {
     use std::io::Write;
 
     let bytes = msg.as_bytes();
@@ -712,6 +712,7 @@ const REQUEST_DEADLINE_SECS: u64 = 60;
 const WATERMARK_DEFAULT_POSITION: Position = Position::BottomRight;
 const WATERMARK_DEFAULT_OPACITY: u8 = 50;
 const WATERMARK_DEFAULT_MARGIN: u32 = 10;
+const WATERMARK_MAX_MARGIN: u32 = 9999;
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, rename_all = "camelCase", deny_unknown_fields)]
@@ -766,6 +767,11 @@ fn validate_watermark_payload(
         ));
     }
     let margin = wm.margin.unwrap_or(WATERMARK_DEFAULT_MARGIN);
+    if margin > WATERMARK_MAX_MARGIN {
+        return Err(bad_request_response(
+            "watermark.margin must be at most 9999",
+        ));
+    }
 
     Ok(Some(ValidatedWatermarkPayload {
         url: url.to_string(),
@@ -823,6 +829,11 @@ fn resolve_multipart_watermark(
         ));
     }
     let margin = margin.unwrap_or(WATERMARK_DEFAULT_MARGIN);
+    if margin > WATERMARK_MAX_MARGIN {
+        return Err(bad_request_response(
+            "watermark_margin must be at most 9999",
+        ));
+    }
     Ok(WatermarkInput {
         image: artifact,
         position,

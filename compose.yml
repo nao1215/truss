@@ -11,6 +11,11 @@ services:
       # - TRUSS_TRANSFORM_DEADLINE_SECS=30
     volumes:
       - ./images:/data:ro
+    healthcheck:
+      test: ["CMD-SHELL", "printf 'GET /health/live HTTP/1.1\\r\\nHost: localhost\\r\\n\\r\\n' | nc localhost 8080 | head -1 | grep -q '200 OK'"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
     read_only: true
     security_opt:
       - no-new-privileges:true

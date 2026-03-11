@@ -178,7 +178,7 @@ pub(super) fn read_s3_source_bytes(
             let mut limited = output.body.into_async_read().take(MAX_SOURCE_BYTES + 1);
             let mut buf = Vec::with_capacity(capacity_hint);
             limited.read_to_end(&mut buf).await.map_err(|e| {
-                eprintln!("s3 error: failed to read object body: {e}");
+                super::stderr_write(&format!("s3 error: failed to read object body: {e}"));
                 bad_gateway_response("failed to read S3 object body")
             })?;
 
@@ -193,7 +193,9 @@ pub(super) fn read_s3_source_bytes(
         match result {
             Ok(inner) => inner,
             Err(_) => {
-                eprintln!("s3 error: download timed out after {timeout_secs}s");
+                super::stderr_write(&format!(
+                    "s3 error: download timed out after {timeout_secs}s"
+                ));
                 Err(bad_gateway_response("object storage download timed out"))
             }
         }
@@ -249,11 +251,11 @@ fn map_s3_get_object_error(
                     "object storage authentication failed — check credentials",
                 );
             }
-            eprintln!("s3 error: {err}");
+            super::stderr_write(&format!("s3 error: {err}"));
             bad_gateway_response("object storage returned an error")
         }
         _ => {
-            eprintln!("s3 error: {err}");
+            super::stderr_write(&format!("s3 error: {err}"));
             bad_gateway_response("object storage request failed")
         }
     }

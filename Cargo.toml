@@ -61,6 +61,11 @@ azure_storage_blob = { version = "0.9", optional = true }
 azure_core = { version = "0.32", optional = true }
 futures = { version = "0.3", optional = true }
 
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+
 [dev-dependencies]
 aws-smithy-runtime-api = "1"
 aws-smithy-types = "1"

@@ -180,7 +180,9 @@ pub(super) fn read_azure_source_bytes(
             let client =
                 azure_storage_blob::BlobClient::new(&ctx.endpoint_url, container, key, None, None)
                     .map_err(|e| {
-                        eprintln!("azure error: failed to create blob client: {e}");
+                        super::stderr_write(&format!(
+                            "azure error: failed to create blob client: {e}"
+                        ));
                         bad_gateway_response("failed to create Azure blob client")
                     })?;
 
@@ -208,7 +210,7 @@ pub(super) fn read_azure_source_bytes(
             futures::pin_mut!(body);
             while let Some(chunk) = body.next().await {
                 let chunk = chunk.map_err(|e| {
-                    eprintln!("azure error: failed to read blob body: {e}");
+                    super::stderr_write(&format!("azure error: failed to read blob body: {e}"));
                     bad_gateway_response("failed to read Azure blob body")
                 })?;
                 buf.extend_from_slice(&chunk);
@@ -224,7 +226,9 @@ pub(super) fn read_azure_source_bytes(
         match result {
             Ok(inner) => inner,
             Err(_) => {
-                eprintln!("azure error: download timed out after {timeout_secs}s");
+                super::stderr_write(&format!(
+                    "azure error: download timed out after {timeout_secs}s"
+                ));
                 Err(bad_gateway_response("object storage download timed out"))
             }
         }
@@ -272,7 +276,7 @@ fn map_azure_error(err: azure_core::Error) -> HttpResponse {
             );
         }
     }
-    eprintln!("azure error: {err}");
+    super::stderr_write(&format!("azure error: {err}"));
     bad_gateway_response("object storage returned an error")
 }
 

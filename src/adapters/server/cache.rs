@@ -227,7 +227,11 @@ impl OriginCache {
 
     /// Returns the sharded file path for the given URL and namespace.
     fn entry_path(&self, namespace: &str, url: &str) -> PathBuf {
-        let key = hex::encode(Sha256::digest(format!("{namespace}:{url}").as_bytes()));
+        let mut hasher = Sha256::new();
+        hasher.update(namespace.as_bytes());
+        hasher.update(b":");
+        hasher.update(url.as_bytes());
+        let key = hex::encode(hasher.finalize());
         let a = &key[0..2];
         let b = &key[2..4];
         let c = &key[4..6];
@@ -310,6 +314,8 @@ pub(super) fn compute_cache_key(
     negotiated_accept: Option<&str>,
     watermark_identity: Option<&str>,
 ) -> String {
+    use std::fmt::Write;
+
     let mut canonical = String::new();
     canonical.push_str(source_identifier);
     canonical.push('\n');
@@ -322,62 +328,71 @@ pub(super) fn compute_cache_key(
     // distinction does not produce different cache keys for identical transforms.
     let has_bounded_resize = options.width.is_some() && options.height.is_some();
 
-    let mut params: Vec<(&str, String)> = Vec::new();
-    if options.auto_orient {
-        params.push(("autoOrient", "true".to_string()));
-    }
-    if let Some(bg) = &options.background {
-        params.push((
-            "background",
-            format!("{:02x}{:02x}{:02x}{:02x}", bg.r, bg.g, bg.b, bg.a),
-        ));
-    }
-    if let Some(blur) = options.blur {
-        params.push(("blur", format!("{blur}")));
-    }
-    if let Some(crop) = options.crop {
-        params.push(("crop", crop.to_string()));
-    }
-    if has_bounded_resize {
-        let fit = options.fit.unwrap_or(Fit::Contain);
-        params.push(("fit", fit.as_name().to_string()));
-    }
-    if let Some(format) = options.format {
-        params.push(("format", format.as_name().to_string()));
-    }
-    if let Some(h) = options.height {
-        params.push(("height", h.to_string()));
-    }
-    if has_bounded_resize {
-        let pos = options.position.unwrap_or(Position::Center);
-        params.push(("position", pos.as_name().to_string()));
-    }
-    if options.preserve_exif {
-        params.push(("preserveExif", "true".to_string()));
-    }
-    if let Some(q) = options.quality {
-        params.push(("quality", q.to_string()));
-    }
-    if options.rotate != Rotation::Deg0 {
-        params.push(("rotate", options.rotate.as_degrees().to_string()));
-    }
-    if let Some(sharpen) = options.sharpen {
-        params.push(("sharpen", format!("{sharpen}")));
-    }
-    if options.strip_metadata {
-        params.push(("stripMetadata", "true".to_string()));
-    }
-    if let Some(w) = options.width {
-        params.push(("width", w.to_string()));
-    }
-    // Keys are inserted in alphabetical order above, so no sort is needed.
-    for (i, (k, v)) in params.iter().enumerate() {
-        if i > 0 {
+    let mut first = true;
+    let mut push_param = |canonical: &mut String, k: &str, v: &str| {
+        if !first {
             canonical.push('&');
         }
+        first = false;
         canonical.push_str(k);
         canonical.push('=');
         canonical.push_str(v);
+    };
+
+    if options.auto_orient {
+        push_param(&mut canonical, "autoOrient", "true");
+    }
+    if let Some(bg) = &options.background {
+        let mut buf = String::new();
+        let _ = write!(buf, "{:02x}{:02x}{:02x}{:02x}", bg.r, bg.g, bg.b, bg.a);
+        push_param(&mut canonical, "background", &buf);
+    }
+    if let Some(blur) = options.blur {
+        let mut buf = String::new();
+        let _ = write!(buf, "{blur}");
+        push_param(&mut canonical, "blur", &buf);
+    }
+    if let Some(crop) = options.crop {
+        let buf = crop.to_string();
+        push_param(&mut canonical, "crop", &buf);
+    }
+    if has_bounded_resize {
+        let fit = options.fit.unwrap_or(Fit::Contain);
+        push_param(&mut canonical, "fit", fit.as_name());
+    }
+    if let Some(format) = options.format {
+        push_param(&mut canonical, "format", format.as_name());
+    }
+    if let Some(h) = options.height {
+        let buf = h.to_string();
+        push_param(&mut canonical, "height", &buf);
+    }
+    if has_bounded_resize {
+        let pos = options.position.unwrap_or(Position::Center);
+        push_param(&mut canonical, "position", pos.as_name());
+    }
+    if options.preserve_exif {
+        push_param(&mut canonical, "preserveExif", "true");
+    }
+    if let Some(q) = options.quality {
+        let buf = q.to_string();
+        push_param(&mut canonical, "quality", &buf);
+    }
+    if options.rotate != Rotation::Deg0 {
+        let buf = options.rotate.as_degrees().to_string();
+        push_param(&mut canonical, "rotate", &buf);
+    }
+    if let Some(sharpen) = options.sharpen {
+        let mut buf = String::new();
+        let _ = write!(buf, "{sharpen}");
+        push_param(&mut canonical, "sharpen", &buf);
+    }
+    if options.strip_metadata {
+        push_param(&mut canonical, "stripMetadata", "true");
+    }
+    if let Some(w) = options.width {
+        let buf = w.to_string();
+        push_param(&mut canonical, "width", &buf);
     }
 
     canonical.push('\n');
@@ -403,16 +418,16 @@ pub(super) fn compute_watermark_identity(
     opacity: u8,
     margin: u32,
 ) -> String {
-    let mut input = String::new();
-    input.push_str("watermark\n");
-    input.push_str(url);
-    input.push('\n');
-    input.push_str(position);
-    input.push('\n');
-    input.push_str(&opacity.to_string());
-    input.push('\n');
-    input.push_str(&margin.to_string());
-    hex::encode(Sha256::digest(input.as_bytes()))
+    let mut hasher = Sha256::new();
+    hasher.update(b"watermark\n");
+    hasher.update(url.as_bytes());
+    hasher.update(b"\n");
+    hasher.update(position.as_bytes());
+    hasher.update(b"\n");
+    hasher.update(opacity.to_string().as_bytes());
+    hasher.update(b"\n");
+    hasher.update(margin.to_string().as_bytes());
+    hex::encode(hasher.finalize())
 }
 
 pub(super) fn compute_watermark_content_identity(
@@ -421,16 +436,16 @@ pub(super) fn compute_watermark_content_identity(
     opacity: u8,
     margin: u32,
 ) -> String {
-    let mut input = String::new();
-    input.push_str("watermark-content\n");
-    input.push_str(content_hash);
-    input.push('\n');
-    input.push_str(position);
-    input.push('\n');
-    input.push_str(&opacity.to_string());
-    input.push('\n');
-    input.push_str(&margin.to_string());
-    hex::encode(Sha256::digest(input.as_bytes()))
+    let mut hasher = Sha256::new();
+    hasher.update(b"watermark-content\n");
+    hasher.update(content_hash.as_bytes());
+    hasher.update(b"\n");
+    hasher.update(position.as_bytes());
+    hasher.update(b"\n");
+    hasher.update(opacity.to_string().as_bytes());
+    hasher.update(b"\n");
+    hasher.update(margin.to_string().as_bytes());
+    hex::encode(hasher.finalize())
 }
 
 /// Attempts a cache lookup using a version-based source hash, which avoids reading

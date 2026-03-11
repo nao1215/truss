@@ -313,3 +313,632 @@ pub(super) fn parse_multipart_part_name(
         "multipart Content-Disposition header must include a name parameter",
     ))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::http_parse::HttpRequest;
+    use super::*;
+
+    // ---------------------------------------------------------------------------
+    // Helpers
+    // ---------------------------------------------------------------------------
+
+    fn make_request(content_type: Option<&str>) -> HttpRequest {
+        let mut headers = Vec::new();
+        if let Some(ct) = content_type {
+            headers.push(("content-type".to_string(), ct.to_string()));
+        }
+        HttpRequest {
+            method: "POST".to_string(),
+            target: "/upload".to_string(),
+            version: "HTTP/1.1".to_string(),
+            headers,
+            body: Vec::new(),
+        }
+    }
+
+    /// Builds a raw multipart body from parts.
+    /// Each entry is (name, content_type (optional), body bytes).
+    fn build_multipart_body(boundary: &str, parts: &[(&str, Option<&str>, &[u8])]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        for (name, ct, body) in parts {
+            buf.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+            buf.extend_from_slice(
+                format!("Content-Disposition: form-data; name=\"{name}\"\r\n").as_bytes(),
+            );
+            if let Some(ct) = ct {
+                buf.extend_from_slice(format!("Content-Type: {ct}\r\n").as_bytes());
+            }
+            buf.extend_from_slice(b"\r\n");
+            buf.extend_from_slice(body);
+            buf.extend_from_slice(b"\r\n");
+        }
+        buf.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+        buf
+    }
+
+    // ---------------------------------------------------------------------------
+    // parse_multipart_boundary
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_boundary_valid() {
+        let req = make_request(Some("multipart/form-data; boundary=abc123"));
+        let boundary = parse_multipart_boundary(&req).unwrap();
+        assert_eq!(boundary, "abc123");
+    }
+
+    #[test]
+    fn test_parse_boundary_quoted() {
+        let req = make_request(Some("multipart/form-data; boundary=\"abc123\""));
+        let boundary = parse_multipart_boundary(&req).unwrap();
+        assert_eq!(boundary, "abc123");
+    }
+
+    #[test]
+    fn test_parse_boundary_case_insensitive_media_type() {
+        let req = make_request(Some("Multipart/Form-Data; boundary=xyz"));
+        let boundary = parse_multipart_boundary(&req).unwrap();
+        assert_eq!(boundary, "xyz");
+    }
+
+    #[test]
+    fn test_parse_boundary_case_insensitive_param_name() {
+        let req = make_request(Some("multipart/form-data; Boundary=xyz"));
+        let boundary = parse_multipart_boundary(&req).unwrap();
+        assert_eq!(boundary, "xyz");
+    }
+
+    #[test]
+    fn test_parse_boundary_missing_content_type() {
+        let req = make_request(None);
+        let err = parse_multipart_boundary(&req).unwrap_err();
+        assert_eq!(err.status, "415 Unsupported Media Type");
+    }
+
+    #[test]
+    fn test_parse_boundary_wrong_media_type() {
+        let req = make_request(Some("application/json"));
+        let err = parse_multipart_boundary(&req).unwrap_err();
+        assert_eq!(err.status, "415 Unsupported Media Type");
+    }
+
+    #[test]
+    fn test_parse_boundary_missing_boundary_param() {
+        let req = make_request(Some("multipart/form-data; charset=utf-8"));
+        let err = parse_multipart_boundary(&req).unwrap_err();
+        assert_eq!(err.status, "400 Bad Request");
+    }
+
+    #[test]
+    fn test_parse_boundary_empty_boundary() {
+        let req = make_request(Some("multipart/form-data; boundary="));
+        let err = parse_multipart_boundary(&req).unwrap_err();
+        assert_eq!(err.status, "400 Bad Request");
+    }
+
+    #[test]
+    fn test_parse_boundary_empty_quoted_boundary() {
+        let req = make_request(Some("multipart/form-data; boundary=\"\""));
+        let err = parse_multipart_boundary(&req).unwrap_err();
+        assert_eq!(err.status, "400 Bad Request");
+    }
+
+    #[test]
+    fn test_parse_boundary_malformed_param_no_equals() {
+        let req = make_request(Some("multipart/form-data; boundary"));
+        let err = parse_multipart_boundary(&req).unwrap_err();
+        assert_eq!(err.status, "400 Bad Request");
+    }
+
+    // ---------------------------------------------------------------------------
+    // parse_part_headers
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_part_headers_valid() {
+        let input = b"Content-Disposition: form-data; name=\"file\"\r\nContent-Type: image/png";
+        let headers = parse_part_headers(input).unwrap();
+        assert_eq!(headers.len(), 2);
+        assert_eq!(headers[0].0, "content-disposition");
+        assert_eq!(headers[1].0, "content-type");
+        assert_eq!(headers[1].1, "image/png");
+    }
+
+    #[test]
+    fn test_parse_part_headers_empty() {
+        let headers = parse_part_headers(b"").unwrap();
+        assert!(headers.is_empty());
+    }
+
+    #[test]
+    fn test_parse_part_headers_invalid_utf8() {
+        let input: &[u8] = &[0xff, 0xfe, 0xfd];
+        let err = parse_part_headers(input).unwrap_err();
+        assert_eq!(err.status, "400 Bad Request");
+    }
+
+    // ---------------------------------------------------------------------------
+    // parse_multipart_part_name
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_part_name_valid() {
+        let headers = vec![(
+            "content-disposition".to_string(),
+            "form-data; name=\"file\"".to_string(),
+        )];
+        let name = parse_multipart_part_name(&headers).unwrap();
+        assert_eq!(name, "file");
+    }
+
+    #[test]
+    fn test_parse_part_name_unquoted() {
+        let headers = vec![(
+            "content-disposition".to_string(),
+            "form-data; name=file".to_string(),
+        )];
+        let name = parse_multipart_part_name(&headers).unwrap();
+        assert_eq!(name, "file");
+    }
+
+    #[test]
+    fn test_parse_part_name_missing_disposition() {
+        let headers = vec![("content-type".to_string(), "image/png".to_string())];
+        let err = parse_multipart_part_name(&headers).unwrap_err();
+        assert_eq!(err.status, "400 Bad Request");
+    }
+
+    #[test]
+    fn test_parse_part_name_not_form_data() {
+        let headers = vec![(
+            "content-disposition".to_string(),
+            "attachment; name=\"file\"".to_string(),
+        )];
+        let err = parse_multipart_part_name(&headers).unwrap_err();
+        assert_eq!(err.status, "400 Bad Request");
+    }
+
+    #[test]
+    fn test_parse_part_name_missing_name_param() {
+        let headers = vec![(
+            "content-disposition".to_string(),
+            "form-data; filename=\"test.png\"".to_string(),
+        )];
+        let err = parse_multipart_part_name(&headers).unwrap_err();
+        assert_eq!(err.status, "400 Bad Request");
+    }
+
+    #[test]
+    fn test_parse_part_name_empty_name() {
+        let headers = vec![(
+            "content-disposition".to_string(),
+            "form-data; name=\"\"".to_string(),
+        )];
+        let err = parse_multipart_part_name(&headers).unwrap_err();
+        assert_eq!(err.status, "400 Bad Request");
+    }
+
+    #[test]
+    fn test_parse_part_name_malformed_param() {
+        let headers = vec![(
+            "content-disposition".to_string(),
+            "form-data; name".to_string(),
+        )];
+        let err = parse_multipart_part_name(&headers).unwrap_err();
+        assert_eq!(err.status, "400 Bad Request");
+    }
+
+    // ---------------------------------------------------------------------------
+    // parse_multipart_form_data
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_form_data_single_part() {
+        let boundary = "BOUNDARY";
+        let body = build_multipart_body(boundary, &[("file", Some("image/png"), b"PNG_DATA")]);
+        let parts = parse_multipart_form_data(&body, boundary).unwrap();
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0].name, "file");
+        assert_eq!(parts[0].content_type.as_deref(), Some("image/png"));
+        assert_eq!(&body[parts[0].body_range.clone()], b"PNG_DATA");
+    }
+
+    #[test]
+    fn test_parse_form_data_multiple_parts() {
+        let boundary = "----WebKitBoundary";
+        let body = build_multipart_body(
+            boundary,
+            &[
+                ("file", Some("image/jpeg"), b"\xff\xd8\xff"),
+                ("options", Some("application/json"), b"{\"width\":100}"),
+            ],
+        );
+        let parts = parse_multipart_form_data(&body, boundary).unwrap();
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0].name, "file");
+        assert_eq!(&body[parts[0].body_range.clone()], b"\xff\xd8\xff");
+        assert_eq!(parts[1].name, "options");
+        assert_eq!(&body[parts[1].body_range.clone()], b"{\"width\":100}",);
+    }
+
+    #[test]
+    fn test_parse_form_data_empty_body_part() {
+        let boundary = "bnd";
+        let body = build_multipart_body(boundary, &[("file", None, b"")]);
+        let parts = parse_multipart_form_data(&body, boundary).unwrap();
+        assert_eq!(parts.len(), 1);
+        assert!(parts[0].body_range.is_empty());
+    }
+
+    #[test]
+    fn test_parse_form_data_no_content_type() {
+        let boundary = "bnd";
+        let body = build_multipart_body(boundary, &[("field", None, b"value")]);
+        let parts = parse_multipart_form_data(&body, boundary).unwrap();
+        assert_eq!(parts.len(), 1);
+        assert!(parts[0].content_type.is_none());
+    }
+
+    #[test]
+    fn test_parse_form_data_does_not_start_with_boundary() {
+        let body = b"garbage\r\n--bnd\r\nContent-Disposition: form-data; name=\"x\"\r\n\r\nval\r\n--bnd--\r\n";
+        let err = parse_multipart_form_data(body, "bnd").unwrap_err();
+        assert_eq!(err.status, "400 Bad Request");
+    }
+
+    #[test]
+    fn test_parse_form_data_missing_header_terminator() {
+        let body = b"--bnd\r\nContent-Disposition: form-data; name=\"x\"";
+        let err = parse_multipart_form_data(body, "bnd").unwrap_err();
+        assert_eq!(err.status, "400 Bad Request");
+    }
+
+    #[test]
+    fn test_parse_form_data_missing_closing_boundary() {
+        let body = b"--bnd\r\nContent-Disposition: form-data; name=\"x\"\r\n\r\ndata";
+        let err = parse_multipart_form_data(body, "bnd").unwrap_err();
+        assert_eq!(err.status, "400 Bad Request");
+    }
+
+    #[test]
+    fn test_parse_form_data_trailing_data_after_close() {
+        // Build body with trailing garbage after the closing boundary.
+        let body =
+            b"--bnd\r\nContent-Disposition: form-data; name=\"x\"\r\n\r\nval\r\n--bnd--GARBAGE";
+        let err = parse_multipart_form_data(body, "bnd").unwrap_err();
+        assert_eq!(err.status, "400 Bad Request");
+    }
+
+    #[test]
+    fn test_parse_form_data_no_crlf_after_boundary() {
+        let body = b"--bndContent-Disposition: form-data; name=\"x\"\r\n\r\nval\r\n--bnd--\r\n";
+        let err = parse_multipart_form_data(body, "bnd").unwrap_err();
+        assert_eq!(err.status, "400 Bad Request");
+    }
+
+    #[test]
+    fn test_parse_form_data_boundary_inside_binary_payload() {
+        // The boundary string appears inside the payload but is NOT followed
+        // by \r\n or --, so the parser must not treat it as a real delimiter.
+        let boundary = "bnd";
+        let payload = b"some\r\n--bndNOT_A_REAL_BOUNDARY data";
+        let body = build_multipart_body(boundary, &[("file", None, payload)]);
+        let parts = parse_multipart_form_data(&body, boundary).unwrap();
+        assert_eq!(parts.len(), 1);
+        assert_eq!(&body[parts[0].body_range.clone()], payload);
+    }
+
+    #[test]
+    fn test_parse_form_data_only_closing_boundary() {
+        // A body that starts with the closing boundary (no parts at all).
+        let body = b"--bnd--\r\n";
+        let parts = parse_multipart_form_data(body, "bnd").unwrap();
+        assert!(parts.is_empty());
+    }
+
+    // ---------------------------------------------------------------------------
+    // parse_upload_request
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn test_upload_request_file_only() {
+        let boundary = "b";
+        let file_bytes = b"FAKE_IMAGE_DATA";
+        let body = build_multipart_body(boundary, &[("file", Some("image/png"), file_bytes)]);
+        let (data, opts, watermark) = parse_upload_request(&body, boundary).unwrap();
+        assert_eq!(data, file_bytes);
+        assert_eq!(opts, TransformOptions::default());
+        assert!(watermark.is_none());
+    }
+
+    #[test]
+    fn test_upload_request_file_with_options() {
+        let boundary = "b";
+        let options_json = br#"{"width":200,"height":100}"#;
+        let body = build_multipart_body(
+            boundary,
+            &[
+                ("file", Some("image/png"), b"IMG"),
+                ("options", Some("application/json"), options_json),
+            ],
+        );
+        let (data, opts, _) = parse_upload_request(&body, boundary).unwrap();
+        assert_eq!(data, b"IMG");
+        assert_eq!(opts.width, Some(200));
+        assert_eq!(opts.height, Some(100));
+    }
+
+    #[test]
+    fn test_upload_request_file_with_empty_options() {
+        let boundary = "b";
+        let body = build_multipart_body(
+            boundary,
+            &[
+                ("file", Some("image/png"), b"IMG"),
+                ("options", Some("application/json"), b""),
+            ],
+        );
+        let (_, opts, _) = parse_upload_request(&body, boundary).unwrap();
+        assert_eq!(opts, TransformOptions::default());
+    }
+
+    #[test]
+    fn test_upload_request_missing_file() {
+        let boundary = "b";
+        let body = build_multipart_body(boundary, &[("options", Some("application/json"), b"{}")]);
+        let err = parse_upload_request(&body, boundary).unwrap_err();
+        assert_eq!(err.status, "400 Bad Request");
+        assert!(String::from_utf8_lossy(&err.body).contains("file"));
+    }
+
+    #[test]
+    fn test_upload_request_empty_file() {
+        let boundary = "b";
+        let body = build_multipart_body(boundary, &[("file", Some("image/png"), b"")]);
+        let err = parse_upload_request(&body, boundary).unwrap_err();
+        assert_eq!(err.status, "400 Bad Request");
+        assert!(String::from_utf8_lossy(&err.body).contains("empty"));
+    }
+
+    #[test]
+    fn test_upload_request_duplicate_file() {
+        let boundary = "b";
+        let body = build_multipart_body(
+            boundary,
+            &[
+                ("file", Some("image/png"), b"IMG1"),
+                ("file", Some("image/png"), b"IMG2"),
+            ],
+        );
+        let err = parse_upload_request(&body, boundary).unwrap_err();
+        assert_eq!(err.status, "400 Bad Request");
+        assert!(String::from_utf8_lossy(&err.body).contains("multiple"));
+    }
+
+    #[test]
+    fn test_upload_request_duplicate_options() {
+        let boundary = "b";
+        let body = build_multipart_body(
+            boundary,
+            &[
+                ("file", Some("image/png"), b"IMG"),
+                ("options", Some("application/json"), b"{}"),
+                ("options", Some("application/json"), b"{}"),
+            ],
+        );
+        let err = parse_upload_request(&body, boundary).unwrap_err();
+        assert_eq!(err.status, "400 Bad Request");
+        assert!(String::from_utf8_lossy(&err.body).contains("multiple"));
+    }
+
+    #[test]
+    fn test_upload_request_options_wrong_content_type() {
+        let boundary = "b";
+        let body = build_multipart_body(
+            boundary,
+            &[
+                ("file", Some("image/png"), b"IMG"),
+                ("options", Some("text/plain"), b"{}"),
+            ],
+        );
+        let err = parse_upload_request(&body, boundary).unwrap_err();
+        assert_eq!(err.status, "400 Bad Request");
+        assert!(String::from_utf8_lossy(&err.body).contains("application/json"));
+    }
+
+    #[test]
+    fn test_upload_request_options_invalid_json() {
+        let boundary = "b";
+        let body = build_multipart_body(
+            boundary,
+            &[
+                ("file", Some("image/png"), b"IMG"),
+                ("options", Some("application/json"), b"NOT JSON"),
+            ],
+        );
+        let err = parse_upload_request(&body, boundary).unwrap_err();
+        assert_eq!(err.status, "400 Bad Request");
+        assert!(String::from_utf8_lossy(&err.body).contains("JSON"));
+    }
+
+    #[test]
+    fn test_upload_request_unsupported_field() {
+        let boundary = "b";
+        let body = build_multipart_body(
+            boundary,
+            &[
+                ("file", Some("image/png"), b"IMG"),
+                ("unknown_field", None, b"value"),
+            ],
+        );
+        let err = parse_upload_request(&body, boundary).unwrap_err();
+        assert_eq!(err.status, "400 Bad Request");
+        assert!(String::from_utf8_lossy(&err.body).contains("unknown_field"));
+    }
+
+    #[test]
+    fn test_upload_request_orphaned_watermark_position() {
+        let boundary = "b";
+        let body = build_multipart_body(
+            boundary,
+            &[
+                ("file", Some("image/png"), b"IMG"),
+                ("watermark_position", None, b"center"),
+            ],
+        );
+        let err = parse_upload_request(&body, boundary).unwrap_err();
+        assert_eq!(err.status, "400 Bad Request");
+        assert!(String::from_utf8_lossy(&err.body).contains("watermark"));
+    }
+
+    #[test]
+    fn test_upload_request_orphaned_watermark_opacity() {
+        let boundary = "b";
+        let body = build_multipart_body(
+            boundary,
+            &[
+                ("file", Some("image/png"), b"IMG"),
+                ("watermark_opacity", None, b"50"),
+            ],
+        );
+        let err = parse_upload_request(&body, boundary).unwrap_err();
+        assert_eq!(err.status, "400 Bad Request");
+    }
+
+    #[test]
+    fn test_upload_request_orphaned_watermark_margin() {
+        let boundary = "b";
+        let body = build_multipart_body(
+            boundary,
+            &[
+                ("file", Some("image/png"), b"IMG"),
+                ("watermark_margin", None, b"10"),
+            ],
+        );
+        let err = parse_upload_request(&body, boundary).unwrap_err();
+        assert_eq!(err.status, "400 Bad Request");
+    }
+
+    #[test]
+    fn test_upload_request_duplicate_watermark_position() {
+        let boundary = "b";
+        let body = build_multipart_body(
+            boundary,
+            &[
+                ("file", Some("image/png"), b"IMG"),
+                ("watermark_position", None, b"center"),
+                ("watermark_position", None, b"top-left"),
+            ],
+        );
+        let err = parse_upload_request(&body, boundary).unwrap_err();
+        assert_eq!(err.status, "400 Bad Request");
+        assert!(String::from_utf8_lossy(&err.body).contains("multiple"));
+    }
+
+    #[test]
+    fn test_upload_request_duplicate_watermark_opacity() {
+        let boundary = "b";
+        let body = build_multipart_body(
+            boundary,
+            &[
+                ("file", Some("image/png"), b"IMG"),
+                ("watermark_opacity", None, b"50"),
+                ("watermark_opacity", None, b"75"),
+            ],
+        );
+        let err = parse_upload_request(&body, boundary).unwrap_err();
+        assert_eq!(err.status, "400 Bad Request");
+    }
+
+    #[test]
+    fn test_upload_request_duplicate_watermark_margin() {
+        let boundary = "b";
+        let body = build_multipart_body(
+            boundary,
+            &[
+                ("file", Some("image/png"), b"IMG"),
+                ("watermark_margin", None, b"10"),
+                ("watermark_margin", None, b"20"),
+            ],
+        );
+        let err = parse_upload_request(&body, boundary).unwrap_err();
+        assert_eq!(err.status, "400 Bad Request");
+    }
+
+    #[test]
+    fn test_upload_request_watermark_opacity_not_integer() {
+        let boundary = "b";
+        let body = build_multipart_body(
+            boundary,
+            &[
+                ("file", Some("image/png"), b"IMG"),
+                ("watermark_opacity", None, b"abc"),
+            ],
+        );
+        let err = parse_upload_request(&body, boundary).unwrap_err();
+        assert_eq!(err.status, "400 Bad Request");
+        assert!(String::from_utf8_lossy(&err.body).contains("integer"));
+    }
+
+    #[test]
+    fn test_upload_request_watermark_margin_not_integer() {
+        let boundary = "b";
+        let body = build_multipart_body(
+            boundary,
+            &[
+                ("file", Some("image/png"), b"IMG"),
+                ("watermark_margin", None, b"xyz"),
+            ],
+        );
+        let err = parse_upload_request(&body, boundary).unwrap_err();
+        assert_eq!(err.status, "400 Bad Request");
+        assert!(String::from_utf8_lossy(&err.body).contains("integer"));
+    }
+
+    #[test]
+    fn test_upload_request_empty_watermark() {
+        let boundary = "b";
+        let body = build_multipart_body(
+            boundary,
+            &[
+                ("file", Some("image/png"), b"IMG"),
+                ("watermark", Some("image/png"), b""),
+            ],
+        );
+        let err = parse_upload_request(&body, boundary).unwrap_err();
+        assert_eq!(err.status, "400 Bad Request");
+        assert!(String::from_utf8_lossy(&err.body).contains("empty"));
+    }
+
+    #[test]
+    fn test_upload_request_duplicate_watermark() {
+        let boundary = "b";
+        let body = build_multipart_body(
+            boundary,
+            &[
+                ("file", Some("image/png"), b"IMG"),
+                ("watermark", Some("image/png"), b"WM1"),
+                ("watermark", Some("image/png"), b"WM2"),
+            ],
+        );
+        let err = parse_upload_request(&body, boundary).unwrap_err();
+        assert_eq!(err.status, "400 Bad Request");
+        assert!(String::from_utf8_lossy(&err.body).contains("multiple"));
+    }
+
+    #[test]
+    fn test_upload_request_options_no_content_type_is_ok() {
+        // When options part has no Content-Type header, it should still be parsed as JSON.
+        let boundary = "b";
+        let body = build_multipart_body(
+            boundary,
+            &[
+                ("file", Some("image/png"), b"IMG"),
+                ("options", None, b"{\"width\":50}"),
+            ],
+        );
+        let (_, opts, _) = parse_upload_request(&body, boundary).unwrap();
+        assert_eq!(opts.width, Some(50));
+    }
+}
