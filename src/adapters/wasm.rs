@@ -5,8 +5,9 @@
 //! reusing the shared transformation pipeline.
 
 use crate::{
-    Artifact, MediaType, Position, RawArtifact, Rgba8, Rotation, TransformError, TransformOptions,
-    TransformRequest, TransformResult, WatermarkInput, sniff_artifact, transform_raster,
+    Artifact, CropRegion, MediaType, Position, RawArtifact, Rgba8, Rotation, TransformError,
+    TransformOptions, TransformRequest, TransformResult, WatermarkInput, sniff_artifact,
+    transform_raster,
 };
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
@@ -46,6 +47,8 @@ pub struct WasmTransformOptions {
     pub keep_metadata: Option<bool>,
     /// Whether only EXIF metadata should be retained.
     pub preserve_exif: Option<bool>,
+    /// Explicit crop region as `x,y,w,h`.
+    pub crop: Option<String>,
     /// Gaussian blur sigma (0.1–100.0).
     pub blur: Option<f32>,
     /// Sharpen sigma (0.1–100.0).
@@ -196,6 +199,16 @@ fn parse_wasm_options(options: WasmTransformOptions) -> Result<TransformOptions,
         })
         .transpose()?;
 
+    let crop = options
+        .crop
+        .as_deref()
+        .map(|v| {
+            CropRegion::from_str(v).map_err(|reason| {
+                TransformError::InvalidOptions(format!("crop is invalid: {reason}"))
+            })
+        })
+        .transpose()?;
+
     Ok(TransformOptions {
         width: options.width,
         height: options.height,
@@ -208,6 +221,7 @@ fn parse_wasm_options(options: WasmTransformOptions) -> Result<TransformOptions,
         auto_orient: options.auto_orient.unwrap_or(true),
         strip_metadata,
         preserve_exif,
+        crop,
         blur: options.blur,
         sharpen: options.sharpen,
         deadline: None,
@@ -687,6 +701,35 @@ mod tests {
         assert_eq!(wm.position, Position::BottomRight);
         assert_eq!(wm.opacity, 50);
         assert_eq!(wm.margin, 10);
+    }
+
+    #[test]
+    fn parse_wasm_options_parses_crop() {
+        let options = parse_wasm_options(WasmTransformOptions {
+            crop: Some("10,20,100,200".to_string()),
+            ..WasmTransformOptions::default()
+        })
+        .expect("valid crop should parse");
+
+        let crop = options.crop.expect("crop should be set");
+        assert_eq!(crop.x, 10);
+        assert_eq!(crop.y, 20);
+        assert_eq!(crop.width, 100);
+        assert_eq!(crop.height, 200);
+    }
+
+    #[test]
+    fn parse_wasm_options_rejects_invalid_crop() {
+        let error = parse_wasm_options(WasmTransformOptions {
+            crop: Some("bad".to_string()),
+            ..WasmTransformOptions::default()
+        })
+        .expect_err("invalid crop should fail");
+
+        assert!(
+            matches!(error, TransformError::InvalidOptions(ref msg) if msg.contains("crop")),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]

@@ -50,9 +50,13 @@ jobs:
           path: /tmp/truss.tar
           retention-days: 1
 
-  api-integration:
+  integration:
     needs: build-image
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [api, s3, gcs, azure]
     steps:
       - uses: actions/checkout@v6
 
@@ -63,9 +67,9 @@ jobs:
 
       - run: docker load -i /tmp/truss.tar
 
-      - name: Run API integration tests
+      - name: Run ${{ matrix.service }} integration tests
         run: |
-          cd integration/api
+          cd integration/${{ matrix.service }}
           docker compose up --no-build --abort-on-container-exit --exit-code-from runn
         timeout-minutes: 10
         env:
@@ -74,86 +78,5 @@ jobs:
       - name: Cleanup
         if: always()
         run: |
-          cd integration/api
-          docker compose down --volumes --remove-orphans
-
-  s3-integration:
-    needs: build-image
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: truss-image
-          path: /tmp
-
-      - run: docker load -i /tmp/truss.tar
-
-      - name: Run S3 integration tests
-        run: |
-          cd integration/s3
-          docker compose up --no-build --abort-on-container-exit --exit-code-from runn
-        timeout-minutes: 10
-        env:
-          TRUSS_IMAGE: truss:local
-
-      - name: Cleanup
-        if: always()
-        run: |
-          cd integration/s3
-          docker compose down --volumes --remove-orphans
-
-  gcs-integration:
-    needs: build-image
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: truss-image
-          path: /tmp
-
-      - run: docker load -i /tmp/truss.tar
-
-      - name: Run GCS integration tests
-        run: |
-          cd integration/gcs
-          docker compose up --no-build --abort-on-container-exit --exit-code-from runn
-        timeout-minutes: 10
-        env:
-          TRUSS_IMAGE: truss:local
-
-      - name: Cleanup
-        if: always()
-        run: |
-          cd integration/gcs
-          docker compose down --volumes --remove-orphans
-
-  azure-integration:
-    needs: build-image
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: truss-image
-          path: /tmp
-
-      - run: docker load -i /tmp/truss.tar
-
-      - name: Run Azure integration tests
-        run: |
-          cd integration/azure
-          docker compose up --no-build --abort-on-container-exit --exit-code-from runn
-        timeout-minutes: 10
-        env:
-          TRUSS_IMAGE: truss:local
-
-      - name: Cleanup
-        if: always()
-        run: |
-          cd integration/azure
+          cd integration/${{ matrix.service }}
           docker compose down --volumes --remove-orphans

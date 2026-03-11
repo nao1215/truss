@@ -189,12 +189,17 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Download binary artifacts
+      - name: Download x86_64 Linux binary
         uses: actions/download-artifact@v4
         with:
-          pattern: "binary-*"
+          name: binary-x86_64-unknown-linux-gnu
           path: binaries
-          merge-multiple: true
+
+      - name: Download aarch64 Linux binary
+        uses: actions/download-artifact@v4
+        with:
+          name: binary-aarch64-unknown-linux-gnu
+          path: binaries
 
       - name: Prepare platform binaries
         run: |

@@ -46,8 +46,8 @@ use response::{
 };
 
 use crate::{
-    Fit, MediaType, Position, RawArtifact, Rgba8, Rotation, TransformOptions, TransformRequest,
-    WatermarkInput, sniff_artifact, transform_raster, transform_svg,
+    CropRegion, Fit, MediaType, Position, RawArtifact, Rgba8, Rotation, TransformOptions,
+    TransformRequest, WatermarkInput, sniff_artifact, transform_raster, transform_svg,
 };
 use hmac::{Hmac, Mac};
 use serde::Deserialize;
@@ -271,9 +271,25 @@ pub struct ServerConfig {
     /// authority that clients sign.
     pub public_base_url: Option<String>,
     /// The expected key identifier for public signed GET requests.
+    ///
+    /// Deprecated in favor of `signing_keys`. Retained for backward compatibility:
+    /// when set alongside `signed_url_secret`, the pair is automatically inserted
+    /// into `signing_keys`.
     pub signed_url_key_id: Option<String>,
     /// The shared secret used to verify public signed GET requests.
+    ///
+    /// Deprecated in favor of `signing_keys`. See `signed_url_key_id`.
     pub signed_url_secret: Option<String>,
+    /// Multiple signing keys for public signed GET requests (key rotation).
+    ///
+    /// Each entry maps a key identifier to its HMAC shared secret. During
+    /// verification the server looks up the `keyId` from the request in this
+    /// map and uses the corresponding secret for HMAC validation.
+    ///
+    /// Configurable via `TRUSS_SIGNING_KEYS` (JSON object `{"keyId":"secret", ...}`).
+    /// The legacy `TRUSS_SIGNED_URL_KEY_ID` / `TRUSS_SIGNED_URL_SECRET` pair is
+    /// merged into this map automatically.
+    pub signing_keys: HashMap<String, String>,
     /// Whether server-side URL sources may bypass private-network and port restrictions.
     ///
     /// This flag is intended for local development and automated tests where fixture servers
@@ -357,6 +373,7 @@ impl Clone for ServerConfig {
             public_base_url: self.public_base_url.clone(),
             signed_url_key_id: self.signed_url_key_id.clone(),
             signed_url_secret: self.signed_url_secret.clone(),
+            signing_keys: self.signing_keys.clone(),
             allow_insecure_url_sources: self.allow_insecure_url_sources,
             cache_root: self.cache_root.clone(),
             public_max_age_seconds: self.public_max_age_seconds,
@@ -394,6 +411,10 @@ impl fmt::Debug for ServerConfig {
             .field(
                 "signed_url_secret",
                 &self.signed_url_secret.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field(
+                "signing_keys",
+                &self.signing_keys.keys().collect::<Vec<_>>(),
             )
             .field(
                 "allow_insecure_url_sources",
@@ -440,6 +461,7 @@ impl PartialEq for ServerConfig {
             && self.public_base_url == other.public_base_url
             && self.signed_url_key_id == other.signed_url_key_id
             && self.signed_url_secret == other.signed_url_secret
+            && self.signing_keys == other.signing_keys
             && self.allow_insecure_url_sources == other.allow_insecure_url_sources
             && self.cache_root == other.cache_root
             && self.public_max_age_seconds == other.public_max_age_seconds
@@ -448,7 +470,7 @@ impl PartialEq for ServerConfig {
             && self.disable_accept_negotiation == other.disable_accept_negotiation
             && self.max_concurrent_transforms == other.max_concurrent_transforms
             && self.transform_deadline_secs == other.transform_deadline_secs
-            && self.presets.len() == other.presets.len()
+            && self.presets == other.presets
             && cfg_storage_eq(self, other)
     }
 }
@@ -529,6 +551,7 @@ impl ServerConfig {
             public_base_url: None,
             signed_url_key_id: None,
             signed_url_secret: None,
+            signing_keys: HashMap::new(),
             allow_insecure_url_sources: false,
             cache_root: None,
             public_max_age_seconds: DEFAULT_PUBLIC_MAX_AGE_SECONDS,
@@ -604,8 +627,21 @@ impl ServerConfig {
         key_id: impl Into<String>,
         secret: impl Into<String>,
     ) -> Self {
-        self.signed_url_key_id = Some(key_id.into());
-        self.signed_url_secret = Some(secret.into());
+        let key_id = key_id.into();
+        let secret = secret.into();
+        self.signing_keys.insert(key_id.clone(), secret.clone());
+        self.signed_url_key_id = Some(key_id);
+        self.signed_url_secret = Some(secret);
+        self
+    }
+
+    /// Returns a copy of the configuration with multiple signing keys attached.
+    ///
+    /// Each entry maps a key identifier to its HMAC shared secret. During key
+    /// rotation both old and new keys can be active simultaneously, allowing a
+    /// graceful cutover.
+    pub fn with_signing_keys(mut self, keys: HashMap<String, String>) -> Self {
+        self.signing_keys.extend(keys);
         self
     }
 
@@ -790,9 +826,33 @@ impl ServerConfig {
             ));
         }
 
-        if signed_url_key_id.is_some() && public_base_url.is_none() {
+        let mut signing_keys = HashMap::new();
+        if let (Some(kid), Some(sec)) = (&signed_url_key_id, &signed_url_secret) {
+            signing_keys.insert(kid.clone(), sec.clone());
+        }
+        if let Ok(json) = env::var("TRUSS_SIGNING_KEYS")
+            && !json.is_empty()
+        {
+            let extra: HashMap<String, String> = serde_json::from_str(&json).map_err(|e| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("TRUSS_SIGNING_KEYS must be valid JSON: {e}"),
+                )
+            })?;
+            for (kid, sec) in &extra {
+                if kid.is_empty() || sec.is_empty() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "TRUSS_SIGNING_KEYS must not contain empty key IDs or secrets",
+                    ));
+                }
+            }
+            signing_keys.extend(extra);
+        }
+
+        if !signing_keys.is_empty() && public_base_url.is_none() {
             eprintln!(
-                "truss: warning: TRUSS_SIGNED_URL_KEY_ID is set but TRUSS_PUBLIC_BASE_URL is not. \
+                "truss: warning: signing keys are configured but TRUSS_PUBLIC_BASE_URL is not. \
                  Behind a reverse proxy or CDN the Host header may differ from the externally \
                  visible authority, causing signed URL verification to fail. Consider setting \
                  TRUSS_PUBLIC_BASE_URL to the canonical external origin."
@@ -966,6 +1026,7 @@ impl ServerConfig {
             public_base_url,
             signed_url_key_id,
             signed_url_secret,
+            signing_keys,
             allow_insecure_url_sources,
             cache_root,
             public_max_age_seconds,
@@ -1471,6 +1532,7 @@ pub struct TransformOptionsPayload {
     pub auto_orient: Option<bool>,
     pub strip_metadata: Option<bool>,
     pub preserve_exif: Option<bool>,
+    pub crop: Option<String>,
     pub blur: Option<f32>,
     pub sharpen: Option<f32>,
 }
@@ -1491,6 +1553,7 @@ impl TransformOptionsPayload {
             auto_orient: overrides.auto_orient.or(self.auto_orient),
             strip_metadata: overrides.strip_metadata.or(self.strip_metadata),
             preserve_exif: overrides.preserve_exif.or(self.preserve_exif),
+            crop: overrides.crop.clone().or(self.crop),
             blur: overrides.blur.or(self.blur),
             sharpen: overrides.sharpen.or(self.sharpen),
         }
@@ -1522,6 +1585,7 @@ impl TransformOptionsPayload {
             auto_orient: self.auto_orient.unwrap_or(defaults.auto_orient),
             strip_metadata: self.strip_metadata.unwrap_or(defaults.strip_metadata),
             preserve_exif: self.preserve_exif.unwrap_or(defaults.preserve_exif),
+            crop: parse_optional_named(self.crop.as_deref(), "crop", CropRegion::from_str)?,
             blur: self.blur,
             sharpen: self.sharpen,
             deadline: defaults.deadline,
@@ -2286,6 +2350,7 @@ fn parse_public_get_request(
         auto_orient: parse_optional_bool_query(query, "autoOrient")?,
         strip_metadata: parse_optional_bool_query(query, "stripMetadata")?,
         preserve_exif: parse_optional_bool_query(query, "preserveExif")?,
+        crop: query.get("crop").cloned(),
         blur: parse_optional_float_query(query, "blur")?,
         sharpen: parse_optional_float_query(query, "sharpen")?,
     };
@@ -2626,30 +2691,29 @@ fn parse_optional_env_u32(name: &str) -> io::Result<Option<u32>> {
 }
 
 fn parse_presets_from_env() -> io::Result<HashMap<String, TransformOptionsPayload>> {
-    let json_str = if let Ok(path) = env::var("TRUSS_PRESETS_FILE") {
-        if !path.is_empty() {
-            std::fs::read_to_string(&path).map_err(|e| {
+    let (json_str, source) = match env::var("TRUSS_PRESETS_FILE")
+        .ok()
+        .filter(|v| !v.is_empty())
+    {
+        Some(path) => {
+            let content = std::fs::read_to_string(&path).map_err(|e| {
                 io::Error::new(
                     io::ErrorKind::InvalidInput,
                     format!("failed to read TRUSS_PRESETS_FILE `{path}`: {e}"),
                 )
-            })?
-        } else {
-            return Ok(HashMap::new());
+            })?;
+            (content, format!("TRUSS_PRESETS_FILE `{path}`"))
         }
-    } else if let Ok(value) = env::var("TRUSS_PRESETS") {
-        if value.is_empty() {
-            return Ok(HashMap::new());
-        }
-        value
-    } else {
-        return Ok(HashMap::new());
+        None => match env::var("TRUSS_PRESETS").ok().filter(|v| !v.is_empty()) {
+            Some(value) => (value, "TRUSS_PRESETS".to_string()),
+            None => return Ok(HashMap::new()),
+        },
     };
 
     serde_json::from_str::<HashMap<String, TransformOptionsPayload>>(&json_str).map_err(|e| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
-            format!("TRUSS_PRESETS must be valid JSON: {e}"),
+            format!("{source} must be valid JSON: {e}"),
         )
     })
 }
@@ -5636,5 +5700,61 @@ mod tests {
     fn cache_status_none_when_header_absent() {
         let headers: Vec<(&str, String)> = vec![("Content-Type", "image/png".to_string())];
         assert!(super::extract_cache_status(&headers).is_none());
+    }
+
+    #[test]
+    fn signing_keys_populated_by_with_signed_url_credentials() {
+        let config = ServerConfig::new(temp_dir("signing-keys-populated"), None)
+            .with_signed_url_credentials("key-alpha", "secret-alpha");
+
+        assert_eq!(
+            config.signing_keys.get("key-alpha").map(String::as_str),
+            Some("secret-alpha")
+        );
+    }
+
+    #[test]
+    fn authorize_signed_request_accepts_multiple_keys() {
+        let mut extra = HashMap::new();
+        extra.insert("key-beta".to_string(), "secret-beta".to_string());
+        let config = ServerConfig::new(temp_dir("multi-key-accept"), None)
+            .with_signed_url_credentials("key-alpha", "secret-alpha")
+            .with_signing_keys(extra);
+
+        // Sign with key-alpha
+        let request_alpha = signed_public_request(
+            "/images/by-path?path=%2Fimage.png&keyId=key-alpha&expires=4102444800&format=jpeg",
+            "assets.example.com",
+            "secret-alpha",
+        );
+        let query_alpha =
+            super::auth::parse_query_params(&request_alpha).expect("parse query alpha");
+        authorize_signed_request(&request_alpha, &query_alpha, &config)
+            .expect("key-alpha should be accepted");
+
+        // Sign with key-beta
+        let request_beta = signed_public_request(
+            "/images/by-path?path=%2Fimage.png&keyId=key-beta&expires=4102444800&format=jpeg",
+            "assets.example.com",
+            "secret-beta",
+        );
+        let query_beta = super::auth::parse_query_params(&request_beta).expect("parse query beta");
+        authorize_signed_request(&request_beta, &query_beta, &config)
+            .expect("key-beta should be accepted");
+    }
+
+    #[test]
+    fn authorize_signed_request_rejects_unknown_key() {
+        let config = ServerConfig::new(temp_dir("unknown-key-reject"), None)
+            .with_signed_url_credentials("key-alpha", "secret-alpha");
+
+        let request = signed_public_request(
+            "/images/by-path?path=%2Fimage.png&keyId=key-unknown&expires=4102444800&format=jpeg",
+            "assets.example.com",
+            "secret-unknown",
+        );
+        let query = super::auth::parse_query_params(&request).expect("parse query");
+        authorize_signed_request(&request, &query, &config)
+            .expect_err("unknown key should be rejected");
     }
 }

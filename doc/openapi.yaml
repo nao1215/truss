@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: Truss Image Server API
-  version: 0.5.0
+  version: 0.6.0
   description: |
     HTTP API for the Truss image toolkit.
 
@@ -87,12 +87,14 @@ paths:
         - $ref: '#/components/parameters/AutoOrient'
         - $ref: '#/components/parameters/StripMetadata'
         - $ref: '#/components/parameters/PreserveExif'
+        - $ref: '#/components/parameters/Crop'
         - $ref: '#/components/parameters/Blur'
         - $ref: '#/components/parameters/Sharpen'
         - $ref: '#/components/parameters/WatermarkUrl'
         - $ref: '#/components/parameters/WatermarkPosition'
         - $ref: '#/components/parameters/WatermarkOpacity'
         - $ref: '#/components/parameters/WatermarkMargin'
+        - $ref: '#/components/parameters/Preset'
       responses:
         '200':
           $ref: '#/components/responses/ImageBinary'
@@ -165,12 +167,14 @@ paths:
         - $ref: '#/components/parameters/AutoOrient'
         - $ref: '#/components/parameters/StripMetadata'
         - $ref: '#/components/parameters/PreserveExif'
+        - $ref: '#/components/parameters/Crop'
         - $ref: '#/components/parameters/Blur'
         - $ref: '#/components/parameters/Sharpen'
         - $ref: '#/components/parameters/WatermarkUrl'
         - $ref: '#/components/parameters/WatermarkPosition'
         - $ref: '#/components/parameters/WatermarkOpacity'
         - $ref: '#/components/parameters/WatermarkMargin'
+        - $ref: '#/components/parameters/Preset'
       responses:
         '200':
           $ref: '#/components/responses/ImageBinary'
@@ -329,7 +333,7 @@ paths:
               example:
                 status: ok
                 service: truss
-                version: 0.5.0
+                version: 0.6.0
                 uptimeSeconds: 3600
                 checks:
                   - name: storageRoot
@@ -357,7 +361,7 @@ paths:
               example:
                 status: ok
                 service: truss
-                version: 0.5.0
+                version: 0.6.0
 
   /health/ready:
     get:
@@ -688,6 +692,31 @@ components:
         type: boolean
         default: false
       example: false
+    Crop:
+      name: crop
+      in: query
+      required: false
+      description: |
+        Explicit pixel crop as `x,y,width,height`.
+        Applied after auto-orient and rotation but before resize.
+        The region must fit within the (possibly rotated) source dimensions.
+        Not supported for SVG inputs.
+      schema:
+        type: string
+        pattern: '^\d+,\d+,[1-9]\d*,[1-9]\d*$'
+      example: "100,50,800,600"
+    Preset:
+      name: preset
+      in: query
+      required: false
+      description: |
+        Name of a server-side transform preset.
+        Presets are defined via `TRUSS_PRESETS` or `TRUSS_PRESETS_FILE`.
+        Explicit query parameters override preset values.
+      schema:
+        type: string
+        minLength: 1
+      example: thumbnail
     Blur:
       name: blur
       in: query
@@ -904,6 +933,12 @@ components:
           type: boolean
           default: false
           description: Preserve EXIF only. Requires `stripMetadata=false`.
+        crop:
+          type: string
+          pattern: '^\d+,\d+,[1-9]\d*,[1-9]\d*$'
+          description: >-
+            Explicit pixel crop as `x,y,width,height`. Applied after auto-orient
+            and rotation but before resize. Not supported for SVG inputs.
         blur:
           type: number
           format: float
@@ -922,6 +957,11 @@ components:
             Sharpen sigma (0.1–100.0). Higher values produce stronger sharpening.
             Not supported for SVG inputs; the server will reject the request
             with an error if sharpen is specified for an SVG source.
+        preset:
+          type: string
+          minLength: 1
+          description: >-
+            Name of a server-side transform preset. Explicit fields override preset values.
       example:
         width: 1600
         height: 900

@@ -47,22 +47,19 @@ pub(super) fn authorize_signed_request(
     query: &BTreeMap<String, String>,
     config: &ServerConfig,
 ) -> Result<(), HttpResponse> {
-    let expected_key_id = config
-        .signed_url_key_id
-        .as_deref()
-        .ok_or_else(|| service_unavailable_response("public signed URL key is not configured"))?;
-    let secret = config.signed_url_secret.as_deref().ok_or_else(|| {
-        service_unavailable_response("public signed URL secret is not configured")
-    })?;
+    if config.signing_keys.is_empty() {
+        return Err(service_unavailable_response(
+            "public signed URL keys are not configured",
+        ));
+    }
     let key_id = required_auth_query_param(query, "keyId")?;
     let expires = required_auth_query_param(query, "expires")?;
     let signature = required_auth_query_param(query, "signature")?;
 
-    if key_id != expected_key_id {
-        return Err(signed_url_unauthorized_response(
-            "signed URL is invalid or expired",
-        ));
-    }
+    let secret = config
+        .signing_keys
+        .get(key_id)
+        .ok_or_else(|| signed_url_unauthorized_response("signed URL is invalid or expired"))?;
 
     let expires = expires.parse::<u64>().map_err(|_| {
         bad_request_response("query parameter `expires` must be a positive integer")
@@ -201,6 +198,9 @@ pub(super) fn extend_transform_query(
     if options.preserve_exif {
         query.insert("preserveExif".to_string(), "true".to_string());
     }
+    if let Some(crop) = options.crop {
+        query.insert("crop".to_string(), crop.to_string());
+    }
     if let Some(blur) = options.blur {
         query.insert("blur".to_string(), format!("{blur}"));
     }
@@ -242,6 +242,7 @@ pub(super) fn validate_public_query_names(
                 | "autoOrient"
                 | "stripMetadata"
                 | "preserveExif"
+                | "crop"
                 | "blur"
                 | "sharpen"
                 | "watermarkUrl"

@@ -1,7 +1,7 @@
 use crate::adapters::server::{self, ServerConfig, SignedUrlSource, sign_public_url};
 use crate::{
-    Fit, MediaType, Position, RawArtifact, Rgba8, Rotation, TransformOptions, TransformRequest,
-    WatermarkInput, sniff_artifact, transform_raster, transform_svg,
+    CropRegion, Fit, MediaType, Position, RawArtifact, Rgba8, Rotation, TransformOptions,
+    TransformRequest, WatermarkInput, sniff_artifact, transform_raster, transform_svg,
 };
 use clap::{CommandFactory, Parser, Subcommand};
 use std::fs;
@@ -121,6 +121,7 @@ OPTIONS:
       --strip-metadata     Remove all metadata (default)
       --keep-metadata      Preserve EXIF, ICC, and other supported metadata
       --preserve-exif      Preserve EXIF only (strip ICC and others)
+      --crop <x,y,w,h>     Explicit crop region as x,y,width,height (applied before resize; raster-only)
       --blur <SIGMA>       Gaussian blur sigma (0.1-100.0; raster-only, not supported for SVG inputs)
       --sharpen <SIGMA>    Sharpen sigma (0.1-100.0; raster-only, not supported for SVG inputs)
       --watermark <FILE>   Watermark image to composite onto the output (raster-only, not supported for SVG inputs)
@@ -183,8 +184,9 @@ ENVIRONMENT VARIABLES:
   TRUSS_STORAGE_ROOT                  Storage root override
   TRUSS_PUBLIC_BASE_URL               Public base URL override
   TRUSS_BEARER_TOKEN                  Private API authentication token
-  TRUSS_SIGNED_URL_KEY_ID             Signing key identifier
-  TRUSS_SIGNED_URL_SECRET             Signing shared secret
+  TRUSS_SIGNED_URL_KEY_ID             Signing key identifier (single-key shorthand)
+  TRUSS_SIGNED_URL_SECRET             Signing shared secret (single-key shorthand)
+  TRUSS_SIGNING_KEYS                  Multiple signing keys as JSON {\"keyId\":\"secret\",...}
   TRUSS_ALLOW_INSECURE_URL_SOURCES    Enable insecure URL sources
   TRUSS_CACHE_ROOT                    On-disk transform cache directory
   TRUSS_PRESETS                       Named transform presets as inline JSON
@@ -284,7 +286,7 @@ OPTIONAL:
       --version <VALUE>    Cache-busting version tag
       --width, --height, --fit, --position, --format, --quality,
       --background, --rotate, --auto-orient, --no-auto-orient,
-      --strip-metadata, --keep-metadata, --preserve-exif, --blur, --sharpen
+      --strip-metadata, --keep-metadata, --preserve-exif, --crop, --blur, --sharpen
       --watermark-url <URL>          Watermark image URL to embed in the signed URL
       --watermark-position <POS>     Watermark placement (default: bottom-right)
       --watermark-opacity <1-100>    Watermark opacity (default: 50)
@@ -417,6 +419,9 @@ struct ClapConvertArgs {
     /// Preserve EXIF only (strip ICC and others)
     #[arg(long)]
     preserve_exif: bool,
+    /// Explicit crop region as x,y,width,height
+    #[arg(long, value_parser = parse_crop)]
+    crop: Option<CropRegion>,
     /// Apply Gaussian blur (sigma: 0.1-100.0)
     #[arg(long, value_parser = parse_blur)]
     blur: Option<f32>,
@@ -540,6 +545,9 @@ struct ClapSignArgs {
     /// Preserve EXIF only
     #[arg(long)]
     preserve_exif: bool,
+    /// Explicit crop region as x,y,width,height
+    #[arg(long, value_parser = parse_crop)]
+    crop: Option<CropRegion>,
     /// Apply Gaussian blur (sigma: 0.1-100.0)
     #[arg(long, value_parser = parse_blur)]
     blur: Option<f32>,
@@ -588,6 +596,10 @@ fn parse_rotation(s: &str) -> Result<Rotation, String> {
 
 fn parse_background(s: &str) -> Result<Rgba8, String> {
     Rgba8::from_hex(s)
+}
+
+fn parse_crop(s: &str) -> Result<CropRegion, String> {
+    CropRegion::from_str(s)
 }
 
 fn parse_blur(s: &str) -> Result<f32, String> {
@@ -1092,6 +1104,7 @@ fn convert_from_clap(args: ClapConvertArgs) -> Result<Command, CliError> {
         strip_metadata: args.strip_metadata,
         keep_metadata: args.keep_metadata,
         preserve_exif: args.preserve_exif,
+        crop: args.crop,
         blur: args.blur,
         sharpen: args.sharpen,
     }
@@ -1210,6 +1223,7 @@ fn sign_from_clap(args: ClapSignArgs) -> Result<Command, CliError> {
         strip_metadata: args.strip_metadata,
         keep_metadata: args.keep_metadata,
         preserve_exif: args.preserve_exif,
+        crop: args.crop,
         blur: args.blur,
         sharpen: args.sharpen,
     }
@@ -1246,6 +1260,7 @@ struct TransformFields {
     strip_metadata: bool,
     keep_metadata: bool,
     preserve_exif: bool,
+    crop: Option<CropRegion>,
     blur: Option<f32>,
     sharpen: Option<f32>,
 }
@@ -1281,6 +1296,7 @@ impl TransformFields {
             auto_orient,
             strip_metadata,
             preserve_exif,
+            crop: self.crop,
             blur: self.blur,
             sharpen: self.sharpen,
             deadline: None,
@@ -1375,8 +1391,8 @@ fn execute_serve(command: ServeCommand) -> Result<(), CliError> {
     })?;
 
     // Signed URL verification status
-    let signed_url_enabled =
-        config.signed_url_key_id.is_some() && config.signed_url_secret.is_some();
+    let signed_url_enabled = !config.signing_keys.is_empty()
+        || (config.signed_url_key_id.is_some() && config.signed_url_secret.is_some());
     writeln!(
         stdout,
         "  signed URL verification: {}",
@@ -2694,6 +2710,32 @@ mod tests {
                 preset: None,
             })
         );
+    }
+
+    #[test]
+    fn parse_args_supports_sign_with_preset() {
+        let command = parse_args(vec![
+            "truss".to_string(),
+            "sign".to_string(),
+            "--base-url".to_string(),
+            "https://cdn.example.com".to_string(),
+            "--path".to_string(),
+            "/hero.jpg".to_string(),
+            "--key-id".to_string(),
+            "mykey".to_string(),
+            "--secret".to_string(),
+            "s3cret".to_string(),
+            "--expires".to_string(),
+            "1700000000".to_string(),
+            "--preset".to_string(),
+            "thumbnail".to_string(),
+        ])
+        .expect("parse sign with preset");
+
+        match command {
+            Command::Sign(s) => assert_eq!(s.preset.as_deref(), Some("thumbnail")),
+            _ => panic!("expected Sign command"),
+        }
     }
 
     #[test]

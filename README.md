@@ -2,7 +2,7 @@
 
 [![Build](https://github.com/nao1215/truss/actions/workflows/rust.yml/badge.svg)](https://github.com/nao1215/truss/actions/workflows/rust.yml)
 [![CLI Integration](https://github.com/nao1215/truss/actions/workflows/integration-cli.yml/badge.svg)](https://github.com/nao1215/truss/actions/workflows/integration-cli.yml)
-[![API Integration](https://github.com/nao1215/truss/actions/workflows/integration-api.yml/badge.svg)](https://github.com/nao1215/truss/actions/workflows/integration-api.yml)
+[![API Integration](https://github.com/nao1215/truss/actions/workflows/integration.yml/badge.svg)](https://github.com/nao1215/truss/actions/workflows/integration.yml)
 [![Crates.io](https://img.shields.io/crates/v/truss-image)](https://crates.io/crates/truss-image)
 [![Crates.io Downloads](https://img.shields.io/crates/d/truss-image)](https://crates.io/crates/truss-image)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
@@ -10,7 +10,7 @@
 
 ![logo](./doc/img/logo-small.png)
 
-Resize, convert, blur, sharpen, and watermark images from the CLI, an HTTP server, or the browser -- written in Rust with signed-URL authentication and SSRF protection built in.
+Resize, crop, convert, blur, sharpen, and watermark images from the CLI, an HTTP server, or the browser -- written in Rust with signed-URL authentication and SSRF protection built in.
 
 [Try the WASM demo in your browser](https://nao1215.github.io/truss/) -- no install, no upload, runs 100 % client-side.
 
@@ -42,7 +42,7 @@ Feature comparison with [imgproxy](https://github.com/imgproxy/imgproxy) and [im
 | SVG sanitization | Yes | Yes | No |
 | Smart crop | No | Yes | Yes |
 | Sharpen filter | Yes | Yes | Yes |
-| Crop / Trim / Padding | [Planned (#46)](https://github.com/nao1215/truss/issues/46) | Yes | Yes |
+| Crop / Trim / Padding | Yes | Yes | Yes |
 | S3  | Yes | Yes | Yes |
 | GCS | Yes | Yes | Yes |
 | Azure Blob Storage | Yes | Yes | No |
@@ -60,7 +60,7 @@ flowchart TB
 
     subgraph Core["Shared Rust core"]
         direction LR
-        Sniff["Detect format"] --> Transform["Resize / blur / sharpen / watermark"]
+        Sniff["Detect format"] --> Transform["Crop / resize / blur / sharpen / watermark"]
         Transform --> Encode["Encode output"]
     end
 
@@ -265,8 +265,9 @@ truss serve --bind 0.0.0.0:8080 --storage-root /var/images
 | Variable | Description |
 |------|------|
 | `TRUSS_PUBLIC_BASE_URL` | External base URL for signed-URL authority (for reverse proxy / CDN setups) |
-| `TRUSS_SIGNED_URL_KEY_ID` | Key ID for signed public URLs |
-| `TRUSS_SIGNED_URL_SECRET` | Shared secret for signed public URLs |
+| `TRUSS_SIGNING_KEYS` | JSON object mapping key IDs to secrets for signed URLs (e.g. `{"k1":"secret1","k2":"secret2"}`). Supports key rotation by accepting multiple keys simultaneously. |
+| `TRUSS_SIGNED_URL_KEY_ID` | Key ID for signed public URLs (legacy; merged into `TRUSS_SIGNING_KEYS` at startup) |
+| `TRUSS_SIGNED_URL_SECRET` | Shared secret for signed public URLs (legacy; merged into `TRUSS_SIGNING_KEYS` at startup) |
 | `TRUSS_CACHE_ROOT` | Directory for the transform cache; caching is disabled when unset |
 | `TRUSS_PUBLIC_MAX_AGE` | `Cache-Control: max-age` for public GET responses in seconds (default: `3600`) |
 | `TRUSS_PUBLIC_STALE_WHILE_REVALIDATE` | `Cache-Control: stale-while-revalidate` for public GET responses in seconds (default: `60`) |
@@ -411,7 +412,7 @@ CDN cache keys must vary by the signed-URL authentication inputs and any transfo
 
 - Authentication: `keyId`, `expires`, `signature`
 - Source: `path` or `url`, `version`
-- Transform: `width`, `height`, `fit`, `position`, `format`, `quality`, `background`, `rotate`, `autoOrient`, `stripMetadata`, `preserveExif`, `blur`, `sharpen`
+- Transform: `width`, `height`, `fit`, `position`, `format`, `quality`, `background`, `rotate`, `autoOrient`, `stripMetadata`, `preserveExif`, `crop`, `blur`, `sharpen`, `preset`
 
 This ensures that a cached response for one signed URL is not served to requests with different or expired signatures, and different transform options produce separate cache entries.
 
