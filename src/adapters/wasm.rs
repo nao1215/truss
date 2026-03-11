@@ -159,20 +159,7 @@ pub fn transform_browser_artifact(
 ) -> Result<WasmTransformResponse, TransformError> {
     let artifact = sniff_browser_artifact(input_bytes, declared_media_type)?;
     let options = parse_wasm_options(options)?;
-    let output = dispatch_browser_transform(artifact, options)?;
-    let TransformResult { artifact, warnings } = output;
-    let artifact_info = artifact_info(&artifact);
-    let suggested_extension = output_extension(artifact.media_type).to_string();
-
-    Ok(WasmTransformResponse {
-        bytes: artifact.bytes,
-        artifact: artifact_info,
-        warnings: warnings
-            .into_iter()
-            .map(|warning| warning.to_string())
-            .collect(),
-        suggested_extension,
-    })
+    build_transform_response(artifact, options, None)
 }
 
 fn sniff_browser_artifact(
@@ -252,13 +239,6 @@ fn parse_rotation(value: Option<u16>) -> Result<Rotation, TransformError> {
             "rotate is invalid: unsupported rotation `{other}`"
         ))),
     }
-}
-
-fn dispatch_browser_transform(
-    artifact: Artifact,
-    options: TransformOptions,
-) -> Result<TransformResult, TransformError> {
-    dispatch_browser_transform_with_watermark(artifact, options, None)
 }
 
 fn dispatch_browser_transform_with_watermark(
@@ -360,7 +340,7 @@ fn resolve_wasm_watermark(
     watermark_options: WasmWatermarkOptions,
 ) -> Result<WatermarkInput, TransformError> {
     let artifact = sniff_artifact(RawArtifact::new(watermark_bytes, None))?;
-    if artifact.media_type == MediaType::Svg {
+    if !artifact.media_type.is_raster() {
         return Err(TransformError::InvalidOptions(
             "watermark image must be a raster format, not SVG".to_string(),
         ));
@@ -401,7 +381,15 @@ pub fn transform_browser_artifact_with_watermark(
     let artifact = sniff_browser_artifact(input_bytes, declared_media_type)?;
     let options = parse_wasm_options(options)?;
     let watermark = resolve_wasm_watermark(watermark_bytes, watermark_options)?;
-    let output = dispatch_browser_transform_with_watermark(artifact, options, Some(watermark))?;
+    build_transform_response(artifact, options, Some(watermark))
+}
+
+fn build_transform_response(
+    artifact: Artifact,
+    options: TransformOptions,
+    watermark: Option<WatermarkInput>,
+) -> Result<WasmTransformResponse, TransformError> {
+    let output = dispatch_browser_transform_with_watermark(artifact, options, watermark)?;
     let TransformResult { artifact, warnings } = output;
     let artifact_info = artifact_info(&artifact);
     let suggested_extension = output_extension(artifact.media_type).to_string();
