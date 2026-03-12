@@ -178,10 +178,10 @@ truss photo.jpg -o watermarked.jpg \
 
 ```sh
 # Start the server (binary)
-truss serve --bind 0.0.0.0:8080 --storage-root ./images --bearer-token changeme
+TRUSS_BEARER_TOKEN=changeme truss serve --bind 0.0.0.0:8080 --storage-root ./images
 
 # Resize a local image to 400 px wide WebP in one request
-curl -X POST http://localhost:8080/images:transform \
+curl -X POST http://localhost:8080/images \
   -H "Authorization: Bearer changeme" \
   -F "file=@photo.jpg" \
   -F 'options={"format":"webp","width":400}' \
