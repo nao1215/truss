@@ -114,6 +114,8 @@ paths:
           $ref: '#/components/responses/PayloadTooLarge'
         '415':
           $ref: '#/components/responses/UnsupportedMediaType'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
         '500':
           $ref: '#/components/responses/InternalError'
         '501':
@@ -194,6 +196,8 @@ paths:
           $ref: '#/components/responses/PayloadTooLarge'
         '415':
           $ref: '#/components/responses/UnsupportedMediaType'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
         '500':
           $ref: '#/components/responses/InternalError'
         '501':
@@ -257,6 +261,8 @@ paths:
           $ref: '#/components/responses/PayloadTooLarge'
         '415':
           $ref: '#/components/responses/UnsupportedMediaType'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
         '500':
           $ref: '#/components/responses/InternalError'
         '501':
@@ -304,6 +310,8 @@ paths:
           $ref: '#/components/responses/PayloadTooLarge'
         '415':
           $ref: '#/components/responses/UnsupportedMediaType'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
         '500':
           $ref: '#/components/responses/InternalError'
         '501':
@@ -340,6 +348,7 @@ paths:
                     status: ok
                   - name: transformCapacity
                     status: ok
+                maxInputPixels: 40000000
 
   /health/live:
     get:
@@ -1113,6 +1122,11 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/HealthCheck'
+        maxInputPixels:
+          type: integer
+          format: int64
+          minimum: 1
+          description: Maximum input image pixel count allowed before decode.
     HealthCheck:
       type: object
       description: Individual dependency check result.
@@ -1269,6 +1283,12 @@ components:
             $ref: '#/components/schemas/ProblemDetail'
     PayloadTooLarge:
       description: Request body or remote source exceeds size limit
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetail'
+    UnprocessableEntity:
+      description: Input image exceeds the configured pixel limit (`TRUSS_MAX_INPUT_PIXELS`)
       content:
         application/problem+json:
           schema:

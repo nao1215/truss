@@ -106,6 +106,10 @@ pub(super) const DEFAULT_PUBLIC_STALE_WHILE_REVALIDATE_SECONDS: u32 = 60;
 /// Configurable at runtime via `TRUSS_TRANSFORM_DEADLINE_SECS`.
 pub(super) const DEFAULT_TRANSFORM_DEADLINE_SECS: u64 = 30;
 
+/// Default maximum number of input pixels allowed before decode.
+/// Configurable at runtime via `TRUSS_MAX_INPUT_PIXELS`.
+pub(super) const DEFAULT_MAX_INPUT_PIXELS: u64 = 40_000_000;
+
 /// Runtime configuration for the HTTP server adapter.
 ///
 /// The HTTP adapter keeps environment-specific concerns, such as the storage root and
@@ -195,6 +199,11 @@ pub struct ServerConfig {
     ///
     /// Configurable via `TRUSS_TRANSFORM_DEADLINE_SECS`. Defaults to 30.
     pub transform_deadline_secs: u64,
+    /// Maximum number of input pixels allowed before decode.
+    ///
+    /// Configurable via `TRUSS_MAX_INPUT_PIXELS`. Defaults to 40,000,000 (~40 MP).
+    /// Images exceeding this limit are rejected with 422 Unprocessable Entity.
+    pub max_input_pixels: u64,
     /// Per-server counter tracking the number of image transforms currently in
     /// flight.  This is runtime state (not configuration) but lives here so that
     /// each `serve_with_config` invocation gets an independent counter, avoiding
@@ -242,6 +251,7 @@ impl Clone for ServerConfig {
             log_handler: self.log_handler.clone(),
             max_concurrent_transforms: self.max_concurrent_transforms,
             transform_deadline_secs: self.transform_deadline_secs,
+            max_input_pixels: self.max_input_pixels,
             transforms_in_flight: Arc::clone(&self.transforms_in_flight),
             presets: self.presets.clone(),
             #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
@@ -293,6 +303,7 @@ impl fmt::Debug for ServerConfig {
             .field("log_handler", &self.log_handler.as_ref().map(|_| ".."))
             .field("max_concurrent_transforms", &self.max_concurrent_transforms)
             .field("transform_deadline_secs", &self.transform_deadline_secs)
+            .field("max_input_pixels", &self.max_input_pixels)
             .field("presets", &self.presets.keys().collect::<Vec<_>>());
         #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
         {
@@ -330,6 +341,7 @@ impl PartialEq for ServerConfig {
             && self.disable_accept_negotiation == other.disable_accept_negotiation
             && self.max_concurrent_transforms == other.max_concurrent_transforms
             && self.transform_deadline_secs == other.transform_deadline_secs
+            && self.max_input_pixels == other.max_input_pixels
             && self.presets == other.presets
             && cfg_storage_eq(self, other)
     }
@@ -420,6 +432,7 @@ impl ServerConfig {
             log_handler: None,
             max_concurrent_transforms: DEFAULT_MAX_CONCURRENT_TRANSFORMS,
             transform_deadline_secs: DEFAULT_TRANSFORM_DEADLINE_SECS,
+            max_input_pixels: DEFAULT_MAX_INPUT_PIXELS,
             transforms_in_flight: Arc::new(AtomicU64::new(0)),
             presets: HashMap::new(),
             #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
@@ -628,6 +641,9 @@ impl ServerConfig {
     ///   (default: 64, range: 1–1024). Requests exceeding this limit are rejected with 503.
     /// - `TRUSS_TRANSFORM_DEADLINE_SECS`: per-transform wall-clock deadline in seconds
     ///   (default: 30, range: 1–300). Transforms exceeding this deadline are cancelled.
+    /// - `TRUSS_MAX_INPUT_PIXELS`: maximum number of input image pixels allowed before decode
+    ///   (default: 40,000,000, range: 1–100,000,000). Images exceeding this limit are rejected
+    ///   with 422 Unprocessable Entity.
     /// - `TRUSS_STORAGE_TIMEOUT_SECS`: download timeout for storage backends in seconds
     ///   (default: 30, range: 1–300).
     ///
@@ -776,6 +792,31 @@ impl ServerConfig {
             None => DEFAULT_TRANSFORM_DEADLINE_SECS,
         };
 
+        let max_input_pixels = match env::var("TRUSS_MAX_INPUT_PIXELS")
+            .ok()
+            .filter(|v| !v.is_empty())
+        {
+            Some(value) => {
+                let n: u64 = value.parse().map_err(|_| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "TRUSS_MAX_INPUT_PIXELS must be a positive integer",
+                    )
+                })?;
+                if n == 0 || n > crate::MAX_DECODED_PIXELS {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!(
+                            "TRUSS_MAX_INPUT_PIXELS must be between 1 and {}",
+                            crate::MAX_DECODED_PIXELS
+                        ),
+                    ));
+                }
+                n
+            }
+            None => DEFAULT_MAX_INPUT_PIXELS,
+        };
+
         #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
         let storage_timeout_secs = match env::var("TRUSS_STORAGE_TIMEOUT_SECS")
             .ok()
@@ -895,6 +936,7 @@ impl ServerConfig {
             log_handler: None,
             max_concurrent_transforms,
             transform_deadline_secs,
+            max_input_pixels,
             transforms_in_flight: Arc::new(AtomicU64::new(0)),
             presets,
             #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]

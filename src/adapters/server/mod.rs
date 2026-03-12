@@ -1405,6 +1405,7 @@ fn handle_health(config: &ServerConfig) -> HttpResponse {
         "version": env!("CARGO_PKG_VERSION"),
         "uptimeSeconds": uptime_seconds(),
         "checks": checks,
+        "maxInputPixels": config.max_input_pixels,
     }))
     .expect("serialize health");
     body.push(b'\n');
@@ -1697,6 +1698,17 @@ fn transform_source_bytes_inner(
 
     if cache.is_some() {
         CACHE_MISSES_TOTAL.fetch_add(1, Ordering::Relaxed);
+    }
+
+    // Check input pixel count against the server-level limit before decode.
+    if let (Some(w), Some(h)) = (artifact.metadata.width, artifact.metadata.height) {
+        let pixels = u64::from(w) * u64::from(h);
+        if pixels > config.max_input_pixels {
+            return response::unprocessable_entity_response(&format!(
+                "input image has {pixels} pixels, server limit is {}",
+                config.max_input_pixels
+            ));
+        }
     }
 
     let is_svg = artifact.media_type == MediaType::Svg;

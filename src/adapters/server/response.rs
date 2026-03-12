@@ -145,6 +145,15 @@ pub(super) fn not_acceptable_response(message: &str) -> HttpResponse {
     problem_response("406 Not Acceptable", 406, "Not Acceptable", message)
 }
 
+pub(super) fn unprocessable_entity_response(message: &str) -> HttpResponse {
+    problem_response(
+        "422 Unprocessable Entity",
+        422,
+        "Unprocessable Entity",
+        message,
+    )
+}
+
 pub(super) fn payload_too_large_response(message: &str) -> HttpResponse {
     problem_response("413 Payload Too Large", 413, "Payload Too Large", message)
 }

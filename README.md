@@ -256,6 +256,7 @@ truss serve --bind 0.0.0.0:8080 --storage-root /var/images
 | `TRUSS_STORAGE_BACKEND` | `filesystem` (default), `s3`, `gcs`, or `azure` |
 | `TRUSS_MAX_CONCURRENT_TRANSFORMS` | Max concurrent transforms; excess requests receive 503 (default: `64`, range: 1-1024) |
 | `TRUSS_TRANSFORM_DEADLINE_SECS` | Per-transform deadline in seconds (default: `30`, range: 1-300) |
+| `TRUSS_MAX_INPUT_PIXELS` | Max input image pixels before decode; excess images receive 422 (default: `40000000`, range: 1-100000000) |
 | `TRUSS_STORAGE_TIMEOUT_SECS` | Download timeout for object storage backends in seconds (default: `30`, range: 1-300) |
 
 `TRUSS_STORAGE_BACKEND` selects the source for public `GET /images/by-path`. When set to `s3`, `gcs`, or `azure`, the `path` query parameter is used as the object key. Only one backend can be active at a time. Private endpoints can still use `kind: storage` regardless of this setting.
