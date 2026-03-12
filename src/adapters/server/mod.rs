@@ -1,3 +1,27 @@
+//! HTTP image-transform server.
+//!
+//! # Threading model
+//!
+//! The server uses **synchronous, blocking I/O** with one OS thread per TCP
+//! connection. This is a deliberate design choice, not a limitation:
+//!
+//! - **Simplicity:** No async runtime (tokio/async-std) dependency for the core
+//!   server. This reduces binary size, compile time, and cognitive overhead.
+//! - **Predictable resource usage:** Each connection consumes a fixed stack
+//!   allocation. There is no task queue, no hidden buffering, and no executor
+//!   scheduling overhead.
+//! - **Bounded concurrency:** `TRUSS_MAX_CONCURRENT_TRANSFORMS` (default 64)
+//!   caps the number of simultaneous image transforms via a semaphore-like
+//!   `TransformSlot` guard. Excess requests receive 503 Service Unavailable.
+//!
+//! **Trade-off:** Slow clients (slow uploads, slow TLS handshakes) block their
+//! thread for the duration of the connection. In production deployments, a
+//! reverse proxy (nginx, envoy, CloudFront) should handle slow-client buffering.
+//!
+//! This design may be reconsidered if the server needs to handle thousands of
+//! concurrent idle connections (e.g., WebSocket or SSE), but for a
+//! request-response image API the current model is sufficient.
+
 mod auth;
 #[cfg(feature = "azure")]
 pub mod azure;
@@ -9,6 +33,7 @@ mod http_parse;
 mod metrics;
 mod multipart;
 mod negotiate;
+mod rate_limit;
 mod remote;
 mod response;
 #[cfg(feature = "s3")]
@@ -48,8 +73,8 @@ use negotiate::{
 use remote::{read_remote_watermark_bytes, resolve_source_bytes};
 use response::{
     HttpResponse, NOT_FOUND_BODY, bad_request_response, service_unavailable_response,
-    transform_error_response, unsupported_media_type_response, write_response,
-    write_response_compressed,
+    too_many_requests_response, transform_error_response, unsupported_media_type_response,
+    write_response, write_response_compressed,
 };
 
 use crate::{
@@ -1242,6 +1267,11 @@ fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io::Result<()>
         config.log_warn(&format!("failed to set socket write timeout: {err}"));
     }
 
+    // Extract the peer IP once for rate limiting. If peer_addr fails
+    // (e.g. the socket was already closed), skip rate limiting for this
+    // connection rather than rejecting it.
+    let peer_ip = stream.peer_addr().ok().map(|addr| addr.ip());
+
     let mut requests_served: u64 = 0;
 
     loop {
@@ -1262,6 +1292,38 @@ fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io::Result<()>
 
         let request_id =
             extract_request_id(&partial.headers).unwrap_or_else(|| Uuid::new_v4().to_string());
+
+        // --- Per-IP rate limiting ---
+        if let (Some(limiter), Some(ip)) = (&config.rate_limiter, peer_ip)
+            && !limiter.check(ip)
+        {
+            let mut response = too_many_requests_response(
+                "rate limit exceeded — try again later",
+            );
+            response
+                .headers
+                .push(("X-Request-Id".to_string(), request_id.clone()));
+            record_http_metrics(RouteMetric::Unknown, response.status);
+            let sc = status_code(response.status).unwrap_or("unknown");
+            let method_log = partial.method.clone();
+            let path_log = partial.path().to_string();
+            let _ = write_response(&mut stream, response, true);
+            record_http_request_duration(RouteMetric::Unknown, start);
+            emit_access_log(
+                config,
+                &AccessLogEntry {
+                    request_id: &request_id,
+                    method: &method_log,
+                    path: &path_log,
+                    route: &path_log,
+                    status: sc,
+                    start,
+                    cache_status: None,
+                    watermark: false,
+                },
+            );
+            return Ok(());
+        }
 
         let client_wants_close = partial
             .headers
@@ -2143,7 +2205,11 @@ fn transform_source_bytes(
     let cache = config
         .cache_root
         .as_ref()
-        .map(|root| TransformCache::new(root.clone()).with_log_handler(config.log_handler.clone()));
+        .map(|root| {
+            TransformCache::new(root.clone())
+                .with_log_handler(config.log_handler.clone())
+                .with_max_bytes(config.cache_max_bytes)
+        });
 
     if let Some(ref cache) = cache
         && options.format.is_some()
@@ -2237,7 +2303,11 @@ fn transform_source_bytes_inner(
     };
     let negotiation_used =
         if options.format.is_none() && !response_config.disable_accept_negotiation {
-            match negotiate_output_format(request.header("accept"), &artifact) {
+            match negotiate_output_format(
+                request.header("accept"),
+                &artifact,
+                &config.format_preference,
+            ) {
                 Ok(Some(format)) => {
                     options.format = Some(format);
                     true
@@ -2778,7 +2848,7 @@ mod tests {
     #[test]
     fn negotiate_output_format_prefers_alpha_safe_formats_for_transparent_inputs() {
         let format =
-            negotiate_output_format(Some("image/jpeg,image/png"), &artifact_with_alpha(true))
+            negotiate_output_format(Some("image/jpeg,image/png"), &artifact_with_alpha(true), &[])
                 .expect("negotiate output format")
                 .expect("resolved output format");
 
@@ -2787,7 +2857,7 @@ mod tests {
 
     #[test]
     fn negotiate_output_format_prefers_avif_for_wildcard_accept() {
-        let format = negotiate_output_format(Some("image/*"), &artifact_with_alpha(false))
+        let format = negotiate_output_format(Some("image/*"), &artifact_with_alpha(false), &[])
             .expect("negotiate output format")
             .expect("resolved output format");
 

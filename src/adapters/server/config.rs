@@ -257,6 +257,15 @@ pub struct ServerConfig {
     /// are served from the cache instead of re-transforming. When `None`, caching is disabled
     /// and every request performs a fresh transform.
     pub cache_root: Option<PathBuf>,
+    /// Maximum total size (in bytes) of the on-disk transform cache.
+    ///
+    /// When set to a positive value, the cache performs LRU-style eviction after
+    /// each write: entries are sorted by modification time and the oldest are
+    /// removed until the total size drops below this limit.
+    ///
+    /// `0` (the default) means unlimited — no size-based eviction is performed.
+    /// Configurable via `TRUSS_CACHE_MAX_BYTES`.
+    pub cache_max_bytes: u64,
     /// `Cache-Control: max-age` value (in seconds) for public GET image responses.
     ///
     /// Defaults to `3600`. Operators can tune this
@@ -275,6 +284,15 @@ pub struct ServerConfig {
     /// disables Accept negotiation entirely: public GET requests that omit the `format`
     /// query parameter will preserve the input format instead of negotiating via Accept.
     pub disable_accept_negotiation: bool,
+    /// Preferred output format order for content negotiation.
+    ///
+    /// When the client's Accept header allows multiple formats with equal quality
+    /// values, the server picks the first format from this list that the client
+    /// accepts. An empty list uses the built-in default order (AVIF, WebP, JPEG/PNG).
+    ///
+    /// Configurable via `TRUSS_FORMAT_PREFERENCE` (comma-separated list of format
+    /// names, e.g. `"avif,webp,png,jpeg"`).
+    pub format_preference: Vec<crate::MediaType>,
     /// Optional logging callback for diagnostic messages.
     ///
     /// When set, the server routes all diagnostic messages (cache errors, connection
@@ -347,6 +365,18 @@ pub struct ServerConfig {
     /// Configurable via `TRUSS_RESPONSE_HEADERS` (JSON object `{"Header-Name": "value", ...}`).
     /// Validated at startup; invalid header names or values cause a startup error.
     pub custom_response_headers: Vec<(String, String)>,
+    /// Maximum size (in bytes) of a source image fetched from the filesystem or remote URL.
+    ///
+    /// Configurable via `TRUSS_MAX_SOURCE_BYTES`. Defaults to 100 MB.
+    pub max_source_bytes: u64,
+    /// Maximum size (in bytes) of a watermark image fetched from a remote URL.
+    ///
+    /// Configurable via `TRUSS_MAX_WATERMARK_BYTES`. Defaults to 10 MB.
+    pub max_watermark_bytes: u64,
+    /// Maximum number of HTTP redirects to follow when fetching a remote URL.
+    ///
+    /// Configurable via `TRUSS_MAX_REMOTE_REDIRECTS`. Defaults to 5.
+    pub max_remote_redirects: usize,
     /// Whether gzip compression is enabled for non-image responses.
     ///
     /// Configurable via `TRUSS_DISABLE_COMPRESSION`. Defaults to `true`.
@@ -375,6 +405,13 @@ pub struct ServerConfig {
     /// presets atomically. When `None` (inline `TRUSS_PRESETS` or no presets),
     /// hot-reload is disabled.
     pub presets_file_path: Option<PathBuf>,
+    /// Optional per-IP rate limiter.
+    ///
+    /// When `TRUSS_RATE_LIMIT_RPS` is set to a positive value, each client IP
+    /// is limited to that many requests per second using a token-bucket algorithm.
+    /// Burst size defaults to the RPS value but can be overridden via
+    /// `TRUSS_RATE_LIMIT_BURST`.  Disabled (no limiting) when unset or zero.
+    pub rate_limiter: Option<Arc<super::rate_limit::RateLimiter>>,
     /// Download timeout in seconds for object storage backends (S3, GCS, Azure).
     ///
     /// Configurable via `TRUSS_STORAGE_TIMEOUT_SECS`. Defaults to 30.
@@ -405,9 +442,11 @@ impl Clone for ServerConfig {
             signing_keys: self.signing_keys.clone(),
             allow_insecure_url_sources: self.allow_insecure_url_sources,
             cache_root: self.cache_root.clone(),
+            cache_max_bytes: self.cache_max_bytes,
             public_max_age_seconds: self.public_max_age_seconds,
             public_stale_while_revalidate_seconds: self.public_stale_while_revalidate_seconds,
             disable_accept_negotiation: self.disable_accept_negotiation,
+            format_preference: self.format_preference.clone(),
             log_handler: self.log_handler.clone(),
             log_level: Arc::clone(&self.log_level),
             max_concurrent_transforms: self.max_concurrent_transforms,
@@ -422,11 +461,15 @@ impl Clone for ServerConfig {
             shutdown_drain_secs: self.shutdown_drain_secs,
             draining: Arc::clone(&self.draining),
             custom_response_headers: self.custom_response_headers.clone(),
+            max_source_bytes: self.max_source_bytes,
+            max_watermark_bytes: self.max_watermark_bytes,
+            max_remote_redirects: self.max_remote_redirects,
             enable_compression: self.enable_compression,
             compression_level: self.compression_level,
             transforms_in_flight: Arc::clone(&self.transforms_in_flight),
             presets: Arc::clone(&self.presets),
             presets_file_path: self.presets_file_path.clone(),
+            rate_limiter: self.rate_limiter.as_ref().map(Arc::clone),
             #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
             storage_timeout_secs: self.storage_timeout_secs,
             #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
@@ -464,6 +507,7 @@ impl fmt::Debug for ServerConfig {
                 &self.allow_insecure_url_sources,
             )
             .field("cache_root", &self.cache_root)
+            .field("cache_max_bytes", &self.cache_max_bytes)
             .field("public_max_age_seconds", &self.public_max_age_seconds)
             .field(
                 "public_stale_while_revalidate_seconds",
@@ -473,6 +517,7 @@ impl fmt::Debug for ServerConfig {
                 "disable_accept_negotiation",
                 &self.disable_accept_negotiation,
             )
+            .field("format_preference", &self.format_preference)
             .field("log_handler", &self.log_handler.as_ref().map(|_| ".."))
             .field("log_level", &self.current_log_level())
             .field("max_concurrent_transforms", &self.max_concurrent_transforms)
@@ -505,7 +550,8 @@ impl fmt::Debug for ServerConfig {
                     .map(|p| p.keys().cloned().collect::<Vec<_>>())
                     .unwrap_or_default(),
             )
-            .field("presets_file_path", &self.presets_file_path);
+            .field("presets_file_path", &self.presets_file_path)
+            .field("rate_limiter", &self.rate_limiter.is_some());
         #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
         {
             d.field("storage_backend", &self.storage_backend);
@@ -536,10 +582,12 @@ impl PartialEq for ServerConfig {
             && self.signing_keys == other.signing_keys
             && self.allow_insecure_url_sources == other.allow_insecure_url_sources
             && self.cache_root == other.cache_root
+            && self.cache_max_bytes == other.cache_max_bytes
             && self.public_max_age_seconds == other.public_max_age_seconds
             && self.public_stale_while_revalidate_seconds
                 == other.public_stale_while_revalidate_seconds
             && self.disable_accept_negotiation == other.disable_accept_negotiation
+            && self.format_preference == other.format_preference
             && self.max_concurrent_transforms == other.max_concurrent_transforms
             && self.transform_deadline_secs == other.transform_deadline_secs
             && self.max_input_pixels == other.max_input_pixels
@@ -551,10 +599,14 @@ impl PartialEq for ServerConfig {
             && self.health_max_memory_bytes == other.health_max_memory_bytes
             && self.shutdown_drain_secs == other.shutdown_drain_secs
             && self.custom_response_headers == other.custom_response_headers
+            && self.max_source_bytes == other.max_source_bytes
+            && self.max_watermark_bytes == other.max_watermark_bytes
+            && self.max_remote_redirects == other.max_remote_redirects
             && self.enable_compression == other.enable_compression
             && self.compression_level == other.compression_level
             && *self.presets.read().unwrap() == *other.presets.read().unwrap()
             && self.presets_file_path == other.presets_file_path
+            && self.rate_limiter.is_some() == other.rate_limiter.is_some()
             && cfg_storage_eq(self, other)
     }
 }
@@ -638,9 +690,11 @@ impl ServerConfig {
             signing_keys: HashMap::new(),
             allow_insecure_url_sources: false,
             cache_root: None,
+            cache_max_bytes: 0,
             public_max_age_seconds: DEFAULT_PUBLIC_MAX_AGE_SECONDS,
             public_stale_while_revalidate_seconds: DEFAULT_PUBLIC_STALE_WHILE_REVALIDATE_SECONDS,
             disable_accept_negotiation: false,
+            format_preference: Vec::new(),
             log_handler: None,
             log_level: Arc::new(AtomicU8::new(LogLevel::Info as u8)),
             max_concurrent_transforms: DEFAULT_MAX_CONCURRENT_TRANSFORMS,
@@ -655,11 +709,15 @@ impl ServerConfig {
             shutdown_drain_secs: DEFAULT_SHUTDOWN_DRAIN_SECS,
             draining: Arc::new(AtomicBool::new(false)),
             custom_response_headers: Vec::new(),
+            max_source_bytes: super::remote::MAX_SOURCE_BYTES,
+            max_watermark_bytes: super::remote::MAX_WATERMARK_BYTES,
+            max_remote_redirects: super::remote::MAX_REMOTE_REDIRECTS,
             enable_compression: true,
             compression_level: 1,
             transforms_in_flight: Arc::new(AtomicU64::new(0)),
             presets: Arc::new(std::sync::RwLock::new(HashMap::new())),
             presets_file_path: None,
+            rate_limiter: None,
             #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
             storage_timeout_secs: STORAGE_DOWNLOAD_TIMEOUT_SECS,
             #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
@@ -813,6 +871,27 @@ impl ServerConfig {
     /// ```
     pub fn with_cache_root(mut self, cache_root: impl Into<PathBuf>) -> Self {
         self.cache_root = Some(cache_root.into());
+        self
+    }
+
+    /// Returns a copy of the configuration with a maximum cache size set.
+    ///
+    /// When `max_bytes` is positive, the cache performs LRU-style eviction after
+    /// each write to keep the total on-disk size under this limit. `0` disables
+    /// size-based eviction.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use truss::adapters::server::ServerConfig;
+    ///
+    /// let config = ServerConfig::new(std::env::temp_dir(), None)
+    ///     .with_cache_max_bytes(500 * 1024 * 1024); // 500 MB
+    ///
+    /// assert_eq!(config.cache_max_bytes, 500 * 1024 * 1024);
+    /// ```
+    pub fn with_cache_max_bytes(mut self, max_bytes: u64) -> Self {
+        self.cache_max_bytes = max_bytes;
         self
     }
 
@@ -1003,6 +1082,9 @@ impl ServerConfig {
             .filter(|value| !value.is_empty())
             .map(PathBuf::from);
 
+        let cache_max_bytes =
+            parse_env_u64_ranged("TRUSS_CACHE_MAX_BYTES", 0, u64::MAX)?.unwrap_or(0);
+
         let public_max_age_seconds = parse_optional_env_u32("TRUSS_PUBLIC_MAX_AGE")?
             .unwrap_or(DEFAULT_PUBLIC_MAX_AGE_SECONDS);
         let public_stale_while_revalidate_seconds =
@@ -1030,6 +1112,19 @@ impl ServerConfig {
         let keep_alive_max_requests =
             parse_env_u64_ranged("TRUSS_KEEP_ALIVE_MAX_REQUESTS", 1, 100_000)?
                 .unwrap_or(DEFAULT_KEEP_ALIVE_MAX_REQUESTS);
+
+        let max_source_bytes =
+            parse_env_u64_ranged("TRUSS_MAX_SOURCE_BYTES", 1, 10 * 1024 * 1024 * 1024)?
+                .unwrap_or(super::remote::MAX_SOURCE_BYTES);
+
+        let max_watermark_bytes =
+            parse_env_u64_ranged("TRUSS_MAX_WATERMARK_BYTES", 1, 1024 * 1024 * 1024)?
+                .unwrap_or(super::remote::MAX_WATERMARK_BYTES);
+
+        let max_remote_redirects =
+            parse_env_u64_ranged("TRUSS_MAX_REMOTE_REDIRECTS", 0, 20)?
+                .unwrap_or(super::remote::MAX_REMOTE_REDIRECTS as u64)
+                as usize;
 
         #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
         let storage_timeout_secs = parse_env_u64_ranged("TRUSS_STORAGE_TIMEOUT_SECS", 1, 300)?
@@ -1145,6 +1240,23 @@ impl ServerConfig {
             None => LogLevel::Info,
         };
 
+        let format_preference = parse_format_preference_from_env()?;
+
+        let rate_limiter = {
+            let rps = parse_env_u64_ranged("TRUSS_RATE_LIMIT_RPS", 0, 100_000)?
+                .unwrap_or(0);
+            if rps > 0 {
+                let burst = parse_env_u64_ranged("TRUSS_RATE_LIMIT_BURST", 1, 100_000)?
+                    .unwrap_or(rps);
+                Some(Arc::new(super::rate_limit::RateLimiter::new(
+                    rps as f64,
+                    burst as f64,
+                )))
+            } else {
+                None
+            }
+        };
+
         Ok(Self {
             storage_root,
             bearer_token,
@@ -1154,9 +1266,11 @@ impl ServerConfig {
             signing_keys,
             allow_insecure_url_sources,
             cache_root,
+            cache_max_bytes,
             public_max_age_seconds,
             public_stale_while_revalidate_seconds,
             disable_accept_negotiation: env_flag("TRUSS_DISABLE_ACCEPT_NEGOTIATION"),
+            format_preference,
             log_handler: None,
             log_level: Arc::new(AtomicU8::new(log_level as u8)),
             max_concurrent_transforms,
@@ -1171,11 +1285,15 @@ impl ServerConfig {
             shutdown_drain_secs,
             draining: Arc::new(AtomicBool::new(false)),
             custom_response_headers,
+            max_source_bytes,
+            max_watermark_bytes,
+            max_remote_redirects,
             enable_compression,
             compression_level,
             transforms_in_flight: Arc::new(AtomicU64::new(0)),
             presets: Arc::new(std::sync::RwLock::new(presets)),
             presets_file_path,
+            rate_limiter,
             #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
             storage_timeout_secs,
             #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
@@ -1213,6 +1331,44 @@ pub(super) fn parse_env_u64_ranged(name: &str, min: u64, max: u64) -> io::Result
         }
         None => Ok(None),
     }
+}
+
+/// Parses `TRUSS_FORMAT_PREFERENCE` into an ordered list of [`MediaType`] values.
+///
+/// The environment variable is a comma-separated list of format short names
+/// (e.g. `"avif,webp,png,jpeg"`). Unrecognised names cause a startup error.
+/// Returns an empty `Vec` when the variable is unset or empty, which tells the
+/// negotiation layer to use its built-in default order.
+pub(super) fn parse_format_preference_from_env() -> io::Result<Vec<crate::MediaType>> {
+    let value = match env::var("TRUSS_FORMAT_PREFERENCE")
+        .ok()
+        .filter(|v| !v.is_empty())
+    {
+        Some(v) => v,
+        None => return Ok(Vec::new()),
+    };
+
+    let mut formats = Vec::new();
+    for segment in value.split(',') {
+        let name = segment.trim();
+        if name.is_empty() {
+            continue;
+        }
+        let media_type: crate::MediaType = name.parse().map_err(|e: String| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("TRUSS_FORMAT_PREFERENCE: {e}"),
+            )
+        })?;
+        if formats.contains(&media_type) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("TRUSS_FORMAT_PREFERENCE: duplicate format `{name}`"),
+            ));
+        }
+        formats.push(media_type);
+    }
+    Ok(formats)
 }
 
 pub(super) fn env_flag(name: &str) -> bool {
@@ -1423,6 +1579,32 @@ mod tests {
     use super::*;
     use serial_test::serial;
 
+    /// RAII guard that sets an environment variable on creation and removes it on drop.
+    struct ScopedEnv {
+        key: &'static str,
+    }
+
+    impl ScopedEnv {
+        fn set(key: &'static str, value: &str) -> Self {
+            // SAFETY: tests using ScopedEnv are annotated with #[serial].
+            unsafe { env::set_var(key, value) };
+            Self { key }
+        }
+
+        fn remove(key: &'static str) -> Self {
+            // SAFETY: tests using ScopedEnv are annotated with #[serial].
+            unsafe { env::remove_var(key) };
+            Self { key }
+        }
+    }
+
+    impl Drop for ScopedEnv {
+        fn drop(&mut self) {
+            // SAFETY: same as set — #[serial] guarantees no concurrent access.
+            unsafe { env::remove_var(self.key) };
+        }
+    }
+
     #[test]
     fn keep_alive_default() {
         let config = ServerConfig::new(PathBuf::from("."), None);
@@ -1432,30 +1614,24 @@ mod tests {
     #[test]
     #[serial]
     fn parse_keep_alive_env_valid() {
-        // SAFETY: test-only, single-threaded access to this env var.
-        unsafe { env::set_var("TRUSS_KEEP_ALIVE_MAX_REQUESTS", "500") };
+        let _env = ScopedEnv::set("TRUSS_KEEP_ALIVE_MAX_REQUESTS", "500");
         let result = parse_env_u64_ranged("TRUSS_KEEP_ALIVE_MAX_REQUESTS", 1, 100_000);
-        unsafe { env::remove_var("TRUSS_KEEP_ALIVE_MAX_REQUESTS") };
         assert_eq!(result.unwrap(), Some(500));
     }
 
     #[test]
     #[serial]
     fn parse_keep_alive_env_zero_rejected() {
-        // SAFETY: test-only, single-threaded access to this env var.
-        unsafe { env::set_var("TRUSS_KEEP_ALIVE_MAX_REQUESTS", "0") };
+        let _env = ScopedEnv::set("TRUSS_KEEP_ALIVE_MAX_REQUESTS", "0");
         let result = parse_env_u64_ranged("TRUSS_KEEP_ALIVE_MAX_REQUESTS", 1, 100_000);
-        unsafe { env::remove_var("TRUSS_KEEP_ALIVE_MAX_REQUESTS") };
         assert!(result.is_err());
     }
 
     #[test]
     #[serial]
     fn parse_keep_alive_env_over_max_rejected() {
-        // SAFETY: test-only, single-threaded access to this env var.
-        unsafe { env::set_var("TRUSS_KEEP_ALIVE_MAX_REQUESTS", "100001") };
+        let _env = ScopedEnv::set("TRUSS_KEEP_ALIVE_MAX_REQUESTS", "100001");
         let result = parse_env_u64_ranged("TRUSS_KEEP_ALIVE_MAX_REQUESTS", 1, 100_000);
-        unsafe { env::remove_var("TRUSS_KEEP_ALIVE_MAX_REQUESTS") };
         assert!(result.is_err());
     }
 
@@ -1469,30 +1645,24 @@ mod tests {
     #[test]
     #[serial]
     fn parse_health_cache_min_free_bytes_valid() {
-        // SAFETY: test-only, single-threaded access to this env var.
-        unsafe { env::set_var("TRUSS_HEALTH_CACHE_MIN_FREE_BYTES", "1073741824") };
+        let _env = ScopedEnv::set("TRUSS_HEALTH_CACHE_MIN_FREE_BYTES", "1073741824");
         let result = parse_env_u64_ranged("TRUSS_HEALTH_CACHE_MIN_FREE_BYTES", 1, u64::MAX);
-        unsafe { env::remove_var("TRUSS_HEALTH_CACHE_MIN_FREE_BYTES") };
         assert_eq!(result.unwrap(), Some(1_073_741_824));
     }
 
     #[test]
     #[serial]
     fn parse_health_max_memory_bytes_valid() {
-        // SAFETY: test-only, single-threaded access to this env var.
-        unsafe { env::set_var("TRUSS_HEALTH_MAX_MEMORY_BYTES", "536870912") };
+        let _env = ScopedEnv::set("TRUSS_HEALTH_MAX_MEMORY_BYTES", "536870912");
         let result = parse_env_u64_ranged("TRUSS_HEALTH_MAX_MEMORY_BYTES", 1, u64::MAX);
-        unsafe { env::remove_var("TRUSS_HEALTH_MAX_MEMORY_BYTES") };
         assert_eq!(result.unwrap(), Some(536_870_912));
     }
 
     #[test]
     #[serial]
     fn parse_health_threshold_zero_rejected() {
-        // SAFETY: test-only, single-threaded access to this env var.
-        unsafe { env::set_var("TRUSS_HEALTH_CACHE_MIN_FREE_BYTES", "0") };
+        let _env = ScopedEnv::set("TRUSS_HEALTH_CACHE_MIN_FREE_BYTES", "0");
         let result = parse_env_u64_ranged("TRUSS_HEALTH_CACHE_MIN_FREE_BYTES", 1, u64::MAX);
-        unsafe { env::remove_var("TRUSS_HEALTH_CACHE_MIN_FREE_BYTES") };
         assert!(result.is_err());
     }
 
@@ -1513,20 +1683,16 @@ mod tests {
     #[test]
     #[serial]
     fn parse_shutdown_drain_secs_valid() {
-        // SAFETY: test-only, single-threaded access to this env var.
-        unsafe { env::set_var("TRUSS_SHUTDOWN_DRAIN_SECS", "30") };
+        let _env = ScopedEnv::set("TRUSS_SHUTDOWN_DRAIN_SECS", "30");
         let result = parse_env_u64_ranged("TRUSS_SHUTDOWN_DRAIN_SECS", 0, 300);
-        unsafe { env::remove_var("TRUSS_SHUTDOWN_DRAIN_SECS") };
         assert_eq!(result.unwrap(), Some(30));
     }
 
     #[test]
     #[serial]
     fn parse_shutdown_drain_secs_over_max_rejected() {
-        // SAFETY: test-only, single-threaded access to this env var.
-        unsafe { env::set_var("TRUSS_SHUTDOWN_DRAIN_SECS", "301") };
+        let _env = ScopedEnv::set("TRUSS_SHUTDOWN_DRAIN_SECS", "301");
         let result = parse_env_u64_ranged("TRUSS_SHUTDOWN_DRAIN_SECS", 0, 300);
-        unsafe { env::remove_var("TRUSS_SHUTDOWN_DRAIN_SECS") };
         assert!(result.is_err());
     }
 
@@ -1604,15 +1770,9 @@ mod tests {
         let path = dir.join("presets.json");
         std::fs::write(&path, r#"{"thumb":{"width":100}}"#).unwrap();
 
-        // SAFETY: test-only, single-threaded access to this env var.
-        unsafe {
-            env::set_var("TRUSS_PRESETS_FILE", path.to_str().unwrap());
-            env::remove_var("TRUSS_PRESETS");
-        }
+        let _env = ScopedEnv::set("TRUSS_PRESETS_FILE", path.to_str().unwrap());
+        let _env2 = ScopedEnv::remove("TRUSS_PRESETS");
         let (presets, file_path) = super::parse_presets_from_env().unwrap();
-        unsafe {
-            env::remove_var("TRUSS_PRESETS_FILE");
-        }
 
         assert_eq!(presets.len(), 1);
         assert_eq!(file_path, Some(path));
@@ -1659,15 +1819,11 @@ mod tests {
     #[test]
     #[serial]
     fn parse_response_headers_valid_json() {
-        // SAFETY: test-only, single-threaded access to this env var.
-        unsafe {
-            env::set_var(
-                "TRUSS_RESPONSE_HEADERS",
-                r#"{"CDN-Cache-Control":"max-age=3600","X-Custom":"value"}"#,
-            )
-        };
+        let _env = ScopedEnv::set(
+            "TRUSS_RESPONSE_HEADERS",
+            r#"{"CDN-Cache-Control":"max-age=3600","X-Custom":"value"}"#,
+        );
         let result = parse_response_headers_from_env();
-        unsafe { env::remove_var("TRUSS_RESPONSE_HEADERS") };
         let headers = result.unwrap();
         assert_eq!(headers.len(), 2);
         // Sorted by name.
@@ -1680,40 +1836,32 @@ mod tests {
     #[test]
     #[serial]
     fn parse_response_headers_invalid_json() {
-        // SAFETY: test-only, single-threaded access to this env var.
-        unsafe { env::set_var("TRUSS_RESPONSE_HEADERS", "not json") };
+        let _env = ScopedEnv::set("TRUSS_RESPONSE_HEADERS", "not json");
         let result = parse_response_headers_from_env();
-        unsafe { env::remove_var("TRUSS_RESPONSE_HEADERS") };
         assert!(result.is_err());
     }
 
     #[test]
     #[serial]
     fn parse_response_headers_empty_name_rejected() {
-        // SAFETY: test-only, single-threaded access to this env var.
-        unsafe { env::set_var("TRUSS_RESPONSE_HEADERS", r#"{"":"value"}"#) };
+        let _env = ScopedEnv::set("TRUSS_RESPONSE_HEADERS", r#"{"":"value"}"#);
         let result = parse_response_headers_from_env();
-        unsafe { env::remove_var("TRUSS_RESPONSE_HEADERS") };
         assert!(result.is_err());
     }
 
     #[test]
     #[serial]
     fn parse_response_headers_invalid_name_character() {
-        // SAFETY: test-only, single-threaded access to this env var.
-        unsafe { env::set_var("TRUSS_RESPONSE_HEADERS", r#"{"Bad Header":"value"}"#) };
+        let _env = ScopedEnv::set("TRUSS_RESPONSE_HEADERS", r#"{"Bad Header":"value"}"#);
         let result = parse_response_headers_from_env();
-        unsafe { env::remove_var("TRUSS_RESPONSE_HEADERS") };
         assert!(result.is_err());
     }
 
     #[test]
     #[serial]
     fn parse_response_headers_invalid_value_character() {
-        // SAFETY: test-only, single-threaded access to this env var.
-        unsafe { env::set_var("TRUSS_RESPONSE_HEADERS", "{\"X-Bad\":\"val\\u0000ue\"}") };
+        let _env = ScopedEnv::set("TRUSS_RESPONSE_HEADERS", r#"{"X-Bad":"val\u0000ue"}"#);
         let result = parse_response_headers_from_env();
-        unsafe { env::remove_var("TRUSS_RESPONSE_HEADERS") };
         assert!(result.is_err());
     }
 
@@ -1798,20 +1946,16 @@ mod tests {
     #[test]
     #[serial]
     fn parse_log_level_from_env() {
-        // SAFETY: test-only, single-threaded access to this env var.
-        unsafe { env::set_var("TRUSS_LOG_LEVEL", "debug") };
+        let _env = ScopedEnv::set("TRUSS_LOG_LEVEL", "debug");
         let config = ServerConfig::from_env().unwrap();
-        unsafe { env::remove_var("TRUSS_LOG_LEVEL") };
         assert_eq!(config.current_log_level(), LogLevel::Debug);
     }
 
     #[test]
     #[serial]
     fn parse_log_level_invalid_rejected() {
-        // SAFETY: test-only, single-threaded access to this env var.
-        unsafe { env::set_var("TRUSS_LOG_LEVEL", "verbose") };
+        let _env = ScopedEnv::set("TRUSS_LOG_LEVEL", "verbose");
         let result = ServerConfig::from_env();
-        unsafe { env::remove_var("TRUSS_LOG_LEVEL") };
         assert!(result.is_err());
     }
 
@@ -1837,5 +1981,93 @@ mod tests {
 
         let logged = messages.lock().unwrap();
         assert_eq!(*logged, vec!["err", "wrn"]);
+    }
+
+    // ── parse_format_preference_from_env ────────────────────────────────
+
+    #[test]
+    #[serial]
+    fn parse_format_preference_unset_returns_empty() {
+        let _env = ScopedEnv::remove("TRUSS_FORMAT_PREFERENCE");
+        let result = parse_format_preference_from_env().unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    #[serial]
+    fn parse_format_preference_empty_returns_empty() {
+        let _env = ScopedEnv::set("TRUSS_FORMAT_PREFERENCE", "");
+        let result = parse_format_preference_from_env().unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    #[serial]
+    fn parse_format_preference_single_format() {
+        let _env = ScopedEnv::set("TRUSS_FORMAT_PREFERENCE", "webp");
+        let result = parse_format_preference_from_env().unwrap();
+        assert_eq!(result, vec![crate::MediaType::Webp]);
+    }
+
+    #[test]
+    #[serial]
+    fn parse_format_preference_multiple_formats() {
+        let _env = ScopedEnv::set("TRUSS_FORMAT_PREFERENCE", "avif,webp,png,jpeg");
+        let result = parse_format_preference_from_env().unwrap();
+        assert_eq!(
+            result,
+            vec![
+                crate::MediaType::Avif,
+                crate::MediaType::Webp,
+                crate::MediaType::Png,
+                crate::MediaType::Jpeg,
+            ]
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn parse_format_preference_with_spaces() {
+        let _env = ScopedEnv::set("TRUSS_FORMAT_PREFERENCE", " webp , jpeg , png ");
+        let result = parse_format_preference_from_env().unwrap();
+        assert_eq!(
+            result,
+            vec![
+                crate::MediaType::Webp,
+                crate::MediaType::Jpeg,
+                crate::MediaType::Png,
+            ]
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn parse_format_preference_invalid_format_rejected() {
+        let _env = ScopedEnv::set("TRUSS_FORMAT_PREFERENCE", "webp,gif");
+        let result = parse_format_preference_from_env();
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("TRUSS_FORMAT_PREFERENCE"));
+    }
+
+    #[test]
+    #[serial]
+    fn parse_format_preference_duplicate_rejected() {
+        let _env = ScopedEnv::set("TRUSS_FORMAT_PREFERENCE", "webp,jpeg,webp");
+        let result = parse_format_preference_from_env();
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("duplicate"));
+    }
+
+    #[test]
+    #[serial]
+    fn parse_format_preference_trailing_comma_ok() {
+        let _env = ScopedEnv::set("TRUSS_FORMAT_PREFERENCE", "avif,webp,");
+        let result = parse_format_preference_from_env().unwrap();
+        assert_eq!(
+            result,
+            vec![crate::MediaType::Avif, crate::MediaType::Webp]
+        );
     }
 }

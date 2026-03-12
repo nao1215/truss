@@ -24,6 +24,18 @@ use std::io::Cursor;
 use std::time::{Duration, Instant};
 use yuvutils_rs::{YuvGrayImage, YuvPlanarImage, YuvRange, YuvStandardMatrix};
 
+/// Checks the transform deadline and returns an error if exceeded.
+///
+/// This macro reduces boilerplate for the repeated deadline-check pattern
+/// throughout the transform pipeline.
+macro_rules! check_deadline_if_set {
+    ($start:expr, $deadline:expr, $stage:expr) => {
+        if let (Some(start), Some(limit)) = ($start, $deadline) {
+            check_deadline(start.elapsed(), limit, $stage)?;
+        }
+    };
+}
+
 /// Transforms a raster artifact using the current backend implementation.
 ///
 /// The input artifact must already be classified by [`crate::sniff_artifact`]. This backend
@@ -183,24 +195,18 @@ pub fn transform_raster(request: TransformRequest) -> Result<TransformResult, Tr
     check_input_pixel_limit(&normalized.input)?;
 
     let mut image = decode_input(&normalized.input)?;
-    if let (Some(start), Some(limit)) = (start, deadline) {
-        check_deadline(start.elapsed(), limit, "decode")?;
-    }
+    check_deadline_if_set!(start, deadline, "decode");
 
     if normalized.options.auto_orient {
         image = apply_auto_orientation(image, &normalized.input);
     }
 
     image = apply_rotation(image, normalized.options.rotate);
-    if let (Some(start), Some(limit)) = (start, deadline) {
-        check_deadline(start.elapsed(), limit, "rotate")?;
-    }
+    check_deadline_if_set!(start, deadline, "rotate");
 
     if let Some(crop) = normalized.options.crop {
         image = apply_crop(image, crop)?;
-        if let (Some(start), Some(limit)) = (start, deadline) {
-            check_deadline(start.elapsed(), limit, "crop")?;
-        }
+        check_deadline_if_set!(start, deadline, "crop");
     }
 
     check_output_pixel_limit(&image, normalized.options.width, normalized.options.height)?;
@@ -213,29 +219,21 @@ pub fn transform_raster(request: TransformRequest) -> Result<TransformResult, Tr
         normalized.options.background,
         normalized.options.format,
     );
-    if let (Some(start), Some(limit)) = (start, deadline) {
-        check_deadline(start.elapsed(), limit, "resize")?;
-    }
+    check_deadline_if_set!(start, deadline, "resize");
 
     if let Some(sigma) = normalized.options.blur {
         image = image.blur(sigma);
-        if let (Some(start), Some(limit)) = (start, deadline) {
-            check_deadline(start.elapsed(), limit, "blur")?;
-        }
+        check_deadline_if_set!(start, deadline, "blur");
     }
 
     if let Some(sigma) = normalized.options.sharpen {
         image = image.unsharpen(sigma, 1);
-        if let (Some(start), Some(limit)) = (start, deadline) {
-            check_deadline(start.elapsed(), limit, "sharpen")?;
-        }
+        check_deadline_if_set!(start, deadline, "sharpen");
     }
 
     if let Some(ref wm) = normalized.watermark {
         image = apply_watermark(image, wm)?;
-        if let (Some(start), Some(limit)) = (start, deadline) {
-            check_deadline(start.elapsed(), limit, "watermark")?;
-        }
+        check_deadline_if_set!(start, deadline, "watermark");
     }
 
     let bytes = encode_output(
@@ -244,9 +242,7 @@ pub fn transform_raster(request: TransformRequest) -> Result<TransformResult, Tr
         normalized.options.quality,
         retained_metadata.as_ref(),
     )?;
-    if let (Some(start), Some(limit)) = (start, deadline) {
-        check_deadline(start.elapsed(), limit, "encode")?;
-    }
+    check_deadline_if_set!(start, deadline, "encode");
 
     // Lossy WebP uses libwebp which cannot inject EXIF/ICC, so metadata is silently
     // dropped even when keep-metadata was requested. Warn the caller.
@@ -538,13 +534,20 @@ fn merge_alpha_plane(alpha_frame: &rav1d_safe::Frame, rgba: &mut [u8], width: u3
         return;
     }
 
+    let w = width as usize;
+    let row_stride = w.saturating_mul(4);
+
     match alpha_frame.planes() {
         Planes::Depth8(planes) => {
             let y = planes.y();
             for row_idx in 0..height as usize {
                 let row = y.row(row_idx);
-                for col in 0..width as usize {
-                    rgba[row_idx * (width as usize) * 4 + col * 4 + 3] = row[col];
+                let row_start = row_idx.saturating_mul(row_stride);
+                for (col, &alpha) in row.iter().enumerate().take(w) {
+                    let idx = row_start + col * 4 + 3;
+                    if idx < rgba.len() {
+                        rgba[idx] = alpha;
+                    }
                 }
             }
         }
@@ -553,8 +556,12 @@ fn merge_alpha_plane(alpha_frame: &rav1d_safe::Frame, rgba: &mut [u8], width: u3
             let y = planes.y();
             for row_idx in 0..height as usize {
                 let row = y.row(row_idx);
-                for col in 0..width as usize {
-                    rgba[row_idx * (width as usize) * 4 + col * 4 + 3] = (row[col] >> shift) as u8;
+                let row_start = row_idx.saturating_mul(row_stride);
+                for (col, &alpha) in row.iter().enumerate().take(w) {
+                    let idx = row_start + col * 4 + 3;
+                    if idx < rgba.len() {
+                        rgba[idx] = (alpha >> shift) as u8;
+                    }
                 }
             }
         }
@@ -786,6 +793,21 @@ fn apply_watermark(
     }
     check_input_pixel_limit(&watermark.image)?;
     let wm_image = decode_input(&watermark.image)?;
+
+    // Cross-check decoded dimensions against header-declared size to detect
+    // malformed files that claim small dimensions but decode larger (#104).
+    let (decoded_w, decoded_h) = wm_image.dimensions();
+    if let (Some(meta_w), Some(meta_h)) = (
+        watermark.image.metadata.width,
+        watermark.image.metadata.height,
+    ) && (decoded_w != meta_w || decoded_h != meta_h)
+    {
+        return Err(TransformError::InvalidInput(format!(
+            "watermark decoded dimensions ({decoded_w}x{decoded_h}) \
+             do not match header-declared size ({meta_w}x{meta_h})"
+        )));
+    }
+
     let mut wm_rgba = wm_image.to_rgba8();
 
     // Apply opacity by scaling the alpha channel of the watermark.
@@ -2964,5 +2986,174 @@ mod tests {
             matches!(err, TransformError::InvalidOptions(ref msg) if msg.contains("exceeds image bounds")),
             "unexpected error: {err}"
         );
+    }
+
+    // ── Exhaustive EXIF orientation tests (issue #106) ──────────────────
+
+    /// Orientation 1: no transform — dimensions remain unchanged.
+    #[test]
+    fn apply_exif_orientation_1_identity() {
+        let image = DynamicImage::ImageRgba8(RgbaImage::from_pixel(4, 2, Rgba([1, 2, 3, 255])));
+        let result = apply_exif_orientation(image, 1);
+        assert_eq!(result.dimensions(), (4, 2));
+    }
+
+    /// Orientation 2: horizontal flip — dimensions remain unchanged.
+    #[test]
+    fn apply_exif_orientation_2_fliph() {
+        let image = DynamicImage::ImageRgba8(RgbaImage::from_pixel(4, 2, Rgba([1, 2, 3, 255])));
+        let result = apply_exif_orientation(image, 2);
+        assert_eq!(result.dimensions(), (4, 2));
+    }
+
+    /// Orientation 3: rotate 180 — dimensions remain unchanged.
+    #[test]
+    fn apply_exif_orientation_3_rotate180() {
+        let image = DynamicImage::ImageRgba8(RgbaImage::from_pixel(4, 2, Rgba([1, 2, 3, 255])));
+        let result = apply_exif_orientation(image, 3);
+        assert_eq!(result.dimensions(), (4, 2));
+    }
+
+    /// Orientation 4: vertical flip — dimensions remain unchanged.
+    #[test]
+    fn apply_exif_orientation_4_flipv() {
+        let image = DynamicImage::ImageRgba8(RgbaImage::from_pixel(4, 2, Rgba([1, 2, 3, 255])));
+        let result = apply_exif_orientation(image, 4);
+        assert_eq!(result.dimensions(), (4, 2));
+    }
+
+    /// Orientation 5: transpose (fliph + rotate90) — dimensions are swapped.
+    #[test]
+    fn apply_exif_orientation_5_transpose() {
+        let image = DynamicImage::ImageRgba8(RgbaImage::from_pixel(4, 2, Rgba([1, 2, 3, 255])));
+        let result = apply_exif_orientation(image, 5);
+        assert_eq!(result.dimensions(), (2, 4));
+    }
+
+    /// Orientation 6: rotate 90 CW — dimensions are swapped.
+    #[test]
+    fn apply_exif_orientation_6_rotate90() {
+        let image = DynamicImage::ImageRgba8(RgbaImage::from_pixel(4, 2, Rgba([1, 2, 3, 255])));
+        let result = apply_exif_orientation(image, 6);
+        assert_eq!(result.dimensions(), (2, 4));
+    }
+
+    /// Orientation 7: transverse (fliph + rotate270) — dimensions are swapped.
+    #[test]
+    fn apply_exif_orientation_7_transverse() {
+        let image = DynamicImage::ImageRgba8(RgbaImage::from_pixel(4, 2, Rgba([1, 2, 3, 255])));
+        let result = apply_exif_orientation(image, 7);
+        assert_eq!(result.dimensions(), (2, 4));
+    }
+
+    /// Orientation 8: rotate 270 CW — dimensions are swapped.
+    #[test]
+    fn apply_exif_orientation_8_rotate270() {
+        let image = DynamicImage::ImageRgba8(RgbaImage::from_pixel(4, 2, Rgba([1, 2, 3, 255])));
+        let result = apply_exif_orientation(image, 8);
+        assert_eq!(result.dimensions(), (2, 4));
+    }
+
+    /// Invalid orientation value (0) should leave the image unchanged.
+    #[test]
+    fn apply_exif_orientation_0_passthrough() {
+        let image = DynamicImage::ImageRgba8(RgbaImage::from_pixel(4, 2, Rgba([1, 2, 3, 255])));
+        let result = apply_exif_orientation(image, 0);
+        assert_eq!(result.dimensions(), (4, 2));
+    }
+
+    /// Out-of-range orientation value (9) should leave the image unchanged.
+    #[test]
+    fn apply_exif_orientation_9_passthrough() {
+        let image = DynamicImage::ImageRgba8(RgbaImage::from_pixel(4, 2, Rgba([1, 2, 3, 255])));
+        let result = apply_exif_orientation(image, 9);
+        assert_eq!(result.dimensions(), (4, 2));
+    }
+
+    /// Verify pixel placement for orientation 2 (horizontal flip).
+    /// Place a distinct pixel at (0,0) and check it moves to (width-1, 0).
+    #[test]
+    fn apply_exif_orientation_2_pixel_placement() {
+        let mut img = RgbaImage::from_pixel(4, 2, Rgba([0, 0, 0, 255]));
+        img.put_pixel(0, 0, Rgba([255, 0, 0, 255]));
+        let result = apply_exif_orientation(DynamicImage::ImageRgba8(img), 2);
+        assert_eq!(*result.to_rgba8().get_pixel(3, 0), Rgba([255, 0, 0, 255]));
+    }
+
+    /// Verify pixel placement for orientation 3 (rotate 180).
+    /// Pixel at (0,0) should move to (width-1, height-1).
+    #[test]
+    fn apply_exif_orientation_3_pixel_placement() {
+        let mut img = RgbaImage::from_pixel(4, 2, Rgba([0, 0, 0, 255]));
+        img.put_pixel(0, 0, Rgba([255, 0, 0, 255]));
+        let result = apply_exif_orientation(DynamicImage::ImageRgba8(img), 3);
+        assert_eq!(*result.to_rgba8().get_pixel(3, 1), Rgba([255, 0, 0, 255]));
+    }
+
+    /// Verify pixel placement for orientation 4 (vertical flip).
+    /// Pixel at (0,0) should move to (0, height-1).
+    #[test]
+    fn apply_exif_orientation_4_pixel_placement() {
+        let mut img = RgbaImage::from_pixel(4, 2, Rgba([0, 0, 0, 255]));
+        img.put_pixel(0, 0, Rgba([255, 0, 0, 255]));
+        let result = apply_exif_orientation(DynamicImage::ImageRgba8(img), 4);
+        assert_eq!(*result.to_rgba8().get_pixel(0, 1), Rgba([255, 0, 0, 255]));
+    }
+
+    /// Verify pixel placement for orientation 6 (rotate 90 CW).
+    /// Pixel at (0,0) should move to (height-1, 0) in the rotated image.
+    #[test]
+    fn apply_exif_orientation_6_pixel_placement() {
+        let mut img = RgbaImage::from_pixel(4, 2, Rgba([0, 0, 0, 255]));
+        img.put_pixel(0, 0, Rgba([255, 0, 0, 255]));
+        let result = apply_exif_orientation(DynamicImage::ImageRgba8(img), 6);
+        let rgba = result.to_rgba8();
+        assert_eq!(rgba.dimensions(), (2, 4));
+        assert_eq!(*rgba.get_pixel(1, 0), Rgba([255, 0, 0, 255]));
+    }
+
+    /// Verify pixel placement for orientation 8 (rotate 270 CW).
+    /// Pixel at (0,0) should move to (0, width-1) in the rotated image.
+    #[test]
+    fn apply_exif_orientation_8_pixel_placement() {
+        let mut img = RgbaImage::from_pixel(4, 2, Rgba([0, 0, 0, 255]));
+        img.put_pixel(0, 0, Rgba([255, 0, 0, 255]));
+        let result = apply_exif_orientation(DynamicImage::ImageRgba8(img), 8);
+        let rgba = result.to_rgba8();
+        assert_eq!(rgba.dimensions(), (2, 4));
+        assert_eq!(*rgba.get_pixel(0, 3), Rgba([255, 0, 0, 255]));
+    }
+
+    /// End-to-end test: JPEG with each EXIF orientation value is auto-corrected
+    /// during transform. Orientations 5-8 swap dimensions.
+    #[test]
+    fn transform_raster_auto_orients_all_jpeg_orientations() {
+        for orientation in 1..=8u16 {
+            let artifact = jpeg_artifact_with_metadata(4, 2, Some(orientation), None);
+            let result = transform_raster(TransformRequest::new(
+                artifact,
+                TransformOptions {
+                    format: Some(MediaType::Jpeg),
+                    ..TransformOptions::default()
+                },
+            ))
+            .unwrap_or_else(|e| panic!("orientation {orientation} should succeed: {e}"));
+
+            let (expected_w, expected_h) = if orientation >= 5 {
+                (2, 4)
+            } else {
+                (4, 2)
+            };
+            assert_eq!(
+                result.artifact.metadata.width,
+                Some(expected_w),
+                "orientation {orientation}: expected width {expected_w}"
+            );
+            assert_eq!(
+                result.artifact.metadata.height,
+                Some(expected_h),
+                "orientation {orientation}: expected height {expected_h}"
+            );
+        }
     }
 }

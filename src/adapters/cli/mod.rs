@@ -1,15 +1,18 @@
-use crate::adapters::server::{self, ServerConfig, SignedUrlSource, sign_public_url};
+use crate::adapters::server::SignedUrlSource;
 use crate::{
-    CropRegion, Fit, MediaType, Position, RawArtifact, Rgba8, Rotation, TransformOptions,
-    TransformRequest, WatermarkInput, sniff_artifact, transform_raster, transform_svg,
+    CropRegion, Fit, MediaType, Position, Rgba8, Rotation, TransformOptions,
 };
 use clap::{CommandFactory, Parser, Subcommand};
 use std::fs;
 use std::io::{self, Read, Write};
-use std::net::TcpListener;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::ExitCode;
 use std::str::FromStr;
+
+mod convert;
+mod inspect;
+mod serve;
+mod sign;
 
 const MAX_REMOTE_BYTES: u64 = 32 * 1024 * 1024;
 
@@ -856,23 +859,23 @@ where
             Ok(_) => EXIT_SUCCESS,
             Err(_) => EXIT_RUNTIME,
         },
-        Ok(Command::Serve(command)) => match execute_serve(command) {
+        Ok(Command::Serve(command)) => match serve::execute_serve(command) {
             Ok(()) => EXIT_SUCCESS,
             Err(error) => write_error(stderr, error),
         },
-        Ok(Command::Validate) => match execute_validate(stdout) {
+        Ok(Command::Validate) => match serve::execute_validate(stdout) {
             Ok(()) => EXIT_SUCCESS,
             Err(error) => write_error(stderr, error),
         },
-        Ok(Command::Inspect(command)) => match execute_inspect(command, stdin, stdout) {
+        Ok(Command::Inspect(command)) => match inspect::execute_inspect(command, stdin, stdout) {
             Ok(()) => EXIT_SUCCESS,
             Err(error) => write_error(stderr, error),
         },
-        Ok(Command::Convert(command)) => match execute_convert(command, stdin, stdout) {
+        Ok(Command::Convert(command)) => match convert::execute_convert(command, stdin, stdout) {
             Ok(()) => EXIT_SUCCESS,
             Err(error) => write_error(stderr, error),
         },
-        Ok(Command::Sign(command)) => match execute_sign(command, stdout) {
+        Ok(Command::Sign(command)) => match sign::execute_sign(command, stdout) {
             Ok(()) => EXIT_SUCCESS,
             Err(error) => write_error(stderr, error),
         },
@@ -1018,11 +1021,11 @@ where
             usage: None,
             hint: Some("try 'truss completions bash'".to_string()),
         }),
-        Some(CliSubcommand::Convert(args)) => convert_from_clap(args),
-        Some(CliSubcommand::Inspect(args)) => inspect_from_clap(args),
-        Some(CliSubcommand::Serve(args)) => serve_from_clap(args),
-        Some(CliSubcommand::Validate(args)) => validate_from_clap(args),
-        Some(CliSubcommand::Sign(args)) => sign_from_clap(args),
+        Some(CliSubcommand::Convert(args)) => convert::convert_from_clap(args),
+        Some(CliSubcommand::Inspect(args)) => inspect::inspect_from_clap(args),
+        Some(CliSubcommand::Serve(args)) => serve::serve_from_clap(args),
+        Some(CliSubcommand::Validate(args)) => serve::validate_from_clap(args),
+        Some(CliSubcommand::Sign(args)) => sign::sign_from_clap(args),
     }
 }
 
@@ -1067,225 +1070,8 @@ fn parse_help_topic(topic: Option<String>) -> Result<Command, CliError> {
 }
 
 // ---------------------------------------------------------------------------
-// Clap → internal Command conversions
+// Shared transform fields
 // ---------------------------------------------------------------------------
-
-fn convert_from_clap(args: ClapConvertArgs) -> Result<Command, CliError> {
-    if args.help {
-        return Ok(Command::Help(HelpTopic::Convert));
-    }
-
-    let input = match (&args.url, &args.input) {
-        (Some(url), None) => {
-            validate_url(url, "--url")?;
-            InputSource::Url(url.clone())
-        }
-        (None, Some(value)) if value == "-" => InputSource::Stdin,
-        (None, Some(value)) => InputSource::Path(PathBuf::from(value)),
-        (None, None) => {
-            return Err(CliError {
-                exit_code: EXIT_USAGE,
-                message: "'convert' requires an input file, URL, or -".to_string(),
-                usage: Some(convert_usage().to_string()),
-                hint: Some("try 'truss convert input.png -o output.jpg'".to_string()),
-            });
-        }
-        (Some(_), Some(_)) => {
-            return Err(convert_error("'convert' accepts exactly one input"));
-        }
-    };
-
-    let output = match args.output {
-        Some(ref value) if value == "-" => OutputTarget::Stdout,
-        Some(ref value) => OutputTarget::Path(PathBuf::from(value)),
-        None => {
-            return Err(CliError {
-                exit_code: EXIT_USAGE,
-                message: "'convert' requires -o <output>".to_string(),
-                usage: Some(convert_usage().to_string()),
-                hint: Some("try 'truss convert input.png -o output.jpg'".to_string()),
-            });
-        }
-    };
-
-    let watermark_path = args.watermark.clone();
-    if watermark_path.is_none()
-        && (args.watermark_position.is_some()
-            || args.watermark_opacity.is_some()
-            || args.watermark_margin.is_some())
-    {
-        return Err(CliError {
-            exit_code: EXIT_USAGE,
-            message: "--watermark-position, --watermark-opacity, and --watermark-margin require --watermark".to_string(),
-            usage: Some(convert_usage().to_string()),
-            hint: Some("provide --watermark <path> when using watermark options".to_string()),
-        });
-    }
-    let watermark_position = args.watermark_position;
-    let watermark_opacity = args.watermark_opacity;
-    let watermark_margin = args.watermark_margin;
-
-    let options = TransformFields {
-        width: args.width,
-        height: args.height,
-        fit: args.fit,
-        position: args.position,
-        format: args.format,
-        quality: args.quality,
-        background: args.background,
-        rotate: args.rotate,
-        auto_orient: args.auto_orient,
-        no_auto_orient: args.no_auto_orient,
-        strip_metadata: args.strip_metadata,
-        keep_metadata: args.keep_metadata,
-        preserve_exif: args.preserve_exif,
-        crop: args.crop,
-        blur: args.blur,
-        sharpen: args.sharpen,
-    }
-    .into_options()
-    .map_err(map_transform_error)?;
-
-    Ok(Command::Convert(ConvertCommand {
-        input,
-        output,
-        options,
-        watermark_path,
-        watermark_position,
-        watermark_opacity,
-        watermark_margin,
-    }))
-}
-
-fn inspect_from_clap(args: ClapInspectArgs) -> Result<Command, CliError> {
-    if args.help {
-        return Ok(Command::Help(HelpTopic::Inspect));
-    }
-
-    let input = match (&args.url, &args.input) {
-        (Some(url), None) => {
-            validate_url(url, "--url")?;
-            InputSource::Url(url.clone())
-        }
-        (None, Some(value)) if value == "-" => InputSource::Stdin,
-        (None, Some(value)) => InputSource::Path(PathBuf::from(value)),
-        (None, None) => {
-            return Err(CliError {
-                exit_code: EXIT_USAGE,
-                message: "'inspect' requires an input file, URL, or -".to_string(),
-                usage: Some(inspect_usage().to_string()),
-                hint: Some(
-                    "try 'truss inspect photo.jpg' or 'truss inspect --url https://...'"
-                        .to_string(),
-                ),
-            });
-        }
-        (Some(_), Some(_)) => {
-            return Err(CliError {
-                exit_code: EXIT_USAGE,
-                message: "'inspect' accepts exactly one input".to_string(),
-                usage: Some(inspect_usage().to_string()),
-                hint: Some("run 'truss inspect --help' for inspect options".to_string()),
-            });
-        }
-    };
-
-    Ok(Command::Inspect(InspectCommand { input }))
-}
-
-fn serve_from_clap(args: ClapServeArgs) -> Result<Command, CliError> {
-    if args.help {
-        return Ok(Command::Help(HelpTopic::Serve));
-    }
-
-    Ok(Command::Serve(ServeCommand {
-        bind_addr: args.bind,
-        storage_root: args.storage_root,
-        public_base_url: args.public_base_url,
-        signed_url_key_id: args.signed_url_key_id,
-        signed_url_secret: args.signed_url_secret,
-        allow_insecure_url_sources: args.allow_insecure_url_sources,
-    }))
-}
-
-fn validate_from_clap(args: ClapValidateArgs) -> Result<Command, CliError> {
-    if args.help {
-        return Ok(Command::Help(HelpTopic::Validate));
-    }
-    Ok(Command::Validate)
-}
-
-fn sign_from_clap(args: ClapSignArgs) -> Result<Command, CliError> {
-    if args.help {
-        return Ok(Command::Help(HelpTopic::Sign));
-    }
-
-    let base_url = args
-        .base_url
-        .ok_or_else(|| sign_error("'sign' requires --base-url"))?;
-
-    let source = match (args.path, args.url) {
-        (Some(path), None) => SignedUrlSource::Path {
-            path,
-            version: args.version,
-        },
-        (None, Some(url)) => SignedUrlSource::Url {
-            url,
-            version: args.version,
-        },
-        (None, None) => {
-            return Err(sign_error("'sign' requires exactly one of --path or --url"));
-        }
-        (Some(_), Some(_)) => {
-            return Err(sign_error("'sign' accepts exactly one of --path or --url"));
-        }
-    };
-
-    let key_id = args
-        .key_id
-        .ok_or_else(|| sign_error("'sign' requires --key-id"))?;
-    let secret = args
-        .secret
-        .ok_or_else(|| sign_error("'sign' requires --secret"))?;
-    let expires = args
-        .expires
-        .ok_or_else(|| sign_error("'sign' requires --expires"))?;
-
-    let options = TransformFields {
-        width: args.width,
-        height: args.height,
-        fit: args.fit,
-        position: args.position,
-        format: args.format,
-        quality: args.quality,
-        background: args.background,
-        rotate: args.rotate,
-        auto_orient: args.auto_orient,
-        no_auto_orient: args.no_auto_orient,
-        strip_metadata: args.strip_metadata,
-        keep_metadata: args.keep_metadata,
-        preserve_exif: args.preserve_exif,
-        crop: args.crop,
-        blur: args.blur,
-        sharpen: args.sharpen,
-    }
-    .into_options()
-    .map_err(map_transform_error)?;
-
-    Ok(Command::Sign(SignCommand {
-        base_url,
-        source,
-        key_id,
-        secret,
-        expires,
-        options,
-        watermark_url: args.watermark_url,
-        watermark_position: args.watermark_position,
-        watermark_opacity: args.watermark_opacity,
-        watermark_margin: args.watermark_margin,
-        preset: args.preset,
-    }))
-}
 
 /// Collects shared transform fields from clap args into `TransformOptions`.
 struct TransformFields {
@@ -1404,296 +1190,6 @@ fn generate_completions<W: Write>(
 }
 
 // ---------------------------------------------------------------------------
-// Execution
-// ---------------------------------------------------------------------------
-
-fn execute_serve(command: ServeCommand) -> Result<(), CliError> {
-    let bind_addr = command.bind_addr.clone().unwrap_or_else(server::bind_addr);
-    let config = resolve_server_config(command)?;
-    let listener = TcpListener::bind(&bind_addr).map_err(|error| {
-        runtime_error(
-            EXIT_RUNTIME,
-            &format!("failed to bind {bind_addr}: {error}"),
-        )
-    })?;
-    let listen_addr = listener.local_addr().map_err(|error| {
-        runtime_error(
-            EXIT_RUNTIME,
-            &format!("failed to read listener address: {error}"),
-        )
-    })?;
-    let mut stdout = io::stdout().lock();
-
-    // Server startup summary
-    writeln!(stdout, "truss listening on http://{listen_addr}").map_err(|error| {
-        runtime_error(EXIT_RUNTIME, &format!("failed to write stdout: {error}"))
-    })?;
-    writeln!(stdout, "  storage root: {}", config.storage_root.display()).map_err(|error| {
-        runtime_error(EXIT_RUNTIME, &format!("failed to write stdout: {error}"))
-    })?;
-
-    // Signed URL verification status
-    let signed_url_enabled = !config.signing_keys.is_empty()
-        || (config.signed_url_key_id.is_some() && config.signed_url_secret.is_some());
-    writeln!(
-        stdout,
-        "  signed URL verification: {}",
-        if signed_url_enabled {
-            "enabled"
-        } else {
-            "disabled"
-        }
-    )
-    .map_err(|error| runtime_error(EXIT_RUNTIME, &format!("failed to write stdout: {error}")))?;
-
-    // Bearer token status (never show the value)
-    writeln!(
-        stdout,
-        "  private API bearer token: {}",
-        if config.bearer_token.is_some() {
-            "configured"
-        } else {
-            "not set"
-        }
-    )
-    .map_err(|error| runtime_error(EXIT_RUNTIME, &format!("failed to write stdout: {error}")))?;
-
-    // Cache status
-    writeln!(
-        stdout,
-        "  cache: {}",
-        if config.cache_root.is_some() {
-            "enabled"
-        } else {
-            "disabled"
-        }
-    )
-    .map_err(|error| runtime_error(EXIT_RUNTIME, &format!("failed to write stdout: {error}")))?;
-
-    if let Some(ref public_base_url) = config.public_base_url {
-        writeln!(stdout, "  public base URL: {public_base_url}").map_err(|error| {
-            runtime_error(EXIT_RUNTIME, &format!("failed to write stdout: {error}"))
-        })?;
-    }
-    if config.allow_insecure_url_sources {
-        writeln!(stdout, "  insecure URL sources: enabled").map_err(|error| {
-            runtime_error(EXIT_RUNTIME, &format!("failed to write stdout: {error}"))
-        })?;
-    }
-    stdout.flush().map_err(|error| {
-        runtime_error(EXIT_RUNTIME, &format!("failed to flush stdout: {error}"))
-    })?;
-
-    server::serve_with_config(listener, config)
-        .map_err(|error| runtime_error(EXIT_RUNTIME, &format!("server runtime failed: {error}")))
-}
-
-fn execute_validate<W: Write>(stdout: &mut W) -> Result<(), CliError> {
-    match ServerConfig::from_env() {
-        Ok(config) => {
-            writeln!(stdout, "configuration is valid").map_err(|error| {
-                runtime_error(EXIT_RUNTIME, &format!("failed to write stdout: {error}"))
-            })?;
-            writeln!(stdout, "  storage root: {}", config.storage_root.display()).map_err(
-                |error| runtime_error(EXIT_RUNTIME, &format!("failed to write stdout: {error}")),
-            )?;
-            Ok(())
-        }
-        Err(error) => Err(runtime_error(
-            EXIT_USAGE,
-            &format!("invalid configuration: {error}"),
-        )),
-    }
-}
-
-fn resolve_server_config(command: ServeCommand) -> Result<ServerConfig, CliError> {
-    let mut config = ServerConfig::from_env().map_err(|error| {
-        runtime_error(
-            EXIT_RUNTIME,
-            &format!("failed to load server configuration: {error}"),
-        )
-    })?;
-
-    if let Some(storage_root) = command.storage_root {
-        config.storage_root = storage_root.canonicalize().map_err(|error| {
-            runtime_error(
-                EXIT_RUNTIME,
-                &format!(
-                    "failed to resolve storage root {}: {error}",
-                    storage_root.display()
-                ),
-            )
-        })?;
-    }
-
-    if let Some(public_base_url) = command.public_base_url {
-        config.public_base_url = Some(public_base_url);
-    }
-
-    match (command.signed_url_key_id, command.signed_url_secret) {
-        (Some(key_id), Some(secret)) => {
-            config = config.with_signed_url_credentials(key_id, secret);
-        }
-        (Some(_), None) | (None, Some(_)) => {
-            return Err(CliError {
-                exit_code: EXIT_USAGE,
-                message: "--signed-url-key-id and --signed-url-secret must be provided together"
-                    .to_string(),
-                usage: Some(serve_usage().to_string()),
-                hint: Some("run 'truss serve --help' for serve options".to_string()),
-            });
-        }
-        (None, None) => {}
-    }
-
-    if command.allow_insecure_url_sources {
-        config.allow_insecure_url_sources = true;
-    }
-
-    Ok(config)
-}
-
-fn execute_inspect<R, W>(
-    command: InspectCommand,
-    stdin: &mut R,
-    stdout: &mut W,
-) -> Result<(), CliError>
-where
-    R: Read,
-    W: Write,
-{
-    let bytes = read_input_bytes(command.input, stdin)?;
-    let artifact = sniff_artifact(RawArtifact::new(bytes, None))
-        .map_err(|error| runtime_error(EXIT_INPUT, &error.to_string()))?;
-    let json = render_inspection_json(&artifact);
-
-    stdout.write_all(json.as_bytes()).map_err(|error| {
-        runtime_error(EXIT_RUNTIME, &format!("failed to write output: {error}"))
-    })?;
-
-    Ok(())
-}
-
-fn execute_convert<R, W>(
-    command: ConvertCommand,
-    stdin: &mut R,
-    stdout: &mut W,
-) -> Result<(), CliError>
-where
-    R: Read,
-    W: Write,
-{
-    let bytes = read_input_bytes(command.input, stdin)?;
-    let input = sniff_artifact(RawArtifact::new(bytes, None))
-        .map_err(|error| runtime_error(EXIT_INPUT, &error.to_string()))?;
-
-    let mut options = command.options;
-    if options.format.is_none() {
-        options.format = infer_output_format(&command.output).or(Some(input.media_type));
-    }
-
-    let watermark = if let Some(ref wm_path) = command.watermark_path {
-        let wm_bytes = fs::read(wm_path).map_err(|error| {
-            runtime_error(EXIT_IO, &format!("failed to read watermark file: {error}"))
-        })?;
-        let wm_artifact = sniff_artifact(RawArtifact::new(wm_bytes, None)).map_err(|error| {
-            runtime_error(
-                EXIT_INPUT,
-                &format!(
-                    "failed to decode watermark '{}': {error}",
-                    wm_path.display()
-                ),
-            )
-        })?;
-        Some(WatermarkInput {
-            image: wm_artifact,
-            position: command.watermark_position.unwrap_or(Position::BottomRight),
-            opacity: command.watermark_opacity.unwrap_or(50),
-            margin: command.watermark_margin.unwrap_or(10),
-        })
-    } else {
-        None
-    };
-
-    let result = if input.media_type == MediaType::Svg {
-        let mut request = TransformRequest::new(input, options);
-        request.watermark = watermark;
-        transform_svg(request)
-    } else {
-        let mut request = TransformRequest::new(input, options);
-        request.watermark = watermark;
-        transform_raster(request)
-    }
-    .map_err(map_transform_error)?;
-
-    for warning in &result.warnings {
-        eprintln!("warning: {warning}");
-    }
-
-    write_output_bytes(command.output, &result.artifact.bytes, stdout)
-}
-
-fn execute_sign<W>(command: SignCommand, stdout: &mut W) -> Result<(), CliError>
-where
-    W: Write,
-{
-    if command.watermark_url.is_none()
-        && (command.watermark_position.is_some()
-            || command.watermark_opacity.is_some()
-            || command.watermark_margin.is_some())
-    {
-        return Err(runtime_error(
-            EXIT_USAGE,
-            "--watermark-position, --watermark-opacity, and --watermark-margin require --watermark-url",
-        ));
-    }
-
-    let watermark_params =
-        command
-            .watermark_url
-            .as_ref()
-            .map(|url| server::SignedWatermarkParams {
-                url: url.clone(),
-                position: command.watermark_position.map(|p| p.as_name().to_string()),
-                opacity: command.watermark_opacity,
-                margin: command.watermark_margin,
-            });
-    let url = sign_public_url(
-        &command.base_url,
-        command.source,
-        &command.options,
-        &command.key_id,
-        &command.secret,
-        command.expires,
-        watermark_params.as_ref(),
-        command.preset.as_deref(),
-    )
-    .map_err(|reason| runtime_error(EXIT_TRANSFORM, &reason))?;
-
-    writeln!(stdout, "{url}").map_err(|error| {
-        runtime_error(EXIT_RUNTIME, &format!("failed to write output: {error}"))
-    })?;
-
-    Ok(())
-}
-
-fn map_transform_error(error: crate::TransformError) -> CliError {
-    match error {
-        crate::TransformError::InvalidOptions(reason) => runtime_error(EXIT_USAGE, &reason),
-        crate::TransformError::InvalidInput(reason) => runtime_error(EXIT_INPUT, &reason),
-        crate::TransformError::UnsupportedInputMediaType(reason)
-        | crate::TransformError::DecodeFailed(reason)
-        | crate::TransformError::EncodeFailed(reason)
-        | crate::TransformError::CapabilityMissing(reason)
-        | crate::TransformError::LimitExceeded(reason) => runtime_error(EXIT_TRANSFORM, &reason),
-        crate::TransformError::UnsupportedOutputMediaType(media_type) => runtime_error(
-            EXIT_TRANSFORM,
-            &format!("unsupported output media type: {media_type}"),
-        ),
-    }
-}
-
-// ---------------------------------------------------------------------------
 // I/O helpers
 // ---------------------------------------------------------------------------
 
@@ -1776,73 +1272,20 @@ fn read_url_bytes(url: &str) -> Result<Vec<u8>, CliError> {
     Ok(bytes)
 }
 
-fn write_output_bytes<W>(output: OutputTarget, bytes: &[u8], stdout: &mut W) -> Result<(), CliError>
-where
-    W: Write,
-{
-    match output {
-        OutputTarget::Stdout => stdout.write_all(bytes).map_err(|error| {
-            runtime_error(EXIT_RUNTIME, &format!("failed to write stdout: {error}"))
-        }),
-        OutputTarget::Path(path) => fs::write(&path, bytes).map_err(|error| {
-            runtime_error(
-                EXIT_IO,
-                &format!("failed to write {}: {error}", path.display()),
-            )
-        }),
-    }
-}
-
-fn infer_output_format(output: &OutputTarget) -> Option<MediaType> {
-    match output {
-        OutputTarget::Stdout => None,
-        OutputTarget::Path(path) => infer_output_format_from_path(path),
-    }
-}
-
-fn infer_output_format_from_path(path: &Path) -> Option<MediaType> {
-    let extension = path.extension()?.to_str()?.to_ascii_lowercase();
-    MediaType::from_str(&extension).ok()
-}
-
-fn render_inspection_json(artifact: &crate::Artifact) -> String {
-    format!(
-        concat!(
-            "{{\n",
-            "  \"format\": \"{}\",\n",
-            "  \"mime\": \"{}\",\n",
-            "  \"width\": {},\n",
-            "  \"height\": {},\n",
-            "  \"hasAlpha\": {},\n",
-            "  \"isAnimated\": {}\n",
-            "}}\n"
+fn map_transform_error(error: crate::TransformError) -> CliError {
+    match error {
+        crate::TransformError::InvalidOptions(reason) => runtime_error(EXIT_USAGE, &reason),
+        crate::TransformError::InvalidInput(reason) => runtime_error(EXIT_INPUT, &reason),
+        crate::TransformError::UnsupportedInputMediaType(reason)
+        | crate::TransformError::DecodeFailed(reason)
+        | crate::TransformError::EncodeFailed(reason)
+        | crate::TransformError::CapabilityMissing(reason)
+        | crate::TransformError::LimitExceeded(reason) => runtime_error(EXIT_TRANSFORM, &reason),
+        crate::TransformError::UnsupportedOutputMediaType(media_type) => runtime_error(
+            EXIT_TRANSFORM,
+            &format!("unsupported output media type: {media_type}"),
         ),
-        artifact.media_type.as_name(),
-        artifact.media_type.as_mime(),
-        render_optional_u32(artifact.metadata.width),
-        render_optional_u32(artifact.metadata.height),
-        render_optional_bool(artifact.metadata.has_alpha),
-        render_bool(artifact.metadata.frame_count > 1 || artifact.metadata.duration.is_some()),
-    )
-}
-
-fn render_optional_u32(value: Option<u32>) -> String {
-    match value {
-        Some(value) => value.to_string(),
-        None => "null".to_string(),
     }
-}
-
-fn render_optional_bool(value: Option<bool>) -> &'static str {
-    match value {
-        Some(true) => "true",
-        Some(false) => "false",
-        None => "null",
-    }
-}
-
-fn render_bool(value: bool) -> &'static str {
-    if value { "true" } else { "false" }
 }
 
 // ---------------------------------------------------------------------------
@@ -1898,8 +1341,9 @@ where
 mod tests {
     use super::{
         Command, ConvertCommand, HelpTopic, InputSource, OutputTarget, ServeCommand, SignCommand,
-        parse_args, preprocess_args, resolve_server_config, run_with_io,
+        parse_args, preprocess_args, run_with_io,
     };
+    use super::serve::resolve_server_config;
     use crate::{Fit, MediaType, RawArtifact, SignedUrlSource, TransformOptions, sniff_artifact};
     use image::codecs::png::PngEncoder;
     use image::{ColorType, ImageEncoder, Rgba, RgbaImage};
@@ -2478,7 +1922,7 @@ mod tests {
         // SAFETY: test-only, single-threaded access to this env var.
         unsafe { env::set_var("TRUSS_MAX_CONCURRENT_TRANSFORMS", "invalid") };
         let mut stdout = Vec::new();
-        let result = super::execute_validate(&mut stdout);
+        let result = super::serve::execute_validate(&mut stdout);
         unsafe { env::remove_var("TRUSS_MAX_CONCURRENT_TRANSFORMS") };
         assert!(result.is_err());
     }
@@ -2490,7 +1934,7 @@ mod tests {
         let mut stdout = Vec::new();
         // SAFETY: test-only, single-threaded access to this env var.
         unsafe { env::set_var("TRUSS_STORAGE_ROOT", dir.path().to_str().unwrap()) };
-        let result = super::execute_validate(&mut stdout);
+        let result = super::serve::execute_validate(&mut stdout);
         unsafe { env::remove_var("TRUSS_STORAGE_ROOT") };
         assert!(result.is_ok());
         let output = String::from_utf8(stdout).expect("valid utf-8");

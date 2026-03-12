@@ -269,6 +269,10 @@ pub(super) fn service_unavailable_response(message: &str) -> HttpResponse {
     )
 }
 
+pub(super) fn too_many_requests_response(message: &str) -> HttpResponse {
+    problem_response("429 Too Many Requests", 429, "Too Many Requests", message)
+}
+
 pub(super) fn too_many_redirects_response(message: &str) -> HttpResponse {
     problem_response("508 Loop Detected", 508, "Loop Detected", message)
 }

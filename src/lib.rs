@@ -26,7 +26,7 @@ pub use codecs::raster::transform_raster;
 #[cfg(feature = "svg")]
 pub use codecs::svg::transform_svg;
 pub use core::{
-    Artifact, ArtifactMetadata, CropRegion, Fit, MAX_DECODED_PIXELS, MAX_OUTPUT_PIXELS,
+    Artifact, ArtifactMetadata, CropRegion, Dimensions, Fit, MAX_DECODED_PIXELS, MAX_OUTPUT_PIXELS,
     MAX_WATERMARK_PIXELS, MediaType, MetadataKind, MetadataPolicy, NormalizedTransformOptions,
     NormalizedTransformRequest, Position, RawArtifact, Rgba8, Rotation, TransformError,
     TransformOptions, TransformRequest, TransformResult, TransformWarning, WatermarkInput,
