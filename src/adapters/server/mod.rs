@@ -2652,16 +2652,22 @@ mod tests {
         );
 
         assert!(headers.contains(&(
-            "Cache-Control",
+            "Cache-Control".to_string(),
             "public, max-age=3600, stale-while-revalidate=60".to_string()
         )));
-        assert!(headers.contains(&("Vary", "Accept".to_string())));
-        assert!(headers.contains(&("X-Content-Type-Options", "nosniff".to_string())));
+        assert!(headers.contains(&("Vary".to_string(), "Accept".to_string())));
         assert!(headers.contains(&(
-            "Content-Disposition",
+            "X-Content-Type-Options".to_string(),
+            "nosniff".to_string()
+        )));
+        assert!(headers.contains(&(
+            "Content-Disposition".to_string(),
             "inline; filename=\"truss.webp\"".to_string()
         )));
-        assert!(headers.contains(&("Cache-Status", "\"truss\"; fwd=miss".to_string())));
+        assert!(headers.contains(&(
+            "Cache-Status".to_string(),
+            "\"truss\"; fwd=miss".to_string()
+        )));
     }
 
     #[test]
@@ -2677,7 +2683,10 @@ mod tests {
             &[],
         );
 
-        assert!(headers.contains(&("Content-Security-Policy", "sandbox".to_string())));
+        assert!(headers.contains(&(
+            "Content-Security-Policy".to_string(),
+            "sandbox".to_string()
+        )));
     }
 
     #[test]
@@ -2909,7 +2918,10 @@ mod tests {
             DEFAULT_PUBLIC_STALE_WHILE_REVALIDATE_SECONDS,
             &[],
         );
-        assert!(headers.contains(&("Cache-Status", "\"truss\"; hit".to_string())));
+        assert!(headers.contains(&(
+            "Cache-Status".to_string(),
+            "\"truss\"; hit".to_string()
+        )));
     }
 
     #[test]
@@ -2924,7 +2936,10 @@ mod tests {
             DEFAULT_PUBLIC_STALE_WHILE_REVALIDATE_SECONDS,
             &[],
         );
-        assert!(headers.contains(&("Cache-Status", "\"truss\"; fwd=miss".to_string())));
+        assert!(headers.contains(&(
+            "Cache-Status".to_string(),
+            "\"truss\"; fwd=miss".to_string()
+        )));
     }
 
     #[test]
