@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.7.2
+
+### Fixed
+
+- Fix aarch64 cross-compilation failure by using newer cross-rs base image with OpenSSL 3.x support.
+
 ## v0.7.1
 
 ### Added
