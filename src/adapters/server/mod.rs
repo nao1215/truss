@@ -389,8 +389,19 @@ pub fn serve_with_config(listener: TcpListener, config: ServerConfig) -> io::Res
     listener.set_nonblocking(true)?;
 
     loop {
+        // Wait for activity on the listener or shutdown pipe. On Unix we use
+        // poll(2) to block efficiently; on Windows we fall back to polling the
+        // draining flag with a short sleep.
+        wait_for_accept_or_shutdown(&listener, shutdown_read_fd, &config.draining);
+
         // Check the shutdown pipe first.
         if poll_shutdown_pipe(shutdown_read_fd) {
+            break;
+        }
+
+        // Also check the draining flag directly (needed on Windows where the
+        // shutdown pipe is not available).
+        if config.draining.load(Ordering::SeqCst) {
             break;
         }
 
@@ -403,13 +414,7 @@ pub fn serve_with_config(listener: TcpListener, config: ServerConfig) -> io::Res
                 }
             }
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                // On Windows (or when the shutdown pipe is unavailable), check
-                // the draining flag directly so that Ctrl+C triggers shutdown.
-                if config.draining.load(Ordering::SeqCst) {
-                    break;
-                }
-                // No pending connection — sleep briefly then retry.
-                std::thread::sleep(Duration::from_millis(10));
+                // Spurious wakeup — retry.
             }
             Err(err) => return Err(err),
         }
@@ -501,6 +506,47 @@ fn poll_shutdown_pipe(read_fd: i32) -> bool {
 #[cfg(windows)]
 fn poll_shutdown_pipe(_read_fd: i32) -> bool {
     false
+}
+
+/// Block until the listener socket or the shutdown pipe has data ready.
+/// On Unix this uses `poll(2)` for zero-CPU-cost waiting; on Windows it falls
+/// back to a short sleep since the shutdown pipe is not available.
+#[cfg(unix)]
+fn wait_for_accept_or_shutdown(
+    listener: &std::net::TcpListener,
+    shutdown_read_fd: i32,
+    _draining: &AtomicBool,
+) {
+    use std::os::unix::io::AsRawFd;
+    let listener_fd = listener.as_raw_fd();
+    let mut fds = [
+        libc::pollfd {
+            fd: listener_fd,
+            events: libc::POLLIN,
+            revents: 0,
+        },
+        libc::pollfd {
+            fd: shutdown_read_fd,
+            events: libc::POLLIN,
+            revents: 0,
+        },
+    ];
+    // Block indefinitely (-1 timeout). Signal delivery will interrupt with
+    // EINTR, which is fine — we just re-check the shutdown conditions.
+    unsafe { libc::poll(fds.as_mut_ptr(), 2, -1) };
+}
+
+#[cfg(windows)]
+fn wait_for_accept_or_shutdown(
+    _listener: &std::net::TcpListener,
+    _shutdown_read_fd: i32,
+    draining: &AtomicBool,
+) {
+    // On Windows, poll(2) is not available for the listener socket. Sleep
+    // briefly and let the caller check the draining flag.
+    if !draining.load(Ordering::SeqCst) {
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
 #[cfg(unix)]
