@@ -41,6 +41,7 @@ const elements = {
   watermarkOpacityRange: document.querySelector("#watermark-opacity-range"),
   watermarkOpacityNumber: document.querySelector("#watermark-opacity-number"),
   watermarkMargin: document.querySelector("#watermark-margin"),
+  crop: document.querySelector("#crop"),
   autoOrient: document.querySelector("#auto-orient"),
   transformButton: document.querySelector("#transform-button"),
   downloadLink: document.querySelector("#download-link"),
@@ -351,6 +352,7 @@ function collectOptions() {
     autoOrient: elements.autoOrient.checked,
     keepMetadata: metadataMode === "keep",
     preserveExif: metadataMode === "exif",
+    crop: emptyToNull(elements.crop.value.trim()),
     blur: (() => { const v = Math.max(0, parseFloat(elements.blurNumber.value) || 0); return v >= 0.1 ? v : null; })(),
     sharpen: (() => { const v = Math.max(0, parseFloat(elements.sharpenNumber.value) || 0); return v >= 0.1 ? v : null; })(),
   };
