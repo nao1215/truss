@@ -1494,9 +1494,7 @@ fn execute_validate<W: Write>(stdout: &mut W) -> Result<(), CliError> {
                 runtime_error(EXIT_RUNTIME, &format!("failed to write stdout: {error}"))
             })?;
             writeln!(stdout, "  storage root: {}", config.storage_root.display()).map_err(
-                |error| {
-                    runtime_error(EXIT_RUNTIME, &format!("failed to write stdout: {error}"))
-                },
+                |error| runtime_error(EXIT_RUNTIME, &format!("failed to write stdout: {error}")),
             )?;
             Ok(())
         }

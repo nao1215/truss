@@ -118,7 +118,6 @@ const SOCKET_WRITE_TIMEOUT: Duration = Duration::from_secs(60);
 const WORKER_THREADS: usize = 8;
 type HmacSha256 = Hmac<Sha256>;
 
-
 #[derive(Clone, Copy)]
 struct PublicCacheControl {
     max_age: u32,
@@ -1409,17 +1408,17 @@ fn handle_health_ready(config: &ServerConfig) -> HttpResponse {
         }
     }
 
-    if let Some(min_free) = config.health_cache_min_free_bytes {
-        if let Some(cache_root) = &config.cache_root {
-            let free = disk_free_bytes(cache_root);
-            let ok = free.is_some_and(|f| f >= min_free);
-            checks.push(json!({
-                "name": "cacheDiskFree",
-                "status": if ok { "ok" } else { "fail" },
-            }));
-            if !ok {
-                all_ok = false;
-            }
+    if let Some(min_free) = config.health_cache_min_free_bytes
+        && let Some(cache_root) = &config.cache_root
+    {
+        let free = disk_free_bytes(cache_root);
+        let ok = free.is_some_and(|f| f >= min_free);
+        checks.push(json!({
+            "name": "cacheDiskFree",
+            "status": if ok { "ok" } else { "fail" },
+        }));
+        if !ok {
+            all_ok = false;
         }
     }
 
