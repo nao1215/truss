@@ -469,11 +469,21 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ReadinessResponse'
-              example:
-                status: fail
-                checks:
-                  - name: storageRoot
+              examples:
+                storageRootFail:
+                  summary: Storage root inaccessible
+                  value:
                     status: fail
+                    checks:
+                      - name: storageRoot
+                        status: fail
+                draining:
+                  summary: Graceful shutdown in progress
+                  value:
+                    status: fail
+                    checks:
+                      - name: draining
+                        status: fail
 
   /metrics:
     get:
