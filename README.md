@@ -321,7 +321,7 @@ truss validate
 | `TRUSS_PUBLIC_STALE_WHILE_REVALIDATE` | `Cache-Control: stale-while-revalidate` for public GET responses in seconds (default: `60`) |
 | `TRUSS_DISABLE_ACCEPT_NEGOTIATION` | Disable Accept-based content negotiation (`true`/`1`; recommended behind CDNs that don't forward Accept) |
 | `TRUSS_ALLOW_INSECURE_URL_SOURCES` | Allow private-network/loopback URL sources (`true`/`1`; dev/test only) |
-| `TRUSS_PRESETS_FILE` | Path to a JSON file defining named transform presets |
+| `TRUSS_PRESETS_FILE` | Path to a JSON file defining named transform presets. The file is watched for changes every 5 seconds; valid updates are applied without restart, invalid files are ignored (previous presets are kept) |
 | `TRUSS_PRESETS` | Inline JSON defining named transform presets (ignored when `TRUSS_PRESETS_FILE` is set) |
 
 ### S3

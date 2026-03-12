@@ -367,7 +367,14 @@ pub struct ServerConfig {
     ///
     /// Configurable via `TRUSS_PRESETS` (inline JSON) or `TRUSS_PRESETS_FILE` (path to JSON file).
     /// Each key is a preset name and the value is a set of transform options.
-    pub presets: HashMap<String, TransformOptionsPayload>,
+    /// Wrapped in `Arc<RwLock<...>>` to support hot-reload from `TRUSS_PRESETS_FILE`.
+    pub presets: Arc<std::sync::RwLock<HashMap<String, TransformOptionsPayload>>>,
+    /// Path to the presets JSON file, if configured via `TRUSS_PRESETS_FILE`.
+    ///
+    /// When set, a background thread watches this file for changes and reloads
+    /// presets atomically. When `None` (inline `TRUSS_PRESETS` or no presets),
+    /// hot-reload is disabled.
+    pub presets_file_path: Option<PathBuf>,
     /// Download timeout in seconds for object storage backends (S3, GCS, Azure).
     ///
     /// Configurable via `TRUSS_STORAGE_TIMEOUT_SECS`. Defaults to 30.
@@ -418,7 +425,8 @@ impl Clone for ServerConfig {
             enable_compression: self.enable_compression,
             compression_level: self.compression_level,
             transforms_in_flight: Arc::clone(&self.transforms_in_flight),
-            presets: self.presets.clone(),
+            presets: Arc::clone(&self.presets),
+            presets_file_path: self.presets_file_path.clone(),
             #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
             storage_timeout_secs: self.storage_timeout_secs,
             #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
@@ -489,7 +497,15 @@ impl fmt::Debug for ServerConfig {
             )
             .field("enable_compression", &self.enable_compression)
             .field("compression_level", &self.compression_level)
-            .field("presets", &self.presets.keys().collect::<Vec<_>>());
+            .field(
+                "presets",
+                &self
+                    .presets
+                    .read()
+                    .map(|p| p.keys().cloned().collect::<Vec<_>>())
+                    .unwrap_or_default(),
+            )
+            .field("presets_file_path", &self.presets_file_path);
         #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
         {
             d.field("storage_backend", &self.storage_backend);
@@ -537,7 +553,8 @@ impl PartialEq for ServerConfig {
             && self.custom_response_headers == other.custom_response_headers
             && self.enable_compression == other.enable_compression
             && self.compression_level == other.compression_level
-            && self.presets == other.presets
+            && *self.presets.read().unwrap() == *other.presets.read().unwrap()
+            && self.presets_file_path == other.presets_file_path
             && cfg_storage_eq(self, other)
     }
 }
@@ -641,7 +658,8 @@ impl ServerConfig {
             enable_compression: true,
             compression_level: 1,
             transforms_in_flight: Arc::new(AtomicU64::new(0)),
-            presets: HashMap::new(),
+            presets: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            presets_file_path: None,
             #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
             storage_timeout_secs: STORAGE_DOWNLOAD_TIMEOUT_SECS,
             #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
@@ -824,7 +842,7 @@ impl ServerConfig {
 
     /// Returns a copy of the configuration with named transform presets attached.
     pub fn with_presets(mut self, presets: HashMap<String, TransformOptionsPayload>) -> Self {
-        self.presets = presets;
+        self.presets = Arc::new(std::sync::RwLock::new(presets));
         self
     }
 
@@ -1106,7 +1124,7 @@ impl ServerConfig {
         let health_max_memory_bytes =
             parse_env_u64_ranged("TRUSS_HEALTH_MAX_MEMORY_BYTES", 1, u64::MAX)?;
 
-        let presets = parse_presets_from_env()?;
+        let (presets, presets_file_path) = parse_presets_from_env()?;
 
         let shutdown_drain_secs = parse_env_u64_ranged("TRUSS_SHUTDOWN_DRAIN_SECS", 0, 300)?
             .unwrap_or(DEFAULT_SHUTDOWN_DRAIN_SECS);
@@ -1156,7 +1174,8 @@ impl ServerConfig {
             enable_compression,
             compression_level,
             transforms_in_flight: Arc::new(AtomicU64::new(0)),
-            presets,
+            presets: Arc::new(std::sync::RwLock::new(presets)),
+            presets_file_path,
             #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
             storage_timeout_secs,
             #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
@@ -1219,8 +1238,11 @@ pub(super) fn parse_optional_env_u32(name: &str) -> io::Result<Option<u32>> {
     }
 }
 
-pub(super) fn parse_presets_from_env() -> io::Result<HashMap<String, TransformOptionsPayload>> {
-    let (json_str, source) = match env::var("TRUSS_PRESETS_FILE")
+/// Parses presets from environment variables, returning both the preset map
+/// and the file path (if loaded from `TRUSS_PRESETS_FILE`).
+pub(super) fn parse_presets_from_env(
+) -> io::Result<(HashMap<String, TransformOptionsPayload>, Option<PathBuf>)> {
+    let (json_str, source, file_path) = match env::var("TRUSS_PRESETS_FILE")
         .ok()
         .filter(|v| !v.is_empty())
     {
@@ -1231,18 +1253,36 @@ pub(super) fn parse_presets_from_env() -> io::Result<HashMap<String, TransformOp
                     format!("failed to read TRUSS_PRESETS_FILE `{path}`: {e}"),
                 )
             })?;
-            (content, format!("TRUSS_PRESETS_FILE `{path}`"))
+            let pb = PathBuf::from(&path);
+            (content, format!("TRUSS_PRESETS_FILE `{path}`"), Some(pb))
         }
         None => match env::var("TRUSS_PRESETS").ok().filter(|v| !v.is_empty()) {
-            Some(value) => (value, "TRUSS_PRESETS".to_string()),
-            None => return Ok(HashMap::new()),
+            Some(value) => (value, "TRUSS_PRESETS".to_string(), None),
+            None => return Ok((HashMap::new(), None)),
         },
     };
 
-    serde_json::from_str::<HashMap<String, TransformOptionsPayload>>(&json_str).map_err(|e| {
+    let presets =
+        serde_json::from_str::<HashMap<String, TransformOptionsPayload>>(&json_str).map_err(
+            |e| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("{source} must be valid JSON: {e}"),
+                )
+            },
+        )?;
+    Ok((presets, file_path))
+}
+
+/// Parses a preset JSON file at the given path. Used by the hot-reload watcher.
+pub(super) fn parse_presets_file(
+    path: &std::path::Path,
+) -> io::Result<HashMap<String, TransformOptionsPayload>> {
+    let content = std::fs::read_to_string(path)?;
+    serde_json::from_str::<HashMap<String, TransformOptionsPayload>>(&content).map_err(|e| {
         io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("{source} must be valid JSON: {e}"),
+            io::ErrorKind::InvalidData,
+            format!("invalid preset JSON in `{}`: {e}", path.display()),
         )
     })
 }

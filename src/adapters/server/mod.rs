@@ -388,6 +388,18 @@ pub fn serve_with_config(listener: TcpListener, config: ServerConfig) -> io::Res
         Arc::clone(&config.log_level),
     );
 
+    // Spawn a background thread to hot-reload presets when TRUSS_PRESETS_FILE changes.
+    if let Some(ref path) = config.presets_file_path {
+        let presets = Arc::clone(&config.presets);
+        let draining = Arc::clone(&config.draining);
+        let cfg = Arc::clone(&config);
+        let path = path.clone();
+        std::thread::Builder::new()
+            .name("preset-watcher".into())
+            .spawn(move || preset_watcher(presets, path, draining, cfg))
+            .expect("failed to spawn preset watcher thread");
+    }
+
     // Set the listener to non-blocking so we can multiplex between incoming
     // connections and the shutdown pipe.
     listener.set_nonblocking(true)?;
@@ -670,6 +682,73 @@ extern "C" fn windows_signal_handler(_sig: libc::c_int) {
     // Re-register the handler since Windows resets to SIG_DFL after each signal.
     unsafe {
         libc::signal(libc::SIGINT, windows_signal_handler as libc::sighandler_t);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Preset hot-reload watcher
+// ---------------------------------------------------------------------------
+
+/// Polling interval for the preset file watcher.
+const PRESET_WATCH_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Background thread that watches `TRUSS_PRESETS_FILE` for changes and reloads
+/// presets atomically. On parse failure, the previous valid presets are kept.
+fn preset_watcher(
+    presets: Arc<std::sync::RwLock<std::collections::HashMap<String, TransformOptionsPayload>>>,
+    path: std::path::PathBuf,
+    draining: Arc<AtomicBool>,
+    config: Arc<ServerConfig>,
+) {
+    use config::parse_presets_file;
+    use std::fs;
+
+    let mut last_modified = fs::metadata(&path)
+        .and_then(|m| m.modified())
+        .ok();
+
+    loop {
+        std::thread::sleep(PRESET_WATCH_INTERVAL);
+
+        if draining.load(Ordering::Relaxed) {
+            break;
+        }
+
+        let current_modified = match fs::metadata(&path).and_then(|m| m.modified()) {
+            Ok(mtime) => Some(mtime),
+            Err(err) => {
+                config.log_warn(&format!(
+                    "[presets] failed to stat `{}`: {err}",
+                    path.display()
+                ));
+                continue;
+            }
+        };
+
+        if current_modified == last_modified {
+            continue;
+        }
+
+        match parse_presets_file(&path) {
+            Ok(new_presets) => {
+                let count = new_presets.len();
+                *presets.write().expect("presets lock poisoned") = new_presets;
+                last_modified = current_modified;
+                config.log(&format!(
+                    "[presets] reloaded {count} presets from `{}`",
+                    path.display()
+                ));
+            }
+            Err(err) => {
+                config.log_warn(&format!(
+                    "[presets] reload failed for `{}`: {err} (keeping previous presets)",
+                    path.display()
+                ));
+                // Update last_modified to avoid retrying every poll cycle for
+                // the same broken file — the operator will save again after fixing.
+                last_modified = current_modified;
+            }
+        }
     }
 }
 
@@ -1999,8 +2078,8 @@ fn parse_public_get_request(
 
     // Resolve preset and merge with per-request overrides.
     let merged = if let Some(preset_name) = query.get("preset") {
-        let preset = config
-            .presets
+        let presets = config.presets.read().expect("presets lock poisoned");
+        let preset = presets
             .get(preset_name)
             .ok_or_else(|| bad_request_response(&format!("unknown preset `{preset_name}`")))?;
         preset.clone().with_overrides(&per_request)
@@ -3206,11 +3285,12 @@ mod tests {
             );
             env::remove_var("TRUSS_PRESETS_FILE");
         }
-        let presets = parse_presets_from_env().unwrap();
+        let (presets, file_path) = parse_presets_from_env().unwrap();
         unsafe {
             env::remove_var("TRUSS_PRESETS");
         }
 
+        assert!(file_path.is_none());
         assert_eq!(presets.len(), 1);
         let thumb = presets.get("thumb").unwrap();
         assert_eq!(thumb.width, Some(100));
@@ -5467,7 +5547,7 @@ mod tests {
         assert!(config.bearer_token.is_none());
         assert!(config.signed_url_secret.is_none());
         assert!(config.signing_keys.is_empty());
-        assert!(config.presets.is_empty());
+        assert!(config.presets.read().unwrap().is_empty());
         assert_eq!(
             config.max_concurrent_transforms,
             DEFAULT_MAX_CONCURRENT_TRANSFORMS
