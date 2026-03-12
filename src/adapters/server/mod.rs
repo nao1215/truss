@@ -59,7 +59,6 @@ use hmac::{Hmac, Mac};
 use serde::Deserialize;
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use subtle::ConstantTimeEq;
 use std::collections::BTreeMap;
 use std::env;
 use std::io;
@@ -68,6 +67,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
+use subtle::ConstantTimeEq;
 use url::Url;
 use uuid::Uuid;
 
@@ -1420,16 +1420,16 @@ fn handle_metrics_request(request: HttpRequest, config: &ServerConfig) -> HttpRe
     }
 
     if let Some(expected) = &config.metrics_token {
-        let provided = request
-            .header("authorization")
-            .and_then(|value| {
-                let (scheme, token) = value.split_once(|c: char| c.is_whitespace())?;
-                scheme.eq_ignore_ascii_case("Bearer").then(|| token.trim())
-            });
+        let provided = request.header("authorization").and_then(|value| {
+            let (scheme, token) = value.split_once(|c: char| c.is_whitespace())?;
+            scheme.eq_ignore_ascii_case("Bearer").then(|| token.trim())
+        });
         match provided {
             Some(token) if token.as_bytes().ct_eq(expected.as_bytes()).into() => {}
             _ => {
-                return response::auth_required_response("metrics endpoint requires authentication");
+                return response::auth_required_response(
+                    "metrics endpoint requires authentication",
+                );
             }
         }
     }
@@ -1837,6 +1837,7 @@ fn transform_source_bytes_inner(
 mod tests {
     use serial_test::serial;
 
+    use super::config::DEFAULT_MAX_CONCURRENT_TRANSFORMS;
     use super::config::{
         DEFAULT_PUBLIC_MAX_AGE_SECONDS, DEFAULT_PUBLIC_STALE_WHILE_REVALIDATE_SECONDS,
         parse_presets_from_env,
@@ -1845,7 +1846,6 @@ mod tests {
         DEFAULT_MAX_UPLOAD_BODY_BYTES, HttpRequest, find_header_terminator, read_request_body,
         read_request_headers, resolve_storage_path,
     };
-    use super::metrics::DEFAULT_MAX_CONCURRENT_TRANSFORMS;
     use super::multipart::parse_multipart_form_data;
     use super::remote::{PinnedResolver, prepare_remote_fetch_target};
     use super::response::auth_required_response;

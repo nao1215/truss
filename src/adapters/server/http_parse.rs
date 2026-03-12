@@ -8,6 +8,7 @@ use std::path::{Component, Path, PathBuf};
 pub(super) const MAX_HEADER_BYTES: usize = 16 * 1024;
 pub(super) const MAX_REQUEST_BODY_BYTES: usize = 1024 * 1024;
 pub(super) const DEFAULT_MAX_UPLOAD_BODY_BYTES: usize = 100 * 1024 * 1024;
+const CHUNK_READ_SIZE: usize = 4096;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct HttpRequest {
@@ -78,7 +79,7 @@ where
     R: Read,
 {
     let mut buffer = Vec::new();
-    let mut chunk = [0_u8; 4096];
+    let mut chunk = [0_u8; CHUNK_READ_SIZE];
     let header_end = loop {
         let read = stream.read(&mut chunk).map_err(|error| {
             internal_error_response(&format!("failed to read request: {error}"))
@@ -155,7 +156,7 @@ where
         partial.overflow
     };
 
-    let mut chunk = [0_u8; 4096];
+    let mut chunk = [0_u8; CHUNK_READ_SIZE];
     while body.len() < partial.content_length {
         let read = stream.read(&mut chunk).map_err(|error| {
             internal_error_response(&format!("failed to read request: {error}"))
@@ -987,8 +988,7 @@ mod tests {
         let raw = b"POST /upload HTTP/1.1\r\nContent-Length: 5\r\nHost: localhost\r\n\r\nhello";
         let mut cursor = std::io::Cursor::new(raw.to_vec());
 
-        let partial =
-            read_request_headers(&mut cursor, DEFAULT_MAX_UPLOAD_BODY_BYTES).unwrap();
+        let partial = read_request_headers(&mut cursor, DEFAULT_MAX_UPLOAD_BODY_BYTES).unwrap();
         assert_eq!(partial.method, "POST");
         assert_eq!(partial.target, "/upload");
         assert_eq!(partial.content_length, 5);
@@ -1002,8 +1002,7 @@ mod tests {
         let raw = b"GET /health HTTP/1.1\r\nHost: localhost\r\n\r\n";
         let mut cursor = std::io::Cursor::new(raw.to_vec());
 
-        let partial =
-            read_request_headers(&mut cursor, DEFAULT_MAX_UPLOAD_BODY_BYTES).unwrap();
+        let partial = read_request_headers(&mut cursor, DEFAULT_MAX_UPLOAD_BODY_BYTES).unwrap();
         assert_eq!(partial.method, "GET");
         assert_eq!(partial.content_length, 0);
     }
@@ -1012,8 +1011,7 @@ mod tests {
     fn test_read_request_headers_truncated_stream() {
         let raw = b"GET /health HTTP/1.1\r\nHost: loc";
         let mut cursor = std::io::Cursor::new(raw.to_vec());
-        let err =
-            read_request_headers(&mut cursor, DEFAULT_MAX_UPLOAD_BODY_BYTES).unwrap_err();
+        let err = read_request_headers(&mut cursor, DEFAULT_MAX_UPLOAD_BODY_BYTES).unwrap_err();
         assert_eq!(err.status, "400 Bad Request");
     }
 }

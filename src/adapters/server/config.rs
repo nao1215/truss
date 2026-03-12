@@ -3,7 +3,8 @@ use super::TransformOptionsPayload;
 use super::azure;
 #[cfg(feature = "gcs")]
 use super::gcs;
-use super::metrics::DEFAULT_MAX_CONCURRENT_TRANSFORMS;
+/// Default maximum number of concurrent transforms allowed.
+pub(super) const DEFAULT_MAX_CONCURRENT_TRANSFORMS: u64 = 64;
 #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
 use super::remote::STORAGE_DOWNLOAD_TIMEOUT_SECS;
 #[cfg(feature = "s3")]
@@ -786,119 +787,25 @@ impl ServerConfig {
 
         let allow_insecure_url_sources = env_flag("TRUSS_ALLOW_INSECURE_URL_SOURCES");
 
-        let max_concurrent_transforms = match env::var("TRUSS_MAX_CONCURRENT_TRANSFORMS")
-            .ok()
-            .filter(|v| !v.is_empty())
-        {
-            Some(value) => {
-                let n: u64 = value.parse().map_err(|_| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        "TRUSS_MAX_CONCURRENT_TRANSFORMS must be a positive integer",
-                    )
-                })?;
-                if n == 0 || n > 1024 {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        "TRUSS_MAX_CONCURRENT_TRANSFORMS must be between 1 and 1024",
-                    ));
-                }
-                n
-            }
-            None => DEFAULT_MAX_CONCURRENT_TRANSFORMS,
-        };
+        let max_concurrent_transforms =
+            parse_env_u64_ranged("TRUSS_MAX_CONCURRENT_TRANSFORMS", 1, 1024)?
+                .unwrap_or(DEFAULT_MAX_CONCURRENT_TRANSFORMS);
 
-        let transform_deadline_secs = match env::var("TRUSS_TRANSFORM_DEADLINE_SECS")
-            .ok()
-            .filter(|v| !v.is_empty())
-        {
-            Some(value) => {
-                let secs: u64 = value.parse().map_err(|_| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        "TRUSS_TRANSFORM_DEADLINE_SECS must be a positive integer",
-                    )
-                })?;
-                if secs == 0 || secs > 300 {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        "TRUSS_TRANSFORM_DEADLINE_SECS must be between 1 and 300",
-                    ));
-                }
-                secs
-            }
-            None => DEFAULT_TRANSFORM_DEADLINE_SECS,
-        };
+        let transform_deadline_secs =
+            parse_env_u64_ranged("TRUSS_TRANSFORM_DEADLINE_SECS", 1, 300)?
+                .unwrap_or(DEFAULT_TRANSFORM_DEADLINE_SECS);
 
-        let max_input_pixels = match env::var("TRUSS_MAX_INPUT_PIXELS")
-            .ok()
-            .filter(|v| !v.is_empty())
-        {
-            Some(value) => {
-                let n: u64 = value.parse().map_err(|_| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        "TRUSS_MAX_INPUT_PIXELS must be a positive integer",
-                    )
-                })?;
-                if n == 0 || n > crate::MAX_DECODED_PIXELS {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        format!(
-                            "TRUSS_MAX_INPUT_PIXELS must be between 1 and {}",
-                            crate::MAX_DECODED_PIXELS
-                        ),
-                    ));
-                }
-                n
-            }
-            None => DEFAULT_MAX_INPUT_PIXELS,
-        };
+        let max_input_pixels =
+            parse_env_u64_ranged("TRUSS_MAX_INPUT_PIXELS", 1, crate::MAX_DECODED_PIXELS)?
+                .unwrap_or(DEFAULT_MAX_INPUT_PIXELS);
 
-        let max_upload_bytes = match env::var("TRUSS_MAX_UPLOAD_BYTES")
-            .ok()
-            .filter(|v| !v.is_empty())
-        {
-            Some(value) => {
-                let n: usize = value.parse().map_err(|_| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        "TRUSS_MAX_UPLOAD_BYTES must be a positive integer",
-                    )
-                })?;
-                if n == 0 || n > 10 * 1024 * 1024 * 1024 {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        "TRUSS_MAX_UPLOAD_BYTES must be between 1 and 10737418240 (10 GB)",
-                    ));
-                }
-                n
-            }
-            None => DEFAULT_MAX_UPLOAD_BODY_BYTES,
-        };
+        let max_upload_bytes =
+            parse_env_u64_ranged("TRUSS_MAX_UPLOAD_BYTES", 1, 10 * 1024 * 1024 * 1024)?
+                .unwrap_or(DEFAULT_MAX_UPLOAD_BODY_BYTES as u64) as usize;
 
         #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
-        let storage_timeout_secs = match env::var("TRUSS_STORAGE_TIMEOUT_SECS")
-            .ok()
-            .filter(|v| !v.is_empty())
-        {
-            Some(value) => {
-                let secs: u64 = value.parse().map_err(|_| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        "TRUSS_STORAGE_TIMEOUT_SECS must be a positive integer",
-                    )
-                })?;
-                if secs == 0 || secs > 300 {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        "TRUSS_STORAGE_TIMEOUT_SECS must be between 1 and 300",
-                    ));
-                }
-                secs
-            }
-            None => STORAGE_DOWNLOAD_TIMEOUT_SECS,
-        };
+        let storage_timeout_secs = parse_env_u64_ranged("TRUSS_STORAGE_TIMEOUT_SECS", 1, 300)?
+            .unwrap_or(STORAGE_DOWNLOAD_TIMEOUT_SECS);
 
         #[cfg(feature = "s3")]
         let s3_context = if storage_backend == StorageBackend::S3 {
@@ -1018,6 +925,31 @@ impl ServerConfig {
             #[cfg(feature = "azure")]
             azure_context,
         })
+    }
+}
+
+/// Parse an optional environment variable as `u64`, validating that its value
+/// falls within `[min, max]`. Returns `Ok(None)` when the variable is unset or
+/// empty, `Ok(Some(value))` on success, or an `io::Error` on parse / range
+/// failure.
+pub(super) fn parse_env_u64_ranged(name: &str, min: u64, max: u64) -> io::Result<Option<u64>> {
+    match env::var(name).ok().filter(|v| !v.is_empty()) {
+        Some(value) => {
+            let n: u64 = value.parse().map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("{name} must be a positive integer"),
+                )
+            })?;
+            if n < min || n > max {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("{name} must be between {min} and {max}"),
+                ));
+            }
+            Ok(Some(n))
+        }
+        None => Ok(None),
     }
 }
 
