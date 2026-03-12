@@ -1111,4 +1111,38 @@ mod tests {
         unsafe { env::remove_var("TRUSS_KEEP_ALIVE_MAX_REQUESTS") };
         assert!(result.is_err());
     }
+
+    #[test]
+    fn health_thresholds_default_none() {
+        let config = ServerConfig::new(PathBuf::from("."), None);
+        assert!(config.health_cache_min_free_bytes.is_none());
+        assert!(config.health_max_memory_bytes.is_none());
+    }
+
+    #[test]
+    fn parse_health_cache_min_free_bytes_valid() {
+        // SAFETY: test-only, single-threaded access to this env var.
+        unsafe { env::set_var("TRUSS_HEALTH_CACHE_MIN_FREE_BYTES", "1073741824") };
+        let result = parse_env_u64_ranged("TRUSS_HEALTH_CACHE_MIN_FREE_BYTES", 1, u64::MAX);
+        unsafe { env::remove_var("TRUSS_HEALTH_CACHE_MIN_FREE_BYTES") };
+        assert_eq!(result.unwrap(), Some(1_073_741_824));
+    }
+
+    #[test]
+    fn parse_health_max_memory_bytes_valid() {
+        // SAFETY: test-only, single-threaded access to this env var.
+        unsafe { env::set_var("TRUSS_HEALTH_MAX_MEMORY_BYTES", "536870912") };
+        let result = parse_env_u64_ranged("TRUSS_HEALTH_MAX_MEMORY_BYTES", 1, u64::MAX);
+        unsafe { env::remove_var("TRUSS_HEALTH_MAX_MEMORY_BYTES") };
+        assert_eq!(result.unwrap(), Some(536_870_912));
+    }
+
+    #[test]
+    fn parse_health_threshold_zero_rejected() {
+        // SAFETY: test-only, single-threaded access to this env var.
+        unsafe { env::set_var("TRUSS_HEALTH_CACHE_MIN_FREE_BYTES", "0") };
+        let result = parse_env_u64_ranged("TRUSS_HEALTH_CACHE_MIN_FREE_BYTES", 1, u64::MAX);
+        unsafe { env::remove_var("TRUSS_HEALTH_CACHE_MIN_FREE_BYTES") };
+        assert!(result.is_err());
+    }
 }

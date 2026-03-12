@@ -5400,4 +5400,97 @@ mod tests {
             serde_json::from_slice(&response.body).expect("parse health body");
         assert_eq!(body["maxInputPixels"], 40_000_000);
     }
+
+    #[test]
+    fn health_includes_transform_capacity_details() {
+        let storage = temp_dir("health-capacity");
+        let config = ServerConfig::new(storage, None);
+        let response = route_request(
+            HttpRequest {
+                method: "GET".to_string(),
+                target: "/health".to_string(),
+                version: "HTTP/1.1".to_string(),
+                headers: Vec::new(),
+                body: Vec::new(),
+            },
+            &config,
+        );
+        let body: serde_json::Value =
+            serde_json::from_slice(&response.body).expect("parse health body");
+        let checks = body["checks"].as_array().expect("checks array");
+        let capacity = checks
+            .iter()
+            .find(|c| c["name"] == "transformCapacity")
+            .expect("transformCapacity check");
+        assert_eq!(capacity["current"], 0);
+        assert_eq!(capacity["max"], 64);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn process_rss_bytes_returns_some() {
+        let rss = super::process_rss_bytes();
+        assert!(rss.is_some());
+        assert!(rss.unwrap() > 0);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn disk_free_bytes_returns_some_for_existing_dir() {
+        let dir = temp_dir("disk-free");
+        let free = super::disk_free_bytes(&dir);
+        assert!(free.is_some());
+        assert!(free.unwrap() > 0);
+    }
+
+    #[test]
+    fn health_ready_returns_503_when_memory_exceeded() {
+        let storage = temp_dir("health-mem");
+        let mut config = ServerConfig::new(storage, None);
+        // Set threshold to 1 byte — guaranteed to be exceeded.
+        config.health_max_memory_bytes = Some(1);
+        let response = route_request(
+            HttpRequest {
+                method: "GET".to_string(),
+                target: "/health/ready".to_string(),
+                version: "HTTP/1.1".to_string(),
+                headers: Vec::new(),
+                body: Vec::new(),
+            },
+            &config,
+        );
+        // On Linux, RSS > 1 byte → 503. On other platforms, memory check
+        // is skipped so the response is 200.
+        if cfg!(target_os = "linux") {
+            assert_eq!(response.status, "503 Service Unavailable");
+        }
+    }
+
+    #[test]
+    fn health_includes_memory_usage_on_linux() {
+        let storage = temp_dir("health-mem-report");
+        let mut config = ServerConfig::new(storage, None);
+        config.health_max_memory_bytes = Some(u64::MAX);
+        let response = route_request(
+            HttpRequest {
+                method: "GET".to_string(),
+                target: "/health".to_string(),
+                version: "HTTP/1.1".to_string(),
+                headers: Vec::new(),
+                body: Vec::new(),
+            },
+            &config,
+        );
+        let body: serde_json::Value =
+            serde_json::from_slice(&response.body).expect("parse health body");
+        if cfg!(target_os = "linux") {
+            let checks = body["checks"].as_array().expect("checks array");
+            let mem = checks
+                .iter()
+                .find(|c| c["name"] == "memoryUsage")
+                .expect("memoryUsage check");
+            assert_eq!(mem["status"], "ok");
+            assert!(mem["rssBytes"].as_u64().unwrap() > 0);
+        }
+    }
 }
