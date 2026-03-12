@@ -1168,7 +1168,13 @@ fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io::Result<()>
             let sc = status_code(response.status).unwrap_or("unknown");
             let method_log = partial.method.clone();
             let path_log = partial.path().to_string();
-            let _ = write_response(&mut stream, response, true);
+            let _ = write_response_compressed(
+                &mut stream,
+                response,
+                true,
+                accepts_gzip,
+                config.compression_level,
+            );
             record_http_request_duration(RouteMetric::Unknown, start);
             emit_access_log(
                 config,
@@ -1221,7 +1227,13 @@ fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io::Result<()>
                 let sc = status_code(response.status).unwrap_or("unknown");
                 let method_log = partial.method.clone();
                 let path_log = partial.path().to_string();
-                let _ = write_response(&mut stream, response, true);
+                let _ = write_response_compressed(
+                    &mut stream,
+                    response,
+                    true,
+                    accepts_gzip,
+                    config.compression_level,
+                );
                 record_http_request_duration(RouteMetric::Metrics, start);
                 emit_access_log(
                     config,
@@ -1252,7 +1264,13 @@ fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io::Result<()>
                     .push(("X-Request-Id".to_string(), request_id.clone()));
                 record_http_metrics(RouteMetric::Unknown, response.status);
                 let sc = status_code(response.status).unwrap_or("unknown");
-                let _ = write_response(&mut stream, response, true);
+                let _ = write_response_compressed(
+                    &mut stream,
+                    response,
+                    true,
+                    accepts_gzip,
+                    config.compression_level,
+                );
                 record_http_request_duration(RouteMetric::Unknown, start);
                 emit_access_log(
                     config,

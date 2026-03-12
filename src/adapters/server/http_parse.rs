@@ -378,7 +378,7 @@ pub(super) fn accepts_encoding(header_value: &str, encoding: &str) -> bool {
             Some((n, p)) => (n.trim(), Some(p)),
             None => (item, None),
         };
-        if !name.eq_ignore_ascii_case(encoding) {
+        if !name.eq_ignore_ascii_case(encoding) && name != "*" {
             continue;
         }
         // If there is a q parameter, reject when q=0 (or 0.0, 0.00, 0.000).
@@ -1104,5 +1104,27 @@ mod tests {
     #[test]
     fn test_accepts_encoding_q0_among_others() {
         assert!(!accepts_encoding("deflate, gzip;q=0, br", "gzip"));
+    }
+
+    #[test]
+    fn test_accepts_encoding_wildcard_matches() {
+        assert!(accepts_encoding("*", "gzip"));
+    }
+
+    #[test]
+    fn test_accepts_encoding_wildcard_with_positive_q() {
+        assert!(accepts_encoding("*;q=1.0", "gzip"));
+    }
+
+    #[test]
+    fn test_accepts_encoding_wildcard_rejected_by_q0() {
+        assert!(!accepts_encoding("*;q=0", "gzip"));
+    }
+
+    #[test]
+    fn test_accepts_encoding_explicit_overrides_wildcard() {
+        // Explicit gzip;q=0 should reject even if * is present.
+        // Our parser returns on first match, so gzip;q=0 wins.
+        assert!(!accepts_encoding("gzip;q=0, *", "gzip"));
     }
 }

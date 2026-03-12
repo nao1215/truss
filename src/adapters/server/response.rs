@@ -838,7 +838,9 @@ mod tests {
         // We can't call write_response_compressed directly with a Cursor
         // because it expects a TcpStream, so we test the decision logic.
         let should_compress = response.body.len() >= MIN_COMPRESS_BYTES
-            && response.content_type.is_some_and(is_compressible_content_type);
+            && response
+                .content_type
+                .is_some_and(is_compressible_content_type);
         assert!(
             !should_compress,
             "body below threshold should not be compressed"
@@ -851,7 +853,9 @@ mod tests {
         let body = vec![b'x'; MIN_COMPRESS_BYTES];
         let response = HttpResponse::json("200 OK", body);
         let should_compress = response.body.len() >= MIN_COMPRESS_BYTES
-            && response.content_type.is_some_and(is_compressible_content_type);
+            && response
+                .content_type
+                .is_some_and(is_compressible_content_type);
         assert!(
             should_compress,
             "body at threshold should be eligible for compression"
@@ -863,7 +867,9 @@ mod tests {
         let body = vec![b'x'; MIN_COMPRESS_BYTES + 1];
         let response = HttpResponse::json("200 OK", body);
         let should_compress = response.body.len() >= MIN_COMPRESS_BYTES
-            && response.content_type.is_some_and(is_compressible_content_type);
+            && response
+                .content_type
+                .is_some_and(is_compressible_content_type);
         assert!(
             should_compress,
             "body above threshold should be eligible for compression"
