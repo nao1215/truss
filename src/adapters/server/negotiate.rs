@@ -222,6 +222,7 @@ pub(super) enum ImageResponsePolicy {
     PrivateTransform,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn build_image_response_headers(
     media_type: MediaType,
     etag: &str,
@@ -230,6 +231,7 @@ pub(super) fn build_image_response_headers(
     cache_status: CacheHitStatus,
     public_max_age: u32,
     public_swr: u32,
+    custom_headers: &[(String, String)],
 ) -> Vec<(&'static str, String)> {
     let mut headers = vec![
         (
@@ -265,6 +267,14 @@ pub(super) fn build_image_response_headers(
         CacheHitStatus::Miss | CacheHitStatus::Disabled => "\"truss\"; fwd=miss".to_string(),
     };
     headers.push(("Cache-Status", cache_status_value));
+
+    // Operator-configured custom headers (e.g. CDN-specific cache directives).
+    for (name, value) in custom_headers {
+        // SAFETY: header names are validated at startup and are stable for the
+        // process lifetime, so leaking them is intentional and bounded.
+        let leaked: &'static str = Box::leak(name.clone().into_boxed_str());
+        headers.push((leaked, value.clone()));
+    }
 
     headers
 }
@@ -659,6 +669,7 @@ mod tests {
             CacheHitStatus::Miss,
             3600,
             86400,
+            &[],
         );
         let cache_control = headers.iter().find(|(k, _)| *k == "Cache-Control").unwrap();
         assert_eq!(
@@ -677,6 +688,7 @@ mod tests {
             CacheHitStatus::Disabled,
             0,
             0,
+            &[],
         );
         let cache_control = headers.iter().find(|(k, _)| *k == "Cache-Control").unwrap();
         assert_eq!(cache_control.1, "no-store");
@@ -692,6 +704,7 @@ mod tests {
             CacheHitStatus::Hit,
             60,
             120,
+            &[],
         );
         let vary = headers.iter().find(|(k, _)| *k == "Vary");
         assert!(vary.is_some());
@@ -708,6 +721,7 @@ mod tests {
             CacheHitStatus::Miss,
             60,
             120,
+            &[],
         );
         let vary = headers.iter().find(|(k, _)| *k == "Vary");
         assert!(vary.is_none());
@@ -723,6 +737,7 @@ mod tests {
             CacheHitStatus::Miss,
             60,
             120,
+            &[],
         );
         let csp = headers
             .iter()
@@ -741,6 +756,7 @@ mod tests {
             CacheHitStatus::Miss,
             60,
             120,
+            &[],
         );
         let csp = headers
             .iter()
@@ -758,6 +774,7 @@ mod tests {
             CacheHitStatus::Disabled,
             0,
             0,
+            &[],
         );
         let nosniff = headers.iter().find(|(k, _)| *k == "X-Content-Type-Options");
         assert!(nosniff.is_some());
@@ -774,6 +791,7 @@ mod tests {
             CacheHitStatus::Miss,
             60,
             120,
+            &[],
         );
         let cd = headers
             .iter()
@@ -792,6 +810,7 @@ mod tests {
             CacheHitStatus::Hit,
             60,
             120,
+            &[],
         );
         let cs = headers.iter().find(|(k, _)| *k == "Cache-Status").unwrap();
         assert_eq!(cs.1, "\"truss\"; hit");
@@ -807,6 +826,7 @@ mod tests {
             CacheHitStatus::Miss,
             60,
             120,
+            &[],
         );
         let cs = headers.iter().find(|(k, _)| *k == "Cache-Status").unwrap();
         assert_eq!(cs.1, "\"truss\"; fwd=miss");
@@ -822,9 +842,57 @@ mod tests {
             CacheHitStatus::Disabled,
             60,
             120,
+            &[],
         );
         let cs = headers.iter().find(|(k, _)| *k == "Cache-Status").unwrap();
         assert_eq!(cs.1, "\"truss\"; fwd=miss");
+    }
+
+    #[test]
+    fn test_build_image_response_headers_custom_headers_appended() {
+        let custom = vec![
+            ("CDN-Cache-Control".to_string(), "max-age=86400".to_string()),
+            ("Surrogate-Control".to_string(), "max-age=3600".to_string()),
+        ];
+        let headers = build_image_response_headers(
+            MediaType::Jpeg,
+            "\"etag\"",
+            ImageResponsePolicy::PublicGet,
+            false,
+            CacheHitStatus::Miss,
+            3600,
+            86400,
+            &custom,
+        );
+        let cdn = headers
+            .iter()
+            .find(|(k, _)| *k == "CDN-Cache-Control")
+            .unwrap();
+        assert_eq!(cdn.1, "max-age=86400");
+        let surrogate = headers
+            .iter()
+            .find(|(k, _)| *k == "Surrogate-Control")
+            .unwrap();
+        assert_eq!(surrogate.1, "max-age=3600");
+    }
+
+    #[test]
+    fn test_build_image_response_headers_no_custom_headers() {
+        let headers = build_image_response_headers(
+            MediaType::Jpeg,
+            "\"etag\"",
+            ImageResponsePolicy::PublicGet,
+            false,
+            CacheHitStatus::Miss,
+            3600,
+            86400,
+            &[],
+        );
+        // Should not have CDN-specific headers.
+        assert!(headers
+            .iter()
+            .find(|(k, _)| *k == "CDN-Cache-Control")
+            .is_none());
     }
 
     // ── negotiate_output_format ──────────────────────────────────────

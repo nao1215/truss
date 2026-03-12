@@ -79,22 +79,76 @@ impl HttpResponse {
     }
 }
 
+/// Minimum body size (in bytes) below which gzip compression is skipped.
+/// Very small bodies may actually grow when compressed due to gzip framing overhead.
+const MIN_COMPRESS_BYTES: usize = 128;
+
+/// Content types eligible for gzip compression.  Image types are excluded
+/// because they are already compressed (JPEG, PNG, WebP, AVIF, etc.).
+fn is_compressible_content_type(ct: &str) -> bool {
+    matches!(
+        ct,
+        "application/json"
+            | "application/problem+json"
+            | "text/plain"
+            | "text/plain; charset=utf-8"
+            | "application/openmetrics-text; version=1.0.0; charset=utf-8"
+    )
+}
+
 pub(super) fn write_response(
     stream: &mut TcpStream,
     response: HttpResponse,
     close: bool,
 ) -> io::Result<()> {
+    write_response_compressed(stream, response, close, false)
+}
+
+pub(super) fn write_response_compressed(
+    stream: &mut TcpStream,
+    response: HttpResponse,
+    close: bool,
+    accepts_gzip: bool,
+) -> io::Result<()> {
     use std::fmt::Write as FmtWrite;
+
+    let should_compress = accepts_gzip
+        && response.body.len() >= MIN_COMPRESS_BYTES
+        && response
+            .content_type
+            .is_some_and(is_compressible_content_type);
+
+    let (body, is_compressed) = if should_compress {
+        match gzip_compress(&response.body) {
+            Ok(compressed) if compressed.len() < response.body.len() => (compressed, true),
+            _ => (response.body, false),
+        }
+    } else {
+        (response.body, false)
+    };
 
     let connection_value = if close { "close" } else { "keep-alive" };
     let mut header = format!(
         "HTTP/1.1 {}\r\nContent-Length: {}\r\nConnection: {connection_value}\r\n",
         response.status,
-        response.body.len()
+        body.len()
     );
 
     if let Some(content_type) = response.content_type {
         let _ = write!(header, "Content-Type: {content_type}\r\n");
+    }
+
+    if is_compressed {
+        header.push_str("Content-Encoding: gzip\r\n");
+    }
+    // Signal to caches that the response varies by Accept-Encoding when the
+    // content type is compressible (regardless of whether this particular
+    // response was actually compressed).
+    if response
+        .content_type
+        .is_some_and(is_compressible_content_type)
+    {
+        header.push_str("Vary: Accept-Encoding\r\n");
     }
 
     for (name, value) in response.headers {
@@ -104,8 +158,17 @@ pub(super) fn write_response(
     header.push_str("\r\n");
 
     stream.write_all(header.as_bytes())?;
-    stream.write_all(&response.body)?;
+    stream.write_all(&body)?;
     stream.flush()
+}
+
+fn gzip_compress(data: &[u8]) -> io::Result<Vec<u8>> {
+    use flate2::Compression;
+    use flate2::write::GzEncoder;
+
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
+    encoder.write_all(data)?;
+    encoder.finish()
 }
 
 pub(super) fn bad_request_response(message: &str) -> HttpResponse {
@@ -688,5 +751,52 @@ mod tests {
                 resp.status
             );
         }
+    }
+
+    // ---------------------------------------------------------------
+    // compression helpers
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn test_is_compressible_json() {
+        assert!(is_compressible_content_type("application/json"));
+        assert!(is_compressible_content_type("application/problem+json"));
+    }
+
+    #[test]
+    fn test_is_not_compressible_image() {
+        assert!(!is_compressible_content_type("image/png"));
+        assert!(!is_compressible_content_type("image/jpeg"));
+        assert!(!is_compressible_content_type("image/webp"));
+    }
+
+    #[test]
+    fn test_is_compressible_text() {
+        assert!(is_compressible_content_type("text/plain"));
+        assert!(is_compressible_content_type(
+            "application/openmetrics-text; version=1.0.0; charset=utf-8"
+        ));
+    }
+
+    #[test]
+    fn test_gzip_compress_roundtrip() {
+        use flate2::read::GzDecoder;
+        use std::io::Read;
+
+        let original = b"hello world, this is test data that should compress well. \
+                        repeating repeating repeating repeating repeating repeating.";
+        let compressed = gzip_compress(original).unwrap();
+        assert!(compressed.len() < original.len());
+
+        let mut decoder = GzDecoder::new(&compressed[..]);
+        let mut decompressed = Vec::new();
+        decoder.read_to_end(&mut decompressed).unwrap();
+        assert_eq!(decompressed, original);
+    }
+
+    #[test]
+    fn test_not_compressible_unknown_type() {
+        assert!(!is_compressible_content_type("application/octet-stream"));
+        assert!(!is_compressible_content_type("video/mp4"));
     }
 }

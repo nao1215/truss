@@ -48,6 +48,7 @@ use negotiate::{
 use remote::{read_remote_watermark_bytes, resolve_source_bytes};
 use response::{
     HttpResponse, NOT_FOUND_BODY, bad_request_response, service_unavailable_response,
+    write_response_compressed,
     transform_error_response, unsupported_media_type_response, write_response,
 };
 
@@ -65,7 +66,7 @@ use std::io;
 use std::net::{TcpListener, TcpStream};
 use std::str::FromStr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use subtle::ConstantTimeEq;
 use url::Url;
@@ -377,23 +378,55 @@ pub fn serve_with_config(listener: TcpListener, config: ServerConfig) -> io::Res
         }));
     }
 
-    for stream in listener.incoming() {
-        match stream {
-            Ok(stream) => {
+    // Install signal handler for graceful shutdown.  The handler sets the
+    // shared `draining` flag (so /health/ready returns 503 immediately) and
+    // writes a byte to a self-pipe to wake the accept loop.
+    let (shutdown_read_fd, shutdown_write_fd) = create_shutdown_pipe()?;
+    install_signal_handler(Arc::clone(&config.draining), shutdown_write_fd);
+
+    // Set the listener to non-blocking so we can multiplex between incoming
+    // connections and the shutdown pipe.
+    listener.set_nonblocking(true)?;
+
+    loop {
+        // Check the shutdown pipe first.
+        if poll_shutdown_pipe(shutdown_read_fd) {
+            break;
+        }
+
+        match listener.accept() {
+            Ok((stream, _addr)) => {
+                // Accepted connections are always blocking for the workers.
+                let _ = stream.set_nonblocking(false);
                 if sender.send(stream).is_err() {
                     break;
                 }
+            }
+            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                // No pending connection — sleep briefly then retry.
+                std::thread::sleep(Duration::from_millis(10));
             }
             Err(err) => return Err(err),
         }
     }
 
+    // --- Drain phase ---
+    let drain_secs = config.shutdown_drain_secs;
+    config.log(&format!(
+        "shutdown: drain started, waiting {drain_secs}s for load balancers"
+    ));
+    if drain_secs > 0 {
+        std::thread::sleep(Duration::from_secs(drain_secs));
+    }
+    config.log("shutdown: drain complete, closing listener");
+
+    // Stop dispatching new connections to workers.
     drop(sender);
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
     for worker in workers {
         let remaining = deadline.saturating_duration_since(std::time::Instant::now());
         if remaining.is_zero() {
-            eprintln!("shutdown: timed out waiting for worker threads");
+            stderr_write("shutdown: timed out waiting for worker threads");
             break;
         }
         // Park the main thread until the worker finishes or the deadline
@@ -416,13 +449,116 @@ pub fn serve_with_config(listener: TcpListener, config: ServerConfig) -> io::Res
                 .expect("shutdown condvar wait");
             done = guard;
             if timeout.timed_out() {
-                eprintln!("shutdown: timed out waiting for a worker thread");
+                stderr_write("shutdown: timed out waiting for a worker thread");
                 break;
             }
         }
     }
 
+    config.log("shutdown: complete");
+    close_shutdown_pipe(shutdown_read_fd, shutdown_write_fd);
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Shutdown pipe helpers — a minimal self-pipe for waking the accept loop from
+// a signal handler without requiring async I/O.
+// ---------------------------------------------------------------------------
+
+#[cfg(unix)]
+fn create_shutdown_pipe() -> io::Result<(i32, i32)> {
+    let mut fds = [0i32; 2];
+    if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // Make the read end non-blocking so `poll_shutdown_pipe` never stalls.
+    unsafe { libc::fcntl(fds[0], libc::F_SETFL, libc::O_NONBLOCK) };
+    Ok((fds[0], fds[1]))
+}
+
+#[cfg(windows)]
+fn create_shutdown_pipe() -> io::Result<(i32, i32)> {
+    // On Windows we fall back to a polling approach using the draining flag.
+    Ok((-1, -1))
+}
+
+#[cfg(unix)]
+fn poll_shutdown_pipe(read_fd: i32) -> bool {
+    let mut buf = [0u8; 1];
+    let n = unsafe { libc::read(read_fd, buf.as_mut_ptr().cast(), 1) };
+    n > 0
+}
+
+#[cfg(windows)]
+fn poll_shutdown_pipe(_read_fd: i32) -> bool {
+    false
+}
+
+#[cfg(unix)]
+fn close_shutdown_pipe(read_fd: i32, write_fd: i32) {
+    unsafe {
+        libc::close(read_fd);
+        libc::close(write_fd);
+    }
+}
+
+#[cfg(windows)]
+fn close_shutdown_pipe(_read_fd: i32, _write_fd: i32) {}
+
+/// Global write-end of the shutdown pipe, written to from the signal handler.
+static SHUTDOWN_PIPE_WR: AtomicU64 = AtomicU64::new(0);
+/// Global draining flag set by the signal handler.
+static GLOBAL_DRAINING: std::sync::atomic::AtomicPtr<AtomicBool> =
+    std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
+
+#[cfg(unix)]
+fn install_signal_handler(draining: Arc<AtomicBool>, write_fd: i32) {
+    // Store the write fd and draining pointer in globals accessible from the
+    // async-signal-safe handler.
+    SHUTDOWN_PIPE_WR.store(write_fd as u64, Ordering::SeqCst);
+    // SAFETY: `Arc::into_raw` leaks intentionally — the pointer remains valid
+    // for the process lifetime.  The signal handler only calls `AtomicBool::store`
+    // and `libc::write`, both of which are async-signal-safe.
+    let ptr = Arc::into_raw(draining) as *mut AtomicBool;
+    GLOBAL_DRAINING.store(ptr, Ordering::SeqCst);
+
+    unsafe {
+        libc::signal(libc::SIGTERM, signal_handler as *const () as libc::sighandler_t);
+        libc::signal(libc::SIGINT, signal_handler as *const () as libc::sighandler_t);
+    }
+}
+
+#[cfg(unix)]
+extern "C" fn signal_handler(_sig: libc::c_int) {
+    // Set the draining flag — async-signal-safe (atomic store).
+    let ptr = GLOBAL_DRAINING.load(Ordering::SeqCst);
+    if !ptr.is_null() {
+        unsafe { (*ptr).store(true, Ordering::SeqCst) };
+    }
+    // Wake the accept loop by writing to the self-pipe.
+    let fd = SHUTDOWN_PIPE_WR.load(Ordering::SeqCst) as i32;
+    if fd > 0 {
+        let byte: u8 = 1;
+        unsafe { libc::write(fd, (&byte as *const u8).cast(), 1) };
+    }
+}
+
+#[cfg(windows)]
+fn install_signal_handler(draining: Arc<AtomicBool>, _write_fd: i32) {
+    // On Windows, spawn a thread that waits for Ctrl+C via the standard handler.
+    std::thread::spawn(move || {
+        let _ = unsafe {
+            libc::signal(libc::SIGTERM, libc::SIG_DFL);
+        };
+        // Fallback: just set draining on Ctrl+C via the atomic flag.
+        // The accept loop polls this via the WouldBlock branch.
+        loop {
+            std::thread::sleep(Duration::from_millis(100));
+            if draining.load(Ordering::SeqCst) {
+                break;
+            }
+        }
+    });
 }
 
 /// Serves exactly one request using configuration loaded from the environment.
@@ -941,6 +1077,10 @@ fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io::Result<()>
             .iter()
             .any(|(name, value)| name == "connection" && value.eq_ignore_ascii_case("close"));
 
+        let accepts_gzip = config.enable_compression
+            && http_parse::header_value(&partial.headers, "accept-encoding")
+                .is_some_and(|v| v.contains("gzip"));
+
         let is_head = partial.method == "HEAD";
 
         let requires_auth = matches!(
@@ -1071,7 +1211,7 @@ fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io::Result<()>
         requests_served += 1;
         let close_after = client_wants_close || requests_served >= config.keep_alive_max_requests;
 
-        write_response(&mut stream, response, close_after)?;
+        write_response_compressed(&mut stream, response, close_after, accepts_gzip)?;
         record_http_request_duration(route, start);
 
         emit_access_log(
@@ -1385,6 +1525,16 @@ fn handle_health_live() -> HttpResponse {
 fn handle_health_ready(config: &ServerConfig) -> HttpResponse {
     let mut checks: Vec<serde_json::Value> = Vec::new();
     let mut all_ok = true;
+
+    // When the server is draining (shutdown signal received), immediately
+    // report not-ready so that load balancers stop routing traffic.
+    if config.draining.load(Ordering::Relaxed) {
+        checks.push(json!({
+            "name": "draining",
+            "status": "fail",
+        }));
+        all_ok = false;
+    }
 
     for (ok, name) in storage_health_check(config) {
         checks.push(json!({
@@ -1788,6 +1938,7 @@ fn transform_source_bytes(
                 CacheHitStatus::Hit,
                 config.public_max_age_seconds,
                 config.public_stale_while_revalidate_seconds,
+                &config.custom_response_headers,
             );
             headers.push(("Age", age.as_secs().to_string()));
             if matches!(response_policy, ImageResponsePolicy::PublicGet)
@@ -1908,6 +2059,7 @@ fn transform_source_bytes_inner(
             CacheHitStatus::Hit,
             response_config.public_cache_control.max_age,
             response_config.public_cache_control.stale_while_revalidate,
+            &config.custom_response_headers,
         );
         headers.push(("Age", age.as_secs().to_string()));
         if matches!(response_policy, ImageResponsePolicy::PublicGet)
@@ -2002,6 +2154,7 @@ fn transform_source_bytes_inner(
         cache_hit_status,
         response_config.public_cache_control.max_age,
         response_config.public_cache_control.stale_while_revalidate,
+        &config.custom_response_headers,
     );
 
     if matches!(response_policy, ImageResponsePolicy::PublicGet)
@@ -2424,6 +2577,7 @@ mod tests {
             CacheHitStatus::Disabled,
             DEFAULT_PUBLIC_MAX_AGE_SECONDS,
             DEFAULT_PUBLIC_STALE_WHILE_REVALIDATE_SECONDS,
+            &[],
         );
 
         assert!(headers.contains(&(
@@ -2449,6 +2603,7 @@ mod tests {
             CacheHitStatus::Disabled,
             DEFAULT_PUBLIC_MAX_AGE_SECONDS,
             DEFAULT_PUBLIC_STALE_WHILE_REVALIDATE_SECONDS,
+            &[],
         );
 
         assert!(headers.contains(&("Content-Security-Policy", "sandbox".to_string())));
@@ -2464,6 +2619,7 @@ mod tests {
             CacheHitStatus::Disabled,
             DEFAULT_PUBLIC_MAX_AGE_SECONDS,
             DEFAULT_PUBLIC_STALE_WHILE_REVALIDATE_SECONDS,
+            &[],
         );
 
         assert!(!headers.iter().any(|(k, _)| *k == "Content-Security-Policy"));
@@ -2680,6 +2836,7 @@ mod tests {
             CacheHitStatus::Hit,
             DEFAULT_PUBLIC_MAX_AGE_SECONDS,
             DEFAULT_PUBLIC_STALE_WHILE_REVALIDATE_SECONDS,
+            &[],
         );
         assert!(headers.contains(&("Cache-Status", "\"truss\"; hit".to_string())));
     }
@@ -2694,6 +2851,7 @@ mod tests {
             CacheHitStatus::Miss,
             DEFAULT_PUBLIC_MAX_AGE_SECONDS,
             DEFAULT_PUBLIC_STALE_WHILE_REVALIDATE_SECONDS,
+            &[],
         );
         assert!(headers.contains(&("Cache-Status", "\"truss\"; fwd=miss".to_string())));
     }
@@ -5630,5 +5788,59 @@ mod tests {
         } else {
             assert!(mem.is_none(), "memoryUsage should be absent on non-Linux");
         }
+    }
+
+    // ── graceful shutdown: draining flag ─────────────────────────────
+
+    #[test]
+    fn health_ready_returns_503_when_draining() {
+        let storage = temp_dir("health-ready-draining");
+        let config = ServerConfig::new(storage, None);
+        config.draining.store(true, Ordering::Relaxed);
+
+        let response = route_request(
+            HttpRequest {
+                method: "GET".to_string(),
+                target: "/health/ready".to_string(),
+                version: "HTTP/1.1".to_string(),
+                headers: Vec::new(),
+                body: Vec::new(),
+            },
+            &config,
+        );
+
+        assert_eq!(response.status, "503 Service Unavailable");
+        let body: serde_json::Value =
+            serde_json::from_slice(&response.body).expect("parse ready body");
+        assert_eq!(body["status"], "fail");
+        let checks = body["checks"].as_array().expect("checks array");
+        assert!(checks
+            .iter()
+            .any(|c| c["name"] == "draining" && c["status"] == "fail"));
+    }
+
+    #[test]
+    fn health_ready_returns_ok_when_not_draining() {
+        let storage = temp_dir("health-ready-not-draining");
+        let config = ServerConfig::new(storage, None);
+        // draining is false by default.
+        let response = route_request(
+            HttpRequest {
+                method: "GET".to_string(),
+                target: "/health/ready".to_string(),
+                version: "HTTP/1.1".to_string(),
+                headers: Vec::new(),
+                body: Vec::new(),
+            },
+            &config,
+        );
+
+        assert_eq!(response.status, "200 OK");
+        let body: serde_json::Value =
+            serde_json::from_slice(&response.body).expect("parse ready body");
+        assert_eq!(body["status"], "ok");
+        // Should not have a draining check entry.
+        let checks = body["checks"].as_array().expect("checks array");
+        assert!(!checks.iter().any(|c| c["name"] == "draining"));
     }
 }

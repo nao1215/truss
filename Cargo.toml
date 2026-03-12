@@ -13,7 +13,7 @@ categories = ["command-line-utilities", "multimedia::images", "web-programming::
 [features]
 default = ["cli", "server", "svg", "webp-lossy"]
 cli = ["dep:clap", "dep:clap_complete", "dep:ureq", "server"]
-server = ["dep:hmac", "dep:hex", "dep:serde_json", "dep:sha2", "dep:subtle", "dep:ureq", "dep:url", "dep:uuid", "dep:libc", "svg"]
+server = ["dep:hmac", "dep:hex", "dep:serde_json", "dep:sha2", "dep:subtle", "dep:ureq", "dep:url", "dep:uuid", "dep:libc", "dep:flate2", "svg"]
 s3 = ["server", "dep:aws-sdk-s3", "dep:aws-config", "dep:tokio"]
 gcs = ["server", "dep:google-cloud-storage", "dep:google-cloud-auth", "dep:tokio"]
 azure = ["server", "dep:azure_storage_blob", "dep:azure_core", "dep:futures", "dep:tokio"]
@@ -60,6 +60,7 @@ google-cloud-auth = { version = "1", optional = true }
 azure_storage_blob = { version = "0.9", optional = true }
 azure_core = { version = "0.32", optional = true }
 futures = { version = "0.3", optional = true }
+flate2 = { version = "1", optional = true }
 libc = { version = "0.2", optional = true }
 
 [profile.release]

@@ -4585,6 +4585,7 @@ dependencies = [
  "bytes",
  "clap",
  "clap_complete",
+ "flate2",
  "futures",
  "google-cloud-auth",
  "google-cloud-storage",

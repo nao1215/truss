@@ -485,6 +485,7 @@ pub(super) fn try_versioned_cache_lookup(
             CacheHitStatus::Hit,
             config.public_max_age_seconds,
             config.public_stale_while_revalidate_seconds,
+            &config.custom_response_headers,
         );
         headers.push(("Age", age.as_secs().to_string()));
         if matches!(response_policy, ImageResponsePolicy::PublicGet)
