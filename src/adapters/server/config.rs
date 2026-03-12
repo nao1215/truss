@@ -990,9 +990,8 @@ impl ServerConfig {
 
         let presets = parse_presets_from_env()?;
 
-        let shutdown_drain_secs =
-            parse_env_u64_ranged("TRUSS_SHUTDOWN_DRAIN_SECS", 0, 300)?
-                .unwrap_or(DEFAULT_SHUTDOWN_DRAIN_SECS);
+        let shutdown_drain_secs = parse_env_u64_ranged("TRUSS_SHUTDOWN_DRAIN_SECS", 0, 300)?
+            .unwrap_or(DEFAULT_SHUTDOWN_DRAIN_SECS);
 
         let custom_response_headers = parse_response_headers_from_env()?;
 
@@ -1165,15 +1164,25 @@ fn validate_header_name(name: &str) -> io::Result<()> {
         let valid = byte.is_ascii_alphanumeric()
             || matches!(
                 byte,
-                b'!' | b'#' | b'$' | b'%' | b'&' | b'\'' | b'*' | b'+' | b'-' | b'.' | b'^'
-                    | b'_' | b'`' | b'|' | b'~'
+                b'!' | b'#'
+                    | b'$'
+                    | b'%'
+                    | b'&'
+                    | b'\''
+                    | b'*'
+                    | b'+'
+                    | b'-'
+                    | b'.'
+                    | b'^'
+                    | b'_'
+                    | b'`'
+                    | b'|'
+                    | b'~'
             );
         if !valid {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                format!(
-                    "TRUSS_RESPONSE_HEADERS: invalid character in header name `{name}`"
-                ),
+                format!("TRUSS_RESPONSE_HEADERS: invalid character in header name `{name}`"),
             ));
         }
     }
@@ -1187,9 +1196,7 @@ fn validate_header_value(name: &str, value: &str) -> io::Result<()> {
         if !valid {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                format!(
-                    "TRUSS_RESPONSE_HEADERS: invalid character in value for header `{name}`"
-                ),
+                format!("TRUSS_RESPONSE_HEADERS: invalid character in value for header `{name}`"),
             ));
         }
     }
@@ -1417,12 +1424,7 @@ mod tests {
     #[serial]
     fn parse_response_headers_invalid_value_character() {
         // SAFETY: test-only, single-threaded access to this env var.
-        unsafe {
-            env::set_var(
-                "TRUSS_RESPONSE_HEADERS",
-                "{\"X-Bad\":\"val\\u0000ue\"}",
-            )
-        };
+        unsafe { env::set_var("TRUSS_RESPONSE_HEADERS", "{\"X-Bad\":\"val\\u0000ue\"}") };
         let result = parse_response_headers_from_env();
         unsafe { env::remove_var("TRUSS_RESPONSE_HEADERS") };
         assert!(result.is_err());

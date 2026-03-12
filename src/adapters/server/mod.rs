@@ -48,8 +48,8 @@ use negotiate::{
 use remote::{read_remote_watermark_bytes, resolve_source_bytes};
 use response::{
     HttpResponse, NOT_FOUND_BODY, bad_request_response, service_unavailable_response,
-    write_response_compressed,
     transform_error_response, unsupported_media_type_response, write_response,
+    write_response_compressed,
 };
 
 use crate::{
@@ -1161,7 +1161,9 @@ fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io::Result<()>
         if requires_auth
             && let Err(mut response) = authorize_request_headers(&partial.headers, config)
         {
-            response.headers.push(("X-Request-Id".to_string(), request_id.clone()));
+            response
+                .headers
+                .push(("X-Request-Id".to_string(), request_id.clone()));
             record_http_metrics(RouteMetric::Unknown, response.status);
             let sc = status_code(response.status).unwrap_or("unknown");
             let method_log = partial.method.clone();
@@ -1212,7 +1214,9 @@ fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io::Result<()>
             };
 
             if let Some(mut response) = early_response {
-                response.headers.push(("X-Request-Id".to_string(), request_id.clone()));
+                response
+                    .headers
+                    .push(("X-Request-Id".to_string(), request_id.clone()));
                 record_http_metrics(RouteMetric::Metrics, response.status);
                 let sc = status_code(response.status).unwrap_or("unknown");
                 let method_log = partial.method.clone();
@@ -1243,7 +1247,9 @@ fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io::Result<()>
         let request = match read_request_body(&mut stream, partial) {
             Ok(request) => request,
             Err(mut response) => {
-                response.headers.push(("X-Request-Id".to_string(), request_id.clone()));
+                response
+                    .headers
+                    .push(("X-Request-Id".to_string(), request_id.clone()));
                 record_http_metrics(RouteMetric::Unknown, response.status);
                 let sc = status_code(response.status).unwrap_or("unknown");
                 let _ = write_response(&mut stream, response, true);
@@ -1268,7 +1274,9 @@ fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io::Result<()>
         let mut response = route_request(request, config);
         record_http_metrics(route, response.status);
 
-        response.headers.push(("X-Request-Id".to_string(), request_id.clone()));
+        response
+            .headers
+            .push(("X-Request-Id".to_string(), request_id.clone()));
 
         let cache_status = extract_cache_status(&response.headers);
         let had_watermark = extract_watermark_flag(&mut response.headers);
@@ -2662,10 +2670,7 @@ mod tests {
             "public, max-age=3600, stale-while-revalidate=60".to_string()
         )));
         assert!(headers.contains(&("Vary".to_string(), "Accept".to_string())));
-        assert!(headers.contains(&(
-            "X-Content-Type-Options".to_string(),
-            "nosniff".to_string()
-        )));
+        assert!(headers.contains(&("X-Content-Type-Options".to_string(), "nosniff".to_string())));
         assert!(headers.contains(&(
             "Content-Disposition".to_string(),
             "inline; filename=\"truss.webp\"".to_string()
@@ -2689,10 +2694,7 @@ mod tests {
             &[],
         );
 
-        assert!(headers.contains(&(
-            "Content-Security-Policy".to_string(),
-            "sandbox".to_string()
-        )));
+        assert!(headers.contains(&("Content-Security-Policy".to_string(), "sandbox".to_string())));
     }
 
     #[test]
@@ -2924,10 +2926,7 @@ mod tests {
             DEFAULT_PUBLIC_STALE_WHILE_REVALIDATE_SECONDS,
             &[],
         );
-        assert!(headers.contains(&(
-            "Cache-Status".to_string(),
-            "\"truss\"; hit".to_string()
-        )));
+        assert!(headers.contains(&("Cache-Status".to_string(), "\"truss\"; hit".to_string())));
     }
 
     #[test]
@@ -5281,8 +5280,10 @@ mod tests {
 
     #[test]
     fn cache_status_miss_detected() {
-        let headers: Vec<(String, String)> =
-            vec![("Cache-Status".to_string(), "\"truss\"; fwd=miss".to_string())];
+        let headers: Vec<(String, String)> = vec![(
+            "Cache-Status".to_string(),
+            "\"truss\"; fwd=miss".to_string(),
+        )];
         assert_eq!(super::extract_cache_status(&headers), Some("miss"));
     }
 
@@ -5908,9 +5909,11 @@ mod tests {
             serde_json::from_slice(&response.body).expect("parse ready body");
         assert_eq!(body["status"], "fail");
         let checks = body["checks"].as_array().expect("checks array");
-        assert!(checks
-            .iter()
-            .any(|c| c["name"] == "draining" && c["status"] == "fail"));
+        assert!(
+            checks
+                .iter()
+                .any(|c| c["name"] == "draining" && c["status"] == "fail")
+        );
     }
 
     #[test]

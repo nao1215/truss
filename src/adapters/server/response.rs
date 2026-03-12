@@ -163,9 +163,7 @@ pub(super) fn write_response_compressed(
             for part in value.split(',') {
                 let trimmed = part.trim();
                 if !trimmed.is_empty()
-                    && !vary_parts
-                        .iter()
-                        .any(|v| v.eq_ignore_ascii_case(trimmed))
+                    && !vary_parts.iter().any(|v| v.eq_ignore_ascii_case(trimmed))
                 {
                     vary_parts.push(trimmed);
                 }
@@ -842,7 +840,10 @@ mod tests {
         let should_compress = true // accepts_gzip
             && response.body.len() >= MIN_COMPRESS_BYTES
             && response.content_type.is_some_and(is_compressible_content_type);
-        assert!(!should_compress, "body below threshold should not be compressed");
+        assert!(
+            !should_compress,
+            "body below threshold should not be compressed"
+        );
     }
 
     #[test]
@@ -853,7 +854,10 @@ mod tests {
         let should_compress = true // accepts_gzip
             && response.body.len() >= MIN_COMPRESS_BYTES
             && response.content_type.is_some_and(is_compressible_content_type);
-        assert!(should_compress, "body at threshold should be eligible for compression");
+        assert!(
+            should_compress,
+            "body at threshold should be eligible for compression"
+        );
     }
 
     #[test]
@@ -863,7 +867,10 @@ mod tests {
         let should_compress = true // accepts_gzip
             && response.body.len() >= MIN_COMPRESS_BYTES
             && response.content_type.is_some_and(is_compressible_content_type);
-        assert!(should_compress, "body above threshold should be eligible for compression");
+        assert!(
+            should_compress,
+            "body above threshold should be eligible for compression"
+        );
     }
 
     // ---------------------------------------------------------------
@@ -899,8 +906,14 @@ mod tests {
         let raw = capture_response(response, true);
         let raw_str = String::from_utf8_lossy(&raw);
 
-        assert!(raw_str.contains("Content-Encoding: gzip"), "should contain Content-Encoding: gzip");
-        assert!(raw_str.contains("Vary: Accept-Encoding"), "should contain Vary header");
+        assert!(
+            raw_str.contains("Content-Encoding: gzip"),
+            "should contain Content-Encoding: gzip"
+        );
+        assert!(
+            raw_str.contains("Vary: Accept-Encoding"),
+            "should contain Vary header"
+        );
 
         // Extract the body after the \r\n\r\n separator and decompress.
         let body_start = raw_str.find("\r\n\r\n").unwrap() + 4;
@@ -919,7 +932,10 @@ mod tests {
         let raw = capture_response(response, false);
         let raw_str = String::from_utf8_lossy(&raw);
 
-        assert!(!raw_str.contains("Content-Encoding: gzip"), "should NOT contain Content-Encoding: gzip");
+        assert!(
+            !raw_str.contains("Content-Encoding: gzip"),
+            "should NOT contain Content-Encoding: gzip"
+        );
     }
 
     #[cfg(unix)]
@@ -931,8 +947,14 @@ mod tests {
         let raw = capture_response(response, true);
         let raw_str = String::from_utf8_lossy(&raw);
 
-        assert!(!raw_str.contains("Content-Encoding: gzip"), "small body should not be compressed");
+        assert!(
+            !raw_str.contains("Content-Encoding: gzip"),
+            "small body should not be compressed"
+        );
         // Vary header should still be present for compressible content types.
-        assert!(raw_str.contains("Vary: Accept-Encoding"), "Vary should be present for compressible type");
+        assert!(
+            raw_str.contains("Vary: Accept-Encoding"),
+            "Vary should be present for compressible type"
+        );
     }
 }

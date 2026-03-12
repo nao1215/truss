@@ -886,10 +886,12 @@ mod tests {
             &[],
         );
         // Should not have CDN-specific headers.
-        assert!(headers
-            .iter()
-            .find(|(k, _)| *k == "CDN-Cache-Control")
-            .is_none());
+        assert!(
+            headers
+                .iter()
+                .find(|(k, _)| *k == "CDN-Cache-Control")
+                .is_none()
+        );
     }
 
     // ── negotiate_output_format ──────────────────────────────────────
