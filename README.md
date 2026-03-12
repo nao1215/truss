@@ -329,7 +329,12 @@ The server echoes the request ID back in the `X-Request-Id` response header, mak
 
 ### Prometheus Metrics
 
-The server exposes a `/metrics` endpoint in Prometheus text exposition format. The endpoint does not require authentication, so Prometheus scrapers can collect metrics without additional configuration.
+The server exposes a `/metrics` endpoint in Prometheus text exposition format. By default, the endpoint does not require authentication.
+
+| Variable | Description |
+|------|------|
+| `TRUSS_METRICS_TOKEN` | Bearer token for `/metrics`; when set, requests must include `Authorization: Bearer <token>` |
+| `TRUSS_DISABLE_METRICS` | Disable the `/metrics` endpoint entirely (`true`/`1`; returns 404) |
 
 For the full metrics reference, bucket boundaries, and example PromQL queries, see [doc/prometheus.md](doc/prometheus.md).
 

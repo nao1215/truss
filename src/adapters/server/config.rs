@@ -211,6 +211,16 @@ pub struct ServerConfig {
     /// Configurable via `TRUSS_MAX_UPLOAD_BYTES`. Defaults to 100 MB.
     /// Requests exceeding this limit are rejected with 413 Payload Too Large.
     pub max_upload_bytes: usize,
+    /// Bearer token for the `/metrics` endpoint.
+    ///
+    /// When set, the `/metrics` endpoint requires `Authorization: Bearer <token>`.
+    /// When absent, `/metrics` is accessible without authentication.
+    /// Configurable via `TRUSS_METRICS_TOKEN`.
+    pub metrics_token: Option<String>,
+    /// Whether the `/metrics` endpoint is disabled.
+    ///
+    /// Configurable via `TRUSS_DISABLE_METRICS`. When enabled, `/metrics` returns 404.
+    pub disable_metrics: bool,
     /// Per-server counter tracking the number of image transforms currently in
     /// flight.  This is runtime state (not configuration) but lives here so that
     /// each `serve_with_config` invocation gets an independent counter, avoiding
@@ -260,6 +270,8 @@ impl Clone for ServerConfig {
             transform_deadline_secs: self.transform_deadline_secs,
             max_input_pixels: self.max_input_pixels,
             max_upload_bytes: self.max_upload_bytes,
+            metrics_token: self.metrics_token.clone(),
+            disable_metrics: self.disable_metrics,
             transforms_in_flight: Arc::clone(&self.transforms_in_flight),
             presets: self.presets.clone(),
             #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
@@ -313,6 +325,11 @@ impl fmt::Debug for ServerConfig {
             .field("transform_deadline_secs", &self.transform_deadline_secs)
             .field("max_input_pixels", &self.max_input_pixels)
             .field("max_upload_bytes", &self.max_upload_bytes)
+            .field(
+                "metrics_token",
+                &self.metrics_token.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("disable_metrics", &self.disable_metrics)
             .field("presets", &self.presets.keys().collect::<Vec<_>>());
         #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
         {
@@ -352,6 +369,8 @@ impl PartialEq for ServerConfig {
             && self.transform_deadline_secs == other.transform_deadline_secs
             && self.max_input_pixels == other.max_input_pixels
             && self.max_upload_bytes == other.max_upload_bytes
+            && self.metrics_token == other.metrics_token
+            && self.disable_metrics == other.disable_metrics
             && self.presets == other.presets
             && cfg_storage_eq(self, other)
     }
@@ -444,6 +463,8 @@ impl ServerConfig {
             transform_deadline_secs: DEFAULT_TRANSFORM_DEADLINE_SECS,
             max_input_pixels: DEFAULT_MAX_INPUT_PIXELS,
             max_upload_bytes: DEFAULT_MAX_UPLOAD_BODY_BYTES,
+            metrics_token: None,
+            disable_metrics: false,
             transforms_in_flight: Arc::new(AtomicU64::new(0)),
             presets: HashMap::new(),
             #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
@@ -657,6 +678,10 @@ impl ServerConfig {
     ///   with 422 Unprocessable Entity.
     /// - `TRUSS_MAX_UPLOAD_BYTES`: maximum upload body size in bytes (default: 104,857,600 = 100 MB,
     ///   range: 1–10,737,418,240). Requests exceeding this limit are rejected with 413.
+    /// - `TRUSS_METRICS_TOKEN`: Bearer token for the `/metrics` endpoint. When set, the endpoint
+    ///   requires `Authorization: Bearer <token>`. When absent, no authentication is required.
+    /// - `TRUSS_DISABLE_METRICS`: when set to `1`, `true`, `yes`, or `on`, disables the `/metrics`
+    ///   endpoint entirely (returns 404).
     /// - `TRUSS_STORAGE_TIMEOUT_SECS`: download timeout for storage backends in seconds
     ///   (default: 30, range: 1–300).
     ///
@@ -954,6 +979,11 @@ impl ServerConfig {
             None
         };
 
+        let metrics_token = env::var("TRUSS_METRICS_TOKEN")
+            .ok()
+            .filter(|value| !value.is_empty());
+        let disable_metrics = env_flag("TRUSS_DISABLE_METRICS");
+
         let presets = parse_presets_from_env()?;
 
         Ok(Self {
@@ -973,6 +1003,8 @@ impl ServerConfig {
             transform_deadline_secs,
             max_input_pixels,
             max_upload_bytes,
+            metrics_token,
+            disable_metrics,
             transforms_in_flight: Arc::new(AtomicU64::new(0)),
             presets,
             #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]

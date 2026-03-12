@@ -454,10 +454,14 @@ paths:
       summary: Prometheus metrics
       description: |
         Returns metrics in Prometheus text exposition format (version 0.0.4).
-        Does not require authentication so that Prometheus scrapers can collect
-        metrics without additional configuration.
+
+        By default, the endpoint does not require authentication. Operators can
+        restrict access via `TRUSS_METRICS_TOKEN` (Bearer token) or disable the
+        endpoint entirely via `TRUSS_DISABLE_METRICS`.
       operationId: getMetrics
-      security: []
+      security:
+        - {}
+        - BearerAuth: []
       responses:
         '200':
           description: Prometheus text exposition format
@@ -478,6 +482,10 @@ paths:
                 truss_http_request_duration_seconds_bucket{route="/health",le="+Inf"} 10
                 truss_http_request_duration_seconds_sum{route="/health"} 0.002
                 truss_http_request_duration_seconds_count{route="/health"} 10
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
 

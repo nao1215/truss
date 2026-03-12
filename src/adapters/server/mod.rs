@@ -59,6 +59,7 @@ use hmac::{Hmac, Mac};
 use serde::Deserialize;
 use serde_json::json;
 use sha2::{Digest, Sha256};
+use subtle::ConstantTimeEq;
 use std::collections::BTreeMap;
 use std::env;
 use std::io;
@@ -1413,7 +1414,26 @@ fn handle_health(config: &ServerConfig) -> HttpResponse {
     HttpResponse::json("200 OK", body)
 }
 
-fn handle_metrics_request(_request: HttpRequest, config: &ServerConfig) -> HttpResponse {
+fn handle_metrics_request(request: HttpRequest, config: &ServerConfig) -> HttpResponse {
+    if config.disable_metrics {
+        return HttpResponse::problem("404 Not Found", NOT_FOUND_BODY.as_bytes().to_vec());
+    }
+
+    if let Some(expected) = &config.metrics_token {
+        let provided = request
+            .header("authorization")
+            .and_then(|value| {
+                let (scheme, token) = value.split_once(|c: char| c.is_whitespace())?;
+                scheme.eq_ignore_ascii_case("Bearer").then(|| token.trim())
+            });
+        match provided {
+            Some(token) if token.as_bytes().ct_eq(expected.as_bytes()).into() => {}
+            _ => {
+                return response::auth_required_response("metrics endpoint requires authentication");
+            }
+        }
+    }
+
     HttpResponse::text(
         "200 OK",
         "text/plain; version=0.0.4; charset=utf-8",
