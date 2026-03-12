@@ -1128,6 +1128,7 @@ fn parse_response_headers_from_env() -> io::Result<Vec<(String, String)>> {
     let mut headers = Vec::with_capacity(map.len());
     for (name, value) in map {
         validate_header_name(&name)?;
+        reject_denied_header(&name)?;
         validate_header_value(&name, &value)?;
         headers.push((name, value));
     }
@@ -1178,6 +1179,35 @@ fn validate_header_value(name: &str, value: &str) -> io::Result<()> {
                 ),
             ));
         }
+    }
+    Ok(())
+}
+
+/// Reject HTTP framing and hop-by-hop headers that must not be overridden by
+/// operator configuration. Allowing these would risk HTTP response smuggling,
+/// MIME-sniffing attacks, or broken connection handling.
+fn reject_denied_header(name: &str) -> io::Result<()> {
+    const DENIED: &[&str] = &[
+        "content-length",
+        "transfer-encoding",
+        "content-encoding",
+        "content-type",
+        "connection",
+        "host",
+        "upgrade",
+        "proxy-connection",
+        "keep-alive",
+        "te",
+        "trailer",
+    ];
+    let lower = name.to_ascii_lowercase();
+    if DENIED.contains(&lower.as_str()) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "TRUSS_RESPONSE_HEADERS: header `{name}` is not allowed (framing/hop-by-hop header)"
+            ),
+        ));
     }
     Ok(())
 }
