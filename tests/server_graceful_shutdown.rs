@@ -8,6 +8,7 @@
 mod common;
 
 use common::{split_response, temp_dir};
+use serial_test::serial;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::Arc;
@@ -117,6 +118,7 @@ fn health_live_returns_200_when_draining() {
 /// another thread after the server starts listening.
 #[cfg(unix)]
 #[test]
+#[serial]
 fn serve_with_config_exits_on_draining_flag() {
     let storage = temp_dir("shutdown-exit");
     let config = ServerConfig::new(storage, None);
@@ -159,6 +161,7 @@ fn serve_with_config_exits_on_draining_flag() {
 /// We start `serve_with_config`, send a request, set draining while the
 /// connection is open, and verify the client still receives a valid response.
 #[test]
+#[serial]
 fn in_flight_request_completes_during_drain() {
     let storage = temp_dir("shutdown-inflight");
     let mut config = ServerConfig::new(storage, None);

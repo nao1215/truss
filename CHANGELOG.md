@@ -1,5 +1,25 @@
 # Changelog
 
+## v0.7.1
+
+### Added
+
+- Hot-reload for transform presets via `TRUSS_PRESETS_FILE` with file-watching support.
+- Dynamic log level switching via `TRUSS_LOG_LEVEL` env var and `SIGUSR1` signal.
+- Unit and integration tests for log level and preset hot-reload.
+- Crop, rotate, fit, and inspect examples to README.
+
+### Fixed
+
+- Use `saturating_duration_since` in rate limiter for Windows compatibility.
+- Do not update `last_modified` on preset parse failure to handle torn reads.
+- Use `wasm32-wasip1` C target for wasi-sdk sysroot header resolution in Pages CI.
+
+### Changed
+
+- Update `Cargo.toml` keywords for better crates.io discoverability.
+- Comprehensive project improvements from multi-perspective review.
+
 ## v0.7.0
 
 ### Added
