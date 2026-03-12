@@ -1303,6 +1303,11 @@ components:
         application/problem+json:
           schema:
             $ref: '#/components/schemas/ProblemDetail'
+          example:
+            type: about:blank
+            title: Unprocessable Entity
+            status: 422
+            detail: "input image has 50000000 pixels, server limit is 40000000"
     UnsupportedMediaType:
       description: |
         Unsupported input format, unsupported output format, or wrong request `Content-Type`.

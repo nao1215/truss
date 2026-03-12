@@ -978,6 +978,58 @@ fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io::Result<()>
             return Ok(());
         }
 
+        // Early-reject /metrics requests before draining the body so that
+        // unauthenticated or disabled-metrics requests do not force a body read.
+        if matches!(
+            (partial.method.as_str(), partial.path()),
+            ("GET" | "HEAD", "/metrics")
+        ) {
+            let early_response = if config.disable_metrics {
+                Some(HttpResponse::problem(
+                    "404 Not Found",
+                    NOT_FOUND_BODY.as_bytes().to_vec(),
+                ))
+            } else if let Some(expected) = &config.metrics_token {
+                let provided = http_parse::header_value(&partial.headers, "authorization")
+                    .and_then(|value| {
+                        let (scheme, token) = value.split_once(|c: char| c.is_whitespace())?;
+                        scheme.eq_ignore_ascii_case("Bearer").then(|| token.trim())
+                    });
+                match provided {
+                    Some(token) if token.as_bytes().ct_eq(expected.as_bytes()).into() => None,
+                    _ => Some(response::auth_required_response(
+                        "metrics endpoint requires authentication",
+                    )),
+                }
+            } else {
+                None
+            };
+
+            if let Some(mut response) = early_response {
+                response.headers.push(("X-Request-Id", request_id.clone()));
+                record_http_metrics(RouteMetric::Metrics, response.status);
+                let sc = status_code(response.status).unwrap_or("unknown");
+                let method_log = partial.method.clone();
+                let path_log = partial.path().to_string();
+                let _ = write_response(&mut stream, response, true);
+                record_http_request_duration(RouteMetric::Metrics, start);
+                emit_access_log(
+                    config,
+                    &AccessLogEntry {
+                        request_id: &request_id,
+                        method: &method_log,
+                        path: &path_log,
+                        route: "/metrics",
+                        status: sc,
+                        start,
+                        cache_status: None,
+                        watermark: false,
+                    },
+                );
+                return Ok(());
+            }
+        }
+
         // Clone method/path before `read_request_body` consumes `partial`.
         let method = partial.method.clone();
         let path = partial.path().to_string();
