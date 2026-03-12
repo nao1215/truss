@@ -2443,6 +2443,45 @@ mod tests {
         assert_eq!(result.unwrap(), Command::Help(HelpTopic::Serve));
     }
 
+    // ===== Additional test: help validate =====
+
+    #[test]
+    fn help_validate_shows_validate_help() {
+        let result = parse_args(vec![
+            "truss".to_string(),
+            "help".to_string(),
+            "validate".to_string(),
+        ]);
+        assert_eq!(result.unwrap(), Command::Help(HelpTopic::Validate));
+    }
+
+    #[test]
+    fn parse_args_validate() {
+        let result =
+            parse_args(vec!["truss".to_string(), "validate".to_string()]).expect("parse validate");
+        assert_eq!(result, Command::Validate);
+    }
+
+    #[test]
+    fn validate_help_flag() {
+        let result = parse_args(vec![
+            "truss".to_string(),
+            "validate".to_string(),
+            "--help".to_string(),
+        ]);
+        assert_eq!(result.unwrap(), Command::Help(HelpTopic::Validate));
+    }
+
+    #[test]
+    fn validate_invalid_config() {
+        // SAFETY: test-only, single-threaded access to this env var.
+        unsafe { env::set_var("TRUSS_MAX_CONCURRENT_TRANSFORMS", "invalid") };
+        let mut stdout = Vec::new();
+        let result = super::execute_validate(&mut stdout);
+        unsafe { env::remove_var("TRUSS_MAX_CONCURRENT_TRANSFORMS") };
+        assert!(result.is_err());
+    }
+
     // ===== Additional test: help sign =====
 
     #[test]
