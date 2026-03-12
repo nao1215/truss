@@ -1822,8 +1822,8 @@ mod tests {
         parse_presets_from_env,
     };
     use super::http_parse::{
-        HttpRequest, find_header_terminator, read_request_body, read_request_headers,
-        resolve_storage_path,
+        DEFAULT_MAX_UPLOAD_BODY_BYTES, HttpRequest, find_header_terminator, read_request_body,
+        read_request_headers, resolve_storage_path,
     };
     use super::metrics::DEFAULT_MAX_CONCURRENT_TRANSFORMS;
     use super::multipart::parse_multipart_form_data;
@@ -1857,8 +1857,7 @@ mod tests {
     /// Test-only convenience wrapper that reads headers + body in one shot,
     /// preserving the original `read_request` semantics for existing tests.
     fn read_request<R: Read>(stream: &mut R) -> Result<HttpRequest, HttpResponse> {
-        let partial =
-            read_request_headers(stream, http_parse::DEFAULT_MAX_UPLOAD_BODY_BYTES)?;
+        let partial = read_request_headers(stream, DEFAULT_MAX_UPLOAD_BODY_BYTES)?;
         read_request_body(stream, partial)
     }
 
@@ -5094,6 +5093,68 @@ mod tests {
         unsafe {
             std::env::remove_var("TRUSS_MAX_INPUT_PIXELS");
         }
+    }
+
+    #[test]
+    #[serial]
+    fn test_max_upload_bytes_default() {
+        unsafe {
+            std::env::remove_var("TRUSS_MAX_UPLOAD_BYTES");
+        }
+        let config = ServerConfig::from_env().unwrap();
+        assert_eq!(config.max_upload_bytes, 100 * 1024 * 1024);
+    }
+
+    #[test]
+    #[serial]
+    fn test_max_upload_bytes_custom() {
+        unsafe {
+            std::env::set_var("TRUSS_MAX_UPLOAD_BYTES", "5242880");
+        }
+        let config = ServerConfig::from_env().unwrap();
+        assert_eq!(config.max_upload_bytes, 5 * 1024 * 1024);
+        unsafe {
+            std::env::remove_var("TRUSS_MAX_UPLOAD_BYTES");
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_max_upload_bytes_zero_rejected() {
+        unsafe {
+            std::env::set_var("TRUSS_MAX_UPLOAD_BYTES", "0");
+        }
+        let err = ServerConfig::from_env().unwrap_err();
+        assert!(err.to_string().contains("TRUSS_MAX_UPLOAD_BYTES"));
+        unsafe {
+            std::env::remove_var("TRUSS_MAX_UPLOAD_BYTES");
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_max_upload_bytes_non_numeric_rejected() {
+        unsafe {
+            std::env::set_var("TRUSS_MAX_UPLOAD_BYTES", "abc");
+        }
+        let err = ServerConfig::from_env().unwrap_err();
+        assert!(err.to_string().contains("TRUSS_MAX_UPLOAD_BYTES"));
+        unsafe {
+            std::env::remove_var("TRUSS_MAX_UPLOAD_BYTES");
+        }
+    }
+
+    #[test]
+    fn max_body_for_multipart_uses_custom_upload_limit() {
+        let headers = vec![(
+            "content-type".to_string(),
+            "multipart/form-data; boundary=abc".to_string(),
+        )];
+        let custom_limit = 5 * 1024 * 1024;
+        assert_eq!(
+            super::http_parse::max_body_for_headers(&headers, custom_limit),
+            custom_limit
+        );
     }
 
     #[test]

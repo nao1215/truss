@@ -987,7 +987,8 @@ mod tests {
         let raw = b"POST /upload HTTP/1.1\r\nContent-Length: 5\r\nHost: localhost\r\n\r\nhello";
         let mut cursor = std::io::Cursor::new(raw.to_vec());
 
-        let partial = read_request_headers(&mut cursor).unwrap();
+        let partial =
+            read_request_headers(&mut cursor, DEFAULT_MAX_UPLOAD_BODY_BYTES).unwrap();
         assert_eq!(partial.method, "POST");
         assert_eq!(partial.target, "/upload");
         assert_eq!(partial.content_length, 5);
@@ -1001,7 +1002,8 @@ mod tests {
         let raw = b"GET /health HTTP/1.1\r\nHost: localhost\r\n\r\n";
         let mut cursor = std::io::Cursor::new(raw.to_vec());
 
-        let partial = read_request_headers(&mut cursor).unwrap();
+        let partial =
+            read_request_headers(&mut cursor, DEFAULT_MAX_UPLOAD_BODY_BYTES).unwrap();
         assert_eq!(partial.method, "GET");
         assert_eq!(partial.content_length, 0);
     }
@@ -1010,7 +1012,8 @@ mod tests {
     fn test_read_request_headers_truncated_stream() {
         let raw = b"GET /health HTTP/1.1\r\nHost: loc";
         let mut cursor = std::io::Cursor::new(raw.to_vec());
-        let err = read_request_headers(&mut cursor).unwrap_err();
+        let err =
+            read_request_headers(&mut cursor, DEFAULT_MAX_UPLOAD_BODY_BYTES).unwrap_err();
         assert_eq!(err.status, "400 Bad Request");
     }
 }
