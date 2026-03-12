@@ -67,6 +67,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
+use subtle::ConstantTimeEq;
 use url::Url;
 use uuid::Uuid;
 
@@ -922,7 +923,7 @@ fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io::Result<()>
     let mut requests_served: usize = 0;
 
     loop {
-        let partial = match read_request_headers(&mut stream) {
+        let partial = match read_request_headers(&mut stream, config.max_upload_bytes) {
             Ok(partial) => partial,
             Err(response) => {
                 if requests_served > 0 {
@@ -975,6 +976,58 @@ fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io::Result<()>
                 },
             );
             return Ok(());
+        }
+
+        // Early-reject /metrics requests before draining the body so that
+        // unauthenticated or disabled-metrics requests do not force a body read.
+        if matches!(
+            (partial.method.as_str(), partial.path()),
+            ("GET" | "HEAD", "/metrics")
+        ) {
+            let early_response = if config.disable_metrics {
+                Some(HttpResponse::problem(
+                    "404 Not Found",
+                    NOT_FOUND_BODY.as_bytes().to_vec(),
+                ))
+            } else if let Some(expected) = &config.metrics_token {
+                let provided = http_parse::header_value(&partial.headers, "authorization")
+                    .and_then(|value| {
+                        let (scheme, token) = value.split_once(|c: char| c.is_whitespace())?;
+                        scheme.eq_ignore_ascii_case("Bearer").then(|| token.trim())
+                    });
+                match provided {
+                    Some(token) if token.as_bytes().ct_eq(expected.as_bytes()).into() => None,
+                    _ => Some(response::auth_required_response(
+                        "metrics endpoint requires authentication",
+                    )),
+                }
+            } else {
+                None
+            };
+
+            if let Some(mut response) = early_response {
+                response.headers.push(("X-Request-Id", request_id.clone()));
+                record_http_metrics(RouteMetric::Metrics, response.status);
+                let sc = status_code(response.status).unwrap_or("unknown");
+                let method_log = partial.method.clone();
+                let path_log = partial.path().to_string();
+                let _ = write_response(&mut stream, response, true);
+                record_http_request_duration(RouteMetric::Metrics, start);
+                emit_access_log(
+                    config,
+                    &AccessLogEntry {
+                        request_id: &request_id,
+                        method: &method_log,
+                        path: &path_log,
+                        route: "/metrics",
+                        status: sc,
+                        start,
+                        cache_status: None,
+                        watermark: false,
+                    },
+                );
+                return Ok(());
+            }
         }
 
         // Clone method/path before `read_request_body` consumes `partial`.
@@ -1405,6 +1458,7 @@ fn handle_health(config: &ServerConfig) -> HttpResponse {
         "version": env!("CARGO_PKG_VERSION"),
         "uptimeSeconds": uptime_seconds(),
         "checks": checks,
+        "maxInputPixels": config.max_input_pixels,
     }))
     .expect("serialize health");
     body.push(b'\n');
@@ -1412,7 +1466,26 @@ fn handle_health(config: &ServerConfig) -> HttpResponse {
     HttpResponse::json("200 OK", body)
 }
 
-fn handle_metrics_request(_request: HttpRequest, config: &ServerConfig) -> HttpResponse {
+fn handle_metrics_request(request: HttpRequest, config: &ServerConfig) -> HttpResponse {
+    if config.disable_metrics {
+        return HttpResponse::problem("404 Not Found", NOT_FOUND_BODY.as_bytes().to_vec());
+    }
+
+    if let Some(expected) = &config.metrics_token {
+        let provided = request.header("authorization").and_then(|value| {
+            let (scheme, token) = value.split_once(|c: char| c.is_whitespace())?;
+            scheme.eq_ignore_ascii_case("Bearer").then(|| token.trim())
+        });
+        match provided {
+            Some(token) if token.as_bytes().ct_eq(expected.as_bytes()).into() => {}
+            _ => {
+                return response::auth_required_response(
+                    "metrics endpoint requires authentication",
+                );
+            }
+        }
+    }
+
     HttpResponse::text(
         "200 OK",
         "text/plain; version=0.0.4; charset=utf-8",
@@ -1661,6 +1734,19 @@ fn transform_source_bytes_inner(
             false
         };
 
+    // Check input pixel count against the server-level limit before decode.
+    // This runs before the cache lookup so that a policy change (lowering the
+    // limit) takes effect immediately, even for previously-cached images.
+    if let (Some(w), Some(h)) = (artifact.metadata.width, artifact.metadata.height) {
+        let pixels = u64::from(w) * u64::from(h);
+        if pixels > config.max_input_pixels {
+            return response::unprocessable_entity_response(&format!(
+                "input image has {pixels} pixels, server limit is {}",
+                config.max_input_pixels
+            ));
+        }
+    }
+
     let negotiated_accept = if negotiation_used {
         request.header("accept")
     } else {
@@ -1805,15 +1891,15 @@ fn transform_source_bytes_inner(
 mod tests {
     use serial_test::serial;
 
+    use super::config::DEFAULT_MAX_CONCURRENT_TRANSFORMS;
     use super::config::{
         DEFAULT_PUBLIC_MAX_AGE_SECONDS, DEFAULT_PUBLIC_STALE_WHILE_REVALIDATE_SECONDS,
         parse_presets_from_env,
     };
     use super::http_parse::{
-        HttpRequest, find_header_terminator, read_request_body, read_request_headers,
-        resolve_storage_path,
+        DEFAULT_MAX_UPLOAD_BODY_BYTES, HttpRequest, find_header_terminator, read_request_body,
+        read_request_headers, resolve_storage_path,
     };
-    use super::metrics::DEFAULT_MAX_CONCURRENT_TRANSFORMS;
     use super::multipart::parse_multipart_form_data;
     use super::remote::{PinnedResolver, prepare_remote_fetch_target};
     use super::response::auth_required_response;
@@ -1845,7 +1931,7 @@ mod tests {
     /// Test-only convenience wrapper that reads headers + body in one shot,
     /// preserving the original `read_request` semantics for existing tests.
     fn read_request<R: Read>(stream: &mut R) -> Result<HttpRequest, HttpResponse> {
-        let partial = read_request_headers(stream)?;
+        let partial = read_request_headers(stream, DEFAULT_MAX_UPLOAD_BODY_BYTES)?;
         read_request_body(stream, partial)
     }
 
@@ -3105,6 +3191,45 @@ mod tests {
     }
 
     #[test]
+    fn metrics_endpoint_returns_401_when_token_required() {
+        let mut config = ServerConfig::new(temp_dir("metrics-auth"), None);
+        config.metrics_token = Some("my-secret-token".to_string());
+
+        // No auth header → 401
+        let response = route_request(metrics_request(false), &config);
+        assert_eq!(response.status, "401 Unauthorized");
+    }
+
+    #[test]
+    fn metrics_endpoint_accepts_valid_token() {
+        let mut config = ServerConfig::new(temp_dir("metrics-auth-ok"), None);
+        config.metrics_token = Some("secret".to_string());
+
+        // Bearer secret matches
+        let response = route_request(metrics_request(true), &config);
+        assert_eq!(response.status, "200 OK");
+    }
+
+    #[test]
+    fn metrics_endpoint_rejects_wrong_token() {
+        let mut config = ServerConfig::new(temp_dir("metrics-auth-bad"), None);
+        config.metrics_token = Some("correct-token".to_string());
+
+        // Bearer secret ≠ correct-token
+        let response = route_request(metrics_request(true), &config);
+        assert_eq!(response.status, "401 Unauthorized");
+    }
+
+    #[test]
+    fn metrics_endpoint_returns_404_when_disabled() {
+        let mut config = ServerConfig::new(temp_dir("metrics-disabled"), None);
+        config.disable_metrics = true;
+
+        let response = route_request(metrics_request(false), &config);
+        assert_eq!(response.status, "404 Not Found");
+    }
+
+    #[test]
     fn transform_endpoint_rejects_unsupported_remote_content_encoding() {
         let (url, handle) = spawn_http_server(vec![(
             "200 OK".to_string(),
@@ -3282,8 +3407,11 @@ mod tests {
             "multipart/form-data; boundary=abc".to_string(),
         )];
         assert_eq!(
-            super::http_parse::max_body_for_headers(&headers),
-            super::http_parse::MAX_UPLOAD_BODY_BYTES
+            super::http_parse::max_body_for_headers(
+                &headers,
+                super::http_parse::DEFAULT_MAX_UPLOAD_BODY_BYTES
+            ),
+            super::http_parse::DEFAULT_MAX_UPLOAD_BODY_BYTES
         );
     }
 
@@ -3291,7 +3419,10 @@ mod tests {
     fn max_body_for_json_uses_default_limit() {
         let headers = vec![("content-type".to_string(), "application/json".to_string())];
         assert_eq!(
-            super::http_parse::max_body_for_headers(&headers),
+            super::http_parse::max_body_for_headers(
+                &headers,
+                super::http_parse::DEFAULT_MAX_UPLOAD_BODY_BYTES
+            ),
             super::http_parse::MAX_REQUEST_BODY_BYTES
         );
     }
@@ -3300,7 +3431,10 @@ mod tests {
     fn max_body_for_no_content_type_uses_default_limit() {
         let headers: Vec<(String, String)> = vec![];
         assert_eq!(
-            super::http_parse::max_body_for_headers(&headers),
+            super::http_parse::max_body_for_headers(
+                &headers,
+                super::http_parse::DEFAULT_MAX_UPLOAD_BODY_BYTES
+            ),
             super::http_parse::MAX_REQUEST_BODY_BYTES
         );
     }
@@ -4971,5 +5105,188 @@ mod tests {
             h.join().unwrap();
         }
         assert_eq!(counter.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    #[serial]
+    fn test_max_input_pixels_default() {
+        unsafe {
+            std::env::remove_var("TRUSS_MAX_INPUT_PIXELS");
+        }
+        let config = ServerConfig::from_env().unwrap();
+        assert_eq!(config.max_input_pixels, 40_000_000);
+    }
+
+    #[test]
+    #[serial]
+    fn test_max_input_pixels_custom() {
+        unsafe {
+            std::env::set_var("TRUSS_MAX_INPUT_PIXELS", "10000000");
+        }
+        let config = ServerConfig::from_env().unwrap();
+        assert_eq!(config.max_input_pixels, 10_000_000);
+        unsafe {
+            std::env::remove_var("TRUSS_MAX_INPUT_PIXELS");
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_max_input_pixels_min_boundary() {
+        unsafe {
+            std::env::set_var("TRUSS_MAX_INPUT_PIXELS", "1");
+        }
+        let config = ServerConfig::from_env().unwrap();
+        assert_eq!(config.max_input_pixels, 1);
+        unsafe {
+            std::env::remove_var("TRUSS_MAX_INPUT_PIXELS");
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_max_input_pixels_max_boundary() {
+        unsafe {
+            std::env::set_var("TRUSS_MAX_INPUT_PIXELS", "100000000");
+        }
+        let config = ServerConfig::from_env().unwrap();
+        assert_eq!(config.max_input_pixels, 100_000_000);
+        unsafe {
+            std::env::remove_var("TRUSS_MAX_INPUT_PIXELS");
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_max_input_pixels_empty_uses_default() {
+        unsafe {
+            std::env::set_var("TRUSS_MAX_INPUT_PIXELS", "");
+        }
+        let config = ServerConfig::from_env().unwrap();
+        assert_eq!(config.max_input_pixels, 40_000_000);
+        unsafe {
+            std::env::remove_var("TRUSS_MAX_INPUT_PIXELS");
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_max_input_pixels_zero_rejected() {
+        unsafe {
+            std::env::set_var("TRUSS_MAX_INPUT_PIXELS", "0");
+        }
+        let err = ServerConfig::from_env().unwrap_err();
+        assert!(err.to_string().contains("TRUSS_MAX_INPUT_PIXELS"));
+        unsafe {
+            std::env::remove_var("TRUSS_MAX_INPUT_PIXELS");
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_max_input_pixels_over_max_rejected() {
+        unsafe {
+            std::env::set_var("TRUSS_MAX_INPUT_PIXELS", "100000001");
+        }
+        let err = ServerConfig::from_env().unwrap_err();
+        assert!(err.to_string().contains("TRUSS_MAX_INPUT_PIXELS"));
+        unsafe {
+            std::env::remove_var("TRUSS_MAX_INPUT_PIXELS");
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_max_input_pixels_non_numeric_rejected() {
+        unsafe {
+            std::env::set_var("TRUSS_MAX_INPUT_PIXELS", "abc");
+        }
+        let err = ServerConfig::from_env().unwrap_err();
+        assert!(err.to_string().contains("TRUSS_MAX_INPUT_PIXELS"));
+        unsafe {
+            std::env::remove_var("TRUSS_MAX_INPUT_PIXELS");
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_max_upload_bytes_default() {
+        unsafe {
+            std::env::remove_var("TRUSS_MAX_UPLOAD_BYTES");
+        }
+        let config = ServerConfig::from_env().unwrap();
+        assert_eq!(config.max_upload_bytes, 100 * 1024 * 1024);
+    }
+
+    #[test]
+    #[serial]
+    fn test_max_upload_bytes_custom() {
+        unsafe {
+            std::env::set_var("TRUSS_MAX_UPLOAD_BYTES", "5242880");
+        }
+        let config = ServerConfig::from_env().unwrap();
+        assert_eq!(config.max_upload_bytes, 5 * 1024 * 1024);
+        unsafe {
+            std::env::remove_var("TRUSS_MAX_UPLOAD_BYTES");
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_max_upload_bytes_zero_rejected() {
+        unsafe {
+            std::env::set_var("TRUSS_MAX_UPLOAD_BYTES", "0");
+        }
+        let err = ServerConfig::from_env().unwrap_err();
+        assert!(err.to_string().contains("TRUSS_MAX_UPLOAD_BYTES"));
+        unsafe {
+            std::env::remove_var("TRUSS_MAX_UPLOAD_BYTES");
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_max_upload_bytes_non_numeric_rejected() {
+        unsafe {
+            std::env::set_var("TRUSS_MAX_UPLOAD_BYTES", "abc");
+        }
+        let err = ServerConfig::from_env().unwrap_err();
+        assert!(err.to_string().contains("TRUSS_MAX_UPLOAD_BYTES"));
+        unsafe {
+            std::env::remove_var("TRUSS_MAX_UPLOAD_BYTES");
+        }
+    }
+
+    #[test]
+    fn max_body_for_multipart_uses_custom_upload_limit() {
+        let headers = vec![(
+            "content-type".to_string(),
+            "multipart/form-data; boundary=abc".to_string(),
+        )];
+        let custom_limit = 5 * 1024 * 1024;
+        assert_eq!(
+            super::http_parse::max_body_for_headers(&headers, custom_limit),
+            custom_limit
+        );
+    }
+
+    #[test]
+    fn health_includes_max_input_pixels() {
+        let storage = temp_dir("health-pixels");
+        let request = HttpRequest {
+            method: "GET".to_string(),
+            target: "/health".to_string(),
+            version: "HTTP/1.1".to_string(),
+            headers: Vec::new(),
+            body: Vec::new(),
+        };
+
+        let config = ServerConfig::new(storage, None);
+        let response = route_request(request, &config);
+
+        assert_eq!(response.status, "200 OK");
+        let body: serde_json::Value =
+            serde_json::from_slice(&response.body).expect("parse health body");
+        assert_eq!(body["maxInputPixels"], 40_000_000);
     }
 }

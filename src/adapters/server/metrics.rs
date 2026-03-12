@@ -39,8 +39,6 @@ pub(super) static ORIGIN_CACHE_HITS_TOTAL: AtomicU64 = AtomicU64::new(0);
 pub(super) static ORIGIN_CACHE_MISSES_TOTAL: AtomicU64 = AtomicU64::new(0);
 pub(super) static WATERMARK_TRANSFORMS_TOTAL: AtomicU64 = AtomicU64::new(0);
 
-pub(super) const DEFAULT_MAX_CONCURRENT_TRANSFORMS: u64 = 64;
-
 pub(super) static START_TIME: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
 
 pub(super) fn uptime_seconds() -> u64 {

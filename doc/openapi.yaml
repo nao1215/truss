@@ -114,6 +114,8 @@ paths:
           $ref: '#/components/responses/PayloadTooLarge'
         '415':
           $ref: '#/components/responses/UnsupportedMediaType'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
         '500':
           $ref: '#/components/responses/InternalError'
         '501':
@@ -194,6 +196,8 @@ paths:
           $ref: '#/components/responses/PayloadTooLarge'
         '415':
           $ref: '#/components/responses/UnsupportedMediaType'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
         '500':
           $ref: '#/components/responses/InternalError'
         '501':
@@ -257,6 +261,8 @@ paths:
           $ref: '#/components/responses/PayloadTooLarge'
         '415':
           $ref: '#/components/responses/UnsupportedMediaType'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
         '500':
           $ref: '#/components/responses/InternalError'
         '501':
@@ -300,10 +306,14 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '406':
+          $ref: '#/components/responses/NotAcceptable'
         '413':
           $ref: '#/components/responses/PayloadTooLarge'
         '415':
           $ref: '#/components/responses/UnsupportedMediaType'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
         '500':
           $ref: '#/components/responses/InternalError'
         '501':
@@ -340,6 +350,7 @@ paths:
                     status: ok
                   - name: transformCapacity
                     status: ok
+                maxInputPixels: 40000000
 
   /health/live:
     get:
@@ -445,10 +456,14 @@ paths:
       summary: Prometheus metrics
       description: |
         Returns metrics in Prometheus text exposition format (version 0.0.4).
-        Does not require authentication so that Prometheus scrapers can collect
-        metrics without additional configuration.
+
+        By default, the endpoint does not require authentication. Operators can
+        restrict access via `TRUSS_METRICS_TOKEN` (Bearer token) or disable the
+        endpoint entirely via `TRUSS_DISABLE_METRICS`.
       operationId: getMetrics
-      security: []
+      security:
+        - {}
+        - BearerAuth: []
       responses:
         '200':
           description: Prometheus text exposition format
@@ -469,6 +484,10 @@ paths:
                 truss_http_request_duration_seconds_bucket{route="/health",le="+Inf"} 10
                 truss_http_request_duration_seconds_sum{route="/health"} 0.002
                 truss_http_request_duration_seconds_count{route="/health"} 10
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
 
@@ -1092,7 +1111,7 @@ components:
       type: object
       description: Comprehensive diagnostic payload with version, uptime, and checks.
       additionalProperties: false
-      required: [status, service, version, uptimeSeconds, checks]
+      required: [status, service, version, uptimeSeconds, checks, maxInputPixels]
       properties:
         status:
           type: string
@@ -1113,6 +1132,11 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/HealthCheck'
+        maxInputPixels:
+          type: integer
+          format: int64
+          minimum: 1
+          description: Maximum input image pixel count allowed before decode.
     HealthCheck:
       type: object
       description: Individual dependency check result.
@@ -1273,6 +1297,17 @@ components:
         application/problem+json:
           schema:
             $ref: '#/components/schemas/ProblemDetail'
+    UnprocessableEntity:
+      description: Input image exceeds the configured pixel limit (`TRUSS_MAX_INPUT_PIXELS`)
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetail'
+          example:
+            type: about:blank
+            title: Unprocessable Entity
+            status: 422
+            detail: "input image has 50000000 pixels, server limit is 40000000"
     UnsupportedMediaType:
       description: |
         Unsupported input format, unsupported output format, or wrong request `Content-Type`.

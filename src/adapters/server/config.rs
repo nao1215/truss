@@ -3,7 +3,8 @@ use super::TransformOptionsPayload;
 use super::azure;
 #[cfg(feature = "gcs")]
 use super::gcs;
-use super::metrics::DEFAULT_MAX_CONCURRENT_TRANSFORMS;
+/// Default maximum number of concurrent transforms allowed.
+pub(super) const DEFAULT_MAX_CONCURRENT_TRANSFORMS: u64 = 64;
 #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
 use super::remote::STORAGE_DOWNLOAD_TIMEOUT_SECS;
 #[cfg(feature = "s3")]
@@ -106,6 +107,12 @@ pub(super) const DEFAULT_PUBLIC_STALE_WHILE_REVALIDATE_SECONDS: u32 = 60;
 /// Configurable at runtime via `TRUSS_TRANSFORM_DEADLINE_SECS`.
 pub(super) const DEFAULT_TRANSFORM_DEADLINE_SECS: u64 = 30;
 
+/// Default maximum number of input pixels allowed before decode.
+/// Configurable at runtime via `TRUSS_MAX_INPUT_PIXELS`.
+pub(super) const DEFAULT_MAX_INPUT_PIXELS: u64 = 40_000_000;
+
+use super::http_parse::DEFAULT_MAX_UPLOAD_BODY_BYTES;
+
 /// Runtime configuration for the HTTP server adapter.
 ///
 /// The HTTP adapter keeps environment-specific concerns, such as the storage root and
@@ -195,6 +202,26 @@ pub struct ServerConfig {
     ///
     /// Configurable via `TRUSS_TRANSFORM_DEADLINE_SECS`. Defaults to 30.
     pub transform_deadline_secs: u64,
+    /// Maximum number of input pixels allowed before decode.
+    ///
+    /// Configurable via `TRUSS_MAX_INPUT_PIXELS`. Defaults to 40,000,000 (~40 MP).
+    /// Images exceeding this limit are rejected with 422 Unprocessable Entity.
+    pub max_input_pixels: u64,
+    /// Maximum upload body size in bytes.
+    ///
+    /// Configurable via `TRUSS_MAX_UPLOAD_BYTES`. Defaults to 100 MB.
+    /// Requests exceeding this limit are rejected with 413 Payload Too Large.
+    pub max_upload_bytes: usize,
+    /// Bearer token for the `/metrics` endpoint.
+    ///
+    /// When set, the `/metrics` endpoint requires `Authorization: Bearer <token>`.
+    /// When absent, `/metrics` is accessible without authentication.
+    /// Configurable via `TRUSS_METRICS_TOKEN`.
+    pub metrics_token: Option<String>,
+    /// Whether the `/metrics` endpoint is disabled.
+    ///
+    /// Configurable via `TRUSS_DISABLE_METRICS`. When enabled, `/metrics` returns 404.
+    pub disable_metrics: bool,
     /// Per-server counter tracking the number of image transforms currently in
     /// flight.  This is runtime state (not configuration) but lives here so that
     /// each `serve_with_config` invocation gets an independent counter, avoiding
@@ -242,6 +269,10 @@ impl Clone for ServerConfig {
             log_handler: self.log_handler.clone(),
             max_concurrent_transforms: self.max_concurrent_transforms,
             transform_deadline_secs: self.transform_deadline_secs,
+            max_input_pixels: self.max_input_pixels,
+            max_upload_bytes: self.max_upload_bytes,
+            metrics_token: self.metrics_token.clone(),
+            disable_metrics: self.disable_metrics,
             transforms_in_flight: Arc::clone(&self.transforms_in_flight),
             presets: self.presets.clone(),
             #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
@@ -293,6 +324,13 @@ impl fmt::Debug for ServerConfig {
             .field("log_handler", &self.log_handler.as_ref().map(|_| ".."))
             .field("max_concurrent_transforms", &self.max_concurrent_transforms)
             .field("transform_deadline_secs", &self.transform_deadline_secs)
+            .field("max_input_pixels", &self.max_input_pixels)
+            .field("max_upload_bytes", &self.max_upload_bytes)
+            .field(
+                "metrics_token",
+                &self.metrics_token.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("disable_metrics", &self.disable_metrics)
             .field("presets", &self.presets.keys().collect::<Vec<_>>());
         #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
         {
@@ -330,6 +368,10 @@ impl PartialEq for ServerConfig {
             && self.disable_accept_negotiation == other.disable_accept_negotiation
             && self.max_concurrent_transforms == other.max_concurrent_transforms
             && self.transform_deadline_secs == other.transform_deadline_secs
+            && self.max_input_pixels == other.max_input_pixels
+            && self.max_upload_bytes == other.max_upload_bytes
+            && self.metrics_token == other.metrics_token
+            && self.disable_metrics == other.disable_metrics
             && self.presets == other.presets
             && cfg_storage_eq(self, other)
     }
@@ -420,6 +462,10 @@ impl ServerConfig {
             log_handler: None,
             max_concurrent_transforms: DEFAULT_MAX_CONCURRENT_TRANSFORMS,
             transform_deadline_secs: DEFAULT_TRANSFORM_DEADLINE_SECS,
+            max_input_pixels: DEFAULT_MAX_INPUT_PIXELS,
+            max_upload_bytes: DEFAULT_MAX_UPLOAD_BODY_BYTES,
+            metrics_token: None,
+            disable_metrics: false,
             transforms_in_flight: Arc::new(AtomicU64::new(0)),
             presets: HashMap::new(),
             #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
@@ -628,6 +674,15 @@ impl ServerConfig {
     ///   (default: 64, range: 1–1024). Requests exceeding this limit are rejected with 503.
     /// - `TRUSS_TRANSFORM_DEADLINE_SECS`: per-transform wall-clock deadline in seconds
     ///   (default: 30, range: 1–300). Transforms exceeding this deadline are cancelled.
+    /// - `TRUSS_MAX_INPUT_PIXELS`: maximum number of input image pixels allowed before decode
+    ///   (default: 40,000,000, range: 1–100,000,000). Images exceeding this limit are rejected
+    ///   with 422 Unprocessable Entity.
+    /// - `TRUSS_MAX_UPLOAD_BYTES`: maximum upload body size in bytes (default: 104,857,600 = 100 MB,
+    ///   range: 1–10,737,418,240). Requests exceeding this limit are rejected with 413.
+    /// - `TRUSS_METRICS_TOKEN`: Bearer token for the `/metrics` endpoint. When set, the endpoint
+    ///   requires `Authorization: Bearer <token>`. When absent, no authentication is required.
+    /// - `TRUSS_DISABLE_METRICS`: when set to `1`, `true`, `yes`, or `on`, disables the `/metrics`
+    ///   endpoint entirely (returns 404).
     /// - `TRUSS_STORAGE_TIMEOUT_SECS`: download timeout for storage backends in seconds
     ///   (default: 30, range: 1–300).
     ///
@@ -732,72 +787,25 @@ impl ServerConfig {
 
         let allow_insecure_url_sources = env_flag("TRUSS_ALLOW_INSECURE_URL_SOURCES");
 
-        let max_concurrent_transforms = match env::var("TRUSS_MAX_CONCURRENT_TRANSFORMS")
-            .ok()
-            .filter(|v| !v.is_empty())
-        {
-            Some(value) => {
-                let n: u64 = value.parse().map_err(|_| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        "TRUSS_MAX_CONCURRENT_TRANSFORMS must be a positive integer",
-                    )
-                })?;
-                if n == 0 || n > 1024 {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        "TRUSS_MAX_CONCURRENT_TRANSFORMS must be between 1 and 1024",
-                    ));
-                }
-                n
-            }
-            None => DEFAULT_MAX_CONCURRENT_TRANSFORMS,
-        };
+        let max_concurrent_transforms =
+            parse_env_u64_ranged("TRUSS_MAX_CONCURRENT_TRANSFORMS", 1, 1024)?
+                .unwrap_or(DEFAULT_MAX_CONCURRENT_TRANSFORMS);
 
-        let transform_deadline_secs = match env::var("TRUSS_TRANSFORM_DEADLINE_SECS")
-            .ok()
-            .filter(|v| !v.is_empty())
-        {
-            Some(value) => {
-                let secs: u64 = value.parse().map_err(|_| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        "TRUSS_TRANSFORM_DEADLINE_SECS must be a positive integer",
-                    )
-                })?;
-                if secs == 0 || secs > 300 {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        "TRUSS_TRANSFORM_DEADLINE_SECS must be between 1 and 300",
-                    ));
-                }
-                secs
-            }
-            None => DEFAULT_TRANSFORM_DEADLINE_SECS,
-        };
+        let transform_deadline_secs =
+            parse_env_u64_ranged("TRUSS_TRANSFORM_DEADLINE_SECS", 1, 300)?
+                .unwrap_or(DEFAULT_TRANSFORM_DEADLINE_SECS);
+
+        let max_input_pixels =
+            parse_env_u64_ranged("TRUSS_MAX_INPUT_PIXELS", 1, crate::MAX_DECODED_PIXELS)?
+                .unwrap_or(DEFAULT_MAX_INPUT_PIXELS);
+
+        let max_upload_bytes =
+            parse_env_u64_ranged("TRUSS_MAX_UPLOAD_BYTES", 1, 10 * 1024 * 1024 * 1024)?
+                .unwrap_or(DEFAULT_MAX_UPLOAD_BODY_BYTES as u64) as usize;
 
         #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
-        let storage_timeout_secs = match env::var("TRUSS_STORAGE_TIMEOUT_SECS")
-            .ok()
-            .filter(|v| !v.is_empty())
-        {
-            Some(value) => {
-                let secs: u64 = value.parse().map_err(|_| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        "TRUSS_STORAGE_TIMEOUT_SECS must be a positive integer",
-                    )
-                })?;
-                if secs == 0 || secs > 300 {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        "TRUSS_STORAGE_TIMEOUT_SECS must be between 1 and 300",
-                    ));
-                }
-                secs
-            }
-            None => STORAGE_DOWNLOAD_TIMEOUT_SECS,
-        };
+        let storage_timeout_secs = parse_env_u64_ranged("TRUSS_STORAGE_TIMEOUT_SECS", 1, 300)?
+            .unwrap_or(STORAGE_DOWNLOAD_TIMEOUT_SECS);
 
         #[cfg(feature = "s3")]
         let s3_context = if storage_backend == StorageBackend::S3 {
@@ -878,6 +886,11 @@ impl ServerConfig {
             None
         };
 
+        let metrics_token = env::var("TRUSS_METRICS_TOKEN")
+            .ok()
+            .filter(|value| !value.is_empty());
+        let disable_metrics = env_flag("TRUSS_DISABLE_METRICS");
+
         let presets = parse_presets_from_env()?;
 
         Ok(Self {
@@ -895,6 +908,10 @@ impl ServerConfig {
             log_handler: None,
             max_concurrent_transforms,
             transform_deadline_secs,
+            max_input_pixels,
+            max_upload_bytes,
+            metrics_token,
+            disable_metrics,
             transforms_in_flight: Arc::new(AtomicU64::new(0)),
             presets,
             #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
@@ -908,6 +925,31 @@ impl ServerConfig {
             #[cfg(feature = "azure")]
             azure_context,
         })
+    }
+}
+
+/// Parse an optional environment variable as `u64`, validating that its value
+/// falls within `[min, max]`. Returns `Ok(None)` when the variable is unset or
+/// empty, `Ok(Some(value))` on success, or an `io::Error` on parse / range
+/// failure.
+pub(super) fn parse_env_u64_ranged(name: &str, min: u64, max: u64) -> io::Result<Option<u64>> {
+    match env::var(name).ok().filter(|v| !v.is_empty()) {
+        Some(value) => {
+            let n: u64 = value.parse().map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("{name} must be a positive integer"),
+                )
+            })?;
+            if n < min || n > max {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("{name} must be between {min} and {max}"),
+                ));
+            }
+            Ok(Some(n))
+        }
+        None => Ok(None),
     }
 }
 
