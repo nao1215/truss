@@ -110,6 +110,8 @@ pub(super) const DEFAULT_TRANSFORM_DEADLINE_SECS: u64 = 30;
 /// Configurable at runtime via `TRUSS_MAX_INPUT_PIXELS`.
 pub(super) const DEFAULT_MAX_INPUT_PIXELS: u64 = 40_000_000;
 
+use super::http_parse::DEFAULT_MAX_UPLOAD_BODY_BYTES;
+
 /// Runtime configuration for the HTTP server adapter.
 ///
 /// The HTTP adapter keeps environment-specific concerns, such as the storage root and
@@ -204,6 +206,11 @@ pub struct ServerConfig {
     /// Configurable via `TRUSS_MAX_INPUT_PIXELS`. Defaults to 40,000,000 (~40 MP).
     /// Images exceeding this limit are rejected with 422 Unprocessable Entity.
     pub max_input_pixels: u64,
+    /// Maximum upload body size in bytes.
+    ///
+    /// Configurable via `TRUSS_MAX_UPLOAD_BYTES`. Defaults to 100 MB.
+    /// Requests exceeding this limit are rejected with 413 Payload Too Large.
+    pub max_upload_bytes: usize,
     /// Per-server counter tracking the number of image transforms currently in
     /// flight.  This is runtime state (not configuration) but lives here so that
     /// each `serve_with_config` invocation gets an independent counter, avoiding
@@ -252,6 +259,7 @@ impl Clone for ServerConfig {
             max_concurrent_transforms: self.max_concurrent_transforms,
             transform_deadline_secs: self.transform_deadline_secs,
             max_input_pixels: self.max_input_pixels,
+            max_upload_bytes: self.max_upload_bytes,
             transforms_in_flight: Arc::clone(&self.transforms_in_flight),
             presets: self.presets.clone(),
             #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
@@ -304,6 +312,7 @@ impl fmt::Debug for ServerConfig {
             .field("max_concurrent_transforms", &self.max_concurrent_transforms)
             .field("transform_deadline_secs", &self.transform_deadline_secs)
             .field("max_input_pixels", &self.max_input_pixels)
+            .field("max_upload_bytes", &self.max_upload_bytes)
             .field("presets", &self.presets.keys().collect::<Vec<_>>());
         #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
         {
@@ -342,6 +351,7 @@ impl PartialEq for ServerConfig {
             && self.max_concurrent_transforms == other.max_concurrent_transforms
             && self.transform_deadline_secs == other.transform_deadline_secs
             && self.max_input_pixels == other.max_input_pixels
+            && self.max_upload_bytes == other.max_upload_bytes
             && self.presets == other.presets
             && cfg_storage_eq(self, other)
     }
@@ -433,6 +443,7 @@ impl ServerConfig {
             max_concurrent_transforms: DEFAULT_MAX_CONCURRENT_TRANSFORMS,
             transform_deadline_secs: DEFAULT_TRANSFORM_DEADLINE_SECS,
             max_input_pixels: DEFAULT_MAX_INPUT_PIXELS,
+            max_upload_bytes: DEFAULT_MAX_UPLOAD_BODY_BYTES,
             transforms_in_flight: Arc::new(AtomicU64::new(0)),
             presets: HashMap::new(),
             #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
@@ -644,6 +655,8 @@ impl ServerConfig {
     /// - `TRUSS_MAX_INPUT_PIXELS`: maximum number of input image pixels allowed before decode
     ///   (default: 40,000,000, range: 1–100,000,000). Images exceeding this limit are rejected
     ///   with 422 Unprocessable Entity.
+    /// - `TRUSS_MAX_UPLOAD_BYTES`: maximum upload body size in bytes (default: 104,857,600 = 100 MB,
+    ///   range: 1–10,737,418,240). Requests exceeding this limit are rejected with 413.
     /// - `TRUSS_STORAGE_TIMEOUT_SECS`: download timeout for storage backends in seconds
     ///   (default: 30, range: 1–300).
     ///
@@ -817,6 +830,28 @@ impl ServerConfig {
             None => DEFAULT_MAX_INPUT_PIXELS,
         };
 
+        let max_upload_bytes = match env::var("TRUSS_MAX_UPLOAD_BYTES")
+            .ok()
+            .filter(|v| !v.is_empty())
+        {
+            Some(value) => {
+                let n: usize = value.parse().map_err(|_| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "TRUSS_MAX_UPLOAD_BYTES must be a positive integer",
+                    )
+                })?;
+                if n == 0 || n > 10 * 1024 * 1024 * 1024 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "TRUSS_MAX_UPLOAD_BYTES must be between 1 and 10737418240 (10 GB)",
+                    ));
+                }
+                n
+            }
+            None => DEFAULT_MAX_UPLOAD_BODY_BYTES,
+        };
+
         #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
         let storage_timeout_secs = match env::var("TRUSS_STORAGE_TIMEOUT_SECS")
             .ok()
@@ -937,6 +972,7 @@ impl ServerConfig {
             max_concurrent_transforms,
             transform_deadline_secs,
             max_input_pixels,
+            max_upload_bytes,
             transforms_in_flight: Arc::new(AtomicU64::new(0)),
             presets,
             #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]

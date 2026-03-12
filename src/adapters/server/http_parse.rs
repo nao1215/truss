@@ -7,7 +7,7 @@ use std::path::{Component, Path, PathBuf};
 
 pub(super) const MAX_HEADER_BYTES: usize = 16 * 1024;
 pub(super) const MAX_REQUEST_BODY_BYTES: usize = 1024 * 1024;
-pub(super) const MAX_UPLOAD_BODY_BYTES: usize = 100 * 1024 * 1024;
+pub(super) const DEFAULT_MAX_UPLOAD_BODY_BYTES: usize = 100 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct HttpRequest {
@@ -70,7 +70,10 @@ impl PartialHttpRequest {
 /// This split allows callers to inspect the method, path, and headers (e.g.
 /// for authentication) *before* committing resources to read a potentially
 /// large request body.
-pub(super) fn read_request_headers<R>(stream: &mut R) -> Result<PartialHttpRequest, HttpResponse>
+pub(super) fn read_request_headers<R>(
+    stream: &mut R,
+    max_upload_bytes: usize,
+) -> Result<PartialHttpRequest, HttpResponse>
 where
     R: Read,
 {
@@ -91,7 +94,7 @@ where
         // While searching for the header terminator we only enforce the
         // header-size limit.  Body-size limits are checked after headers are
         // parsed (in `read_request_body`).
-        if buffer.len() > MAX_HEADER_BYTES + MAX_UPLOAD_BODY_BYTES {
+        if buffer.len() > MAX_HEADER_BYTES + max_upload_bytes {
             return Err(payload_too_large_response("request is too large"));
         }
 
@@ -114,7 +117,7 @@ where
     let (method, target, version) = parse_request_line(request_line)?;
     let headers = parse_headers(lines)?;
     let content_length = parse_content_length(&headers)?;
-    let max_body = max_body_for_headers(&headers);
+    let max_body = max_body_for_headers(&headers, max_upload_bytes);
     if content_length > max_body {
         return Err(payload_too_large_response("request body is too large"));
     }
@@ -278,15 +281,15 @@ pub(super) fn request_has_json_content_type(request: &HttpRequest) -> bool {
 
 /// Returns the maximum allowed body size for a request. Multipart uploads
 /// (identified by `content-type: multipart/form-data`) are allowed up to
-/// [`MAX_UPLOAD_BODY_BYTES`] because real-world photographs easily exceed the
+/// `max_upload_bytes` because real-world photographs easily exceed the
 /// 1 MiB default. All other requests keep the tighter [`MAX_REQUEST_BODY_BYTES`]
 /// limit to bound JSON parsing and header-only endpoints.
-pub(super) fn max_body_for_headers(headers: &[(String, String)]) -> usize {
+pub(super) fn max_body_for_headers(headers: &[(String, String)], max_upload_bytes: usize) -> usize {
     let is_multipart = headers.iter().any(|(name, value)| {
         name == "content-type" && content_type_matches(value, "multipart/form-data")
     });
     if is_multipart {
-        MAX_UPLOAD_BODY_BYTES
+        max_upload_bytes
     } else {
         MAX_REQUEST_BODY_BYTES
     }
@@ -849,7 +852,10 @@ mod tests {
     #[test]
     fn test_max_body_for_headers_default_limit() {
         let headers = vec![("content-type".to_string(), "application/json".to_string())];
-        assert_eq!(max_body_for_headers(&headers), MAX_REQUEST_BODY_BYTES);
+        assert_eq!(
+            max_body_for_headers(&headers, DEFAULT_MAX_UPLOAD_BODY_BYTES),
+            MAX_REQUEST_BODY_BYTES
+        );
     }
 
     #[test]
@@ -858,13 +864,19 @@ mod tests {
             "content-type".to_string(),
             "multipart/form-data; boundary=abc".to_string(),
         )];
-        assert_eq!(max_body_for_headers(&headers), MAX_UPLOAD_BODY_BYTES);
+        assert_eq!(
+            max_body_for_headers(&headers, DEFAULT_MAX_UPLOAD_BODY_BYTES),
+            DEFAULT_MAX_UPLOAD_BODY_BYTES
+        );
     }
 
     #[test]
     fn test_max_body_for_headers_no_content_type() {
         let headers: Vec<(String, String)> = vec![];
-        assert_eq!(max_body_for_headers(&headers), MAX_REQUEST_BODY_BYTES);
+        assert_eq!(
+            max_body_for_headers(&headers, DEFAULT_MAX_UPLOAD_BODY_BYTES),
+            MAX_REQUEST_BODY_BYTES
+        );
     }
 
     // ── request_has_json_content_type ──────────────────────────────

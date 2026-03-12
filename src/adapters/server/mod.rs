@@ -922,7 +922,7 @@ fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io::Result<()>
     let mut requests_served: usize = 0;
 
     loop {
-        let partial = match read_request_headers(&mut stream) {
+        let partial = match read_request_headers(&mut stream, config.max_upload_bytes) {
             Ok(partial) => partial,
             Err(response) => {
                 if requests_served > 0 {
@@ -1857,7 +1857,8 @@ mod tests {
     /// Test-only convenience wrapper that reads headers + body in one shot,
     /// preserving the original `read_request` semantics for existing tests.
     fn read_request<R: Read>(stream: &mut R) -> Result<HttpRequest, HttpResponse> {
-        let partial = read_request_headers(stream)?;
+        let partial =
+            read_request_headers(stream, http_parse::DEFAULT_MAX_UPLOAD_BODY_BYTES)?;
         read_request_body(stream, partial)
     }
 
@@ -3294,8 +3295,11 @@ mod tests {
             "multipart/form-data; boundary=abc".to_string(),
         )];
         assert_eq!(
-            super::http_parse::max_body_for_headers(&headers),
-            super::http_parse::MAX_UPLOAD_BODY_BYTES
+            super::http_parse::max_body_for_headers(
+                &headers,
+                super::http_parse::DEFAULT_MAX_UPLOAD_BODY_BYTES
+            ),
+            super::http_parse::DEFAULT_MAX_UPLOAD_BODY_BYTES
         );
     }
 
@@ -3303,7 +3307,10 @@ mod tests {
     fn max_body_for_json_uses_default_limit() {
         let headers = vec![("content-type".to_string(), "application/json".to_string())];
         assert_eq!(
-            super::http_parse::max_body_for_headers(&headers),
+            super::http_parse::max_body_for_headers(
+                &headers,
+                super::http_parse::DEFAULT_MAX_UPLOAD_BODY_BYTES
+            ),
             super::http_parse::MAX_REQUEST_BODY_BYTES
         );
     }
@@ -3312,7 +3319,10 @@ mod tests {
     fn max_body_for_no_content_type_uses_default_limit() {
         let headers: Vec<(String, String)> = vec![];
         assert_eq!(
-            super::http_parse::max_body_for_headers(&headers),
+            super::http_parse::max_body_for_headers(
+                &headers,
+                super::http_parse::DEFAULT_MAX_UPLOAD_BODY_BYTES
+            ),
             super::http_parse::MAX_REQUEST_BODY_BYTES
         );
     }
