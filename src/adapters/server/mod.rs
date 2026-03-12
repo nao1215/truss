@@ -4984,4 +4984,125 @@ mod tests {
         }
         assert_eq!(counter.load(Ordering::Relaxed), 0);
     }
+
+    #[test]
+    #[serial]
+    fn test_max_input_pixels_default() {
+        unsafe {
+            std::env::remove_var("TRUSS_MAX_INPUT_PIXELS");
+        }
+        let config = ServerConfig::from_env().unwrap();
+        assert_eq!(config.max_input_pixels, 40_000_000);
+    }
+
+    #[test]
+    #[serial]
+    fn test_max_input_pixels_custom() {
+        unsafe {
+            std::env::set_var("TRUSS_MAX_INPUT_PIXELS", "10000000");
+        }
+        let config = ServerConfig::from_env().unwrap();
+        assert_eq!(config.max_input_pixels, 10_000_000);
+        unsafe {
+            std::env::remove_var("TRUSS_MAX_INPUT_PIXELS");
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_max_input_pixels_min_boundary() {
+        unsafe {
+            std::env::set_var("TRUSS_MAX_INPUT_PIXELS", "1");
+        }
+        let config = ServerConfig::from_env().unwrap();
+        assert_eq!(config.max_input_pixels, 1);
+        unsafe {
+            std::env::remove_var("TRUSS_MAX_INPUT_PIXELS");
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_max_input_pixels_max_boundary() {
+        unsafe {
+            std::env::set_var("TRUSS_MAX_INPUT_PIXELS", "100000000");
+        }
+        let config = ServerConfig::from_env().unwrap();
+        assert_eq!(config.max_input_pixels, 100_000_000);
+        unsafe {
+            std::env::remove_var("TRUSS_MAX_INPUT_PIXELS");
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_max_input_pixels_empty_uses_default() {
+        unsafe {
+            std::env::set_var("TRUSS_MAX_INPUT_PIXELS", "");
+        }
+        let config = ServerConfig::from_env().unwrap();
+        assert_eq!(config.max_input_pixels, 40_000_000);
+        unsafe {
+            std::env::remove_var("TRUSS_MAX_INPUT_PIXELS");
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_max_input_pixels_zero_rejected() {
+        unsafe {
+            std::env::set_var("TRUSS_MAX_INPUT_PIXELS", "0");
+        }
+        let err = ServerConfig::from_env().unwrap_err();
+        assert!(err.to_string().contains("TRUSS_MAX_INPUT_PIXELS"));
+        unsafe {
+            std::env::remove_var("TRUSS_MAX_INPUT_PIXELS");
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_max_input_pixels_over_max_rejected() {
+        unsafe {
+            std::env::set_var("TRUSS_MAX_INPUT_PIXELS", "100000001");
+        }
+        let err = ServerConfig::from_env().unwrap_err();
+        assert!(err.to_string().contains("TRUSS_MAX_INPUT_PIXELS"));
+        unsafe {
+            std::env::remove_var("TRUSS_MAX_INPUT_PIXELS");
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_max_input_pixels_non_numeric_rejected() {
+        unsafe {
+            std::env::set_var("TRUSS_MAX_INPUT_PIXELS", "abc");
+        }
+        let err = ServerConfig::from_env().unwrap_err();
+        assert!(err.to_string().contains("TRUSS_MAX_INPUT_PIXELS"));
+        unsafe {
+            std::env::remove_var("TRUSS_MAX_INPUT_PIXELS");
+        }
+    }
+
+    #[test]
+    fn health_includes_max_input_pixels() {
+        let storage = temp_dir("health-pixels");
+        let request = HttpRequest {
+            method: "GET".to_string(),
+            target: "/health".to_string(),
+            version: "HTTP/1.1".to_string(),
+            headers: Vec::new(),
+            body: Vec::new(),
+        };
+
+        let config = ServerConfig::new(storage, None);
+        let response = route_request(request, &config);
+
+        assert_eq!(response.status, "200 OK");
+        let body: serde_json::Value =
+            serde_json::from_slice(&response.body).expect("parse health body");
+        assert_eq!(body["maxInputPixels"], 40_000_000);
+    }
 }
