@@ -266,7 +266,7 @@ pub struct ServerConfig {
     pub custom_response_headers: Vec<(String, String)>,
     /// Whether gzip compression is enabled for non-image responses.
     ///
-    /// Configurable via `TRUSS_ENABLE_COMPRESSION`. Defaults to `true`.
+    /// Configurable via `TRUSS_DISABLE_COMPRESSION`. Defaults to `true`.
     pub enable_compression: bool,
     /// Per-server counter tracking the number of image transforms currently in
     /// flight.  This is runtime state (not configuration) but lives here so that
