@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+  pull_request:
   workflow_dispatch:
 
 permissions:
@@ -12,7 +13,7 @@ permissions:
   id-token: write
 
 concurrency:
-  group: github-pages
+  group: github-pages-${{ github.ref }}
   cancel-in-progress: true
 
 env:
@@ -50,18 +51,21 @@ jobs:
         env:
           CC_wasm32_unknown_unknown: ${{ env.WASI_SDK_PATH }}/bin/clang
           AR_wasm32_unknown_unknown: ${{ env.WASI_SDK_PATH }}/bin/llvm-ar
-          CFLAGS_wasm32_unknown_unknown: "--target=wasm32-unknown-unknown --sysroot=${{ env.WASI_SDK_PATH }}/share/wasi-sysroot"
+          CFLAGS_wasm32_unknown_unknown: "--target=wasm32-wasip1 --sysroot=${{ env.WASI_SDK_PATH }}/share/wasi-sysroot"
         run: ./scripts/build-wasm-demo.sh
 
       - name: Configure Pages
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: actions/configure-pages@v5
 
       - name: Upload Pages artifact
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: actions/upload-pages-artifact@v4
         with:
           path: web/dist
 
   deploy:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     needs: build
     environment:
