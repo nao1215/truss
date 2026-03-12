@@ -44,7 +44,7 @@ jobs:
           outputs: type=docker,dest=/tmp/truss.tar
 
       - name: Upload image artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: truss-image
           path: /tmp/truss.tar
@@ -60,7 +60,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: truss-image
           path: /tmp
