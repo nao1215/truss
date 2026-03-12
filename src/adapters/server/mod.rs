@@ -1150,7 +1150,7 @@ fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io::Result<()>
 
         let accepts_gzip = config.enable_compression
             && http_parse::header_value(&partial.headers, "accept-encoding")
-                .is_some_and(|v| v.contains("gzip"));
+                .is_some_and(|v| http_parse::accepts_encoding(v, "gzip"));
 
         let is_head = partial.method == "HEAD";
 
