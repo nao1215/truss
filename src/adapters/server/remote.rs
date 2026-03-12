@@ -1,3 +1,22 @@
+//! Remote URL fetching with layered SSRF protection.
+//!
+//! # Design decisions
+//!
+//! **DNS pinning:** We resolve the remote URL once and then pin the HTTP connection
+//! to the validated IP addresses via [`PinnedResolver`]. This prevents DNS rebinding
+//! attacks where the first resolution returns a public IP (passes validation) but a
+//! second resolution during connection returns a private/metadata IP.
+//!
+//! **IP deny-list:** We check resolved IPs against an explicit deny-list that is
+//! more conservative than `is_private()` alone — it also blocks shared address space
+//! (100.64.0.0/10), TEST-NET ranges, and reserved IPv4 space (240.0.0.0/4). Cloud
+//! metadata endpoints (169.254.169.254, metadata.google.internal, fd00:ec2::254) are
+//! always blocked regardless of `allow_insecure_url_sources`.
+//!
+//! **Origin cache:** Remote fetches are cached on disk to avoid redundant HTTP
+//! round-trips. The security policy is re-evaluated before each cache lookup so
+//! tightening restrictions invalidates previously cached responses.
+
 use super::ServerConfig;
 use super::TransformSourcePayload;
 use super::cache::OriginCache;
@@ -31,7 +50,7 @@ pub(super) fn resolve_source_bytes(
         TransformSourcePayload::Path { path, .. } => {
             let path = resolve_storage_path(&config.storage_root, &path)?;
             let metadata = std::fs::metadata(&path).map_err(map_source_io_error)?;
-            if metadata.len() > MAX_SOURCE_BYTES {
+            if metadata.len() > config.max_source_bytes {
                 return Err(payload_too_large_response("source file is too large"));
             }
 
@@ -110,7 +129,7 @@ pub(super) fn read_remote_source_bytes(
         config,
         deadline,
         &RemoteFetchPolicy {
-            max_bytes: MAX_SOURCE_BYTES,
+            max_bytes: config.max_source_bytes,
             cache_namespace: "src",
             resource_label: "remote URL",
         },
@@ -127,7 +146,7 @@ pub(super) fn read_remote_watermark_bytes(
         config,
         deadline,
         &RemoteFetchPolicy {
-            max_bytes: MAX_WATERMARK_BYTES,
+            max_bytes: config.max_watermark_bytes,
             cache_namespace: "wm",
             resource_label: "watermark image",
         },
@@ -174,9 +193,10 @@ fn fetch_remote_bytes(
         ORIGIN_CACHE_MISSES_TOTAL.fetch_add(1, Ordering::Relaxed);
     }
 
+    let max_redirects = config.max_remote_redirects;
     let mut current_url = url.to_string();
 
-    for redirect_index in 0..=MAX_REMOTE_REDIRECTS {
+    for redirect_index in 0..=max_redirects {
         let target = prepare_remote_fetch_target(&current_url, config)?;
         let agent = build_remote_agent(&target, deadline);
 
@@ -184,7 +204,8 @@ fn fetch_remote_bytes(
             Ok(response) => {
                 let status = response.status().as_u16();
                 if is_redirect_status(status) {
-                    current_url = next_redirect_url(&target.url, &response, redirect_index)?;
+                    current_url =
+                        next_redirect_url(&target.url, &response, redirect_index, max_redirects)?;
                 } else if (200..=299).contains(&status) {
                     let bytes =
                         read_remote_response_body(target.url.as_str(), response, policy.max_bytes)?;
@@ -328,8 +349,9 @@ pub(super) fn next_redirect_url(
     current_url: &Url,
     response: &http::Response<ureq::Body>,
     redirect_index: usize,
+    max_redirects: usize,
 ) -> Result<String, HttpResponse> {
-    if redirect_index == MAX_REMOTE_REDIRECTS {
+    if redirect_index == max_redirects {
         return Err(too_many_redirects_response(
             "remote URL exceeded the redirect limit",
         ));
@@ -585,6 +607,275 @@ pub(super) fn is_disallowed_ipv6(ip: Ipv6Addr) -> bool {
         || ip.is_unique_local()
         || ip.is_unicast_link_local()
         || (segments[0] == 0x2001 && segments[1] == 0x0db8)
+}
+
+#[cfg(test)]
+mod redirect_tests {
+    use super::*;
+
+    #[test]
+    fn is_redirect_status_recognizes_all_redirect_codes() {
+        assert!(is_redirect_status(301));
+        assert!(is_redirect_status(302));
+        assert!(is_redirect_status(303));
+        assert!(is_redirect_status(307));
+        assert!(is_redirect_status(308));
+    }
+
+    #[test]
+    fn is_redirect_status_rejects_non_redirect_codes() {
+        assert!(!is_redirect_status(200));
+        assert!(!is_redirect_status(201));
+        assert!(!is_redirect_status(304));
+        assert!(!is_redirect_status(400));
+        assert!(!is_redirect_status(404));
+        assert!(!is_redirect_status(500));
+    }
+
+    #[test]
+    fn parse_remote_url_accepts_valid_urls() {
+        assert!(parse_remote_url("http://example.com/image.png").is_ok());
+        assert!(parse_remote_url("https://cdn.example.com/path/to/img.jpg").is_ok());
+    }
+
+    #[test]
+    fn parse_remote_url_rejects_invalid_urls() {
+        assert!(parse_remote_url("not a url").is_err());
+        assert!(parse_remote_url("").is_err());
+    }
+
+    #[test]
+    fn validate_remote_url_rejects_non_http_scheme() {
+        let url = Url::parse("ftp://example.com/image.png").unwrap();
+        let config = ServerConfig::new(std::env::temp_dir(), None);
+        assert!(validate_remote_url(&url, &config).is_err());
+    }
+
+    #[test]
+    fn validate_remote_url_rejects_userinfo() {
+        let url = Url::parse("http://user:pass@example.com/image.png").unwrap();
+        let config = ServerConfig::new(std::env::temp_dir(), None);
+        assert!(validate_remote_url(&url, &config).is_err());
+    }
+
+    #[test]
+    fn validate_remote_url_rejects_non_standard_port_when_strict() {
+        let url = Url::parse("http://example.com:8080/image.png").unwrap();
+        let mut config = ServerConfig::new(std::env::temp_dir(), None);
+        config.allow_insecure_url_sources = false;
+        assert!(validate_remote_url(&url, &config).is_err());
+    }
+
+    #[test]
+    fn validate_remote_url_allows_standard_port_when_strict() {
+        let url = Url::parse("http://example.com:80/image.png").unwrap();
+        let mut config = ServerConfig::new(std::env::temp_dir(), None);
+        config.allow_insecure_url_sources = false;
+        // Port 80 should be allowed even in strict mode.
+        // The call may fail due to IP check, but should NOT fail due to port.
+        let result = validate_remote_url(&url, &config);
+        if let Err(ref resp) = result {
+            let body = String::from_utf8_lossy(&resp.body);
+            assert!(
+                !body.contains("port is not allowed"),
+                "port 80 should be allowed in strict mode"
+            );
+        }
+    }
+
+    /// Helper to construct an `http::Response<ureq::Body>` for tests that only
+    /// inspect headers. The body is an empty byte vector.
+    fn build_response(builder: http::response::Builder) -> http::Response<ureq::Body> {
+        let (parts, _) = builder.body(()).unwrap().into_parts();
+        let body = ureq::Body::builder().data(vec![]);
+        http::Response::from_parts(parts, body)
+    }
+
+    #[test]
+    fn validate_content_encoding_accepts_known_encodings() {
+        let response =
+            build_response(ureq::http::Response::builder().header("Content-Encoding", "gzip"));
+        assert!(validate_remote_content_encoding(&response).is_ok());
+
+        let response =
+            build_response(ureq::http::Response::builder().header("Content-Encoding", "br"));
+        assert!(validate_remote_content_encoding(&response).is_ok());
+
+        let response =
+            build_response(ureq::http::Response::builder().header("Content-Encoding", "identity"));
+        assert!(validate_remote_content_encoding(&response).is_ok());
+    }
+
+    #[test]
+    fn validate_content_encoding_rejects_unknown_encoding() {
+        let response =
+            build_response(ureq::http::Response::builder().header("Content-Encoding", "deflate"));
+        assert!(validate_remote_content_encoding(&response).is_err());
+    }
+
+    #[test]
+    fn validate_content_encoding_accepts_no_header() {
+        let response = build_response(ureq::http::Response::builder());
+        assert!(validate_remote_content_encoding(&response).is_ok());
+    }
+
+    // ── IP deny-list tests ──────────────────────────────────────────────
+
+    #[test]
+    fn disallowed_ipv4_blocks_private_ranges() {
+        assert!(is_disallowed_ipv4(Ipv4Addr::new(10, 0, 0, 1)));
+        assert!(is_disallowed_ipv4(Ipv4Addr::new(172, 16, 0, 1)));
+        assert!(is_disallowed_ipv4(Ipv4Addr::new(192, 168, 1, 1)));
+    }
+
+    #[test]
+    fn disallowed_ipv4_blocks_loopback() {
+        assert!(is_disallowed_ipv4(Ipv4Addr::new(127, 0, 0, 1)));
+    }
+
+    #[test]
+    fn disallowed_ipv4_blocks_link_local() {
+        assert!(is_disallowed_ipv4(Ipv4Addr::new(169, 254, 169, 254)));
+    }
+
+    #[test]
+    fn disallowed_ipv4_blocks_shared_address_space() {
+        // 100.64.0.0/10 (CGNAT)
+        assert!(is_disallowed_ipv4(Ipv4Addr::new(100, 64, 0, 1)));
+        assert!(is_disallowed_ipv4(Ipv4Addr::new(100, 127, 255, 254)));
+    }
+
+    #[test]
+    fn disallowed_ipv4_blocks_reserved_range() {
+        // 240.0.0.0/4
+        assert!(is_disallowed_ipv4(Ipv4Addr::new(240, 0, 0, 1)));
+        assert!(is_disallowed_ipv4(Ipv4Addr::new(255, 255, 255, 254)));
+    }
+
+    #[test]
+    fn disallowed_ipv4_allows_public_addresses() {
+        assert!(!is_disallowed_ipv4(Ipv4Addr::new(8, 8, 8, 8)));
+        assert!(!is_disallowed_ipv4(Ipv4Addr::new(1, 1, 1, 1)));
+        assert!(!is_disallowed_ipv4(Ipv4Addr::new(93, 184, 216, 34)));
+    }
+
+    #[test]
+    fn disallowed_ipv6_blocks_loopback() {
+        assert!(is_disallowed_ipv6(Ipv6Addr::LOCALHOST));
+    }
+
+    #[test]
+    fn disallowed_ipv6_blocks_ipv4_mapped_loopback() {
+        // ::ffff:127.0.0.1
+        let mapped = Ipv6Addr::new(0, 0, 0, 0, 0, 0xffff, 0x7f00, 0x0001);
+        assert!(is_disallowed_ipv6(mapped));
+    }
+
+    #[test]
+    fn disallowed_ipv6_blocks_unique_local() {
+        let ula = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 1);
+        assert!(is_disallowed_ipv6(ula));
+    }
+
+    #[test]
+    fn disallowed_ipv6_blocks_documentation_prefix() {
+        // 2001:db8::/32
+        let doc = Ipv6Addr::new(0x2001, 0x0db8, 0, 0, 0, 0, 0, 1);
+        assert!(is_disallowed_ipv6(doc));
+    }
+
+    // ── max_remote_redirects config enforcement ─────────────────────────
+
+    #[test]
+    fn max_remote_redirects_default_is_five() {
+        let config = ServerConfig::new(std::env::temp_dir(), None);
+        assert_eq!(config.max_remote_redirects, MAX_REMOTE_REDIRECTS);
+        assert_eq!(config.max_remote_redirects, 5);
+    }
+
+    #[test]
+    fn next_redirect_url_at_limit_returns_error() {
+        // When redirect_index == max_redirects, should return an error.
+        let current_url = Url::parse("http://example.com/a").unwrap();
+        let response = build_response(
+            ureq::http::Response::builder()
+                .status(302)
+                .header("Location", "/b"),
+        );
+
+        let result = next_redirect_url(&current_url, &response, 3, 3);
+        assert!(
+            result.is_err(),
+            "should error when redirect_index == max_redirects"
+        );
+    }
+
+    #[test]
+    fn next_redirect_url_within_limit_follows_redirect() {
+        let current_url = Url::parse("http://example.com/a").unwrap();
+        let response = build_response(
+            ureq::http::Response::builder()
+                .status(302)
+                .header("Location", "/b"),
+        );
+
+        let result = next_redirect_url(&current_url, &response, 0, 5);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "http://example.com/b");
+    }
+
+    #[test]
+    fn next_redirect_url_resolves_relative_location() {
+        let current_url = Url::parse("http://example.com/dir/a").unwrap();
+        let response = build_response(
+            ureq::http::Response::builder()
+                .status(301)
+                .header("Location", "b"),
+        );
+
+        let result = next_redirect_url(&current_url, &response, 0, 5).unwrap();
+        assert_eq!(result, "http://example.com/dir/b");
+    }
+
+    #[test]
+    fn next_redirect_url_resolves_absolute_location() {
+        let current_url = Url::parse("http://example.com/a").unwrap();
+        let response = build_response(
+            ureq::http::Response::builder()
+                .status(307)
+                .header("Location", "https://cdn.example.com/image.png"),
+        );
+
+        let result = next_redirect_url(&current_url, &response, 0, 5).unwrap();
+        assert_eq!(result, "https://cdn.example.com/image.png");
+    }
+
+    #[test]
+    fn next_redirect_url_missing_location_returns_error() {
+        let current_url = Url::parse("http://example.com/a").unwrap();
+        let response = build_response(ureq::http::Response::builder().status(302));
+
+        let result = next_redirect_url(&current_url, &response, 0, 5);
+        assert!(
+            result.is_err(),
+            "missing Location header should produce an error"
+        );
+    }
+
+    #[test]
+    fn next_redirect_url_last_allowed_redirect_succeeds() {
+        // redirect_index=4 with max=5 should succeed (the limit is exclusive).
+        let current_url = Url::parse("http://example.com/a").unwrap();
+        let response = build_response(
+            ureq::http::Response::builder()
+                .status(302)
+                .header("Location", "/final"),
+        );
+
+        let result = next_redirect_url(&current_url, &response, 4, 5);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "http://example.com/final");
+    }
 }
 
 #[cfg(test)]

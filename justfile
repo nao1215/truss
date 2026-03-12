@@ -138,6 +138,14 @@ serve-docker:
 generate-fixtures:
     ./scripts/generate-fixtures.sh
 
+# Generate CHANGELOG.md from git history (requires git-cliff)
+changelog:
+    git-cliff --output CHANGELOG.md
+
+# Check dependency licenses and advisories (requires cargo-deny)
+deny:
+    cargo deny check
+
 # Remove build artifacts
 clean:
     cargo clean
@@ -146,5 +154,7 @@ clean:
 setup:
     cargo install cargo-audit cargo-llvm-cov
     rustup component add llvm-tools-preview
+    @echo "Optional: cargo install cargo-deny"
+    @echo "Optional: cargo install git-cliff"
     @echo "Optional: cargo install wasm-bindgen-cli --version 0.2.114"
     @echo "Optional: rustup target add wasm32-unknown-unknown"

@@ -1,3 +1,30 @@
+//! On-disk transform and origin caching.
+//!
+//! # Design decisions
+//!
+//! **Sharded directory layout:** Cache entries are stored under
+//! `<root>/ab/cd/ef/<sha256>`, splitting the first three byte-pairs of the hex key
+//! into nested directories. This creates up to 4,096 intermediate directories and
+//! prevents filesystem inode exhaustion or performance degradation when millions of
+//! entries accumulate in a flat directory.
+//!
+//! **Atomic writes:** Cache entries are written to a temporary file (with a unique
+//! PID + counter suffix) then renamed atomically. This ensures readers never see
+//! partial data. Corrupted entries (detected during reads) are cleaned up
+//! automatically.
+//!
+//! **mtime-based TTL:** Staleness is determined by file modification time rather
+//! than an embedded timestamp. This keeps the on-disk format simple (media-type
+//! header + raw bytes) and allows operators to touch files to extend their lifetime.
+//!
+//! **Optional size-based eviction:** When `TRUSS_CACHE_MAX_BYTES` is set to a
+//! positive value, the cache performs LRU-style eviction after each write. It
+//! scans all files under the cache root, sorts by modification time, and removes
+//! the oldest entries until the total size drops below the configured limit.
+//! When the variable is unset or `0`, no size-based eviction is performed and
+//! operators should use external tools (e.g., `tmpwatch`, `tmpreaper`, cron)
+//! for disk management.
+
 use super::LogHandler;
 use crate::MediaType;
 use sha2::{Digest, Sha256};
@@ -34,12 +61,14 @@ pub(super) static CACHE_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 /// Staleness is determined by file modification time. Entries older than
 /// [`DEFAULT_CACHE_TTL_SECONDS`] are treated as misses and overwritten on the next transform.
 ///
-/// The cache does not perform size-based eviction. Operators should use external tools
-/// (e.g. `tmpwatch`, `tmpreaper`, or a cron job) to manage disk usage.
+/// When `max_bytes` is set to a positive value, the cache performs LRU-style eviction
+/// after each write to keep the total on-disk size under the configured limit.
 pub(super) struct TransformCache {
     pub(super) root: PathBuf,
     pub(super) ttl: Duration,
     pub(super) log_handler: Option<LogHandler>,
+    /// Maximum total cache size in bytes. `0` means unlimited (no eviction).
+    pub(super) max_bytes: u64,
 }
 
 /// The result of a cache lookup.
@@ -62,11 +91,17 @@ impl TransformCache {
             root,
             ttl: Duration::from_secs(DEFAULT_CACHE_TTL_SECONDS),
             log_handler: None,
+            max_bytes: 0,
         }
     }
 
     pub(super) fn with_log_handler(mut self, handler: Option<LogHandler>) -> Self {
         self.log_handler = handler;
+        self
+    }
+
+    pub(super) fn with_max_bytes(mut self, max_bytes: u64) -> Self {
+        self.max_bytes = max_bytes;
         self
     }
 
@@ -125,21 +160,31 @@ impl TransformCache {
 
         let mut data = Vec::new();
         if io::Read::read_to_end(&mut &file, &mut data).is_err() {
+            self.remove_corrupted(&path, "read failed");
             return CacheLookup::Miss;
         }
 
         // Parse the header line: "<media_type>\n<body>"
         let newline_pos = match data.iter().position(|&b| b == b'\n') {
             Some(pos) => pos,
-            None => return CacheLookup::Miss,
+            None => {
+                self.remove_corrupted(&path, "missing header newline");
+                return CacheLookup::Miss;
+            }
         };
         let media_type_str = match std::str::from_utf8(&data[..newline_pos]) {
             Ok(s) => s,
-            Err(_) => return CacheLookup::Miss,
+            Err(_) => {
+                self.remove_corrupted(&path, "invalid UTF-8 in header");
+                return CacheLookup::Miss;
+            }
         };
         let media_type = match MediaType::from_str(media_type_str) {
             Ok(mt) => mt,
-            Err(_) => return CacheLookup::Miss,
+            Err(_) => {
+                self.remove_corrupted(&path, "unrecognized media type");
+                return CacheLookup::Miss;
+            }
         };
 
         // Remove the header in-place to avoid a second allocation.
@@ -150,6 +195,15 @@ impl TransformCache {
             body: data,
             age,
         }
+    }
+
+    /// Removes a corrupted cache entry and logs the reason.
+    fn remove_corrupted(&self, path: &Path, reason: &str) {
+        self.log(&format!(
+            "truss: removing corrupted cache entry ({reason}): {}",
+            path.display()
+        ));
+        let _ = fs::remove_file(path);
     }
 
     /// Writes a transform result to the cache.
@@ -183,6 +237,98 @@ impl TransformCache {
             self.log(&format!("truss: cache write failed: {err}"));
             // Clean up the temp file if it exists.
             let _ = fs::remove_file(&tmp_path);
+        } else {
+            self.maybe_evict();
+        }
+    }
+
+    /// Runs LRU-style eviction if a maximum cache size is configured and exceeded.
+    ///
+    /// Scans all files under the cache root, sorts them by modification time
+    /// (oldest first), and removes entries until the total size drops below
+    /// `self.max_bytes`. Errors on individual files (e.g. concurrent deletion)
+    /// are silently ignored.
+    fn maybe_evict(&self) {
+        if self.max_bytes == 0 {
+            return;
+        }
+        if let Err(err) = self.evict_to_limit() {
+            self.log(&format!("truss: cache eviction scan failed: {err}"));
+        }
+    }
+
+    /// Performs the eviction scan and removal. Returns an error only if the
+    /// top-level directory walk cannot be started.
+    fn evict_to_limit(&self) -> io::Result<()> {
+        let mut entries = collect_cache_entries(&self.root)?;
+        let total_size: u64 = entries.iter().map(|e| e.size).sum();
+        if total_size <= self.max_bytes {
+            return Ok(());
+        }
+
+        // Sort oldest-first (largest mtime = most recently modified = keep).
+        entries.sort_by_key(|e| e.mtime);
+
+        let mut current_size = total_size;
+        for entry in &entries {
+            if current_size <= self.max_bytes {
+                break;
+            }
+            if fs::remove_file(&entry.path).is_ok() {
+                self.log(&format!(
+                    "truss: cache eviction: removed {} ({} bytes)",
+                    entry.path.display(),
+                    entry.size
+                ));
+                current_size = current_size.saturating_sub(entry.size);
+            }
+        }
+        Ok(())
+    }
+}
+
+/// A cache file entry used during eviction scanning.
+struct CacheEntry {
+    path: PathBuf,
+    size: u64,
+    /// Modification time as duration since `UNIX_EPOCH`. Entries with smaller
+    /// values are older and evicted first.
+    mtime: Duration,
+}
+
+/// Recursively collects all regular files under `root` with their size and
+/// modification time. Temp files (containing `.tmp.`) are skipped.
+fn collect_cache_entries(root: &Path) -> io::Result<Vec<CacheEntry>> {
+    let mut entries = Vec::new();
+    collect_entries_recursive(root, &mut entries);
+    Ok(entries)
+}
+
+fn collect_entries_recursive(dir: &Path, entries: &mut Vec<CacheEntry>) {
+    let read_dir = match fs::read_dir(dir) {
+        Ok(rd) => rd,
+        Err(_) => return,
+    };
+    for entry in read_dir.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_entries_recursive(&path, entries);
+        } else if path.is_file() {
+            // Skip temp files from in-flight writes.
+            if let Some(name) = path.file_name().and_then(|n| n.to_str())
+                && name.contains(".tmp.")
+            {
+                continue;
+            }
+            if let Ok(meta) = fs::metadata(&path) {
+                let size = meta.len();
+                let mtime = meta
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .unwrap_or(Duration::ZERO);
+                entries.push(CacheEntry { path, size, mtime });
+            }
         }
     }
 }
@@ -523,5 +669,111 @@ mod tests {
             key_a, key_b,
             "blur=0.11 and blur=0.14 must produce different cache keys"
         );
+    }
+
+    /// Helper to generate a deterministic 64-char hex key for testing.
+    fn test_key(index: u8) -> String {
+        let digest = Sha256::digest([index]);
+        hex::encode(digest)
+    }
+
+    #[test]
+    fn eviction_removes_oldest_entries_when_over_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = TransformCache::new(dir.path().to_path_buf()).with_max_bytes(200);
+
+        // Write three entries, each ~60 bytes on disk (header + body).
+        // Total will exceed 200 bytes after the third write.
+        let body = vec![0u8; 50];
+        cache.put(&test_key(0), MediaType::Jpeg, &body);
+        // Ensure distinct mtimes by touching the file timestamps manually.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        cache.put(&test_key(1), MediaType::Jpeg, &body);
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        cache.put(&test_key(2), MediaType::Jpeg, &body);
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        // Fourth entry triggers eviction; oldest entries should be removed.
+        cache.put(&test_key(3), MediaType::Jpeg, &body);
+
+        // Collect remaining files.
+        let remaining: Vec<_> = collect_cache_entries(dir.path())
+            .unwrap()
+            .into_iter()
+            .map(|e| e.path)
+            .collect();
+
+        let total_size: u64 = collect_cache_entries(dir.path())
+            .unwrap()
+            .iter()
+            .map(|e| e.size)
+            .sum();
+
+        assert!(
+            total_size <= 200,
+            "cache size {total_size} should be <= 200 after eviction"
+        );
+        // The most recent entry must survive.
+        assert!(
+            remaining.contains(&cache.entry_path(&test_key(3))),
+            "newest entry should survive eviction"
+        );
+    }
+
+    #[test]
+    fn no_eviction_when_max_bytes_is_zero() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = TransformCache::new(dir.path().to_path_buf()).with_max_bytes(0);
+
+        let body = vec![0u8; 100];
+        for i in 0..5 {
+            cache.put(&test_key(i), MediaType::Jpeg, &body);
+        }
+
+        let entries = collect_cache_entries(dir.path()).unwrap();
+        assert_eq!(
+            entries.len(),
+            5,
+            "all entries should survive when max_bytes is 0"
+        );
+    }
+
+    #[test]
+    fn no_eviction_when_under_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        // Set a very generous limit.
+        let cache = TransformCache::new(dir.path().to_path_buf()).with_max_bytes(1_000_000);
+
+        let body = vec![0u8; 50];
+        for i in 0..3 {
+            cache.put(&test_key(i), MediaType::Jpeg, &body);
+        }
+
+        let entries = collect_cache_entries(dir.path()).unwrap();
+        assert_eq!(
+            entries.len(),
+            3,
+            "all entries should survive when under limit"
+        );
+    }
+
+    #[test]
+    fn collect_cache_entries_skips_temp_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = TransformCache::new(dir.path().to_path_buf());
+
+        // Write a normal entry.
+        cache.put(&test_key(0), MediaType::Jpeg, b"data");
+
+        // Create a temp file that should be skipped.
+        let key = test_key(1);
+        let path = cache.entry_path(&key);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        let tmp_path = path.with_extension("tmp.12345.0");
+        fs::write(&tmp_path, b"partial").unwrap();
+
+        let entries = collect_cache_entries(dir.path()).unwrap();
+        assert_eq!(entries.len(), 1, "temp files should be excluded from scan");
     }
 }

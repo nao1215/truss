@@ -91,8 +91,29 @@ src/
 ├── lib.rs                   # Public API exports
 ├── core.rs                  # Core types, validation, media sniffing
 ├── adapters/
-│   ├── cli.rs               # CLI parser and command execution
-│   ├── server.rs            # HTTP server, caching, signed URLs
+│   ├── cli/                 # CLI parser and command execution
+│   │   ├── mod.rs           # Routing and shared utilities
+│   │   ├── convert.rs       # convert subcommand
+│   │   ├── inspect.rs       # inspect subcommand
+│   │   ├── serve.rs         # serve subcommand
+│   │   └── sign.rs          # sign / completions / validate
+│   ├── server/              # HTTP server
+│   │   ├── mod.rs           # Orchestrator and public API
+│   │   ├── routing.rs       # Route dispatch
+│   │   ├── handler.rs       # Request handlers
+│   │   ├── lifecycle.rs     # Server startup, shutdown, draining
+│   │   ├── auth.rs          # HMAC signing and bearer tokens
+│   │   ├── cache.rs         # Transform and origin caches
+│   │   ├── config.rs        # ServerConfig and env parsing
+│   │   ├── http_parse.rs    # HTTP request parsing
+│   │   ├── metrics.rs       # Prometheus metrics
+│   │   ├── multipart.rs     # Multipart form parsing
+│   │   ├── negotiate.rs     # Content negotiation (Accept)
+│   │   ├── remote.rs        # Remote URL fetching (SSRF protection)
+│   │   ├── response.rs      # Response builders (RFC 7807)
+│   │   ├── s3.rs            # AWS S3 backend
+│   │   ├── gcs.rs           # Google Cloud Storage backend
+│   │   └── azure.rs         # Azure Blob Storage backend
 │   └── wasm.rs              # Browser WASM adapter
 └── codecs/
     ├── raster.rs            # JPEG, PNG, WebP, AVIF, BMP codec
@@ -109,6 +130,50 @@ integration/
 
 doc/                         # Design documents and specs
 ```
+
+### Architecture overview
+
+truss follows a three-layer architecture:
+
+```
+┌──────────────────────────────────────────────┐
+│  Adapters (CLI / HTTP Server / WASM)         │  Runtime-specific I/O
+├──────────────────────────────────────────────┤
+│  Core (core.rs)                              │  Types, validation, media sniffing
+├──────────────────────────────────────────────┤
+│  Codecs (raster.rs / svg.rs)                 │  Image decode, transform, encode
+└──────────────────────────────────────────────┘
+```
+
+- **Core** defines domain types (`Artifact`, `TransformOptions`, `MediaType`, etc.) and all validation logic. It has no I/O dependencies.
+- **Codecs** perform the actual image processing. `transform_raster()` is the main entry point. SVG input is handled separately by `transform_svg()`.
+- **Adapters** translate external interfaces into core operations:
+  - **CLI** parses command-line arguments and drives transforms via stdin/stdout/files.
+  - **Server** provides an HTTP API with signed URLs, caching, content negotiation, and cloud storage backends. It uses synchronous I/O by design for simplicity and predictable resource usage.
+  - **WASM** exposes a browser-friendly JS API via `wasm-bindgen`.
+
+**Key design decisions:**
+
+- **Synchronous I/O (server):** The HTTP server uses one thread per connection with blocking I/O. This avoids async complexity and gives predictable memory usage. `MAX_CONCURRENT_TRANSFORMS` (configurable via `TRUSS_MAX_CONCURRENT_TRANSFORMS`) bounds resource consumption.
+- **DNS pinning (remote fetch):** Remote URL fetching resolves DNS once, then pins the connection to validated IPs. This prevents SSRF via DNS rebinding attacks.
+- **Sharded cache layout:** The transform cache stores files under `<root>/ab/cd/ef/<sha256>` to avoid inode exhaustion on large caches. Writes use atomic temp-file-then-rename.
+
+**How to add a new transform operation:**
+
+1. Add the option field to `TransformOptions` in `core.rs`
+2. Add normalization logic in `TransformOptions::normalize()`
+3. Implement the operation in `transform_raster()` in `codecs/raster.rs`
+4. Add CLI flag parsing in `cli/convert.rs`
+5. Add HTTP query parameter parsing in `server/http_parse.rs`
+6. Update the OpenAPI spec in `doc/openapi.yaml`
+
+**How to add a new storage backend:**
+
+1. Create `src/adapters/server/<backend>.rs`
+2. Add the feature flag to `Cargo.toml`
+3. Add the variant to `StorageBackend` enum in `config.rs`
+4. Add configuration parsing in `config.rs`
+5. Add the `resolve_storage_source_bytes` match arm in `remote.rs`
 
 ### 7. Available `just` recipes
 

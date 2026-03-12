@@ -35,7 +35,55 @@ pub const MAX_DECODED_PIXELS: u64 = 100_000_000;
 /// ```
 pub const MAX_WATERMARK_PIXELS: u64 = 4_000_000;
 
+/// A (width, height) pair that prevents accidental transposition of dimensions.
+///
+/// Using a named struct instead of separate `u32` parameters ensures call sites
+/// cannot silently swap width and height.
+///
+/// ```
+/// use truss::Dimensions;
+/// let d = Dimensions::new(1920, 1080);
+/// assert_eq!(d.width, 1920);
+/// assert_eq!(d.height, 1080);
+/// assert_eq!(d.pixel_count(), 1920 * 1080);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Dimensions {
+    pub width: u32,
+    pub height: u32,
+}
+
+impl Dimensions {
+    /// Creates a new dimensions value.
+    pub const fn new(width: u32, height: u32) -> Self {
+        Self { width, height }
+    }
+
+    /// Returns the total pixel count (width × height) as `u64` to avoid overflow.
+    pub const fn pixel_count(self) -> u64 {
+        self.width as u64 * self.height as u64
+    }
+}
+
+impl fmt::Display for Dimensions {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}x{}", self.width, self.height)
+    }
+}
+
 /// Raw input bytes before media-type detection has completed.
+///
+/// # Examples
+///
+/// ```
+/// use truss::{RawArtifact, MediaType};
+///
+/// let raw = RawArtifact::new(vec![0xFF, 0xD8, 0xFF], Some(MediaType::Jpeg));
+/// assert_eq!(raw.declared_media_type, Some(MediaType::Jpeg));
+///
+/// let unknown = RawArtifact::new(vec![1, 2, 3], None);
+/// assert!(unknown.declared_media_type.is_none());
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RawArtifact {
     /// The raw input bytes.
@@ -55,6 +103,20 @@ impl RawArtifact {
 }
 
 /// A decoded or otherwise classified artifact handled by the Core layer.
+///
+/// # Examples
+///
+/// ```
+/// use truss::{Artifact, ArtifactMetadata, MediaType};
+///
+/// let artifact = Artifact::new(
+///     vec![0x89, b'P', b'N', b'G'],
+///     MediaType::Png,
+///     ArtifactMetadata::default(),
+/// );
+/// assert_eq!(artifact.media_type, MediaType::Png);
+/// assert_eq!(artifact.metadata.frame_count, 1);
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Artifact {
     /// The artifact bytes.
@@ -77,6 +139,24 @@ impl Artifact {
 }
 
 /// Metadata that the Core layer can carry between decode and encode steps.
+///
+/// # Examples
+///
+/// ```
+/// use truss::{ArtifactMetadata, Dimensions};
+///
+/// let meta = ArtifactMetadata {
+///     width: Some(1920),
+///     height: Some(1080),
+///     ..ArtifactMetadata::default()
+/// };
+/// assert_eq!(meta.dimensions(), Some(Dimensions::new(1920, 1080)));
+/// assert_eq!(meta.frame_count, 1);
+///
+/// // When either dimension is unknown, dimensions() returns None
+/// let partial = ArtifactMetadata { width: Some(100), ..ArtifactMetadata::default() };
+/// assert!(partial.dimensions().is_none());
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArtifactMetadata {
     /// The rendered width in pixels, when known.
@@ -89,6 +169,16 @@ pub struct ArtifactMetadata {
     pub duration: Option<Duration>,
     /// Whether the artifact contains alpha, when known.
     pub has_alpha: Option<bool>,
+}
+
+impl ArtifactMetadata {
+    /// Returns the dimensions as a [`Dimensions`] value, if both width and height are known.
+    pub fn dimensions(&self) -> Option<Dimensions> {
+        match (self.width, self.height) {
+            (Some(w), Some(h)) => Some(Dimensions::new(w, h)),
+            _ => None,
+        }
+    }
 }
 
 impl Default for ArtifactMetadata {
@@ -104,6 +194,23 @@ impl Default for ArtifactMetadata {
 }
 
 /// Supported media types for the current implementation phase.
+///
+/// # Examples
+///
+/// ```
+/// use truss::MediaType;
+/// use std::str::FromStr;
+///
+/// let mt = MediaType::from_str("png").unwrap();
+/// assert_eq!(mt, MediaType::Png);
+/// assert_eq!(mt.as_name(), "png");
+/// assert_eq!(mt.as_mime(), "image/png");
+/// assert!(!mt.is_lossy());
+/// assert!(mt.is_raster());
+///
+/// assert!(MediaType::Jpeg.is_lossy());
+/// assert!(!MediaType::Svg.is_raster());
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MediaType {
     /// JPEG image data.
@@ -212,6 +319,16 @@ pub struct WatermarkInput {
 }
 
 /// A complete transform request for the Core layer.
+///
+/// # Examples
+///
+/// ```
+/// use truss::{Artifact, ArtifactMetadata, MediaType, TransformOptions, TransformRequest};
+///
+/// let input = Artifact::new(vec![0], MediaType::Png, ArtifactMetadata::default());
+/// let request = TransformRequest::new(input, TransformOptions::default());
+/// assert!(request.watermark.is_none());
+/// ```
 #[derive(Debug, Clone, PartialEq)]
 pub struct TransformRequest {
     /// The already-resolved input artifact.
@@ -277,6 +394,23 @@ pub struct NormalizedTransformRequest {
 /// Crop extracts a rectangular sub-image at the given pixel coordinates.
 /// The origin `(x, y)` is the top-left corner and `(width, height)` define
 /// the size of the extracted region. Both dimensions must be non-zero.
+///
+/// # Examples
+///
+/// ```
+/// use truss::CropRegion;
+/// use std::str::FromStr;
+///
+/// let region = CropRegion::from_str("10,20,100,200").unwrap();
+/// assert_eq!(region.x, 10);
+/// assert_eq!(region.y, 20);
+/// assert_eq!(region.width, 100);
+/// assert_eq!(region.height, 200);
+/// assert_eq!(format!("{region}"), "10,20,100,200");
+///
+/// // Zero-size regions are rejected
+/// assert!(CropRegion::from_str("0,0,0,100").is_err());
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CropRegion {
     /// Horizontal offset from the left edge.
@@ -336,6 +470,29 @@ impl fmt::Display for CropRegion {
 }
 
 /// Raw transform options before defaulting and validation has completed.
+///
+/// Use `TransformOptions::default()` as a starting point and override the fields
+/// you need. Call [`TransformOptions::normalize`] to validate and resolve defaults.
+///
+/// # Examples
+///
+/// ```
+/// use truss::{TransformOptions, MediaType, Rotation};
+///
+/// let opts = TransformOptions {
+///     width: Some(800),
+///     height: Some(600),
+///     format: Some(MediaType::Webp),
+///     quality: Some(80),
+///     rotate: Rotation::Deg90,
+///     ..TransformOptions::default()
+/// };
+/// assert_eq!(opts.width, Some(800));
+/// assert_eq!(opts.quality, Some(80));
+/// assert_eq!(opts.rotate, Rotation::Deg90);
+/// // strip_metadata defaults to true
+/// assert!(opts.strip_metadata);
+/// ```
 #[derive(Debug, Clone, PartialEq)]
 pub struct TransformOptions {
     /// The desired output width in pixels.
@@ -520,6 +677,19 @@ pub struct NormalizedTransformOptions {
 }
 
 /// Resize behavior for bounded transforms.
+///
+/// # Examples
+///
+/// ```
+/// use truss::Fit;
+/// use std::str::FromStr;
+///
+/// let fit = Fit::from_str("cover").unwrap();
+/// assert_eq!(fit, Fit::Cover);
+/// assert_eq!(fit.as_name(), "cover");
+///
+/// assert!(Fit::from_str("unknown").is_err());
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Fit {
     /// Scale to fit within the box while preserving aspect ratio.
@@ -559,6 +729,19 @@ impl FromStr for Fit {
 }
 
 /// Positioning behavior for bounded transforms.
+///
+/// # Examples
+///
+/// ```
+/// use truss::Position;
+/// use std::str::FromStr;
+///
+/// let pos = Position::from_str("bottom-right").unwrap();
+/// assert_eq!(pos, Position::BottomRight);
+/// assert_eq!(pos.as_name(), "bottom-right");
+///
+/// assert!(Position::from_str("middle").is_err());
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Position {
     /// Center alignment.
@@ -618,6 +801,20 @@ impl FromStr for Position {
 }
 
 /// Rotation that is applied after auto-orientation.
+///
+/// # Examples
+///
+/// ```
+/// use truss::Rotation;
+/// use std::str::FromStr;
+///
+/// let rot = Rotation::from_str("270").unwrap();
+/// assert_eq!(rot, Rotation::Deg270);
+/// assert_eq!(rot.as_degrees(), 270);
+///
+/// assert_eq!(Rotation::Deg0.as_degrees(), 0);
+/// assert!(Rotation::from_str("45").is_err());
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Rotation {
     /// No extra rotation.
@@ -657,6 +854,23 @@ impl FromStr for Rotation {
 }
 
 /// A simple 8-bit RGBA color.
+///
+/// # Examples
+///
+/// ```
+/// use truss::Rgba8;
+///
+/// // Parse a 6-digit hex color (fully opaque)
+/// let red = Rgba8::from_hex("ff0000").unwrap();
+/// assert_eq!(red, Rgba8 { r: 255, g: 0, b: 0, a: 255 });
+///
+/// // Parse an 8-digit hex color with alpha
+/// let semi = Rgba8::from_hex("00ff0080").unwrap();
+/// assert_eq!(semi, Rgba8 { r: 0, g: 255, b: 0, a: 128 });
+///
+/// // Invalid input is rejected
+/// assert!(Rgba8::from_hex("xyz").is_err());
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Rgba8 {
     /// Red channel.
@@ -694,6 +908,22 @@ impl Rgba8 {
 }
 
 /// Metadata handling after option normalization.
+///
+/// # Examples
+///
+/// ```
+/// use truss::{TransformOptions, MediaType};
+///
+/// // Default options normalize to StripAll
+/// let opts = TransformOptions::default();
+/// let normalized = opts.normalize(MediaType::Png).unwrap();
+/// assert_eq!(normalized.metadata_policy, truss::MetadataPolicy::StripAll);
+///
+/// // Disabling strip_metadata normalizes to KeepAll
+/// let opts = TransformOptions { strip_metadata: false, ..TransformOptions::default() };
+/// let normalized = opts.normalize(MediaType::Png).unwrap();
+/// assert_eq!(normalized.metadata_policy, truss::MetadataPolicy::KeepAll);
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MetadataPolicy {
     /// Drop metadata from the output.
@@ -770,6 +1000,21 @@ pub fn resolve_metadata_flags(
 }
 
 /// Errors returned by Core validation or backend execution.
+///
+/// # Examples
+///
+/// ```
+/// use truss::TransformError;
+///
+/// let err = TransformError::InvalidOptions("quality must be between 1 and 100".into());
+/// assert_eq!(
+///     format!("{err}"),
+///     "invalid transform options: quality must be between 1 and 100"
+/// );
+///
+/// // TransformError implements std::error::Error
+/// let _: &dyn std::error::Error = &err;
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TransformError {
     /// The input artifact is structurally invalid.
@@ -1062,9 +1307,16 @@ fn detect_artifact(bytes: &[u8]) -> Result<(MediaType, ArtifactMetadata), Transf
         return Ok((MediaType::Svg, sniff_svg(bytes)));
     }
 
-    Err(TransformError::UnsupportedInputMediaType(
-        "unknown file signature".to_string(),
-    ))
+    let preview_len = bytes.len().min(16);
+    let hex_preview: String = bytes[..preview_len]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    Err(TransformError::UnsupportedInputMediaType(format!(
+        "unknown file signature ({} bytes, header: [{hex_preview}])",
+        bytes.len()
+    )))
 }
 
 fn is_png(bytes: &[u8]) -> bool {
@@ -2114,9 +2366,15 @@ mod tests {
         let err =
             sniff_artifact(RawArtifact::new(vec![1, 2, 3, 4], None)).expect_err("unknown bytes");
 
-        assert_eq!(
-            err,
-            TransformError::UnsupportedInputMediaType("unknown file signature".to_string())
+        assert!(
+            matches!(err, TransformError::UnsupportedInputMediaType(ref msg) if msg.contains("unknown file signature")),
+            "expected unknown file signature error, got: {err}"
+        );
+        let msg = err.to_string();
+        assert!(msg.contains("4 bytes"), "should include file size: {msg}");
+        assert!(
+            msg.contains("01 02 03 04"),
+            "should include hex preview: {msg}"
         );
     }
 

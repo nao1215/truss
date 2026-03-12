@@ -1,3 +1,27 @@
+//! HTTP image-transform server.
+//!
+//! # Threading model
+//!
+//! The server uses **synchronous, blocking I/O** with one OS thread per TCP
+//! connection. This is a deliberate design choice, not a limitation:
+//!
+//! - **Simplicity:** No async runtime (tokio/async-std) dependency for the core
+//!   server. This reduces binary size, compile time, and cognitive overhead.
+//! - **Predictable resource usage:** Each connection consumes a fixed stack
+//!   allocation. There is no task queue, no hidden buffering, and no executor
+//!   scheduling overhead.
+//! - **Bounded concurrency:** `TRUSS_MAX_CONCURRENT_TRANSFORMS` (default 64)
+//!   caps the number of simultaneous image transforms via a semaphore-like
+//!   `TransformSlot` guard. Excess requests receive 503 Service Unavailable.
+//!
+//! **Trade-off:** Slow clients (slow uploads, slow TLS handshakes) block their
+//! thread for the duration of the connection. In production deployments, a
+//! reverse proxy (nginx, envoy, CloudFront) should handle slow-client buffering.
+//!
+//! This design may be reconsidered if the server needs to handle thousands of
+//! concurrent idle connections (e.g., WebSocket or SSE), but for a
+//! request-response image API the current model is sufficient.
+
 mod auth;
 #[cfg(feature = "azure")]
 pub mod azure;
@@ -9,6 +33,7 @@ mod http_parse;
 mod metrics;
 mod multipart;
 mod negotiate;
+mod rate_limit;
 mod remote;
 mod response;
 #[cfg(feature = "s3")]
@@ -17,7 +42,7 @@ pub mod s3;
 #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
 pub use config::StorageBackend;
 use config::StorageBackendLabel;
-pub use config::{DEFAULT_BIND_ADDR, DEFAULT_STORAGE_ROOT, LogHandler, ServerConfig};
+pub use config::{DEFAULT_BIND_ADDR, DEFAULT_STORAGE_ROOT, LogHandler, LogLevel, ServerConfig};
 
 use auth::{
     authorize_request, authorize_request_headers, authorize_signed_request,
@@ -48,8 +73,8 @@ use negotiate::{
 use remote::{read_remote_watermark_bytes, resolve_source_bytes};
 use response::{
     HttpResponse, NOT_FOUND_BODY, bad_request_response, service_unavailable_response,
-    transform_error_response, unsupported_media_type_response, write_response,
-    write_response_compressed,
+    too_many_requests_response, transform_error_response, unsupported_media_type_response,
+    write_response, write_response_compressed,
 };
 
 use crate::{
@@ -66,7 +91,7 @@ use std::io;
 use std::net::{TcpListener, TcpStream};
 use std::str::FromStr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use subtle::ConstantTimeEq;
 use url::Url;
@@ -372,7 +397,7 @@ pub fn serve_with_config(listener: TcpListener, config: ServerConfig) -> io::Res
                     }
                 }; // MutexGuard dropped here — before handle_stream runs.
                 if let Err(err) = handle_stream(stream, &cfg) {
-                    cfg.log(&format!("failed to handle connection: {err}"));
+                    cfg.log_warn(&format!("failed to handle connection: {err}"));
                 }
             }
         }));
@@ -382,7 +407,23 @@ pub fn serve_with_config(listener: TcpListener, config: ServerConfig) -> io::Res
     // shared `draining` flag (so /health/ready returns 503 immediately) and
     // writes a byte to a self-pipe to wake the accept loop.
     let (shutdown_read_fd, shutdown_write_fd) = create_shutdown_pipe()?;
-    install_signal_handler(Arc::clone(&config.draining), shutdown_write_fd);
+    install_signal_handler(
+        Arc::clone(&config.draining),
+        shutdown_write_fd,
+        Arc::clone(&config.log_level),
+    );
+
+    // Spawn a background thread to hot-reload presets when TRUSS_PRESETS_FILE changes.
+    if let Some(ref path) = config.presets_file_path {
+        let presets = Arc::clone(&config.presets);
+        let draining = Arc::clone(&config.draining);
+        let cfg = Arc::clone(&config);
+        let path = path.clone();
+        std::thread::Builder::new()
+            .name("preset-watcher".into())
+            .spawn(move || preset_watcher(presets, path, draining, cfg))
+            .expect("failed to spawn preset watcher thread");
+    }
 
     // Set the listener to non-blocking so we can multiplex between incoming
     // connections and the shutdown pipe.
@@ -567,9 +608,12 @@ static SHUTDOWN_PIPE_WR: AtomicI32 = AtomicI32::new(-1);
 /// Global draining flag set by the signal handler.
 static GLOBAL_DRAINING: std::sync::atomic::AtomicPtr<AtomicBool> =
     std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
+/// Global log level, cycled by SIGUSR1 (Unix only).
+static GLOBAL_LOG_LEVEL: std::sync::atomic::AtomicPtr<AtomicU8> =
+    std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
 
 #[cfg(unix)]
-fn install_signal_handler(draining: Arc<AtomicBool>, write_fd: i32) {
+fn install_signal_handler(draining: Arc<AtomicBool>, write_fd: i32, log_level: Arc<AtomicU8>) {
     // Store the write fd and draining pointer in globals accessible from the
     // async-signal-safe handler.
     SHUTDOWN_PIPE_WR.store(write_fd, Ordering::SeqCst);
@@ -578,6 +622,9 @@ fn install_signal_handler(draining: Arc<AtomicBool>, write_fd: i32) {
     // and `libc::write`, both of which are async-signal-safe.
     let ptr = Arc::into_raw(draining).cast_mut();
     GLOBAL_DRAINING.store(ptr, Ordering::SeqCst);
+    // SAFETY: same as above — leaked intentionally for the process lifetime.
+    let lvl_ptr = Arc::into_raw(log_level).cast_mut();
+    GLOBAL_LOG_LEVEL.store(lvl_ptr, Ordering::SeqCst);
 
     // Use sigaction instead of signal to avoid SysV semantics where the handler
     // is reset to SIG_DFL after the first invocation. SA_RESTART ensures that
@@ -589,7 +636,38 @@ fn install_signal_handler(draining: Arc<AtomicBool>, write_fd: i32) {
         sa.sa_flags = libc::SA_RESTART;
         libc::sigaction(libc::SIGTERM, &sa, std::ptr::null_mut());
         libc::sigaction(libc::SIGINT, &sa, std::ptr::null_mut());
+
+        let mut sa_usr1: libc::sigaction = std::mem::zeroed();
+        sa_usr1.sa_sigaction = sigusr1_handler as *const () as libc::sighandler_t;
+        libc::sigemptyset(&mut sa_usr1.sa_mask);
+        sa_usr1.sa_flags = libc::SA_RESTART;
+        libc::sigaction(libc::SIGUSR1, &sa_usr1, std::ptr::null_mut());
     }
+}
+
+/// SIGUSR1 handler: cycles the log level.
+///
+/// This is async-signal-safe because it only performs atomic load/store
+/// operations and a raw `libc::write` to stderr.
+#[cfg(unix)]
+extern "C" fn sigusr1_handler(_sig: libc::c_int) {
+    let ptr = GLOBAL_LOG_LEVEL.load(Ordering::SeqCst);
+    if ptr.is_null() {
+        return;
+    }
+    let level_atomic = unsafe { &*ptr };
+    let current = level_atomic.load(Ordering::SeqCst);
+    let next = LogLevel::from_u8(current).cycle();
+    level_atomic.store(next as u8, Ordering::SeqCst);
+
+    // Write a log message directly to stderr (async-signal-safe).
+    let msg = match next {
+        LogLevel::Error => b"[log] level changed to error\n" as &[u8],
+        LogLevel::Warn => b"[log] level changed to warn\n",
+        LogLevel::Info => b"[log] level changed to info\n",
+        LogLevel::Debug => b"[log] level changed to debug\n",
+    };
+    unsafe { libc::write(2, msg.as_ptr().cast(), msg.len()) };
 }
 
 #[cfg(unix)]
@@ -608,7 +686,7 @@ extern "C" fn signal_handler(_sig: libc::c_int) {
 }
 
 #[cfg(windows)]
-fn install_signal_handler(draining: Arc<AtomicBool>, _write_fd: i32) {
+fn install_signal_handler(draining: Arc<AtomicBool>, _write_fd: i32, _log_level: Arc<AtomicU8>) {
     // Store the draining pointer in the global so the signal handler can set it.
     let ptr = Arc::into_raw(draining).cast_mut();
     GLOBAL_DRAINING.store(ptr, Ordering::SeqCst);
@@ -629,6 +707,71 @@ extern "C" fn windows_signal_handler(_sig: libc::c_int) {
     // Re-register the handler since Windows resets to SIG_DFL after each signal.
     unsafe {
         libc::signal(libc::SIGINT, windows_signal_handler as libc::sighandler_t);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Preset hot-reload watcher
+// ---------------------------------------------------------------------------
+
+/// Polling interval for the preset file watcher.
+const PRESET_WATCH_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Background thread that watches `TRUSS_PRESETS_FILE` for changes and reloads
+/// presets atomically. On parse failure, the previous valid presets are kept.
+fn preset_watcher(
+    presets: Arc<std::sync::RwLock<std::collections::HashMap<String, TransformOptionsPayload>>>,
+    path: std::path::PathBuf,
+    draining: Arc<AtomicBool>,
+    config: Arc<ServerConfig>,
+) {
+    use config::parse_presets_file;
+    use std::fs;
+
+    let mut last_modified = fs::metadata(&path).and_then(|m| m.modified()).ok();
+
+    loop {
+        std::thread::sleep(PRESET_WATCH_INTERVAL);
+
+        if draining.load(Ordering::Relaxed) {
+            break;
+        }
+
+        let current_modified = match fs::metadata(&path).and_then(|m| m.modified()) {
+            Ok(mtime) => Some(mtime),
+            Err(err) => {
+                config.log_warn(&format!(
+                    "[presets] failed to stat `{}`: {err}",
+                    path.display()
+                ));
+                continue;
+            }
+        };
+
+        if current_modified == last_modified {
+            continue;
+        }
+
+        match parse_presets_file(&path) {
+            Ok(new_presets) => {
+                let count = new_presets.len();
+                *presets.write().expect("presets lock poisoned") = new_presets;
+                last_modified = current_modified;
+                config.log(&format!(
+                    "[presets] reloaded {count} presets from `{}`",
+                    path.display()
+                ));
+            }
+            Err(err) => {
+                config.log_warn(&format!(
+                    "[presets] reload failed for `{}`: {err} (keeping previous presets)",
+                    path.display()
+                ));
+                // Do NOT update last_modified here — the file may have been read
+                // mid-write (torn read). By keeping the old mtime, the watcher
+                // will retry on the next poll cycle and pick up the completed file.
+            }
+        }
     }
 }
 
@@ -1116,11 +1259,16 @@ fn emit_access_log(config: &ServerConfig, entry: &AccessLogEntry<'_>) {
 fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io::Result<()> {
     // Prevent slow or stalled clients from blocking the accept loop indefinitely.
     if let Err(err) = stream.set_read_timeout(Some(SOCKET_READ_TIMEOUT)) {
-        config.log(&format!("failed to set socket read timeout: {err}"));
+        config.log_warn(&format!("failed to set socket read timeout: {err}"));
     }
     if let Err(err) = stream.set_write_timeout(Some(SOCKET_WRITE_TIMEOUT)) {
-        config.log(&format!("failed to set socket write timeout: {err}"));
+        config.log_warn(&format!("failed to set socket write timeout: {err}"));
     }
+
+    // Extract the peer IP once for rate limiting. If peer_addr fails
+    // (e.g. the socket was already closed), skip rate limiting for this
+    // connection rather than rejecting it.
+    let peer_ip = stream.peer_addr().ok().map(|addr| addr.ip());
 
     let mut requests_served: u64 = 0;
 
@@ -1142,6 +1290,36 @@ fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io::Result<()>
 
         let request_id =
             extract_request_id(&partial.headers).unwrap_or_else(|| Uuid::new_v4().to_string());
+
+        // --- Per-IP rate limiting ---
+        if let (Some(limiter), Some(ip)) = (&config.rate_limiter, peer_ip)
+            && !limiter.check(ip)
+        {
+            let mut response = too_many_requests_response("rate limit exceeded — try again later");
+            response
+                .headers
+                .push(("X-Request-Id".to_string(), request_id.clone()));
+            record_http_metrics(RouteMetric::Unknown, response.status);
+            let sc = status_code(response.status).unwrap_or("unknown");
+            let method_log = partial.method.clone();
+            let path_log = partial.path().to_string();
+            let _ = write_response(&mut stream, response, true);
+            record_http_request_duration(RouteMetric::Unknown, start);
+            emit_access_log(
+                config,
+                &AccessLogEntry {
+                    request_id: &request_id,
+                    method: &method_log,
+                    path: &path_log,
+                    route: &path_log,
+                    status: sc,
+                    start,
+                    cache_status: None,
+                    watermark: false,
+                },
+            );
+            return Ok(());
+        }
 
         let client_wants_close = partial
             .headers
@@ -1958,8 +2136,8 @@ fn parse_public_get_request(
 
     // Resolve preset and merge with per-request overrides.
     let merged = if let Some(preset_name) = query.get("preset") {
-        let preset = config
-            .presets
+        let presets = config.presets.read().expect("presets lock poisoned");
+        let preset = presets
             .get(preset_name)
             .ok_or_else(|| bad_request_response(&format!("unknown preset `{preset_name}`")))?;
         preset.clone().with_overrides(&per_request)
@@ -2020,10 +2198,11 @@ fn transform_source_bytes(
         }
     };
 
-    let cache = config
-        .cache_root
-        .as_ref()
-        .map(|root| TransformCache::new(root.clone()).with_log_handler(config.log_handler.clone()));
+    let cache = config.cache_root.as_ref().map(|root| {
+        TransformCache::new(root.clone())
+            .with_log_handler(config.log_handler.clone())
+            .with_max_bytes(config.cache_max_bytes)
+    });
 
     if let Some(ref cache) = cache
         && options.format.is_some()
@@ -2117,7 +2296,11 @@ fn transform_source_bytes_inner(
     };
     let negotiation_used =
         if options.format.is_none() && !response_config.disable_accept_negotiation {
-            match negotiate_output_format(request.header("accept"), &artifact) {
+            match negotiate_output_format(
+                request.header("accept"),
+                &artifact,
+                &config.format_preference,
+            ) {
                 Ok(Some(format)) => {
                     options.format = Some(format);
                     true
@@ -2657,17 +2840,20 @@ mod tests {
 
     #[test]
     fn negotiate_output_format_prefers_alpha_safe_formats_for_transparent_inputs() {
-        let format =
-            negotiate_output_format(Some("image/jpeg,image/png"), &artifact_with_alpha(true))
-                .expect("negotiate output format")
-                .expect("resolved output format");
+        let format = negotiate_output_format(
+            Some("image/jpeg,image/png"),
+            &artifact_with_alpha(true),
+            &[],
+        )
+        .expect("negotiate output format")
+        .expect("resolved output format");
 
         assert_eq!(format, MediaType::Png);
     }
 
     #[test]
     fn negotiate_output_format_prefers_avif_for_wildcard_accept() {
-        let format = negotiate_output_format(Some("image/*"), &artifact_with_alpha(false))
+        let format = negotiate_output_format(Some("image/*"), &artifact_with_alpha(false), &[])
             .expect("negotiate output format")
             .expect("resolved output format");
 
@@ -3165,11 +3351,12 @@ mod tests {
             );
             env::remove_var("TRUSS_PRESETS_FILE");
         }
-        let presets = parse_presets_from_env().unwrap();
+        let (presets, file_path) = parse_presets_from_env().unwrap();
         unsafe {
             env::remove_var("TRUSS_PRESETS");
         }
 
+        assert!(file_path.is_none());
         assert_eq!(presets.len(), 1);
         let thumb = presets.get("thumb").unwrap();
         assert_eq!(thumb.width, Some(100));
@@ -5426,7 +5613,7 @@ mod tests {
         assert!(config.bearer_token.is_none());
         assert!(config.signed_url_secret.is_none());
         assert!(config.signing_keys.is_empty());
-        assert!(config.presets.is_empty());
+        assert!(config.presets.read().unwrap().is_empty());
         assert_eq!(
             config.max_concurrent_transforms,
             DEFAULT_MAX_CONCURRENT_TRANSFORMS
@@ -6009,5 +6196,154 @@ mod tests {
 
         // The path doesn't match any route, so we get 404 — NOT 503.
         assert_eq!(response.status, "404 Not Found");
+    }
+
+    // ── preset hot-reload watcher ────────────────────────────────────
+
+    #[test]
+    fn preset_watcher_reloads_on_file_change() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let dir = std::env::temp_dir().join(format!(
+            "truss_test_watcher_{}",
+            std::time::SystemTime::UNIX_EPOCH
+                .elapsed()
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("presets.json");
+        std::fs::write(&path, r#"{"thumb":{"width":100}}"#).unwrap();
+
+        let presets = Arc::new(std::sync::RwLock::new({
+            let mut m = std::collections::HashMap::new();
+            m.insert(
+                "thumb".to_string(),
+                TransformOptionsPayload {
+                    width: Some(100),
+                    height: None,
+                    fit: None,
+                    position: None,
+                    format: None,
+                    quality: None,
+                    background: None,
+                    rotate: None,
+                    auto_orient: None,
+                    strip_metadata: None,
+                    preserve_exif: None,
+                    crop: None,
+                    blur: None,
+                    sharpen: None,
+                },
+            );
+            m
+        }));
+        let draining = Arc::new(AtomicBool::new(false));
+        let config = Arc::new(ServerConfig::new(dir.clone(), None));
+
+        let presets_clone = Arc::clone(&presets);
+        let draining_clone = Arc::clone(&draining);
+        let config_clone = Arc::clone(&config);
+        let path_clone = path.clone();
+
+        let handle = std::thread::spawn(move || {
+            super::preset_watcher(presets_clone, path_clone, draining_clone, config_clone);
+        });
+
+        // Wait a moment, then update the file with a new mtime.
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        // Ensure a different mtime by sleeping briefly.
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        std::fs::write(&path, r#"{"thumb":{"width":200},"banner":{"width":800}}"#).unwrap();
+
+        // Wait for the watcher to pick up the change (poll interval is 5s).
+        std::thread::sleep(std::time::Duration::from_secs(6));
+
+        // Verify updated presets.
+        {
+            let p = presets.read().unwrap();
+            assert_eq!(p.len(), 2, "expected 2 presets after reload");
+            assert_eq!(p["thumb"].width, Some(200));
+            assert_eq!(p["banner"].width, Some(800));
+        }
+
+        // Stop the watcher.
+        draining.store(true, Ordering::Relaxed);
+        handle.join().unwrap();
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn preset_watcher_keeps_old_presets_on_invalid_file() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let dir = std::env::temp_dir().join(format!(
+            "truss_test_watcher_invalid_{}",
+            std::time::SystemTime::UNIX_EPOCH
+                .elapsed()
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("presets.json");
+        std::fs::write(&path, r#"{"thumb":{"width":100}}"#).unwrap();
+
+        let presets = Arc::new(std::sync::RwLock::new({
+            let mut m = std::collections::HashMap::new();
+            m.insert(
+                "thumb".to_string(),
+                TransformOptionsPayload {
+                    width: Some(100),
+                    height: None,
+                    fit: None,
+                    position: None,
+                    format: None,
+                    quality: None,
+                    background: None,
+                    rotate: None,
+                    auto_orient: None,
+                    strip_metadata: None,
+                    preserve_exif: None,
+                    crop: None,
+                    blur: None,
+                    sharpen: None,
+                },
+            );
+            m
+        }));
+        let draining = Arc::new(AtomicBool::new(false));
+        let config = Arc::new(ServerConfig::new(dir.clone(), None));
+
+        let presets_clone = Arc::clone(&presets);
+        let draining_clone = Arc::clone(&draining);
+        let config_clone = Arc::clone(&config);
+        let path_clone = path.clone();
+
+        let handle = std::thread::spawn(move || {
+            super::preset_watcher(presets_clone, path_clone, draining_clone, config_clone);
+        });
+
+        // Write invalid JSON after a brief delay.
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        std::fs::write(&path, "invalid json!!!").unwrap();
+
+        // Wait for the watcher to process.
+        std::thread::sleep(std::time::Duration::from_secs(6));
+
+        // Original presets should still be in place.
+        {
+            let p = presets.read().unwrap();
+            assert_eq!(p.len(), 1, "presets should not change on invalid file");
+            assert_eq!(p["thumb"].width, Some(100));
+        }
+
+        draining.store(true, Ordering::Relaxed);
+        handle.join().unwrap();
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
