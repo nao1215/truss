@@ -1902,6 +1902,7 @@ mod tests {
     use crate::{Fit, MediaType, RawArtifact, SignedUrlSource, TransformOptions, sniff_artifact};
     use image::codecs::png::PngEncoder;
     use image::{ColorType, ImageEncoder, Rgba, RgbaImage};
+    use serial_test::serial;
     use std::env;
     use std::fs;
     use std::io::{Cursor, Read, Write};
@@ -2471,6 +2472,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn validate_invalid_config() {
         // SAFETY: test-only, single-threaded access to this env var.
         unsafe { env::set_var("TRUSS_MAX_CONCURRENT_TRANSFORMS", "invalid") };
@@ -2478,6 +2480,21 @@ mod tests {
         let result = super::execute_validate(&mut stdout);
         unsafe { env::remove_var("TRUSS_MAX_CONCURRENT_TRANSFORMS") };
         assert!(result.is_err());
+    }
+
+    #[test]
+    #[serial]
+    fn validate_valid_config() {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let mut stdout = Vec::new();
+        // SAFETY: test-only, single-threaded access to this env var.
+        unsafe { env::set_var("TRUSS_STORAGE_ROOT", dir.path().to_str().unwrap()) };
+        let result = super::execute_validate(&mut stdout);
+        unsafe { env::remove_var("TRUSS_STORAGE_ROOT") };
+        assert!(result.is_ok());
+        let output = String::from_utf8(stdout).expect("valid utf-8");
+        assert!(output.contains("configuration is valid"));
+        assert!(output.contains("storage root:"));
     }
 
     // ===== Additional test: help sign =====
