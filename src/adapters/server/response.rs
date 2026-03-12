@@ -85,6 +85,12 @@ const MIN_COMPRESS_BYTES: usize = 128;
 
 /// Content types eligible for gzip compression.  Image types are excluded
 /// because they are already compressed (JPEG, PNG, WebP, AVIF, etc.).
+///
+/// **Security note (BREACH):** If a future endpoint returns compressed
+/// responses that mix attacker-controlled input with secret tokens, it may
+/// be vulnerable to BREACH-style compression side-channel attacks. The
+/// current endpoints (health, metrics, image transforms) do not include
+/// secrets in the response body, so the risk is low today.
 fn is_compressible_content_type(ct: &str) -> bool {
     matches!(
         ct,
