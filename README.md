@@ -203,6 +203,7 @@ See the [Docker](#docker) section for running with Docker instead.
 | `convert` | Convert and transform an image file (can be omitted; see above) |
 | `inspect` | Show metadata (format, dimensions, alpha) of an image |
 | `serve` | Start the HTTP image-transform server (implied when server flags are used at the top level) |
+| `validate` | Validate server configuration without starting the server (useful in CI/CD) |
 | `sign` | Generate a signed public URL for the server |
 | `completions` | Generate shell completion scripts |
 | `version` | Print version information |

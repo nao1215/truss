@@ -1059,7 +1059,8 @@ fn parse_help_topic(topic: Option<String>) -> Result<Command, CliError> {
             message: format!("unknown help topic '{other}'"),
             usage: None,
             hint: Some(
-                "available topics: convert, inspect, serve, sign, completions, version".to_string(),
+                "available topics: convert, inspect, serve, validate, sign, completions, version"
+                    .to_string(),
             ),
         }),
     }
@@ -1499,7 +1500,7 @@ fn execute_validate<W: Write>(stdout: &mut W) -> Result<(), CliError> {
             Ok(())
         }
         Err(error) => Err(runtime_error(
-            EXIT_RUNTIME,
+            EXIT_USAGE,
             &format!("invalid configuration: {error}"),
         )),
     }

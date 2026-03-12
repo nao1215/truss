@@ -394,8 +394,15 @@ paths:
         verifying the storage root is accessible, the cache root (if configured)
         is accessible, the object-storage backend (if configured) is
         network-reachable, cache disk free space is above the configured
-        threshold (`TRUSS_HEALTH_CACHE_MIN_FREE_BYTES`), and process memory
-        usage is below the configured limit (`TRUSS_HEALTH_MAX_MEMORY_BYTES`).
+        threshold (`TRUSS_HEALTH_CACHE_MIN_FREE_BYTES`), process memory
+        usage is below the configured limit (`TRUSS_HEALTH_MAX_MEMORY_BYTES`),
+        and transform capacity is not exhausted.
+
+        **Platform note:** RSS memory and cache disk free space are read on
+        Linux only. On other platforms `TRUSS_HEALTH_MAX_MEMORY_BYTES` and
+        `TRUSS_HEALTH_CACHE_MIN_FREE_BYTES` are effectively no-ops — those
+        checks are omitted from the response and the remaining checks
+        (object-storage reachability, transform capacity, etc.) still apply.
 
         The object-storage reachability check (S3, GCS, or Azure) confirms
         that the configured bucket/container exists and the service responds to

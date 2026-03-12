@@ -1069,8 +1069,7 @@ fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io::Result<()>
         }
 
         requests_served += 1;
-        let close_after =
-            client_wants_close || requests_served >= config.keep_alive_max_requests;
+        let close_after = client_wants_close || requests_served >= config.keep_alive_max_requests;
 
         write_response(&mut stream, response, close_after)?;
         record_http_request_duration(route, start);
@@ -1431,19 +1430,33 @@ fn handle_health_ready(config: &ServerConfig) -> HttpResponse {
         }
     }
 
-    if let Some(max_mem) = config.health_max_memory_bytes {
-        let rss = process_rss_bytes();
-        let ok = rss.is_none_or(|r| r <= max_mem);
+    // Concurrency utilization
+    let in_flight = config.transforms_in_flight.load(Ordering::Relaxed);
+    let overloaded = in_flight >= config.max_concurrent_transforms;
+    checks.push(json!({
+        "name": "transformCapacity",
+        "status": if overloaded { "fail" } else { "ok" },
+        "current": in_flight,
+        "max": config.max_concurrent_transforms,
+    }));
+    if overloaded {
+        all_ok = false;
+    }
+
+    // Memory usage (Linux only) — skip entirely when RSS is unavailable
+    if let Some(rss_bytes) = process_rss_bytes() {
+        let threshold = config.health_max_memory_bytes;
+        let mem_ok = threshold.is_none_or(|max| rss_bytes <= max);
         let mut check = json!({
             "name": "memoryUsage",
-            "status": if ok { "ok" } else { "fail" },
+            "status": if mem_ok { "ok" } else { "fail" },
+            "rssBytes": rss_bytes,
         });
-        if let Some(r) = rss {
-            check["rssBytes"] = json!(r);
+        if let Some(max) = threshold {
+            check["thresholdBytes"] = json!(max);
         }
-        check["thresholdBytes"] = json!(max_mem);
         checks.push(check);
-        if !ok {
+        if !mem_ok {
             all_ok = false;
         }
     }
@@ -5530,8 +5543,7 @@ mod tests {
             &config,
         );
         assert_eq!(response.status, "503 Service Unavailable");
-        let body: serde_json::Value =
-            serde_json::from_slice(&response.body).expect("parse body");
+        let body: serde_json::Value = serde_json::from_slice(&response.body).expect("parse body");
         assert_eq!(body["status"], "fail");
         let checks = body["checks"].as_array().expect("checks array");
         let storage_check = checks
@@ -5557,8 +5569,7 @@ mod tests {
             },
             &config,
         );
-        let body: serde_json::Value =
-            serde_json::from_slice(&response.body).expect("parse body");
+        let body: serde_json::Value = serde_json::from_slice(&response.body).expect("parse body");
         let checks = body["checks"].as_array().expect("checks array");
         let disk_check = checks
             .iter()
@@ -5585,8 +5596,7 @@ mod tests {
             },
             &config,
         );
-        let body: serde_json::Value =
-            serde_json::from_slice(&response.body).expect("parse body");
+        let body: serde_json::Value = serde_json::from_slice(&response.body).expect("parse body");
         let checks = body["checks"].as_array().expect("checks array");
         assert!(
             checks.iter().all(|c| c["name"] != "cacheDiskFree"),
@@ -5609,17 +5619,16 @@ mod tests {
             },
             &config,
         );
-        let body: serde_json::Value =
-            serde_json::from_slice(&response.body).expect("parse body");
+        let body: serde_json::Value = serde_json::from_slice(&response.body).expect("parse body");
         let checks = body["checks"].as_array().expect("checks array");
-        let mem = checks
-            .iter()
-            .find(|c| c["name"] == "memoryUsage")
-            .expect("memoryUsage check");
-        assert_eq!(mem["status"], "ok");
-        assert_eq!(mem["thresholdBytes"], u64::MAX);
+        let mem = checks.iter().find(|c| c["name"] == "memoryUsage");
         if cfg!(target_os = "linux") {
+            let mem = mem.expect("memoryUsage check present on Linux");
+            assert_eq!(mem["status"], "ok");
+            assert_eq!(mem["thresholdBytes"], u64::MAX);
             assert!(mem["rssBytes"].as_u64().is_some());
+        } else {
+            assert!(mem.is_none(), "memoryUsage should be absent on non-Linux");
         }
     }
 }
