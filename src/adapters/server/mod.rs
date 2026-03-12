@@ -744,9 +744,9 @@ fn preset_watcher(
                     "[presets] reload failed for `{}`: {err} (keeping previous presets)",
                     path.display()
                 ));
-                // Update last_modified to avoid retrying every poll cycle for
-                // the same broken file — the operator will save again after fixing.
-                last_modified = current_modified;
+                // Do NOT update last_modified here — the file may have been read
+                // mid-write (torn read). By keeping the old mtime, the watcher
+                // will retry on the next poll cycle and pick up the completed file.
             }
         }
     }
