@@ -10,7 +10,7 @@ pub(super) const NOT_FOUND_BODY: &str =
 pub(super) struct HttpResponse {
     pub(super) status: &'static str,
     pub(super) content_type: Option<&'static str>,
-    pub(super) headers: Vec<(&'static str, String)>,
+    pub(super) headers: Vec<(String, String)>,
     pub(super) body: Vec<u8>,
 }
 
@@ -35,7 +35,7 @@ impl HttpResponse {
 
     pub(super) fn problem_with_headers(
         status: &'static str,
-        headers: Vec<(&'static str, String)>,
+        headers: Vec<(String, String)>,
         body: Vec<u8>,
     ) -> Self {
         Self {
@@ -49,7 +49,7 @@ impl HttpResponse {
     pub(super) fn binary_with_headers(
         status: &'static str,
         content_type: &'static str,
-        headers: Vec<(&'static str, String)>,
+        headers: Vec<(String, String)>,
         body: Vec<u8>,
     ) -> Self {
         Self {
@@ -69,7 +69,7 @@ impl HttpResponse {
         }
     }
 
-    pub(super) fn empty(status: &'static str, headers: Vec<(&'static str, String)>) -> Self {
+    pub(super) fn empty(status: &'static str, headers: Vec<(String, String)>) -> Self {
         Self {
             status,
             content_type: None,
@@ -178,7 +178,7 @@ pub(super) fn bad_request_response(message: &str) -> HttpResponse {
 pub(super) fn auth_required_response(message: &str) -> HttpResponse {
     HttpResponse::problem_with_headers(
         "401 Unauthorized",
-        vec![("WWW-Authenticate", "Bearer".to_string())],
+        vec![("WWW-Authenticate".to_string(), "Bearer".to_string())],
         problem_detail_body(401, "Unauthorized", message),
     )
 }
@@ -690,7 +690,7 @@ mod tests {
 
     #[test]
     fn test_http_response_empty_constructor() {
-        let headers = vec![("X-Custom", "val".to_string())];
+        let headers = vec![("X-Custom".to_string(), "val".to_string())];
         let resp = HttpResponse::empty("204 No Content", headers);
         assert_eq!(resp.status, "204 No Content");
         assert!(resp.content_type.is_none());
@@ -707,7 +707,7 @@ mod tests {
 
     #[test]
     fn test_http_response_binary_with_headers_constructor() {
-        let headers = vec![("Cache-Control", "no-cache".to_string())];
+        let headers = vec![("Cache-Control".to_string(), "no-cache".to_string())];
         let resp =
             HttpResponse::binary_with_headers("200 OK", "image/png", headers, vec![0x89, 0x50]);
         assert_eq!(resp.content_type, Some("image/png"));

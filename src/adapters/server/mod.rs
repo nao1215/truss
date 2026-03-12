@@ -1005,18 +1005,18 @@ fn extract_request_id(headers: &[(String, String)]) -> Option<String> {
 
 /// Classifies the `Cache-Status` response header as `"hit"` or `"miss"`.
 /// Returns `None` when the header is absent.
-fn extract_cache_status(headers: &[(&'static str, String)]) -> Option<&'static str> {
+fn extract_cache_status(headers: &[(String, String)]) -> Option<&'static str> {
     headers
         .iter()
-        .find_map(|(name, value)| (*name == "Cache-Status").then_some(value.as_str()))
+        .find_map(|(name, value)| (name == "Cache-Status").then_some(value.as_str()))
         .map(|v| if v.contains("hit") { "hit" } else { "miss" })
 }
 
 /// Extracts and removes the internal `X-Truss-Watermark` header, returning whether it was set.
-fn extract_watermark_flag(headers: &mut Vec<(&'static str, String)>) -> bool {
+fn extract_watermark_flag(headers: &mut Vec<(String, String)>) -> bool {
     let pos = headers
         .iter()
-        .position(|(name, _)| *name == "X-Truss-Watermark");
+        .position(|(name, _)| name == "X-Truss-Watermark");
     if let Some(idx) = pos {
         headers.swap_remove(idx);
         true
@@ -1090,7 +1090,7 @@ fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io::Result<()>
         if requires_auth
             && let Err(mut response) = authorize_request_headers(&partial.headers, config)
         {
-            response.headers.push(("X-Request-Id", request_id.clone()));
+            response.headers.push(("X-Request-Id".to_string(), request_id.clone()));
             record_http_metrics(RouteMetric::Unknown, response.status);
             let sc = status_code(response.status).unwrap_or("unknown");
             let method_log = partial.method.clone();
@@ -1141,7 +1141,7 @@ fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io::Result<()>
             };
 
             if let Some(mut response) = early_response {
-                response.headers.push(("X-Request-Id", request_id.clone()));
+                response.headers.push(("X-Request-Id".to_string(), request_id.clone()));
                 record_http_metrics(RouteMetric::Metrics, response.status);
                 let sc = status_code(response.status).unwrap_or("unknown");
                 let method_log = partial.method.clone();
@@ -1172,7 +1172,7 @@ fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io::Result<()>
         let request = match read_request_body(&mut stream, partial) {
             Ok(request) => request,
             Err(mut response) => {
-                response.headers.push(("X-Request-Id", request_id.clone()));
+                response.headers.push(("X-Request-Id".to_string(), request_id.clone()));
                 record_http_metrics(RouteMetric::Unknown, response.status);
                 let sc = status_code(response.status).unwrap_or("unknown");
                 let _ = write_response(&mut stream, response, true);
@@ -1197,7 +1197,7 @@ fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io::Result<()>
         let mut response = route_request(request, config);
         record_http_metrics(route, response.status);
 
-        response.headers.push(("X-Request-Id", request_id.clone()));
+        response.headers.push(("X-Request-Id".to_string(), request_id.clone()));
 
         let cache_status = extract_cache_status(&response.headers);
         let had_watermark = extract_watermark_flag(&mut response.headers);
@@ -1940,7 +1940,7 @@ fn transform_source_bytes(
                 config.public_stale_while_revalidate_seconds,
                 &config.custom_response_headers,
             );
-            headers.push(("Age", age.as_secs().to_string()));
+            headers.push(("Age".to_string(), age.as_secs().to_string()));
             if matches!(response_policy, ImageResponsePolicy::PublicGet)
                 && if_none_match_matches(request.header("if-none-match"), &etag)
             {
@@ -2061,7 +2061,7 @@ fn transform_source_bytes_inner(
             response_config.public_cache_control.stale_while_revalidate,
             &config.custom_response_headers,
         );
-        headers.push(("Age", age.as_secs().to_string()));
+        headers.push(("Age".to_string(), age.as_secs().to_string()));
         if matches!(response_policy, ImageResponsePolicy::PublicGet)
             && if_none_match_matches(request.header("if-none-match"), &etag)
         {
@@ -2172,7 +2172,7 @@ fn transform_source_bytes_inner(
     if had_watermark {
         response
             .headers
-            .push(("X-Truss-Watermark", "true".to_string()));
+            .push(("X-Truss-Watermark".to_string(), "true".to_string()));
     }
     response
 }
@@ -5182,20 +5182,22 @@ mod tests {
 
     #[test]
     fn cache_status_hit_detected() {
-        let headers: Vec<(&str, String)> = vec![("Cache-Status", "\"truss\"; hit".to_string())];
+        let headers: Vec<(String, String)> =
+            vec![("Cache-Status".to_string(), "\"truss\"; hit".to_string())];
         assert_eq!(super::extract_cache_status(&headers), Some("hit"));
     }
 
     #[test]
     fn cache_status_miss_detected() {
-        let headers: Vec<(&str, String)> =
-            vec![("Cache-Status", "\"truss\"; fwd=miss".to_string())];
+        let headers: Vec<(String, String)> =
+            vec![("Cache-Status".to_string(), "\"truss\"; fwd=miss".to_string())];
         assert_eq!(super::extract_cache_status(&headers), Some("miss"));
     }
 
     #[test]
     fn cache_status_none_when_header_absent() {
-        let headers: Vec<(&str, String)> = vec![("Content-Type", "image/png".to_string())];
+        let headers: Vec<(String, String)> =
+            vec![("Content-Type".to_string(), "image/png".to_string())];
         assert!(super::extract_cache_status(&headers).is_none());
     }
 
