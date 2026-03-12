@@ -66,7 +66,7 @@ use std::io;
 use std::net::{TcpListener, TcpStream};
 use std::str::FromStr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use subtle::ConstantTimeEq;
 use url::Url;
@@ -471,8 +471,12 @@ fn create_shutdown_pipe() -> io::Result<(i32, i32)> {
     if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
         return Err(io::Error::last_os_error());
     }
-    // Make the read end non-blocking so `poll_shutdown_pipe` never stalls.
-    unsafe { libc::fcntl(fds[0], libc::F_SETFL, libc::O_NONBLOCK) };
+    // Make both ends non-blocking: the read end so `poll_shutdown_pipe` never
+    // stalls, and the write end so the signal handler never blocks.
+    unsafe {
+        libc::fcntl(fds[0], libc::F_SETFL, libc::O_NONBLOCK);
+        libc::fcntl(fds[1], libc::F_SETFL, libc::O_NONBLOCK);
+    }
     Ok((fds[0], fds[1]))
 }
 
@@ -506,7 +510,7 @@ fn close_shutdown_pipe(read_fd: i32, write_fd: i32) {
 fn close_shutdown_pipe(_read_fd: i32, _write_fd: i32) {}
 
 /// Global write-end of the shutdown pipe, written to from the signal handler.
-static SHUTDOWN_PIPE_WR: AtomicU64 = AtomicU64::new(0);
+static SHUTDOWN_PIPE_WR: AtomicI32 = AtomicI32::new(-1);
 /// Global draining flag set by the signal handler.
 static GLOBAL_DRAINING: std::sync::atomic::AtomicPtr<AtomicBool> =
     std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
@@ -515,16 +519,23 @@ static GLOBAL_DRAINING: std::sync::atomic::AtomicPtr<AtomicBool> =
 fn install_signal_handler(draining: Arc<AtomicBool>, write_fd: i32) {
     // Store the write fd and draining pointer in globals accessible from the
     // async-signal-safe handler.
-    SHUTDOWN_PIPE_WR.store(write_fd as u64, Ordering::SeqCst);
+    SHUTDOWN_PIPE_WR.store(write_fd, Ordering::SeqCst);
     // SAFETY: `Arc::into_raw` leaks intentionally — the pointer remains valid
     // for the process lifetime.  The signal handler only calls `AtomicBool::store`
     // and `libc::write`, both of which are async-signal-safe.
-    let ptr = Arc::into_raw(draining) as *mut AtomicBool;
+    let ptr = Arc::into_raw(draining).cast_mut();
     GLOBAL_DRAINING.store(ptr, Ordering::SeqCst);
 
+    // Use sigaction instead of signal to avoid SysV semantics where the handler
+    // is reset to SIG_DFL after the first invocation. SA_RESTART ensures that
+    // interrupted syscalls are automatically restarted.
     unsafe {
-        libc::signal(libc::SIGTERM, signal_handler as *const () as libc::sighandler_t);
-        libc::signal(libc::SIGINT, signal_handler as *const () as libc::sighandler_t);
+        let mut sa: libc::sigaction = std::mem::zeroed();
+        sa.sa_sigaction = signal_handler as *const () as libc::sighandler_t;
+        libc::sigemptyset(&mut sa.sa_mask);
+        sa.sa_flags = libc::SA_RESTART;
+        libc::sigaction(libc::SIGTERM, &sa, std::ptr::null_mut());
+        libc::sigaction(libc::SIGINT, &sa, std::ptr::null_mut());
     }
 }
 
@@ -536,8 +547,8 @@ extern "C" fn signal_handler(_sig: libc::c_int) {
         unsafe { (*ptr).store(true, Ordering::SeqCst) };
     }
     // Wake the accept loop by writing to the self-pipe.
-    let fd = SHUTDOWN_PIPE_WR.load(Ordering::SeqCst) as i32;
-    if fd > 0 {
+    let fd = SHUTDOWN_PIPE_WR.load(Ordering::SeqCst);
+    if fd >= 0 {
         let byte: u8 = 1;
         unsafe { libc::write(fd, (&byte as *const u8).cast(), 1) };
     }
