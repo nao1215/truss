@@ -403,6 +403,11 @@ pub fn serve_with_config(listener: TcpListener, config: ServerConfig) -> io::Res
                 }
             }
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                // On Windows (or when the shutdown pipe is unavailable), check
+                // the draining flag directly so that Ctrl+C triggers shutdown.
+                if config.draining.load(Ordering::SeqCst) {
+                    break;
+                }
                 // No pending connection — sleep briefly then retry.
                 std::thread::sleep(Duration::from_millis(10));
             }
@@ -556,20 +561,27 @@ extern "C" fn signal_handler(_sig: libc::c_int) {
 
 #[cfg(windows)]
 fn install_signal_handler(draining: Arc<AtomicBool>, _write_fd: i32) {
-    // On Windows, spawn a thread that waits for Ctrl+C via the standard handler.
-    std::thread::spawn(move || {
-        let _ = unsafe {
-            libc::signal(libc::SIGTERM, libc::SIG_DFL);
-        };
-        // Fallback: just set draining on Ctrl+C via the atomic flag.
-        // The accept loop polls this via the WouldBlock branch.
-        loop {
-            std::thread::sleep(Duration::from_millis(100));
-            if draining.load(Ordering::SeqCst) {
-                break;
-            }
-        }
-    });
+    // Store the draining pointer in the global so the signal handler can set it.
+    let ptr = Arc::into_raw(draining).cast_mut();
+    GLOBAL_DRAINING.store(ptr, Ordering::SeqCst);
+
+    // On Windows, register a SIGINT handler (Ctrl+C) via the C runtime.
+    // The accept loop checks `draining` in the WouldBlock branch.
+    unsafe {
+        libc::signal(libc::SIGINT, windows_signal_handler as libc::sighandler_t);
+    }
+}
+
+#[cfg(windows)]
+extern "C" fn windows_signal_handler(_sig: libc::c_int) {
+    let ptr = GLOBAL_DRAINING.load(Ordering::SeqCst);
+    if !ptr.is_null() {
+        unsafe { (*ptr).store(true, Ordering::SeqCst) };
+    }
+    // Re-register the handler since Windows resets to SIG_DFL after each signal.
+    unsafe {
+        libc::signal(libc::SIGINT, windows_signal_handler as libc::sighandler_t);
+    }
 }
 
 /// Serves exactly one request using configuration loaded from the environment.
