@@ -432,7 +432,9 @@ pub fn serve_with_config(listener: TcpListener, config: ServerConfig) -> io::Res
 
     // Stop dispatching new connections to workers.
     drop(sender);
-    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    // Worker drain deadline: 15s so that total shutdown (drain + worker drain)
+    // fits within Kubernetes default terminationGracePeriodSeconds of 30s.
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
     for worker in workers {
         let remaining = deadline.saturating_duration_since(std::time::Instant::now());
         if remaining.is_zero() {
