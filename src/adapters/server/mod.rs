@@ -118,10 +118,6 @@ const SOCKET_WRITE_TIMEOUT: Duration = Duration::from_secs(60);
 const WORKER_THREADS: usize = 8;
 type HmacSha256 = Hmac<Sha256>;
 
-/// Maximum number of requests served over a single keep-alive connection before
-/// the server closes it.  This prevents a single client from monopolising a
-/// worker thread indefinitely.
-const KEEP_ALIVE_MAX_REQUESTS: usize = 100;
 
 #[derive(Clone, Copy)]
 struct PublicCacheControl {
@@ -1074,7 +1070,8 @@ fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io::Result<()>
         }
 
         requests_served += 1;
-        let close_after = client_wants_close || requests_served >= KEEP_ALIVE_MAX_REQUESTS;
+        let close_after =
+            client_wants_close || requests_served as u64 >= config.keep_alive_max_requests;
 
         write_response(&mut stream, response, close_after)?;
         record_http_request_duration(route, start);

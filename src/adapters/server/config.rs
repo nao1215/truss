@@ -111,6 +111,11 @@ pub(super) const DEFAULT_TRANSFORM_DEADLINE_SECS: u64 = 30;
 /// Configurable at runtime via `TRUSS_MAX_INPUT_PIXELS`.
 pub(super) const DEFAULT_MAX_INPUT_PIXELS: u64 = 40_000_000;
 
+/// Default maximum number of requests served over a single keep-alive
+/// connection before the server closes it.
+/// Configurable at runtime via `TRUSS_KEEP_ALIVE_MAX_REQUESTS`.
+pub(super) const DEFAULT_KEEP_ALIVE_MAX_REQUESTS: u64 = 100;
+
 use super::http_parse::DEFAULT_MAX_UPLOAD_BODY_BYTES;
 
 /// Runtime configuration for the HTTP server adapter.
@@ -212,6 +217,10 @@ pub struct ServerConfig {
     /// Configurable via `TRUSS_MAX_UPLOAD_BYTES`. Defaults to 100 MB.
     /// Requests exceeding this limit are rejected with 413 Payload Too Large.
     pub max_upload_bytes: usize,
+    /// Maximum number of requests served over a single keep-alive connection.
+    ///
+    /// Configurable via `TRUSS_KEEP_ALIVE_MAX_REQUESTS`. Defaults to 100.
+    pub keep_alive_max_requests: u64,
     /// Bearer token for the `/metrics` endpoint.
     ///
     /// When set, the `/metrics` endpoint requires `Authorization: Bearer <token>`.
@@ -271,6 +280,7 @@ impl Clone for ServerConfig {
             transform_deadline_secs: self.transform_deadline_secs,
             max_input_pixels: self.max_input_pixels,
             max_upload_bytes: self.max_upload_bytes,
+            keep_alive_max_requests: self.keep_alive_max_requests,
             metrics_token: self.metrics_token.clone(),
             disable_metrics: self.disable_metrics,
             transforms_in_flight: Arc::clone(&self.transforms_in_flight),
@@ -326,6 +336,7 @@ impl fmt::Debug for ServerConfig {
             .field("transform_deadline_secs", &self.transform_deadline_secs)
             .field("max_input_pixels", &self.max_input_pixels)
             .field("max_upload_bytes", &self.max_upload_bytes)
+            .field("keep_alive_max_requests", &self.keep_alive_max_requests)
             .field(
                 "metrics_token",
                 &self.metrics_token.as_ref().map(|_| "[REDACTED]"),
@@ -370,6 +381,7 @@ impl PartialEq for ServerConfig {
             && self.transform_deadline_secs == other.transform_deadline_secs
             && self.max_input_pixels == other.max_input_pixels
             && self.max_upload_bytes == other.max_upload_bytes
+            && self.keep_alive_max_requests == other.keep_alive_max_requests
             && self.metrics_token == other.metrics_token
             && self.disable_metrics == other.disable_metrics
             && self.presets == other.presets
@@ -464,6 +476,7 @@ impl ServerConfig {
             transform_deadline_secs: DEFAULT_TRANSFORM_DEADLINE_SECS,
             max_input_pixels: DEFAULT_MAX_INPUT_PIXELS,
             max_upload_bytes: DEFAULT_MAX_UPLOAD_BODY_BYTES,
+            keep_alive_max_requests: DEFAULT_KEEP_ALIVE_MAX_REQUESTS,
             metrics_token: None,
             disable_metrics: false,
             transforms_in_flight: Arc::new(AtomicU64::new(0)),
@@ -803,6 +816,10 @@ impl ServerConfig {
             parse_env_u64_ranged("TRUSS_MAX_UPLOAD_BYTES", 1, 10 * 1024 * 1024 * 1024)?
                 .unwrap_or(DEFAULT_MAX_UPLOAD_BODY_BYTES as u64) as usize;
 
+        let keep_alive_max_requests =
+            parse_env_u64_ranged("TRUSS_KEEP_ALIVE_MAX_REQUESTS", 1, 100_000)?
+                .unwrap_or(DEFAULT_KEEP_ALIVE_MAX_REQUESTS);
+
         #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
         let storage_timeout_secs = parse_env_u64_ranged("TRUSS_STORAGE_TIMEOUT_SECS", 1, 300)?
             .unwrap_or(STORAGE_DOWNLOAD_TIMEOUT_SECS);
@@ -910,6 +927,7 @@ impl ServerConfig {
             transform_deadline_secs,
             max_input_pixels,
             max_upload_bytes,
+            keep_alive_max_requests,
             metrics_token,
             disable_metrics,
             transforms_in_flight: Arc::new(AtomicU64::new(0)),
