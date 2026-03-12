@@ -4,18 +4,10 @@ on:
   push:
     tags:
       - "v*"
-  pull_request:
-    paths:
-      - ".github/workflows/release.yml"
-      - "Cross.toml"
-      - "Dockerfile.release"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "src/**"
 
 concurrency:
   group: release-${{ github.ref_name }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always
@@ -37,7 +29,6 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Ensure tag matches Cargo.toml version
-        if: github.event_name == 'push'
         run: |
           expected_tag="v$(cargo pkgid | sed -E 's/.*@//')"
           if [ "${GITHUB_REF_NAME}" != "${expected_tag}" ]; then
@@ -48,7 +39,43 @@ jobs:
       - name: Verify publishable package
         run: cargo publish --locked --dry-run
 
-  # ── 2. Build release binaries (PR: verify only, tag: full build) ───
+  # ── 2. Publish crate to crates.io ───────────────────────────────────
+  publish-crate:
+    runs-on: ubuntu-latest
+    needs: verify
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      HAS_CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN != '' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Authenticate to crates.io with trusted publishing
+        if: env.HAS_CARGO_REGISTRY_TOKEN == 'false'
+        id: crates-auth
+        uses: rust-lang/crates-io-auth-action@v1
+
+      - name: Publish crate with API token
+        if: env.HAS_CARGO_REGISTRY_TOKEN == 'true'
+        run: cargo publish --locked
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+      - name: Publish crate with trusted publishing
+        if: env.HAS_CARGO_REGISTRY_TOKEN == 'false'
+        run: cargo publish --locked
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.crates-auth.outputs.token }}
+
+  # ── 2b. Build release binaries ──────────────────────────────────────
   build-binaries:
     needs: verify
     strategy:
@@ -100,7 +127,6 @@ jobs:
         run: ${{ matrix.cross && 'cross' || 'cargo' }} build --release --locked --target ${{ matrix.target }} --features "s3,gcs,azure"
 
       - name: Determine binary path
-        if: startsWith(github.ref, 'refs/tags/')
         id: bin
         shell: bash
         run: |
@@ -113,22 +139,22 @@ jobs:
           fi
 
       - name: Strip binary (Linux/macOS)
-        if: startsWith(github.ref, 'refs/tags/') && matrix.os != 'windows-latest' && !matrix.cross
+        if: matrix.os != 'windows-latest' && !matrix.cross
         run: strip ${{ steps.bin.outputs.path }}
 
       - name: Strip binary (cross aarch64)
-        if: startsWith(github.ref, 'refs/tags/') && matrix.target == 'aarch64-unknown-linux-gnu'
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
         run: aarch64-linux-gnu-strip ${{ steps.bin.outputs.path }}
 
       - name: Create archive (tar.gz)
-        if: startsWith(github.ref, 'refs/tags/') && matrix.archive == 'tar.gz'
+        if: matrix.archive == 'tar.gz'
         run: |
           archive_name="truss-${GITHUB_REF_NAME}-${{ matrix.target }}.tar.gz"
           tar czf "${archive_name}" -C "$(dirname ${{ steps.bin.outputs.path }})" ${{ steps.bin.outputs.name }}
           echo "ARCHIVE=${archive_name}" >> "$GITHUB_ENV"
 
       - name: Create archive (zip)
-        if: startsWith(github.ref, 'refs/tags/') && matrix.archive == 'zip'
+        if: matrix.archive == 'zip'
         shell: bash
         run: |
           archive_name="truss-${GITHUB_REF_NAME}-${{ matrix.target }}.zip"
@@ -136,7 +162,6 @@ jobs:
           echo "ARCHIVE=${archive_name}" >> "$GITHUB_ENV"
 
       - name: Generate checksum
-        if: startsWith(github.ref, 'refs/tags/')
         shell: bash
         run: |
           if [ "${{ matrix.os }}" = "macos-latest" ]; then
@@ -146,7 +171,6 @@ jobs:
           fi
 
       - name: Upload artifacts
-        if: startsWith(github.ref, 'refs/tags/')
         uses: actions/upload-artifact@v7
         with:
           name: binary-${{ matrix.target }}
@@ -154,46 +178,8 @@ jobs:
             ${{ env.ARCHIVE }}
             ${{ env.ARCHIVE }}.sha256
 
-  # ── 3. Publish crate to crates.io (tag push only) ──────────────────
-  publish-crate:
-    if: startsWith(github.ref, 'refs/tags/')
-    runs-on: ubuntu-latest
-    needs: verify
-    permissions:
-      contents: read
-      id-token: write
-    env:
-      HAS_CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN != '' }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo artifacts
-        uses: Swatinem/rust-cache@v2
-
-      - name: Authenticate to crates.io with trusted publishing
-        if: env.HAS_CARGO_REGISTRY_TOKEN == 'false'
-        id: crates-auth
-        uses: rust-lang/crates-io-auth-action@v1
-
-      - name: Publish crate with API token
-        if: env.HAS_CARGO_REGISTRY_TOKEN == 'true'
-        run: cargo publish --locked
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-
-      - name: Publish crate with trusted publishing
-        if: env.HAS_CARGO_REGISTRY_TOKEN == 'false'
-        run: cargo publish --locked
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ steps.crates-auth.outputs.token }}
-
-  # ── 4. Build & push container image (tag push only) ────────────────
+  # ── 3. Build & push container image ─────────────────────────────────
   publish-container:
-    if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     needs: [publish-crate, build-binaries]
     permissions:
@@ -285,9 +271,8 @@ jobs:
             "${IMAGE}:${{ github.ref_name }}-amd64" \
             "${IMAGE}:${{ github.ref_name }}-arm64"
 
-  # ── 5. Create GitHub Release (tag push only) ───────────────────────
+  # ── 4. Create GitHub Release ────────────────────────────────────────
   create-release:
-    if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     needs: [publish-container, build-binaries]
     permissions:
