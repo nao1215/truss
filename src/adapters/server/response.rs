@@ -837,8 +837,7 @@ mod tests {
         let mut _stream_buf: Vec<u8> = Vec::new();
         // We can't call write_response_compressed directly with a Cursor
         // because it expects a TcpStream, so we test the decision logic.
-        let should_compress = true // accepts_gzip
-            && response.body.len() >= MIN_COMPRESS_BYTES
+        let should_compress = response.body.len() >= MIN_COMPRESS_BYTES
             && response.content_type.is_some_and(is_compressible_content_type);
         assert!(
             !should_compress,
@@ -851,8 +850,7 @@ mod tests {
         // Body of exactly MIN_COMPRESS_BYTES should be eligible for compression.
         let body = vec![b'x'; MIN_COMPRESS_BYTES];
         let response = HttpResponse::json("200 OK", body);
-        let should_compress = true // accepts_gzip
-            && response.body.len() >= MIN_COMPRESS_BYTES
+        let should_compress = response.body.len() >= MIN_COMPRESS_BYTES
             && response.content_type.is_some_and(is_compressible_content_type);
         assert!(
             should_compress,
@@ -864,8 +862,7 @@ mod tests {
     fn test_gzip_compress_above_threshold_eligible() {
         let body = vec![b'x'; MIN_COMPRESS_BYTES + 1];
         let response = HttpResponse::json("200 OK", body);
-        let should_compress = true // accepts_gzip
-            && response.body.len() >= MIN_COMPRESS_BYTES
+        let should_compress = response.body.len() >= MIN_COMPRESS_BYTES
             && response.content_type.is_some_and(is_compressible_content_type);
         assert!(
             should_compress,

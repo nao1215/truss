@@ -387,10 +387,10 @@ pub(super) fn accepts_encoding(header_value: &str, encoding: &str) -> bool {
                 let param = param.trim();
                 if let Some(qval) = param.strip_prefix('q') {
                     let qval = qval.trim_start().strip_prefix('=').map(str::trim_start);
-                    if let Some(qval) = qval {
-                        if let Ok(q) = qval.parse::<f32>() {
-                            return q > 0.0;
-                        }
+                    if let Some(qval) = qval
+                        && let Ok(q) = qval.parse::<f32>()
+                    {
+                        return q > 0.0;
                     }
                 }
             }
