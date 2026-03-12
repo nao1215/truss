@@ -269,6 +269,9 @@ truss validate
 | `TRUSS_KEEP_ALIVE_MAX_REQUESTS` | Max requests per keep-alive connection before the server closes it (default: `100`, range: 1-100000) |
 | `TRUSS_HEALTH_CACHE_MIN_FREE_BYTES` | Minimum free bytes on cache disk; `/health/ready` returns 503 when breached (disabled by default) |
 | `TRUSS_HEALTH_MAX_MEMORY_BYTES` | Maximum process RSS in bytes; `/health/ready` returns 503 when breached (disabled by default, Linux only) |
+| `TRUSS_SHUTDOWN_DRAIN_SECS` | Drain period in seconds during graceful shutdown; `/health/ready` returns 503 immediately (default: `10`, range: 0-300) |
+| `TRUSS_RESPONSE_HEADERS` | JSON object of custom headers added to image responses (e.g. `{"CDN-Cache-Control":"max-age=86400"}`) |
+| `TRUSS_DISABLE_COMPRESSION` | Disable gzip compression for non-image responses (`true`/`1`) |
 
 `TRUSS_STORAGE_BACKEND` selects the source for public `GET /images/by-path`. When set to `s3`, `gcs`, or `azure`, the `path` query parameter is used as the object key. Only one backend can be active at a time. Private endpoints can still use `kind: storage` regardless of this setting.
 

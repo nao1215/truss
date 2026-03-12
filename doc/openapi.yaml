@@ -398,6 +398,12 @@ paths:
         usage is below the configured limit (`TRUSS_HEALTH_MAX_MEMORY_BYTES`),
         and transform capacity is not exhausted.
 
+        During graceful shutdown (after SIGTERM/SIGINT), this endpoint
+        immediately returns 503 with a `draining` check set to `fail`, even
+        before the drain period (`TRUSS_SHUTDOWN_DRAIN_SECS`, default 10s)
+        expires. This allows load balancers and CDN edges to remove the
+        instance from rotation before the server stops accepting connections.
+
         **Platform note:** RSS memory and cache disk free space are read on
         Linux only. On other platforms `TRUSS_HEALTH_MAX_MEMORY_BYTES` and
         `TRUSS_HEALTH_CACHE_MIN_FREE_BYTES` are effectively no-ops — those
