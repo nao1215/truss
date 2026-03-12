@@ -49,6 +49,7 @@ paths:
       summary: Transform an image by storage path
       description: |
         Public, cache-friendly transform endpoint for files identified by path.
+        Also supports `HEAD` requests, which return the same headers without a body.
 
         When the storage backend is `filesystem` (default), the `path` query
         parameter is resolved relative to `TRUSS_STORAGE_ROOT`; path traversal
@@ -133,6 +134,7 @@ paths:
       summary: Transform an image from a remote URL
       description: |
         Public, cache-friendly transform endpoint for remote HTTP(S) sources.
+        Also supports `HEAD` requests, which return the same headers without a body.
 
         Use this when the source image is hosted elsewhere and should be fetched by
         Truss on demand. Remote fetches are subject to URL validation, redirect
@@ -328,6 +330,7 @@ paths:
       description: |
         Human-oriented diagnostic endpoint that returns version information,
         process uptime, and detailed readiness checks.
+        Also supports `HEAD` requests.
 
         This endpoint always returns 200 OK, even when individual checks fail,
         because it is designed for dashboards and operators who need to see the
@@ -370,7 +373,7 @@ paths:
         Lightweight liveness probe for container orchestrators (e.g. Kubernetes
         `livenessProbe`). Returns immediately with minimal information confirming
         the process is running and can serve HTTP. Does not check external
-        dependencies.
+        dependencies. Also supports `HEAD` requests.
       operationId: getLiveHealth
       responses:
         '200':
@@ -390,11 +393,11 @@ paths:
       summary: Readiness probe
       description: |
         Readiness probe for container orchestrators (e.g. Kubernetes
-        `readinessProbe`). Checks that the server is able to accept traffic by
-        verifying the storage root is accessible, the cache root (if configured)
-        is accessible, the object-storage backend (if configured) is
-        network-reachable, cache disk free space is above the configured
-        threshold (`TRUSS_HEALTH_CACHE_MIN_FREE_BYTES`), process memory
+        `readinessProbe`). Also supports `HEAD` requests. Checks that the server
+        is able to accept traffic by verifying the storage root is accessible,
+        the cache root (if configured) is accessible, the object-storage backend
+        (if configured) is network-reachable, cache disk free space is above the
+        configured threshold (`TRUSS_HEALTH_CACHE_MIN_FREE_BYTES`), process memory
         usage is below the configured limit (`TRUSS_HEALTH_MAX_MEMORY_BYTES`),
         and transform capacity is not exhausted.
 
@@ -491,6 +494,7 @@ paths:
       summary: Prometheus metrics
       description: |
         Returns metrics in Prometheus text exposition format (version 0.0.4).
+        Also supports `HEAD` requests.
 
         By default, the endpoint does not require authentication. Operators can
         restrict access via `TRUSS_METRICS_TOKEN` (Bearer token) or disable the
