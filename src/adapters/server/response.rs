@@ -141,18 +141,38 @@ pub(super) fn write_response_compressed(
     if is_compressed {
         header.push_str("Content-Encoding: gzip\r\n");
     }
-    // Signal to caches that the response varies by Accept-Encoding when the
-    // content type is compressible (regardless of whether this particular
-    // response was actually compressed).
+
+    // Collect Vary directives from response headers and compression, then emit
+    // a single combined Vary header to avoid duplicate Vary lines.
+    let mut vary_parts: Vec<&str> = Vec::new();
     if response
         .content_type
         .is_some_and(is_compressible_content_type)
     {
-        header.push_str("Vary: Accept-Encoding\r\n");
+        vary_parts.push("Accept-Encoding");
+    }
+    for (name, value) in &response.headers {
+        if name.eq_ignore_ascii_case("Vary") {
+            for part in value.split(',') {
+                let trimmed = part.trim();
+                if !trimmed.is_empty()
+                    && !vary_parts
+                        .iter()
+                        .any(|v| v.eq_ignore_ascii_case(trimmed))
+                {
+                    vary_parts.push(trimmed);
+                }
+            }
+        }
+    }
+    if !vary_parts.is_empty() {
+        let _ = write!(header, "Vary: {}\r\n", vary_parts.join(", "));
     }
 
     for (name, value) in response.headers {
-        let _ = write!(header, "{name}: {value}\r\n");
+        if !name.eq_ignore_ascii_case("Vary") {
+            let _ = write!(header, "{name}: {value}\r\n");
+        }
     }
 
     header.push_str("\r\n");
