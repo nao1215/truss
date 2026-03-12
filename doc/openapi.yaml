@@ -1111,7 +1111,7 @@ components:
       type: object
       description: Comprehensive diagnostic payload with version, uptime, and checks.
       additionalProperties: false
-      required: [status, service, version, uptimeSeconds, checks]
+      required: [status, service, version, uptimeSeconds, checks, maxInputPixels]
       properties:
         status:
           type: string

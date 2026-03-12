@@ -1682,6 +1682,19 @@ fn transform_source_bytes_inner(
             false
         };
 
+    // Check input pixel count against the server-level limit before decode.
+    // This runs before the cache lookup so that a policy change (lowering the
+    // limit) takes effect immediately, even for previously-cached images.
+    if let (Some(w), Some(h)) = (artifact.metadata.width, artifact.metadata.height) {
+        let pixels = u64::from(w) * u64::from(h);
+        if pixels > config.max_input_pixels {
+            return response::unprocessable_entity_response(&format!(
+                "input image has {pixels} pixels, server limit is {}",
+                config.max_input_pixels
+            ));
+        }
+    }
+
     let negotiated_accept = if negotiation_used {
         request.header("accept")
     } else {
@@ -1718,17 +1731,6 @@ fn transform_source_bytes_inner(
 
     if cache.is_some() {
         CACHE_MISSES_TOTAL.fetch_add(1, Ordering::Relaxed);
-    }
-
-    // Check input pixel count against the server-level limit before decode.
-    if let (Some(w), Some(h)) = (artifact.metadata.width, artifact.metadata.height) {
-        let pixels = u64::from(w) * u64::from(h);
-        if pixels > config.max_input_pixels {
-            return response::unprocessable_entity_response(&format!(
-                "input image has {pixels} pixels, server limit is {}",
-                config.max_input_pixels
-            ));
-        }
     }
 
     let is_svg = artifact.media_type == MediaType::Svg;
