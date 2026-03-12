@@ -1530,6 +1530,124 @@ mod tests {
         assert!(result.is_err());
     }
 
+    // ── presets ────────────────────────────────────────────────────
+
+    #[test]
+    fn presets_default_empty() {
+        let config = ServerConfig::new(PathBuf::from("."), None);
+        assert!(config.presets.read().unwrap().is_empty());
+        assert!(config.presets_file_path.is_none());
+    }
+
+    #[test]
+    fn parse_presets_file_valid() {
+        let dir = std::env::temp_dir().join(format!(
+            "truss_test_presets_{}",
+            std::time::SystemTime::UNIX_EPOCH
+                .elapsed()
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("presets.json");
+        std::fs::write(
+            &path,
+            r#"{"thumb":{"width":100,"height":100},"banner":{"width":1200}}"#,
+        )
+        .unwrap();
+
+        let presets = super::parse_presets_file(&path).unwrap();
+        assert_eq!(presets.len(), 2);
+        assert_eq!(presets["thumb"].width, Some(100));
+        assert_eq!(presets["thumb"].height, Some(100));
+        assert_eq!(presets["banner"].width, Some(1200));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn parse_presets_file_invalid_json() {
+        let dir = std::env::temp_dir().join(format!(
+            "truss_test_presets_invalid_{}",
+            std::time::SystemTime::UNIX_EPOCH
+                .elapsed()
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("bad.json");
+        std::fs::write(&path, "not valid json {{{").unwrap();
+
+        let result = super::parse_presets_file(&path);
+        assert!(result.is_err());
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn parse_presets_file_nonexistent() {
+        let result = super::parse_presets_file(std::path::Path::new("/tmp/nonexistent_truss_test.json"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    #[serial]
+    fn parse_presets_from_env_returns_file_path() {
+        let dir = std::env::temp_dir().join(format!(
+            "truss_test_presets_path_{}",
+            std::time::SystemTime::UNIX_EPOCH
+                .elapsed()
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("presets.json");
+        std::fs::write(&path, r#"{"thumb":{"width":100}}"#).unwrap();
+
+        // SAFETY: test-only, single-threaded access to this env var.
+        unsafe {
+            env::set_var("TRUSS_PRESETS_FILE", path.to_str().unwrap());
+            env::remove_var("TRUSS_PRESETS");
+        }
+        let (presets, file_path) = super::parse_presets_from_env().unwrap();
+        unsafe {
+            env::remove_var("TRUSS_PRESETS_FILE");
+        }
+
+        assert_eq!(presets.len(), 1);
+        assert_eq!(file_path, Some(path));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn with_presets_sets_presets() {
+        let mut map = HashMap::new();
+        map.insert(
+            "test".to_string(),
+            super::super::TransformOptionsPayload {
+                width: Some(200),
+                height: None,
+                fit: None,
+                position: None,
+                format: None,
+                quality: None,
+                background: None,
+                rotate: None,
+                auto_orient: None,
+                strip_metadata: None,
+                preserve_exif: None,
+                crop: None,
+                blur: None,
+                sharpen: None,
+            },
+        );
+        let config = ServerConfig::new(PathBuf::from("."), None).with_presets(map);
+        let presets = config.presets.read().unwrap();
+        assert_eq!(presets.len(), 1);
+        assert_eq!(presets["test"].width, Some(200));
+    }
+
     // ── custom_response_headers ────────────────────────────────────
 
     #[test]

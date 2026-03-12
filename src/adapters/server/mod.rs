@@ -6131,4 +6131,153 @@ mod tests {
         // The path doesn't match any route, so we get 404 — NOT 503.
         assert_eq!(response.status, "404 Not Found");
     }
+
+    // ── preset hot-reload watcher ────────────────────────────────────
+
+    #[test]
+    fn preset_watcher_reloads_on_file_change() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        let dir = std::env::temp_dir().join(format!(
+            "truss_test_watcher_{}",
+            std::time::SystemTime::UNIX_EPOCH
+                .elapsed()
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("presets.json");
+        std::fs::write(&path, r#"{"thumb":{"width":100}}"#).unwrap();
+
+        let presets = Arc::new(std::sync::RwLock::new({
+            let mut m = std::collections::HashMap::new();
+            m.insert(
+                "thumb".to_string(),
+                TransformOptionsPayload {
+                    width: Some(100),
+                    height: None,
+                    fit: None,
+                    position: None,
+                    format: None,
+                    quality: None,
+                    background: None,
+                    rotate: None,
+                    auto_orient: None,
+                    strip_metadata: None,
+                    preserve_exif: None,
+                    crop: None,
+                    blur: None,
+                    sharpen: None,
+                },
+            );
+            m
+        }));
+        let draining = Arc::new(AtomicBool::new(false));
+        let config = Arc::new(ServerConfig::new(dir.clone(), None));
+
+        let presets_clone = Arc::clone(&presets);
+        let draining_clone = Arc::clone(&draining);
+        let config_clone = Arc::clone(&config);
+        let path_clone = path.clone();
+
+        let handle = std::thread::spawn(move || {
+            super::preset_watcher(presets_clone, path_clone, draining_clone, config_clone);
+        });
+
+        // Wait a moment, then update the file with a new mtime.
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        // Ensure a different mtime by sleeping briefly.
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        std::fs::write(&path, r#"{"thumb":{"width":200},"banner":{"width":800}}"#).unwrap();
+
+        // Wait for the watcher to pick up the change (poll interval is 5s).
+        std::thread::sleep(std::time::Duration::from_secs(6));
+
+        // Verify updated presets.
+        {
+            let p = presets.read().unwrap();
+            assert_eq!(p.len(), 2, "expected 2 presets after reload");
+            assert_eq!(p["thumb"].width, Some(200));
+            assert_eq!(p["banner"].width, Some(800));
+        }
+
+        // Stop the watcher.
+        draining.store(true, Ordering::Relaxed);
+        handle.join().unwrap();
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn preset_watcher_keeps_old_presets_on_invalid_file() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        let dir = std::env::temp_dir().join(format!(
+            "truss_test_watcher_invalid_{}",
+            std::time::SystemTime::UNIX_EPOCH
+                .elapsed()
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("presets.json");
+        std::fs::write(&path, r#"{"thumb":{"width":100}}"#).unwrap();
+
+        let presets = Arc::new(std::sync::RwLock::new({
+            let mut m = std::collections::HashMap::new();
+            m.insert(
+                "thumb".to_string(),
+                TransformOptionsPayload {
+                    width: Some(100),
+                    height: None,
+                    fit: None,
+                    position: None,
+                    format: None,
+                    quality: None,
+                    background: None,
+                    rotate: None,
+                    auto_orient: None,
+                    strip_metadata: None,
+                    preserve_exif: None,
+                    crop: None,
+                    blur: None,
+                    sharpen: None,
+                },
+            );
+            m
+        }));
+        let draining = Arc::new(AtomicBool::new(false));
+        let config = Arc::new(ServerConfig::new(dir.clone(), None));
+
+        let presets_clone = Arc::clone(&presets);
+        let draining_clone = Arc::clone(&draining);
+        let config_clone = Arc::clone(&config);
+        let path_clone = path.clone();
+
+        let handle = std::thread::spawn(move || {
+            super::preset_watcher(presets_clone, path_clone, draining_clone, config_clone);
+        });
+
+        // Write invalid JSON after a brief delay.
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        std::fs::write(&path, "invalid json!!!").unwrap();
+
+        // Wait for the watcher to process.
+        std::thread::sleep(std::time::Duration::from_secs(6));
+
+        // Original presets should still be in place.
+        {
+            let p = presets.read().unwrap();
+            assert_eq!(p.len(), 1, "presets should not change on invalid file");
+            assert_eq!(p["thumb"].width, Some(100));
+        }
+
+        draining.store(true, Ordering::Relaxed);
+        handle.join().unwrap();
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }
