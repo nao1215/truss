@@ -203,6 +203,7 @@ See the [Docker](#docker) section for running with Docker instead.
 | `convert` | Convert and transform an image file (can be omitted; see above) |
 | `inspect` | Show metadata (format, dimensions, alpha) of an image |
 | `serve` | Start the HTTP image-transform server (implied when server flags are used at the top level) |
+| `validate` | Validate server configuration without starting the server (useful in CI/CD) |
 | `sign` | Generate a signed public URL for the server |
 | `completions` | Generate shell completion scripts |
 | `version` | Print version information |
@@ -246,6 +247,12 @@ By default, the server listens on `127.0.0.1:8080`. Configuration can be supplie
 truss serve --bind 0.0.0.0:8080 --storage-root /var/images
 ```
 
+To validate the server configuration without starting the server (useful in CI/CD pipelines):
+
+```sh
+truss validate
+```
+
 ### Core settings
 
 | Variable | Description |
@@ -259,6 +266,9 @@ truss serve --bind 0.0.0.0:8080 --storage-root /var/images
 | `TRUSS_MAX_INPUT_PIXELS` | Max input image pixels before decode; excess images receive 422 (default: `40000000`, range: 1-100000000) |
 | `TRUSS_MAX_UPLOAD_BYTES` | Max upload body size in bytes; excess requests receive 413 (default: `104857600` = 100 MB, range: 1-10737418240) |
 | `TRUSS_STORAGE_TIMEOUT_SECS` | Download timeout for object storage backends in seconds (default: `30`, range: 1-300) |
+| `TRUSS_KEEP_ALIVE_MAX_REQUESTS` | Max requests per keep-alive connection before the server closes it (default: `100`, range: 1-100000) |
+| `TRUSS_HEALTH_CACHE_MIN_FREE_BYTES` | Minimum free bytes on cache disk; `/health/ready` returns 503 when breached (disabled by default) |
+| `TRUSS_HEALTH_MAX_MEMORY_BYTES` | Maximum process RSS in bytes; `/health/ready` returns 503 when breached (disabled by default, Linux only) |
 
 `TRUSS_STORAGE_BACKEND` selects the source for public `GET /images/by-path`. When set to `s3`, `gcs`, or `azure`, the `path` query parameter is used as the object key. Only one backend can be active at a time. Private endpoints can still use `kind: storage` regardless of this setting.
 

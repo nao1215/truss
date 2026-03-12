@@ -348,8 +348,18 @@ paths:
                 checks:
                   - name: storageRoot
                     status: ok
+                  - name: cacheDiskFree
+                    status: ok
+                    freeBytes: 53687091200
+                    thresholdBytes: 1073741824
                   - name: transformCapacity
                     status: ok
+                    current: 2
+                    max: 64
+                  - name: memoryUsage
+                    status: ok
+                    rssBytes: 134217728
+                    thresholdBytes: 536870912
                 maxInputPixels: 40000000
 
   /health/live:
@@ -382,8 +392,17 @@ paths:
         Readiness probe for container orchestrators (e.g. Kubernetes
         `readinessProbe`). Checks that the server is able to accept traffic by
         verifying the storage root is accessible, the cache root (if configured)
-        is accessible, and the object-storage backend (if configured) is
-        network-reachable.
+        is accessible, the object-storage backend (if configured) is
+        network-reachable, cache disk free space is above the configured
+        threshold (`TRUSS_HEALTH_CACHE_MIN_FREE_BYTES`), process memory
+        usage is below the configured limit (`TRUSS_HEALTH_MAX_MEMORY_BYTES`),
+        and transform capacity is not exhausted.
+
+        **Platform note:** RSS memory and cache disk free space are read on
+        Linux only. On other platforms `TRUSS_HEALTH_MAX_MEMORY_BYTES` and
+        `TRUSS_HEALTH_CACHE_MIN_FREE_BYTES` are effectively no-ops — those
+        checks are omitted from the response and the remaining checks
+        (object-storage reachability, transform capacity, etc.) still apply.
 
         The object-storage reachability check (S3, GCS, or Azure) confirms
         that the configured bucket/container exists and the service responds to
@@ -1150,6 +1169,33 @@ components:
         status:
           type: string
           enum: [ok, fail]
+        freeBytes:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Free bytes on the cache disk (cacheDiskFree check only).
+        thresholdBytes:
+          type: integer
+          format: int64
+          minimum: 1
+          description: >-
+            Configured threshold in bytes. Present on cacheDiskFree and
+            memoryUsage checks when a threshold is configured.
+        rssBytes:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Process resident set size in bytes (memoryUsage check only, Linux).
+        current:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Current number of in-flight transforms (transformCapacity check only).
+        max:
+          type: integer
+          format: int64
+          minimum: 1
+          description: Maximum concurrent transforms allowed (transformCapacity check only).
     ProblemDetail:
       type: object
       description: RFC 7807 Problem Details

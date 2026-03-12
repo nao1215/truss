@@ -118,11 +118,6 @@ const SOCKET_WRITE_TIMEOUT: Duration = Duration::from_secs(60);
 const WORKER_THREADS: usize = 8;
 type HmacSha256 = Hmac<Sha256>;
 
-/// Maximum number of requests served over a single keep-alive connection before
-/// the server closes it.  This prevents a single client from monopolising a
-/// worker thread indefinitely.
-const KEEP_ALIVE_MAX_REQUESTS: usize = 100;
-
 #[derive(Clone, Copy)]
 struct PublicCacheControl {
     max_age: u32,
@@ -920,7 +915,7 @@ fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io::Result<()>
         config.log(&format!("failed to set socket write timeout: {err}"));
     }
 
-    let mut requests_served: usize = 0;
+    let mut requests_served: u64 = 0;
 
     loop {
         let partial = match read_request_headers(&mut stream, config.max_upload_bytes) {
@@ -1074,7 +1069,7 @@ fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io::Result<()>
         }
 
         requests_served += 1;
-        let close_after = client_wants_close || requests_served >= KEEP_ALIVE_MAX_REQUESTS;
+        let close_after = client_wants_close || requests_served >= config.keep_alive_max_requests;
 
         write_response(&mut stream, response, close_after)?;
         record_http_request_duration(route, start);
@@ -1328,6 +1323,49 @@ fn handle_upload_request(request: HttpRequest, config: &ServerConfig) -> HttpRes
     )
 }
 
+/// Returns the number of free bytes on the filesystem containing `path`,
+/// or `None` if the query fails.
+#[cfg(target_os = "linux")]
+fn disk_free_bytes(path: &std::path::Path) -> Option<u64> {
+    use std::ffi::CString;
+
+    let c_path = CString::new(path.to_str()?).ok()?;
+    let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+    let ret = unsafe { libc::statvfs(c_path.as_ptr(), &mut stat) };
+    if ret == 0 {
+        stat.f_bavail.checked_mul(stat.f_frsize)
+    } else {
+        None
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn disk_free_bytes(_path: &std::path::Path) -> Option<u64> {
+    None
+}
+
+/// Returns the current process RSS (Resident Set Size) in bytes by reading
+/// `/proc/self/status`. Returns `None` on non-Linux platforms or on read failure.
+#[cfg(target_os = "linux")]
+fn process_rss_bytes() -> Option<u64> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    for line in status.lines() {
+        if let Some(value) = line.strip_prefix("VmRSS:") {
+            let value = value.trim();
+            // Format: "123456 kB"
+            let kb_str = value.strip_suffix(" kB")?.trim();
+            let kb: u64 = kb_str.parse().ok()?;
+            return kb.checked_mul(1024);
+        }
+    }
+    None
+}
+
+#[cfg(not(target_os = "linux"))]
+fn process_rss_bytes() -> Option<u64> {
+    None
+}
+
 /// Returns a minimal liveness response confirming the process is running.
 fn handle_health_live() -> HttpResponse {
     let body = serde_json::to_vec(&json!({
@@ -1343,8 +1381,7 @@ fn handle_health_live() -> HttpResponse {
 
 /// Returns a readiness response after checking that critical infrastructure
 /// dependencies are available (storage root, cache root if configured, S3
-/// reachability).  Transform capacity is intentionally excluded — it is a
-/// runtime signal reported only by the full `/health` diagnostic endpoint.
+/// reachability) and configurable resource thresholds.
 fn handle_health_ready(config: &ServerConfig) -> HttpResponse {
     let mut checks: Vec<serde_json::Value> = Vec::new();
     let mut all_ok = true;
@@ -1366,6 +1403,60 @@ fn handle_health_ready(config: &ServerConfig) -> HttpResponse {
             "status": if cache_ok { "ok" } else { "fail" },
         }));
         if !cache_ok {
+            all_ok = false;
+        }
+    }
+
+    if let Some(cache_root) = &config.cache_root {
+        let free = disk_free_bytes(cache_root);
+        let threshold = config.health_cache_min_free_bytes;
+        let disk_ok = match (free, threshold) {
+            (Some(f), Some(min)) => f >= min,
+            _ => true,
+        };
+        let mut check = json!({
+            "name": "cacheDiskFree",
+            "status": if disk_ok { "ok" } else { "fail" },
+        });
+        if let Some(f) = free {
+            check["freeBytes"] = json!(f);
+        }
+        if let Some(min) = threshold {
+            check["thresholdBytes"] = json!(min);
+        }
+        checks.push(check);
+        if !disk_ok {
+            all_ok = false;
+        }
+    }
+
+    // Concurrency utilization
+    let in_flight = config.transforms_in_flight.load(Ordering::Relaxed);
+    let overloaded = in_flight >= config.max_concurrent_transforms;
+    checks.push(json!({
+        "name": "transformCapacity",
+        "status": if overloaded { "fail" } else { "ok" },
+        "current": in_flight,
+        "max": config.max_concurrent_transforms,
+    }));
+    if overloaded {
+        all_ok = false;
+    }
+
+    // Memory usage (Linux only) — skip entirely when RSS is unavailable
+    if let Some(rss_bytes) = process_rss_bytes() {
+        let threshold = config.health_max_memory_bytes;
+        let mem_ok = threshold.is_none_or(|max| rss_bytes <= max);
+        let mut check = json!({
+            "name": "memoryUsage",
+            "status": if mem_ok { "ok" } else { "fail" },
+            "rssBytes": rss_bytes,
+        });
+        if let Some(max) = threshold {
+            check["thresholdBytes"] = json!(max);
+        }
+        checks.push(check);
+        if !mem_ok {
             all_ok = false;
         }
     }
@@ -1441,14 +1532,60 @@ fn handle_health(config: &ServerConfig) -> HttpResponse {
         }
     }
 
+    // Cache disk free space
+    if let Some(cache_root) = &config.cache_root {
+        let free = disk_free_bytes(cache_root);
+        let threshold = config.health_cache_min_free_bytes;
+        let disk_ok = match (free, threshold) {
+            (Some(f), Some(min)) => f >= min,
+            _ => true,
+        };
+        let mut check = json!({
+            "name": "cacheDiskFree",
+            "status": if disk_ok { "ok" } else { "fail" },
+        });
+        if let Some(f) = free {
+            check["freeBytes"] = json!(f);
+        }
+        if let Some(min) = threshold {
+            check["thresholdBytes"] = json!(min);
+        }
+        checks.push(check);
+        if !disk_ok {
+            all_ok = false;
+        }
+    }
+
+    // Concurrency utilization
     let in_flight = config.transforms_in_flight.load(Ordering::Relaxed);
     let overloaded = in_flight >= config.max_concurrent_transforms;
     checks.push(json!({
         "name": "transformCapacity",
         "status": if overloaded { "fail" } else { "ok" },
+        "current": in_flight,
+        "max": config.max_concurrent_transforms,
     }));
     if overloaded {
         all_ok = false;
+    }
+
+    // Memory usage (Linux only)
+    let rss = process_rss_bytes();
+    if let Some(rss_bytes) = rss {
+        let threshold = config.health_max_memory_bytes;
+        let mem_ok = threshold.is_none_or(|max| rss_bytes <= max);
+        let mut check = json!({
+            "name": "memoryUsage",
+            "status": if mem_ok { "ok" } else { "fail" },
+            "rssBytes": rss_bytes,
+        });
+        if let Some(max) = threshold {
+            check["thresholdBytes"] = json!(max);
+        }
+        checks.push(check);
+        if !mem_ok {
+            all_ok = false;
+        }
     }
 
     let status_str = if all_ok { "ok" } else { "fail" };
@@ -5288,5 +5425,210 @@ mod tests {
         let body: serde_json::Value =
             serde_json::from_slice(&response.body).expect("parse health body");
         assert_eq!(body["maxInputPixels"], 40_000_000);
+    }
+
+    #[test]
+    fn health_includes_transform_capacity_details() {
+        let storage = temp_dir("health-capacity");
+        let config = ServerConfig::new(storage, None);
+        let response = route_request(
+            HttpRequest {
+                method: "GET".to_string(),
+                target: "/health".to_string(),
+                version: "HTTP/1.1".to_string(),
+                headers: Vec::new(),
+                body: Vec::new(),
+            },
+            &config,
+        );
+        let body: serde_json::Value =
+            serde_json::from_slice(&response.body).expect("parse health body");
+        let checks = body["checks"].as_array().expect("checks array");
+        let capacity = checks
+            .iter()
+            .find(|c| c["name"] == "transformCapacity")
+            .expect("transformCapacity check");
+        assert_eq!(capacity["current"], 0);
+        assert_eq!(capacity["max"], 64);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn process_rss_bytes_returns_some() {
+        let rss = super::process_rss_bytes();
+        assert!(rss.is_some());
+        assert!(rss.unwrap() > 0);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn disk_free_bytes_returns_some_for_existing_dir() {
+        let dir = temp_dir("disk-free");
+        let free = super::disk_free_bytes(&dir);
+        assert!(free.is_some());
+        assert!(free.unwrap() > 0);
+    }
+
+    #[test]
+    fn health_ready_returns_503_when_memory_exceeded() {
+        let storage = temp_dir("health-mem");
+        let mut config = ServerConfig::new(storage, None);
+        // Set threshold to 1 byte — guaranteed to be exceeded.
+        config.health_max_memory_bytes = Some(1);
+        let response = route_request(
+            HttpRequest {
+                method: "GET".to_string(),
+                target: "/health/ready".to_string(),
+                version: "HTTP/1.1".to_string(),
+                headers: Vec::new(),
+                body: Vec::new(),
+            },
+            &config,
+        );
+        // On Linux, RSS > 1 byte → 503. On other platforms, memory check
+        // is skipped so the response is 200.
+        if cfg!(target_os = "linux") {
+            assert_eq!(response.status, "503 Service Unavailable");
+        }
+    }
+
+    #[test]
+    fn health_includes_memory_usage_on_linux() {
+        let storage = temp_dir("health-mem-report");
+        let mut config = ServerConfig::new(storage, None);
+        config.health_max_memory_bytes = Some(u64::MAX);
+        let response = route_request(
+            HttpRequest {
+                method: "GET".to_string(),
+                target: "/health".to_string(),
+                version: "HTTP/1.1".to_string(),
+                headers: Vec::new(),
+                body: Vec::new(),
+            },
+            &config,
+        );
+        let body: serde_json::Value =
+            serde_json::from_slice(&response.body).expect("parse health body");
+        if cfg!(target_os = "linux") {
+            let checks = body["checks"].as_array().expect("checks array");
+            let mem = checks
+                .iter()
+                .find(|c| c["name"] == "memoryUsage")
+                .expect("memoryUsage check");
+            assert_eq!(mem["status"], "ok");
+            assert!(mem["rssBytes"].as_u64().unwrap() > 0);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn disk_free_bytes_returns_none_for_nonexistent_path() {
+        let free = super::disk_free_bytes(std::path::Path::new("/nonexistent/path/xyz"));
+        assert!(free.is_none());
+    }
+
+    #[test]
+    fn health_ready_503_body_contains_fail_status() {
+        let storage = temp_dir("health-ready-body");
+        std::fs::remove_dir_all(&storage).ok();
+        let config = ServerConfig::new(storage, None);
+        let response = route_request(
+            HttpRequest {
+                method: "GET".to_string(),
+                target: "/health/ready".to_string(),
+                version: "HTTP/1.1".to_string(),
+                headers: Vec::new(),
+                body: Vec::new(),
+            },
+            &config,
+        );
+        assert_eq!(response.status, "503 Service Unavailable");
+        let body: serde_json::Value = serde_json::from_slice(&response.body).expect("parse body");
+        assert_eq!(body["status"], "fail");
+        let checks = body["checks"].as_array().expect("checks array");
+        let storage_check = checks
+            .iter()
+            .find(|c| c["name"] == "storageRoot")
+            .expect("storageRoot check");
+        assert_eq!(storage_check["status"], "fail");
+    }
+
+    #[test]
+    fn health_ready_cache_disk_free_shown_when_cache_root_set() {
+        let storage = temp_dir("health-ready-cache-disk");
+        let cache = temp_dir("health-ready-cache-disk-cache");
+        let mut config = ServerConfig::new(storage, None).with_cache_root(cache);
+        config.health_cache_min_free_bytes = Some(1);
+        let response = route_request(
+            HttpRequest {
+                method: "GET".to_string(),
+                target: "/health/ready".to_string(),
+                version: "HTTP/1.1".to_string(),
+                headers: Vec::new(),
+                body: Vec::new(),
+            },
+            &config,
+        );
+        let body: serde_json::Value = serde_json::from_slice(&response.body).expect("parse body");
+        let checks = body["checks"].as_array().expect("checks array");
+        let disk_check = checks
+            .iter()
+            .find(|c| c["name"] == "cacheDiskFree")
+            .expect("cacheDiskFree check");
+        assert_eq!(disk_check["status"], "ok");
+        if cfg!(target_os = "linux") {
+            assert!(disk_check["freeBytes"].as_u64().is_some());
+        }
+        assert_eq!(disk_check["thresholdBytes"], 1);
+    }
+
+    #[test]
+    fn health_ready_no_cache_disk_free_without_cache_root() {
+        let storage = temp_dir("health-ready-no-cache");
+        let config = ServerConfig::new(storage, None);
+        let response = route_request(
+            HttpRequest {
+                method: "GET".to_string(),
+                target: "/health/ready".to_string(),
+                version: "HTTP/1.1".to_string(),
+                headers: Vec::new(),
+                body: Vec::new(),
+            },
+            &config,
+        );
+        let body: serde_json::Value = serde_json::from_slice(&response.body).expect("parse body");
+        let checks = body["checks"].as_array().expect("checks array");
+        assert!(
+            checks.iter().all(|c| c["name"] != "cacheDiskFree"),
+            "cacheDiskFree should not appear without cache_root"
+        );
+    }
+
+    #[test]
+    fn health_ready_memory_check_includes_details() {
+        let storage = temp_dir("health-ready-mem-detail");
+        let mut config = ServerConfig::new(storage, None);
+        config.health_max_memory_bytes = Some(u64::MAX);
+        let response = route_request(
+            HttpRequest {
+                method: "GET".to_string(),
+                target: "/health/ready".to_string(),
+                version: "HTTP/1.1".to_string(),
+                headers: Vec::new(),
+                body: Vec::new(),
+            },
+            &config,
+        );
+        let body: serde_json::Value = serde_json::from_slice(&response.body).expect("parse body");
+        let checks = body["checks"].as_array().expect("checks array");
+        let mem = checks.iter().find(|c| c["name"] == "memoryUsage");
+        if cfg!(target_os = "linux") {
+            let mem = mem.expect("memoryUsage check present on Linux");
+            assert_eq!(mem["status"], "ok");
+            assert_eq!(mem["thresholdBytes"], u64::MAX);
+            assert!(mem["rssBytes"].as_u64().is_some());
+        } else {
+            assert!(mem.is_none(), "memoryUsage should be absent on non-Linux");
+        }
     }
 }

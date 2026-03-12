@@ -111,6 +111,11 @@ pub(super) const DEFAULT_TRANSFORM_DEADLINE_SECS: u64 = 30;
 /// Configurable at runtime via `TRUSS_MAX_INPUT_PIXELS`.
 pub(super) const DEFAULT_MAX_INPUT_PIXELS: u64 = 40_000_000;
 
+/// Default maximum number of requests served over a single keep-alive
+/// connection before the server closes it.
+/// Configurable at runtime via `TRUSS_KEEP_ALIVE_MAX_REQUESTS`.
+pub(super) const DEFAULT_KEEP_ALIVE_MAX_REQUESTS: u64 = 100;
+
 use super::http_parse::DEFAULT_MAX_UPLOAD_BODY_BYTES;
 
 /// Runtime configuration for the HTTP server adapter.
@@ -212,6 +217,10 @@ pub struct ServerConfig {
     /// Configurable via `TRUSS_MAX_UPLOAD_BYTES`. Defaults to 100 MB.
     /// Requests exceeding this limit are rejected with 413 Payload Too Large.
     pub max_upload_bytes: usize,
+    /// Maximum number of requests served over a single keep-alive connection.
+    ///
+    /// Configurable via `TRUSS_KEEP_ALIVE_MAX_REQUESTS`. Defaults to 100.
+    pub keep_alive_max_requests: u64,
     /// Bearer token for the `/metrics` endpoint.
     ///
     /// When set, the `/metrics` endpoint requires `Authorization: Bearer <token>`.
@@ -222,6 +231,16 @@ pub struct ServerConfig {
     ///
     /// Configurable via `TRUSS_DISABLE_METRICS`. When enabled, `/metrics` returns 404.
     pub disable_metrics: bool,
+    /// Minimum free bytes on the cache disk before `/health/ready` reports failure.
+    ///
+    /// Configurable via `TRUSS_HEALTH_CACHE_MIN_FREE_BYTES`. When unset, the cache
+    /// disk free-space check is skipped.
+    pub health_cache_min_free_bytes: Option<u64>,
+    /// Maximum resident memory (RSS) in bytes before `/health/ready` reports failure.
+    ///
+    /// Configurable via `TRUSS_HEALTH_MAX_MEMORY_BYTES`. When unset, the memory
+    /// check is skipped. Only effective on Linux.
+    pub health_max_memory_bytes: Option<u64>,
     /// Per-server counter tracking the number of image transforms currently in
     /// flight.  This is runtime state (not configuration) but lives here so that
     /// each `serve_with_config` invocation gets an independent counter, avoiding
@@ -271,8 +290,11 @@ impl Clone for ServerConfig {
             transform_deadline_secs: self.transform_deadline_secs,
             max_input_pixels: self.max_input_pixels,
             max_upload_bytes: self.max_upload_bytes,
+            keep_alive_max_requests: self.keep_alive_max_requests,
             metrics_token: self.metrics_token.clone(),
             disable_metrics: self.disable_metrics,
+            health_cache_min_free_bytes: self.health_cache_min_free_bytes,
+            health_max_memory_bytes: self.health_max_memory_bytes,
             transforms_in_flight: Arc::clone(&self.transforms_in_flight),
             presets: self.presets.clone(),
             #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
@@ -326,11 +348,17 @@ impl fmt::Debug for ServerConfig {
             .field("transform_deadline_secs", &self.transform_deadline_secs)
             .field("max_input_pixels", &self.max_input_pixels)
             .field("max_upload_bytes", &self.max_upload_bytes)
+            .field("keep_alive_max_requests", &self.keep_alive_max_requests)
             .field(
                 "metrics_token",
                 &self.metrics_token.as_ref().map(|_| "[REDACTED]"),
             )
             .field("disable_metrics", &self.disable_metrics)
+            .field(
+                "health_cache_min_free_bytes",
+                &self.health_cache_min_free_bytes,
+            )
+            .field("health_max_memory_bytes", &self.health_max_memory_bytes)
             .field("presets", &self.presets.keys().collect::<Vec<_>>());
         #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
         {
@@ -370,8 +398,11 @@ impl PartialEq for ServerConfig {
             && self.transform_deadline_secs == other.transform_deadline_secs
             && self.max_input_pixels == other.max_input_pixels
             && self.max_upload_bytes == other.max_upload_bytes
+            && self.keep_alive_max_requests == other.keep_alive_max_requests
             && self.metrics_token == other.metrics_token
             && self.disable_metrics == other.disable_metrics
+            && self.health_cache_min_free_bytes == other.health_cache_min_free_bytes
+            && self.health_max_memory_bytes == other.health_max_memory_bytes
             && self.presets == other.presets
             && cfg_storage_eq(self, other)
     }
@@ -464,8 +495,11 @@ impl ServerConfig {
             transform_deadline_secs: DEFAULT_TRANSFORM_DEADLINE_SECS,
             max_input_pixels: DEFAULT_MAX_INPUT_PIXELS,
             max_upload_bytes: DEFAULT_MAX_UPLOAD_BODY_BYTES,
+            keep_alive_max_requests: DEFAULT_KEEP_ALIVE_MAX_REQUESTS,
             metrics_token: None,
             disable_metrics: false,
+            health_cache_min_free_bytes: None,
+            health_max_memory_bytes: None,
             transforms_in_flight: Arc::new(AtomicU64::new(0)),
             presets: HashMap::new(),
             #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
@@ -803,6 +837,10 @@ impl ServerConfig {
             parse_env_u64_ranged("TRUSS_MAX_UPLOAD_BYTES", 1, 10 * 1024 * 1024 * 1024)?
                 .unwrap_or(DEFAULT_MAX_UPLOAD_BODY_BYTES as u64) as usize;
 
+        let keep_alive_max_requests =
+            parse_env_u64_ranged("TRUSS_KEEP_ALIVE_MAX_REQUESTS", 1, 100_000)?
+                .unwrap_or(DEFAULT_KEEP_ALIVE_MAX_REQUESTS);
+
         #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
         let storage_timeout_secs = parse_env_u64_ranged("TRUSS_STORAGE_TIMEOUT_SECS", 1, 300)?
             .unwrap_or(STORAGE_DOWNLOAD_TIMEOUT_SECS);
@@ -891,6 +929,11 @@ impl ServerConfig {
             .filter(|value| !value.is_empty());
         let disable_metrics = env_flag("TRUSS_DISABLE_METRICS");
 
+        let health_cache_min_free_bytes =
+            parse_env_u64_ranged("TRUSS_HEALTH_CACHE_MIN_FREE_BYTES", 1, u64::MAX)?;
+        let health_max_memory_bytes =
+            parse_env_u64_ranged("TRUSS_HEALTH_MAX_MEMORY_BYTES", 1, u64::MAX)?;
+
         let presets = parse_presets_from_env()?;
 
         Ok(Self {
@@ -910,8 +953,11 @@ impl ServerConfig {
             transform_deadline_secs,
             max_input_pixels,
             max_upload_bytes,
+            keep_alive_max_requests,
             metrics_token,
             disable_metrics,
+            health_cache_min_free_bytes,
+            health_max_memory_bytes,
             transforms_in_flight: Arc::new(AtomicU64::new(0)),
             presets,
             #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
@@ -1018,5 +1064,84 @@ pub(super) fn validate_public_base_url(value: String) -> io::Result<String> {
             io::ErrorKind::InvalidInput,
             "TRUSS_PUBLIC_BASE_URL must use http or https",
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serial_test::serial;
+
+    #[test]
+    fn keep_alive_default() {
+        let config = ServerConfig::new(PathBuf::from("."), None);
+        assert_eq!(config.keep_alive_max_requests, 100);
+    }
+
+    #[test]
+    #[serial]
+    fn parse_keep_alive_env_valid() {
+        // SAFETY: test-only, single-threaded access to this env var.
+        unsafe { env::set_var("TRUSS_KEEP_ALIVE_MAX_REQUESTS", "500") };
+        let result = parse_env_u64_ranged("TRUSS_KEEP_ALIVE_MAX_REQUESTS", 1, 100_000);
+        unsafe { env::remove_var("TRUSS_KEEP_ALIVE_MAX_REQUESTS") };
+        assert_eq!(result.unwrap(), Some(500));
+    }
+
+    #[test]
+    #[serial]
+    fn parse_keep_alive_env_zero_rejected() {
+        // SAFETY: test-only, single-threaded access to this env var.
+        unsafe { env::set_var("TRUSS_KEEP_ALIVE_MAX_REQUESTS", "0") };
+        let result = parse_env_u64_ranged("TRUSS_KEEP_ALIVE_MAX_REQUESTS", 1, 100_000);
+        unsafe { env::remove_var("TRUSS_KEEP_ALIVE_MAX_REQUESTS") };
+        assert!(result.is_err());
+    }
+
+    #[test]
+    #[serial]
+    fn parse_keep_alive_env_over_max_rejected() {
+        // SAFETY: test-only, single-threaded access to this env var.
+        unsafe { env::set_var("TRUSS_KEEP_ALIVE_MAX_REQUESTS", "100001") };
+        let result = parse_env_u64_ranged("TRUSS_KEEP_ALIVE_MAX_REQUESTS", 1, 100_000);
+        unsafe { env::remove_var("TRUSS_KEEP_ALIVE_MAX_REQUESTS") };
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn health_thresholds_default_none() {
+        let config = ServerConfig::new(PathBuf::from("."), None);
+        assert!(config.health_cache_min_free_bytes.is_none());
+        assert!(config.health_max_memory_bytes.is_none());
+    }
+
+    #[test]
+    #[serial]
+    fn parse_health_cache_min_free_bytes_valid() {
+        // SAFETY: test-only, single-threaded access to this env var.
+        unsafe { env::set_var("TRUSS_HEALTH_CACHE_MIN_FREE_BYTES", "1073741824") };
+        let result = parse_env_u64_ranged("TRUSS_HEALTH_CACHE_MIN_FREE_BYTES", 1, u64::MAX);
+        unsafe { env::remove_var("TRUSS_HEALTH_CACHE_MIN_FREE_BYTES") };
+        assert_eq!(result.unwrap(), Some(1_073_741_824));
+    }
+
+    #[test]
+    #[serial]
+    fn parse_health_max_memory_bytes_valid() {
+        // SAFETY: test-only, single-threaded access to this env var.
+        unsafe { env::set_var("TRUSS_HEALTH_MAX_MEMORY_BYTES", "536870912") };
+        let result = parse_env_u64_ranged("TRUSS_HEALTH_MAX_MEMORY_BYTES", 1, u64::MAX);
+        unsafe { env::remove_var("TRUSS_HEALTH_MAX_MEMORY_BYTES") };
+        assert_eq!(result.unwrap(), Some(536_870_912));
+    }
+
+    #[test]
+    #[serial]
+    fn parse_health_threshold_zero_rejected() {
+        // SAFETY: test-only, single-threaded access to this env var.
+        unsafe { env::set_var("TRUSS_HEALTH_CACHE_MIN_FREE_BYTES", "0") };
+        let result = parse_env_u64_ranged("TRUSS_HEALTH_CACHE_MIN_FREE_BYTES", 1, u64::MAX);
+        unsafe { env::remove_var("TRUSS_HEALTH_CACHE_MIN_FREE_BYTES") };
+        assert!(result.is_err());
     }
 }
