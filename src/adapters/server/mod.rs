@@ -3137,6 +3137,45 @@ mod tests {
     }
 
     #[test]
+    fn metrics_endpoint_returns_401_when_token_required() {
+        let mut config = ServerConfig::new(temp_dir("metrics-auth"), None);
+        config.metrics_token = Some("my-secret-token".to_string());
+
+        // No auth header → 401
+        let response = route_request(metrics_request(false), &config);
+        assert_eq!(response.status, "401 Unauthorized");
+    }
+
+    #[test]
+    fn metrics_endpoint_accepts_valid_token() {
+        let mut config = ServerConfig::new(temp_dir("metrics-auth-ok"), None);
+        config.metrics_token = Some("secret".to_string());
+
+        // Bearer secret matches
+        let response = route_request(metrics_request(true), &config);
+        assert_eq!(response.status, "200 OK");
+    }
+
+    #[test]
+    fn metrics_endpoint_rejects_wrong_token() {
+        let mut config = ServerConfig::new(temp_dir("metrics-auth-bad"), None);
+        config.metrics_token = Some("correct-token".to_string());
+
+        // Bearer secret ≠ correct-token
+        let response = route_request(metrics_request(true), &config);
+        assert_eq!(response.status, "401 Unauthorized");
+    }
+
+    #[test]
+    fn metrics_endpoint_returns_404_when_disabled() {
+        let mut config = ServerConfig::new(temp_dir("metrics-disabled"), None);
+        config.disable_metrics = true;
+
+        let response = route_request(metrics_request(false), &config);
+        assert_eq!(response.status, "404 Not Found");
+    }
+
+    #[test]
     fn transform_endpoint_rejects_unsupported_remote_content_encoding() {
         let (url, handle) = spawn_http_server(vec![(
             "200 OK".to_string(),
