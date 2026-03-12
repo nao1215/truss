@@ -17,7 +17,7 @@ use std::fmt;
 use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use url::Url;
 
 /// Feature-flag-independent label for the active storage backend, used only
@@ -102,6 +102,10 @@ pub const DEFAULT_STORAGE_ROOT: &str = ".";
 
 pub(super) const DEFAULT_PUBLIC_MAX_AGE_SECONDS: u32 = 3600;
 pub(super) const DEFAULT_PUBLIC_STALE_WHILE_REVALIDATE_SECONDS: u32 = 60;
+
+/// Default drain period (in seconds) during graceful shutdown.
+/// Configurable at runtime via `TRUSS_SHUTDOWN_DRAIN_SECS`.
+pub(super) const DEFAULT_SHUTDOWN_DRAIN_SECS: u64 = 10;
 
 /// Default wall-clock deadline (in seconds) for server-side transforms.
 /// Configurable at runtime via `TRUSS_TRANSFORM_DEADLINE_SECS`.
@@ -241,6 +245,35 @@ pub struct ServerConfig {
     /// Configurable via `TRUSS_HEALTH_MAX_MEMORY_BYTES`. When unset, the memory
     /// check is skipped. Only effective on Linux.
     pub health_max_memory_bytes: Option<u64>,
+    /// Drain period (in seconds) during graceful shutdown.
+    ///
+    /// On receiving a shutdown signal the server immediately marks itself as
+    /// draining (causing `/health/ready` to return 503), then waits this many
+    /// seconds before stopping acceptance of new connections so that load
+    /// balancers have time to remove the instance from rotation.
+    ///
+    /// Configurable via `TRUSS_SHUTDOWN_DRAIN_SECS`. Defaults to 10.
+    pub shutdown_drain_secs: u64,
+    /// Runtime flag indicating the server is draining.
+    ///
+    /// Set to `true` upon receiving SIGTERM/SIGINT. While draining,
+    /// `/health/ready` returns 503 so that load balancers stop routing traffic.
+    pub draining: Arc<AtomicBool>,
+    /// Custom response headers applied to all public image responses.
+    ///
+    /// Configurable via `TRUSS_RESPONSE_HEADERS` (JSON object `{"Header-Name": "value", ...}`).
+    /// Validated at startup; invalid header names or values cause a startup error.
+    pub custom_response_headers: Vec<(String, String)>,
+    /// Whether gzip compression is enabled for non-image responses.
+    ///
+    /// Configurable via `TRUSS_DISABLE_COMPRESSION`. Defaults to `true`.
+    pub enable_compression: bool,
+    /// Gzip compression level (0-9). Higher values produce smaller output but
+    /// use more CPU. `1` is fastest, `6` is the default (a good trade-off),
+    /// and `9` is best compression.
+    ///
+    /// Configurable via `TRUSS_COMPRESSION_LEVEL`. Defaults to `1` (fast).
+    pub compression_level: u32,
     /// Per-server counter tracking the number of image transforms currently in
     /// flight.  This is runtime state (not configuration) but lives here so that
     /// each `serve_with_config` invocation gets an independent counter, avoiding
@@ -295,6 +328,11 @@ impl Clone for ServerConfig {
             disable_metrics: self.disable_metrics,
             health_cache_min_free_bytes: self.health_cache_min_free_bytes,
             health_max_memory_bytes: self.health_max_memory_bytes,
+            shutdown_drain_secs: self.shutdown_drain_secs,
+            draining: Arc::clone(&self.draining),
+            custom_response_headers: self.custom_response_headers.clone(),
+            enable_compression: self.enable_compression,
+            compression_level: self.compression_level,
             transforms_in_flight: Arc::clone(&self.transforms_in_flight),
             presets: self.presets.clone(),
             #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
@@ -359,6 +397,13 @@ impl fmt::Debug for ServerConfig {
                 &self.health_cache_min_free_bytes,
             )
             .field("health_max_memory_bytes", &self.health_max_memory_bytes)
+            .field("shutdown_drain_secs", &self.shutdown_drain_secs)
+            .field(
+                "custom_response_headers",
+                &self.custom_response_headers.len(),
+            )
+            .field("enable_compression", &self.enable_compression)
+            .field("compression_level", &self.compression_level)
             .field("presets", &self.presets.keys().collect::<Vec<_>>());
         #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
         {
@@ -403,6 +448,10 @@ impl PartialEq for ServerConfig {
             && self.disable_metrics == other.disable_metrics
             && self.health_cache_min_free_bytes == other.health_cache_min_free_bytes
             && self.health_max_memory_bytes == other.health_max_memory_bytes
+            && self.shutdown_drain_secs == other.shutdown_drain_secs
+            && self.custom_response_headers == other.custom_response_headers
+            && self.enable_compression == other.enable_compression
+            && self.compression_level == other.compression_level
             && self.presets == other.presets
             && cfg_storage_eq(self, other)
     }
@@ -500,6 +549,11 @@ impl ServerConfig {
             disable_metrics: false,
             health_cache_min_free_bytes: None,
             health_max_memory_bytes: None,
+            shutdown_drain_secs: DEFAULT_SHUTDOWN_DRAIN_SECS,
+            draining: Arc::new(AtomicBool::new(false)),
+            custom_response_headers: Vec::new(),
+            enable_compression: true,
+            compression_level: 1,
             transforms_in_flight: Arc::new(AtomicU64::new(0)),
             presets: HashMap::new(),
             #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
@@ -936,6 +990,15 @@ impl ServerConfig {
 
         let presets = parse_presets_from_env()?;
 
+        let shutdown_drain_secs = parse_env_u64_ranged("TRUSS_SHUTDOWN_DRAIN_SECS", 0, 300)?
+            .unwrap_or(DEFAULT_SHUTDOWN_DRAIN_SECS);
+
+        let custom_response_headers = parse_response_headers_from_env()?;
+
+        let enable_compression = !env_flag("TRUSS_DISABLE_COMPRESSION");
+        let compression_level =
+            parse_env_u64_ranged("TRUSS_COMPRESSION_LEVEL", 0, 9)?.unwrap_or(1) as u32;
+
         Ok(Self {
             storage_root,
             bearer_token,
@@ -958,6 +1021,11 @@ impl ServerConfig {
             disable_metrics,
             health_cache_min_free_bytes,
             health_max_memory_bytes,
+            shutdown_drain_secs,
+            draining: Arc::new(AtomicBool::new(false)),
+            custom_response_headers,
+            enable_compression,
+            compression_level,
             transforms_in_flight: Arc::new(AtomicU64::new(0)),
             presets,
             #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
@@ -1048,6 +1116,120 @@ pub(super) fn parse_presets_from_env() -> io::Result<HashMap<String, TransformOp
             format!("{source} must be valid JSON: {e}"),
         )
     })
+}
+
+/// Parse `TRUSS_RESPONSE_HEADERS` (a JSON object `{"Header-Name": "value", ...}`) and
+/// validate that every name and value conforms to RFC 7230. Returns an empty vec when the
+/// variable is unset or empty.
+fn parse_response_headers_from_env() -> io::Result<Vec<(String, String)>> {
+    let raw = match env::var("TRUSS_RESPONSE_HEADERS")
+        .ok()
+        .filter(|v| !v.is_empty())
+    {
+        Some(value) => value,
+        None => return Ok(Vec::new()),
+    };
+
+    let map: HashMap<String, String> = serde_json::from_str(&raw).map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("TRUSS_RESPONSE_HEADERS must be a JSON object: {e}"),
+        )
+    })?;
+
+    let mut headers = Vec::with_capacity(map.len());
+    for (name, value) in map {
+        validate_header_name(&name)?;
+        reject_denied_header(&name)?;
+        validate_header_value(&name, &value)?;
+        headers.push((name, value));
+    }
+    // Sort for deterministic ordering in responses.
+    headers.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(headers)
+}
+
+/// Validate an HTTP header name per RFC 7230 §3.2.6 (token characters).
+fn validate_header_name(name: &str) -> io::Result<()> {
+    if name.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "TRUSS_RESPONSE_HEADERS: header name must not be empty",
+        ));
+    }
+    // token = 1*tchar
+    // tchar = "!" / "#" / "$" / "%" / "&" / "'" / "*" / "+" / "-" / "." /
+    //         "^" / "_" / "`" / "|" / "~" / DIGIT / ALPHA
+    for byte in name.bytes() {
+        let valid = byte.is_ascii_alphanumeric()
+            || matches!(
+                byte,
+                b'!' | b'#'
+                    | b'$'
+                    | b'%'
+                    | b'&'
+                    | b'\''
+                    | b'*'
+                    | b'+'
+                    | b'-'
+                    | b'.'
+                    | b'^'
+                    | b'_'
+                    | b'`'
+                    | b'|'
+                    | b'~'
+            );
+        if !valid {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("TRUSS_RESPONSE_HEADERS: invalid character in header name `{name}`"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Validate an HTTP header value per RFC 7230 §3.2.6 (visible ASCII + SP + HTAB).
+fn validate_header_value(name: &str, value: &str) -> io::Result<()> {
+    for byte in value.bytes() {
+        let valid = byte == b'\t' || (0x20..=0x7E).contains(&byte);
+        if !valid {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("TRUSS_RESPONSE_HEADERS: invalid character in value for header `{name}`"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Reject HTTP framing and hop-by-hop headers that must not be overridden by
+/// operator configuration. Allowing these would risk HTTP response smuggling,
+/// MIME-sniffing attacks, or broken connection handling.
+fn reject_denied_header(name: &str) -> io::Result<()> {
+    const DENIED: &[&str] = &[
+        "content-length",
+        "transfer-encoding",
+        "content-encoding",
+        "content-type",
+        "connection",
+        "host",
+        "upgrade",
+        "proxy-connection",
+        "keep-alive",
+        "te",
+        "trailer",
+    ];
+    let lower = name.to_ascii_lowercase();
+    if DENIED.contains(&lower.as_str()) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "TRUSS_RESPONSE_HEADERS: header `{name}` is not allowed (framing/hop-by-hop header)"
+            ),
+        ));
+    }
+    Ok(())
 }
 
 pub(super) fn validate_public_base_url(value: String) -> io::Result<String> {
@@ -1143,5 +1325,144 @@ mod tests {
         let result = parse_env_u64_ranged("TRUSS_HEALTH_CACHE_MIN_FREE_BYTES", 1, u64::MAX);
         unsafe { env::remove_var("TRUSS_HEALTH_CACHE_MIN_FREE_BYTES") };
         assert!(result.is_err());
+    }
+
+    // ── shutdown_drain_secs ────────────────────────────────────────
+
+    #[test]
+    fn shutdown_drain_secs_default() {
+        let config = ServerConfig::new(PathBuf::from("."), None);
+        assert_eq!(config.shutdown_drain_secs, DEFAULT_SHUTDOWN_DRAIN_SECS);
+    }
+
+    #[test]
+    fn draining_default_false() {
+        let config = ServerConfig::new(PathBuf::from("."), None);
+        assert!(!config.draining.load(std::sync::atomic::Ordering::Relaxed));
+    }
+
+    #[test]
+    #[serial]
+    fn parse_shutdown_drain_secs_valid() {
+        // SAFETY: test-only, single-threaded access to this env var.
+        unsafe { env::set_var("TRUSS_SHUTDOWN_DRAIN_SECS", "30") };
+        let result = parse_env_u64_ranged("TRUSS_SHUTDOWN_DRAIN_SECS", 0, 300);
+        unsafe { env::remove_var("TRUSS_SHUTDOWN_DRAIN_SECS") };
+        assert_eq!(result.unwrap(), Some(30));
+    }
+
+    #[test]
+    #[serial]
+    fn parse_shutdown_drain_secs_over_max_rejected() {
+        // SAFETY: test-only, single-threaded access to this env var.
+        unsafe { env::set_var("TRUSS_SHUTDOWN_DRAIN_SECS", "301") };
+        let result = parse_env_u64_ranged("TRUSS_SHUTDOWN_DRAIN_SECS", 0, 300);
+        unsafe { env::remove_var("TRUSS_SHUTDOWN_DRAIN_SECS") };
+        assert!(result.is_err());
+    }
+
+    // ── custom_response_headers ────────────────────────────────────
+
+    #[test]
+    fn custom_response_headers_default_empty() {
+        let config = ServerConfig::new(PathBuf::from("."), None);
+        assert!(config.custom_response_headers.is_empty());
+    }
+
+    #[test]
+    #[serial]
+    fn parse_response_headers_valid_json() {
+        // SAFETY: test-only, single-threaded access to this env var.
+        unsafe {
+            env::set_var(
+                "TRUSS_RESPONSE_HEADERS",
+                r#"{"CDN-Cache-Control":"max-age=3600","X-Custom":"value"}"#,
+            )
+        };
+        let result = parse_response_headers_from_env();
+        unsafe { env::remove_var("TRUSS_RESPONSE_HEADERS") };
+        let headers = result.unwrap();
+        assert_eq!(headers.len(), 2);
+        // Sorted by name.
+        assert_eq!(headers[0].0, "CDN-Cache-Control");
+        assert_eq!(headers[0].1, "max-age=3600");
+        assert_eq!(headers[1].0, "X-Custom");
+        assert_eq!(headers[1].1, "value");
+    }
+
+    #[test]
+    #[serial]
+    fn parse_response_headers_invalid_json() {
+        // SAFETY: test-only, single-threaded access to this env var.
+        unsafe { env::set_var("TRUSS_RESPONSE_HEADERS", "not json") };
+        let result = parse_response_headers_from_env();
+        unsafe { env::remove_var("TRUSS_RESPONSE_HEADERS") };
+        assert!(result.is_err());
+    }
+
+    #[test]
+    #[serial]
+    fn parse_response_headers_empty_name_rejected() {
+        // SAFETY: test-only, single-threaded access to this env var.
+        unsafe { env::set_var("TRUSS_RESPONSE_HEADERS", r#"{"":"value"}"#) };
+        let result = parse_response_headers_from_env();
+        unsafe { env::remove_var("TRUSS_RESPONSE_HEADERS") };
+        assert!(result.is_err());
+    }
+
+    #[test]
+    #[serial]
+    fn parse_response_headers_invalid_name_character() {
+        // SAFETY: test-only, single-threaded access to this env var.
+        unsafe { env::set_var("TRUSS_RESPONSE_HEADERS", r#"{"Bad Header":"value"}"#) };
+        let result = parse_response_headers_from_env();
+        unsafe { env::remove_var("TRUSS_RESPONSE_HEADERS") };
+        assert!(result.is_err());
+    }
+
+    #[test]
+    #[serial]
+    fn parse_response_headers_invalid_value_character() {
+        // SAFETY: test-only, single-threaded access to this env var.
+        unsafe { env::set_var("TRUSS_RESPONSE_HEADERS", "{\"X-Bad\":\"val\\u0000ue\"}") };
+        let result = parse_response_headers_from_env();
+        unsafe { env::remove_var("TRUSS_RESPONSE_HEADERS") };
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_header_name_valid() {
+        assert!(super::validate_header_name("Cache-Control").is_ok());
+        assert!(super::validate_header_name("X-Custom-Header").is_ok());
+        assert!(super::validate_header_name("CDN-Cache-Control").is_ok());
+    }
+
+    #[test]
+    fn validate_header_name_rejects_space() {
+        assert!(super::validate_header_name("Bad Header").is_err());
+    }
+
+    #[test]
+    fn validate_header_name_rejects_empty() {
+        assert!(super::validate_header_name("").is_err());
+    }
+
+    #[test]
+    fn validate_header_value_valid() {
+        assert!(super::validate_header_value("X", "normal value").is_ok());
+        assert!(super::validate_header_value("X", "max-age=3600, public").is_ok());
+    }
+
+    #[test]
+    fn validate_header_value_rejects_null() {
+        assert!(super::validate_header_value("X", "bad\x00value").is_err());
+    }
+
+    // ── enable_compression ─────────────────────────────────────────
+
+    #[test]
+    fn compression_enabled_by_default() {
+        let config = ServerConfig::new(PathBuf::from("."), None);
+        assert!(config.enable_compression);
     }
 }

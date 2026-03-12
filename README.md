@@ -178,10 +178,10 @@ truss photo.jpg -o watermarked.jpg \
 
 ```sh
 # Start the server (binary)
-truss serve --bind 0.0.0.0:8080 --storage-root ./images --bearer-token changeme
+TRUSS_BEARER_TOKEN=changeme truss serve --bind 0.0.0.0:8080 --storage-root ./images
 
 # Resize a local image to 400 px wide WebP in one request
-curl -X POST http://localhost:8080/images:transform \
+curl -X POST http://localhost:8080/images \
   -H "Authorization: Bearer changeme" \
   -F "file=@photo.jpg" \
   -F 'options={"format":"webp","width":400}' \
@@ -269,6 +269,10 @@ truss validate
 | `TRUSS_KEEP_ALIVE_MAX_REQUESTS` | Max requests per keep-alive connection before the server closes it (default: `100`, range: 1-100000) |
 | `TRUSS_HEALTH_CACHE_MIN_FREE_BYTES` | Minimum free bytes on cache disk; `/health/ready` returns 503 when breached (disabled by default) |
 | `TRUSS_HEALTH_MAX_MEMORY_BYTES` | Maximum process RSS in bytes; `/health/ready` returns 503 when breached (disabled by default, Linux only) |
+| `TRUSS_SHUTDOWN_DRAIN_SECS` | Drain period in seconds during graceful shutdown; `/health/ready` returns 503 immediately (default: `10`, range: 0-300). Total shutdown time is drain + 15 s worker drain. On Kubernetes, set `terminationGracePeriodSeconds` ≥ drain + 20 (e.g. `35` for the default 10 s drain) |
+| `TRUSS_RESPONSE_HEADERS` | JSON object of custom headers added to all image responses including private transforms (e.g. `{"CDN-Cache-Control":"max-age=86400"}`). Framing / hop-by-hop headers (`Content-Length`, `Transfer-Encoding`, `Content-Encoding`, `Content-Type`, `Connection`, etc.) are rejected at startup. Header names must be valid RFC 7230 tokens; values must contain only visible ASCII, SP, or HTAB (CRLF is rejected) |
+| `TRUSS_DISABLE_COMPRESSION` | Disable gzip compression for non-image responses (`true`/`1`/`yes`/`on`, case-insensitive). When compression is enabled (default), `Vary: Accept-Encoding` is added to compressible responses |
+| `TRUSS_COMPRESSION_LEVEL` | Gzip compression level (default: `1`, range: 0-9). `1` is fastest, `6` is a good trade-off, `9` is best compression |
 
 `TRUSS_STORAGE_BACKEND` selects the source for public `GET /images/by-path`. When set to `s3`, `gcs`, or `azure`, the `path` query parameter is used as the object key. Only one backend can be active at a time. Private endpoints can still use `kind: storage` regardless of this setting.
 

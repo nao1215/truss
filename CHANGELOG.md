@@ -1,5 +1,42 @@
 # Changelog
 
+## v0.7.0
+
+### Added
+
+- Configurable max input pixel limit (`TRUSS_MAX_INPUT_PIXELS`) with 422 response for oversized images.
+- Configurable max upload body size (`TRUSS_MAX_UPLOAD_BYTES`) with 413 response for oversized uploads.
+- Optional Bearer token protection for `/metrics` endpoint (`TRUSS_METRICS_TOKEN`) and disable flag (`TRUSS_DISABLE_METRICS`).
+- Configurable keep-alive max requests (`TRUSS_KEEP_ALIVE_MAX_REQUESTS`).
+- Config validation subcommand (`truss validate`) for CI/CD pre-flight checks.
+- Enhanced health checks: cache disk free space (`TRUSS_HEALTH_CACHE_MIN_FREE_BYTES`), transform capacity, and process memory usage (`TRUSS_HEALTH_MAX_MEMORY_BYTES`).
+- Graceful shutdown with configurable drain period (`TRUSS_SHUTDOWN_DRAIN_SECS`); `/health/ready` returns 503 immediately on SIGTERM/SIGINT.
+- Custom response headers via `TRUSS_RESPONSE_HEADERS` JSON env var with security-critical header rejection.
+- Gzip response compression for non-image responses with configurable level (`TRUSS_COMPRESSION_LEVEL`) and disable flag (`TRUSS_DISABLE_COMPRESSION`).
+- Crop control in the WASM demo page UI.
+- SVG and lossy WebP features enabled in the WASM demo build.
+
+### Fixed
+
+- `Box::leak` per-request memory leak in custom response headers.
+- Reject security-critical headers (framing, hop-by-hop) in `TRUSS_RESPONSE_HEADERS` at startup.
+- Merge `Vary` headers into a single line to avoid duplication.
+- Reduce worker drain timeout to 15 s for Kubernetes compatibility.
+- Replace busy-wait accept loop with `poll(2)` on Unix.
+- Windows graceful shutdown via SIGINT handler and draining check.
+- Use `sigaction`, `AtomicI32`, `cast_mut`, and `O_NONBLOCK` on write fd for signal safety.
+- Pixel-cap check moved before cache lookup to prevent unnecessary cache reads.
+- Early-reject `/metrics` before body read.
+- README: `--bearer-token` CLI flag corrected to `TRUSS_BEARER_TOKEN` env var.
+- README: `POST /images:transform` curl example corrected to `POST /images` for multipart uploads.
+
+### Changed
+
+- OpenAPI spec documents HEAD method support on all GET endpoints.
+- `UnprocessableEntity` response includes example in OpenAPI spec.
+- `maxInputPixels` marked as required in `HealthDiagnosticResponse` schema.
+- Extracted `parse_env_u64_ranged` helper for env var parsing.
+
 ## v0.6.2
 
 ### Fixed

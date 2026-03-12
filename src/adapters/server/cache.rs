@@ -485,8 +485,9 @@ pub(super) fn try_versioned_cache_lookup(
             CacheHitStatus::Hit,
             config.public_max_age_seconds,
             config.public_stale_while_revalidate_seconds,
+            &config.custom_response_headers,
         );
-        headers.push(("Age", age.as_secs().to_string()));
+        headers.push(("Age".to_string(), age.as_secs().to_string()));
         if matches!(response_policy, ImageResponsePolicy::PublicGet)
             && if_none_match_matches(request.header("if-none-match"), &etag)
         {

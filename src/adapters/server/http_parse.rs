@@ -366,6 +366,40 @@ pub(super) fn header_value<'a>(headers: &'a [(String, String)], name: &str) -> O
         .find_map(|(header_name, value)| (header_name == name).then_some(value.as_str()))
 }
 
+/// Returns `true` when the `Accept-Encoding` header value indicates that
+/// `encoding` (e.g. `"gzip"`) is acceptable.
+///
+/// Per RFC 7231 §5.3.4, a quality value of 0 means "not acceptable".
+/// `gzip;q=0` must therefore be treated as *rejected*.
+pub(super) fn accepts_encoding(header_value: &str, encoding: &str) -> bool {
+    for item in header_value.split(',') {
+        let item = item.trim();
+        let (name, params) = match item.split_once(';') {
+            Some((n, p)) => (n.trim(), Some(p)),
+            None => (item, None),
+        };
+        if !name.eq_ignore_ascii_case(encoding) && name != "*" {
+            continue;
+        }
+        // If there is a q parameter, reject when q=0 (or 0.0, 0.00, 0.000).
+        if let Some(params) = params {
+            for param in params.split(';') {
+                let param = param.trim();
+                if let Some(qval) = param.strip_prefix('q') {
+                    let qval = qval.trim_start().strip_prefix('=').map(str::trim_start);
+                    if let Some(qval) = qval
+                        && let Ok(q) = qval.parse::<f32>()
+                    {
+                        return q > 0.0;
+                    }
+                }
+            }
+        }
+        return true;
+    }
+    false
+}
+
 pub(super) fn content_type_matches(value: &str, expected: &str) -> bool {
     value
         .split(';')
@@ -1013,5 +1047,84 @@ mod tests {
         let mut cursor = std::io::Cursor::new(raw.to_vec());
         let err = read_request_headers(&mut cursor, DEFAULT_MAX_UPLOAD_BODY_BYTES).unwrap_err();
         assert_eq!(err.status, "400 Bad Request");
+    }
+
+    // ── accepts_encoding ──────────────────────────────────────────
+
+    #[test]
+    fn test_accepts_encoding_simple_match() {
+        assert!(accepts_encoding("gzip, deflate", "gzip"));
+    }
+
+    #[test]
+    fn test_accepts_encoding_single() {
+        assert!(accepts_encoding("gzip", "gzip"));
+    }
+
+    #[test]
+    fn test_accepts_encoding_case_insensitive() {
+        assert!(accepts_encoding("GZIP", "gzip"));
+    }
+
+    #[test]
+    fn test_accepts_encoding_with_positive_qvalue() {
+        assert!(accepts_encoding("gzip;q=1.0, deflate", "gzip"));
+    }
+
+    #[test]
+    fn test_accepts_encoding_with_low_positive_qvalue() {
+        assert!(accepts_encoding("gzip;q=0.001", "gzip"));
+    }
+
+    #[test]
+    fn test_accepts_encoding_rejected_by_q0() {
+        assert!(!accepts_encoding("gzip;q=0", "gzip"));
+    }
+
+    #[test]
+    fn test_accepts_encoding_rejected_by_q0_point0() {
+        assert!(!accepts_encoding("gzip;q=0.0", "gzip"));
+    }
+
+    #[test]
+    fn test_accepts_encoding_rejected_by_q0_with_spaces() {
+        assert!(!accepts_encoding("gzip ; q=0", "gzip"));
+    }
+
+    #[test]
+    fn test_accepts_encoding_not_present() {
+        assert!(!accepts_encoding("deflate, br", "gzip"));
+    }
+
+    #[test]
+    fn test_accepts_encoding_empty_header() {
+        assert!(!accepts_encoding("", "gzip"));
+    }
+
+    #[test]
+    fn test_accepts_encoding_q0_among_others() {
+        assert!(!accepts_encoding("deflate, gzip;q=0, br", "gzip"));
+    }
+
+    #[test]
+    fn test_accepts_encoding_wildcard_matches() {
+        assert!(accepts_encoding("*", "gzip"));
+    }
+
+    #[test]
+    fn test_accepts_encoding_wildcard_with_positive_q() {
+        assert!(accepts_encoding("*;q=1.0", "gzip"));
+    }
+
+    #[test]
+    fn test_accepts_encoding_wildcard_rejected_by_q0() {
+        assert!(!accepts_encoding("*;q=0", "gzip"));
+    }
+
+    #[test]
+    fn test_accepts_encoding_explicit_overrides_wildcard() {
+        // Explicit gzip;q=0 should reject even if * is present.
+        // Our parser returns on first match, so gzip;q=0 wins.
+        assert!(!accepts_encoding("gzip;q=0, *", "gzip"));
     }
 }

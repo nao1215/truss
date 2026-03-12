@@ -240,6 +240,18 @@
               </div>
             </label>
 
+            <label id="crop-field">
+              <span>Crop (x,y,w,h)</span>
+              <input
+                id="crop"
+                name="crop"
+                type="text"
+                placeholder="100,50,800,600"
+                pattern="\d+,\d+,[1-9]\d*,[1-9]\d*"
+                spellcheck="false"
+              />
+            </label>
+
             <label class="checkbox">
               <input id="auto-orient" name="autoOrient" type="checkbox" checked />
               <span>Apply EXIF auto-orient</span>

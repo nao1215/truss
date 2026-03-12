@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: Truss Image Server API
-  version: 0.6.2
+  version: 0.7.0
   description: |
     HTTP API for the Truss image toolkit.
 
@@ -49,6 +49,7 @@ paths:
       summary: Transform an image by storage path
       description: |
         Public, cache-friendly transform endpoint for files identified by path.
+        Also supports `HEAD` requests, which return the same headers without a body.
 
         When the storage backend is `filesystem` (default), the `path` query
         parameter is resolved relative to `TRUSS_STORAGE_ROOT`; path traversal
@@ -133,6 +134,7 @@ paths:
       summary: Transform an image from a remote URL
       description: |
         Public, cache-friendly transform endpoint for remote HTTP(S) sources.
+        Also supports `HEAD` requests, which return the same headers without a body.
 
         Use this when the source image is hosted elsewhere and should be fetched by
         Truss on demand. Remote fetches are subject to URL validation, redirect
@@ -328,6 +330,7 @@ paths:
       description: |
         Human-oriented diagnostic endpoint that returns version information,
         process uptime, and detailed readiness checks.
+        Also supports `HEAD` requests.
 
         This endpoint always returns 200 OK, even when individual checks fail,
         because it is designed for dashboards and operators who need to see the
@@ -343,7 +346,7 @@ paths:
               example:
                 status: ok
                 service: truss
-                version: 0.6.2
+                version: 0.7.0
                 uptimeSeconds: 3600
                 checks:
                   - name: storageRoot
@@ -370,7 +373,7 @@ paths:
         Lightweight liveness probe for container orchestrators (e.g. Kubernetes
         `livenessProbe`). Returns immediately with minimal information confirming
         the process is running and can serve HTTP. Does not check external
-        dependencies.
+        dependencies. Also supports `HEAD` requests.
       operationId: getLiveHealth
       responses:
         '200':
@@ -382,7 +385,7 @@ paths:
               example:
                 status: ok
                 service: truss
-                version: 0.6.2
+                version: 0.7.0
 
   /health/ready:
     get:
@@ -390,13 +393,19 @@ paths:
       summary: Readiness probe
       description: |
         Readiness probe for container orchestrators (e.g. Kubernetes
-        `readinessProbe`). Checks that the server is able to accept traffic by
-        verifying the storage root is accessible, the cache root (if configured)
-        is accessible, the object-storage backend (if configured) is
-        network-reachable, cache disk free space is above the configured
-        threshold (`TRUSS_HEALTH_CACHE_MIN_FREE_BYTES`), process memory
+        `readinessProbe`). Also supports `HEAD` requests. Checks that the server
+        is able to accept traffic by verifying the storage root is accessible,
+        the cache root (if configured) is accessible, the object-storage backend
+        (if configured) is network-reachable, cache disk free space is above the
+        configured threshold (`TRUSS_HEALTH_CACHE_MIN_FREE_BYTES`), process memory
         usage is below the configured limit (`TRUSS_HEALTH_MAX_MEMORY_BYTES`),
         and transform capacity is not exhausted.
+
+        During graceful shutdown (after SIGTERM/SIGINT), this endpoint
+        immediately returns 503 with a `draining` check set to `fail`, even
+        before the drain period (`TRUSS_SHUTDOWN_DRAIN_SECS`, default 10s)
+        expires. This allows load balancers and CDN edges to remove the
+        instance from rotation before the server stops accepting connections.
 
         **Platform note:** RSS memory and cache disk free space are read on
         Linux only. On other platforms `TRUSS_HEALTH_MAX_MEMORY_BYTES` and
@@ -463,11 +472,21 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ReadinessResponse'
-              example:
-                status: fail
-                checks:
-                  - name: storageRoot
+              examples:
+                storageRootFail:
+                  summary: Storage root inaccessible
+                  value:
                     status: fail
+                    checks:
+                      - name: storageRoot
+                        status: fail
+                draining:
+                  summary: Graceful shutdown in progress
+                  value:
+                    status: fail
+                    checks:
+                      - name: draining
+                        status: fail
 
   /metrics:
     get:
@@ -475,6 +494,7 @@ paths:
       summary: Prometheus metrics
       description: |
         Returns metrics in Prometheus text exposition format (version 0.0.4).
+        Also supports `HEAD` requests.
 
         By default, the endpoint does not require authentication. Operators can
         restrict access via `TRUSS_METRICS_TOKEN` (Bearer token) or disable the

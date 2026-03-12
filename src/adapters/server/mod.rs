@@ -49,6 +49,7 @@ use remote::{read_remote_watermark_bytes, resolve_source_bytes};
 use response::{
     HttpResponse, NOT_FOUND_BODY, bad_request_response, service_unavailable_response,
     transform_error_response, unsupported_media_type_response, write_response,
+    write_response_compressed,
 };
 
 use crate::{
@@ -65,7 +66,7 @@ use std::io;
 use std::net::{TcpListener, TcpStream};
 use std::str::FromStr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use subtle::ConstantTimeEq;
 use url::Url;
@@ -377,23 +378,67 @@ pub fn serve_with_config(listener: TcpListener, config: ServerConfig) -> io::Res
         }));
     }
 
-    for stream in listener.incoming() {
-        match stream {
-            Ok(stream) => {
+    // Install signal handler for graceful shutdown.  The handler sets the
+    // shared `draining` flag (so /health/ready returns 503 immediately) and
+    // writes a byte to a self-pipe to wake the accept loop.
+    let (shutdown_read_fd, shutdown_write_fd) = create_shutdown_pipe()?;
+    install_signal_handler(Arc::clone(&config.draining), shutdown_write_fd);
+
+    // Set the listener to non-blocking so we can multiplex between incoming
+    // connections and the shutdown pipe.
+    listener.set_nonblocking(true)?;
+
+    loop {
+        // Wait for activity on the listener or shutdown pipe. On Unix we use
+        // poll(2) to block efficiently; on Windows we fall back to polling the
+        // draining flag with a short sleep.
+        wait_for_accept_or_shutdown(&listener, shutdown_read_fd, &config.draining);
+
+        // Check the shutdown pipe first.
+        if poll_shutdown_pipe(shutdown_read_fd) {
+            break;
+        }
+
+        // Also check the draining flag directly (needed on Windows where the
+        // shutdown pipe is not available).
+        if config.draining.load(Ordering::SeqCst) {
+            break;
+        }
+
+        match listener.accept() {
+            Ok((stream, _addr)) => {
+                // Accepted connections are always blocking for the workers.
+                let _ = stream.set_nonblocking(false);
                 if sender.send(stream).is_err() {
                     break;
                 }
+            }
+            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                // Spurious wakeup — retry.
             }
             Err(err) => return Err(err),
         }
     }
 
+    // --- Drain phase ---
+    let drain_secs = config.shutdown_drain_secs;
+    config.log(&format!(
+        "shutdown: drain started, waiting {drain_secs}s for load balancers"
+    ));
+    if drain_secs > 0 {
+        std::thread::sleep(Duration::from_secs(drain_secs));
+    }
+    config.log("shutdown: drain complete, closing listener");
+
+    // Stop dispatching new connections to workers.
     drop(sender);
-    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    // Worker drain deadline: 15s so that total shutdown (drain + worker drain)
+    // fits within Kubernetes default terminationGracePeriodSeconds of 30s.
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
     for worker in workers {
         let remaining = deadline.saturating_duration_since(std::time::Instant::now());
         if remaining.is_zero() {
-            eprintln!("shutdown: timed out waiting for worker threads");
+            stderr_write("shutdown: timed out waiting for worker threads");
             break;
         }
         // Park the main thread until the worker finishes or the deadline
@@ -416,13 +461,175 @@ pub fn serve_with_config(listener: TcpListener, config: ServerConfig) -> io::Res
                 .expect("shutdown condvar wait");
             done = guard;
             if timeout.timed_out() {
-                eprintln!("shutdown: timed out waiting for a worker thread");
+                stderr_write("shutdown: timed out waiting for a worker thread");
                 break;
             }
         }
     }
 
+    config.log("shutdown: complete");
+    close_shutdown_pipe(shutdown_read_fd, shutdown_write_fd);
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Shutdown pipe helpers — a minimal self-pipe for waking the accept loop from
+// a signal handler without requiring async I/O.
+// ---------------------------------------------------------------------------
+
+#[cfg(unix)]
+fn create_shutdown_pipe() -> io::Result<(i32, i32)> {
+    let mut fds = [0i32; 2];
+    if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // Make both ends non-blocking: the read end so `poll_shutdown_pipe` never
+    // stalls, and the write end so the signal handler never blocks.
+    unsafe {
+        libc::fcntl(fds[0], libc::F_SETFL, libc::O_NONBLOCK);
+        libc::fcntl(fds[1], libc::F_SETFL, libc::O_NONBLOCK);
+    }
+    Ok((fds[0], fds[1]))
+}
+
+#[cfg(windows)]
+fn create_shutdown_pipe() -> io::Result<(i32, i32)> {
+    // On Windows we fall back to a polling approach using the draining flag.
+    Ok((-1, -1))
+}
+
+#[cfg(unix)]
+fn poll_shutdown_pipe(read_fd: i32) -> bool {
+    let mut buf = [0u8; 1];
+    let n = unsafe { libc::read(read_fd, buf.as_mut_ptr().cast(), 1) };
+    n > 0
+}
+
+#[cfg(windows)]
+fn poll_shutdown_pipe(_read_fd: i32) -> bool {
+    false
+}
+
+/// Block until the listener socket or the shutdown pipe has data ready.
+/// On Unix this uses `poll(2)` for zero-CPU-cost waiting; on Windows it falls
+/// back to a short sleep since the shutdown pipe is not available.
+#[cfg(unix)]
+fn wait_for_accept_or_shutdown(
+    listener: &std::net::TcpListener,
+    shutdown_read_fd: i32,
+    _draining: &AtomicBool,
+) {
+    use std::os::unix::io::AsRawFd;
+    let listener_fd = listener.as_raw_fd();
+    let mut fds = [
+        libc::pollfd {
+            fd: listener_fd,
+            events: libc::POLLIN,
+            revents: 0,
+        },
+        libc::pollfd {
+            fd: shutdown_read_fd,
+            events: libc::POLLIN,
+            revents: 0,
+        },
+    ];
+    // Block indefinitely (-1 timeout). Signal delivery will interrupt with
+    // EINTR, which is fine — we just re-check the shutdown conditions.
+    unsafe { libc::poll(fds.as_mut_ptr(), 2, -1) };
+}
+
+#[cfg(windows)]
+fn wait_for_accept_or_shutdown(
+    _listener: &std::net::TcpListener,
+    _shutdown_read_fd: i32,
+    draining: &AtomicBool,
+) {
+    // On Windows, poll(2) is not available for the listener socket. Sleep
+    // briefly and let the caller check the draining flag.
+    if !draining.load(Ordering::SeqCst) {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[cfg(unix)]
+fn close_shutdown_pipe(read_fd: i32, write_fd: i32) {
+    unsafe {
+        libc::close(read_fd);
+        libc::close(write_fd);
+    }
+}
+
+#[cfg(windows)]
+fn close_shutdown_pipe(_read_fd: i32, _write_fd: i32) {}
+
+/// Global write-end of the shutdown pipe, written to from the signal handler.
+static SHUTDOWN_PIPE_WR: AtomicI32 = AtomicI32::new(-1);
+/// Global draining flag set by the signal handler.
+static GLOBAL_DRAINING: std::sync::atomic::AtomicPtr<AtomicBool> =
+    std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
+
+#[cfg(unix)]
+fn install_signal_handler(draining: Arc<AtomicBool>, write_fd: i32) {
+    // Store the write fd and draining pointer in globals accessible from the
+    // async-signal-safe handler.
+    SHUTDOWN_PIPE_WR.store(write_fd, Ordering::SeqCst);
+    // SAFETY: `Arc::into_raw` leaks intentionally — the pointer remains valid
+    // for the process lifetime.  The signal handler only calls `AtomicBool::store`
+    // and `libc::write`, both of which are async-signal-safe.
+    let ptr = Arc::into_raw(draining).cast_mut();
+    GLOBAL_DRAINING.store(ptr, Ordering::SeqCst);
+
+    // Use sigaction instead of signal to avoid SysV semantics where the handler
+    // is reset to SIG_DFL after the first invocation. SA_RESTART ensures that
+    // interrupted syscalls are automatically restarted.
+    unsafe {
+        let mut sa: libc::sigaction = std::mem::zeroed();
+        sa.sa_sigaction = signal_handler as *const () as libc::sighandler_t;
+        libc::sigemptyset(&mut sa.sa_mask);
+        sa.sa_flags = libc::SA_RESTART;
+        libc::sigaction(libc::SIGTERM, &sa, std::ptr::null_mut());
+        libc::sigaction(libc::SIGINT, &sa, std::ptr::null_mut());
+    }
+}
+
+#[cfg(unix)]
+extern "C" fn signal_handler(_sig: libc::c_int) {
+    // Set the draining flag — async-signal-safe (atomic store).
+    let ptr = GLOBAL_DRAINING.load(Ordering::SeqCst);
+    if !ptr.is_null() {
+        unsafe { (*ptr).store(true, Ordering::SeqCst) };
+    }
+    // Wake the accept loop by writing to the self-pipe.
+    let fd = SHUTDOWN_PIPE_WR.load(Ordering::SeqCst);
+    if fd >= 0 {
+        let byte: u8 = 1;
+        unsafe { libc::write(fd, (&byte as *const u8).cast(), 1) };
+    }
+}
+
+#[cfg(windows)]
+fn install_signal_handler(draining: Arc<AtomicBool>, _write_fd: i32) {
+    // Store the draining pointer in the global so the signal handler can set it.
+    let ptr = Arc::into_raw(draining).cast_mut();
+    GLOBAL_DRAINING.store(ptr, Ordering::SeqCst);
+
+    // On Windows, register a SIGINT handler (Ctrl+C) via the C runtime.
+    // The accept loop checks `draining` in the WouldBlock branch.
+    unsafe {
+        libc::signal(libc::SIGINT, windows_signal_handler as libc::sighandler_t);
+    }
+}
+
+#[cfg(windows)]
+extern "C" fn windows_signal_handler(_sig: libc::c_int) {
+    let ptr = GLOBAL_DRAINING.load(Ordering::SeqCst);
+    if !ptr.is_null() {
+        unsafe { (*ptr).store(true, Ordering::SeqCst) };
+    }
+    // Re-register the handler since Windows resets to SIG_DFL after each signal.
+    unsafe {
+        libc::signal(libc::SIGINT, windows_signal_handler as libc::sighandler_t);
+    }
 }
 
 /// Serves exactly one request using configuration loaded from the environment.
@@ -869,18 +1076,18 @@ fn extract_request_id(headers: &[(String, String)]) -> Option<String> {
 
 /// Classifies the `Cache-Status` response header as `"hit"` or `"miss"`.
 /// Returns `None` when the header is absent.
-fn extract_cache_status(headers: &[(&'static str, String)]) -> Option<&'static str> {
+fn extract_cache_status(headers: &[(String, String)]) -> Option<&'static str> {
     headers
         .iter()
-        .find_map(|(name, value)| (*name == "Cache-Status").then_some(value.as_str()))
+        .find_map(|(name, value)| (name == "Cache-Status").then_some(value.as_str()))
         .map(|v| if v.contains("hit") { "hit" } else { "miss" })
 }
 
 /// Extracts and removes the internal `X-Truss-Watermark` header, returning whether it was set.
-fn extract_watermark_flag(headers: &mut Vec<(&'static str, String)>) -> bool {
+fn extract_watermark_flag(headers: &mut Vec<(String, String)>) -> bool {
     let pos = headers
         .iter()
-        .position(|(name, _)| *name == "X-Truss-Watermark");
+        .position(|(name, _)| name == "X-Truss-Watermark");
     if let Some(idx) = pos {
         headers.swap_remove(idx);
         true
@@ -941,6 +1148,10 @@ fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io::Result<()>
             .iter()
             .any(|(name, value)| name == "connection" && value.eq_ignore_ascii_case("close"));
 
+        let accepts_gzip = config.enable_compression
+            && http_parse::header_value(&partial.headers, "accept-encoding")
+                .is_some_and(|v| http_parse::accepts_encoding(v, "gzip"));
+
         let is_head = partial.method == "HEAD";
 
         let requires_auth = matches!(
@@ -950,12 +1161,20 @@ fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io::Result<()>
         if requires_auth
             && let Err(mut response) = authorize_request_headers(&partial.headers, config)
         {
-            response.headers.push(("X-Request-Id", request_id.clone()));
+            response
+                .headers
+                .push(("X-Request-Id".to_string(), request_id.clone()));
             record_http_metrics(RouteMetric::Unknown, response.status);
             let sc = status_code(response.status).unwrap_or("unknown");
             let method_log = partial.method.clone();
             let path_log = partial.path().to_string();
-            let _ = write_response(&mut stream, response, true);
+            let _ = write_response_compressed(
+                &mut stream,
+                response,
+                true,
+                accepts_gzip,
+                config.compression_level,
+            );
             record_http_request_duration(RouteMetric::Unknown, start);
             emit_access_log(
                 config,
@@ -1001,12 +1220,20 @@ fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io::Result<()>
             };
 
             if let Some(mut response) = early_response {
-                response.headers.push(("X-Request-Id", request_id.clone()));
+                response
+                    .headers
+                    .push(("X-Request-Id".to_string(), request_id.clone()));
                 record_http_metrics(RouteMetric::Metrics, response.status);
                 let sc = status_code(response.status).unwrap_or("unknown");
                 let method_log = partial.method.clone();
                 let path_log = partial.path().to_string();
-                let _ = write_response(&mut stream, response, true);
+                let _ = write_response_compressed(
+                    &mut stream,
+                    response,
+                    true,
+                    accepts_gzip,
+                    config.compression_level,
+                );
                 record_http_request_duration(RouteMetric::Metrics, start);
                 emit_access_log(
                     config,
@@ -1032,10 +1259,18 @@ fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io::Result<()>
         let request = match read_request_body(&mut stream, partial) {
             Ok(request) => request,
             Err(mut response) => {
-                response.headers.push(("X-Request-Id", request_id.clone()));
+                response
+                    .headers
+                    .push(("X-Request-Id".to_string(), request_id.clone()));
                 record_http_metrics(RouteMetric::Unknown, response.status);
                 let sc = status_code(response.status).unwrap_or("unknown");
-                let _ = write_response(&mut stream, response, true);
+                let _ = write_response_compressed(
+                    &mut stream,
+                    response,
+                    true,
+                    accepts_gzip,
+                    config.compression_level,
+                );
                 record_http_request_duration(RouteMetric::Unknown, start);
                 emit_access_log(
                     config,
@@ -1057,7 +1292,9 @@ fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io::Result<()>
         let mut response = route_request(request, config);
         record_http_metrics(route, response.status);
 
-        response.headers.push(("X-Request-Id", request_id.clone()));
+        response
+            .headers
+            .push(("X-Request-Id".to_string(), request_id.clone()));
 
         let cache_status = extract_cache_status(&response.headers);
         let had_watermark = extract_watermark_flag(&mut response.headers);
@@ -1071,7 +1308,13 @@ fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io::Result<()>
         requests_served += 1;
         let close_after = client_wants_close || requests_served >= config.keep_alive_max_requests;
 
-        write_response(&mut stream, response, close_after)?;
+        write_response_compressed(
+            &mut stream,
+            response,
+            close_after,
+            accepts_gzip,
+            config.compression_level,
+        )?;
         record_http_request_duration(route, start);
 
         emit_access_log(
@@ -1385,6 +1628,20 @@ fn handle_health_live() -> HttpResponse {
 fn handle_health_ready(config: &ServerConfig) -> HttpResponse {
     let mut checks: Vec<serde_json::Value> = Vec::new();
     let mut all_ok = true;
+
+    // When the server is draining (shutdown signal received), immediately
+    // report not-ready so that load balancers stop routing traffic.
+    // Skip expensive probes (storage, disk, memory) — they are irrelevant
+    // once the process is shutting down.
+    if config.draining.load(Ordering::Relaxed) {
+        let mut body = serde_json::to_vec(&json!({
+            "status": "fail",
+            "checks": [{ "name": "draining", "status": "fail" }],
+        }))
+        .expect("serialize readiness");
+        body.push(b'\n');
+        return HttpResponse::problem("503 Service Unavailable", body);
+    }
 
     for (ok, name) in storage_health_check(config) {
         checks.push(json!({
@@ -1788,8 +2045,9 @@ fn transform_source_bytes(
                 CacheHitStatus::Hit,
                 config.public_max_age_seconds,
                 config.public_stale_while_revalidate_seconds,
+                &config.custom_response_headers,
             );
-            headers.push(("Age", age.as_secs().to_string()));
+            headers.push(("Age".to_string(), age.as_secs().to_string()));
             if matches!(response_policy, ImageResponsePolicy::PublicGet)
                 && if_none_match_matches(request.header("if-none-match"), &etag)
             {
@@ -1908,8 +2166,9 @@ fn transform_source_bytes_inner(
             CacheHitStatus::Hit,
             response_config.public_cache_control.max_age,
             response_config.public_cache_control.stale_while_revalidate,
+            &config.custom_response_headers,
         );
-        headers.push(("Age", age.as_secs().to_string()));
+        headers.push(("Age".to_string(), age.as_secs().to_string()));
         if matches!(response_policy, ImageResponsePolicy::PublicGet)
             && if_none_match_matches(request.header("if-none-match"), &etag)
         {
@@ -2002,6 +2261,7 @@ fn transform_source_bytes_inner(
         cache_hit_status,
         response_config.public_cache_control.max_age,
         response_config.public_cache_control.stale_while_revalidate,
+        &config.custom_response_headers,
     );
 
     if matches!(response_policy, ImageResponsePolicy::PublicGet)
@@ -2019,7 +2279,7 @@ fn transform_source_bytes_inner(
     if had_watermark {
         response
             .headers
-            .push(("X-Truss-Watermark", "true".to_string()));
+            .push(("X-Truss-Watermark".to_string(), "true".to_string()));
     }
     response
 }
@@ -2424,19 +2684,23 @@ mod tests {
             CacheHitStatus::Disabled,
             DEFAULT_PUBLIC_MAX_AGE_SECONDS,
             DEFAULT_PUBLIC_STALE_WHILE_REVALIDATE_SECONDS,
+            &[],
         );
 
         assert!(headers.contains(&(
-            "Cache-Control",
+            "Cache-Control".to_string(),
             "public, max-age=3600, stale-while-revalidate=60".to_string()
         )));
-        assert!(headers.contains(&("Vary", "Accept".to_string())));
-        assert!(headers.contains(&("X-Content-Type-Options", "nosniff".to_string())));
+        assert!(headers.contains(&("Vary".to_string(), "Accept".to_string())));
+        assert!(headers.contains(&("X-Content-Type-Options".to_string(), "nosniff".to_string())));
         assert!(headers.contains(&(
-            "Content-Disposition",
+            "Content-Disposition".to_string(),
             "inline; filename=\"truss.webp\"".to_string()
         )));
-        assert!(headers.contains(&("Cache-Status", "\"truss\"; fwd=miss".to_string())));
+        assert!(headers.contains(&(
+            "Cache-Status".to_string(),
+            "\"truss\"; fwd=miss".to_string()
+        )));
     }
 
     #[test]
@@ -2449,9 +2713,10 @@ mod tests {
             CacheHitStatus::Disabled,
             DEFAULT_PUBLIC_MAX_AGE_SECONDS,
             DEFAULT_PUBLIC_STALE_WHILE_REVALIDATE_SECONDS,
+            &[],
         );
 
-        assert!(headers.contains(&("Content-Security-Policy", "sandbox".to_string())));
+        assert!(headers.contains(&("Content-Security-Policy".to_string(), "sandbox".to_string())));
     }
 
     #[test]
@@ -2464,6 +2729,7 @@ mod tests {
             CacheHitStatus::Disabled,
             DEFAULT_PUBLIC_MAX_AGE_SECONDS,
             DEFAULT_PUBLIC_STALE_WHILE_REVALIDATE_SECONDS,
+            &[],
         );
 
         assert!(!headers.iter().any(|(k, _)| *k == "Content-Security-Policy"));
@@ -2680,8 +2946,9 @@ mod tests {
             CacheHitStatus::Hit,
             DEFAULT_PUBLIC_MAX_AGE_SECONDS,
             DEFAULT_PUBLIC_STALE_WHILE_REVALIDATE_SECONDS,
+            &[],
         );
-        assert!(headers.contains(&("Cache-Status", "\"truss\"; hit".to_string())));
+        assert!(headers.contains(&("Cache-Status".to_string(), "\"truss\"; hit".to_string())));
     }
 
     #[test]
@@ -2694,8 +2961,12 @@ mod tests {
             CacheHitStatus::Miss,
             DEFAULT_PUBLIC_MAX_AGE_SECONDS,
             DEFAULT_PUBLIC_STALE_WHILE_REVALIDATE_SECONDS,
+            &[],
         );
-        assert!(headers.contains(&("Cache-Status", "\"truss\"; fwd=miss".to_string())));
+        assert!(headers.contains(&(
+            "Cache-Status".to_string(),
+            "\"truss\"; fwd=miss".to_string()
+        )));
     }
 
     #[test]
@@ -5024,20 +5295,24 @@ mod tests {
 
     #[test]
     fn cache_status_hit_detected() {
-        let headers: Vec<(&str, String)> = vec![("Cache-Status", "\"truss\"; hit".to_string())];
+        let headers: Vec<(String, String)> =
+            vec![("Cache-Status".to_string(), "\"truss\"; hit".to_string())];
         assert_eq!(super::extract_cache_status(&headers), Some("hit"));
     }
 
     #[test]
     fn cache_status_miss_detected() {
-        let headers: Vec<(&str, String)> =
-            vec![("Cache-Status", "\"truss\"; fwd=miss".to_string())];
+        let headers: Vec<(String, String)> = vec![(
+            "Cache-Status".to_string(),
+            "\"truss\"; fwd=miss".to_string(),
+        )];
         assert_eq!(super::extract_cache_status(&headers), Some("miss"));
     }
 
     #[test]
     fn cache_status_none_when_header_absent() {
-        let headers: Vec<(&str, String)> = vec![("Content-Type", "image/png".to_string())];
+        let headers: Vec<(String, String)> =
+            vec![("Content-Type".to_string(), "image/png".to_string())];
         assert!(super::extract_cache_status(&headers).is_none());
     }
 
@@ -5630,5 +5905,109 @@ mod tests {
         } else {
             assert!(mem.is_none(), "memoryUsage should be absent on non-Linux");
         }
+    }
+
+    // ── graceful shutdown: draining flag ─────────────────────────────
+
+    #[test]
+    fn health_ready_returns_503_when_draining() {
+        let storage = temp_dir("health-ready-draining");
+        let config = ServerConfig::new(storage, None);
+        config.draining.store(true, Ordering::Relaxed);
+
+        let response = route_request(
+            HttpRequest {
+                method: "GET".to_string(),
+                target: "/health/ready".to_string(),
+                version: "HTTP/1.1".to_string(),
+                headers: Vec::new(),
+                body: Vec::new(),
+            },
+            &config,
+        );
+
+        assert_eq!(response.status, "503 Service Unavailable");
+        let body: serde_json::Value =
+            serde_json::from_slice(&response.body).expect("parse ready body");
+        assert_eq!(body["status"], "fail");
+        let checks = body["checks"].as_array().expect("checks array");
+        assert!(
+            checks
+                .iter()
+                .any(|c| c["name"] == "draining" && c["status"] == "fail")
+        );
+    }
+
+    #[test]
+    fn health_ready_returns_ok_when_not_draining() {
+        let storage = temp_dir("health-ready-not-draining");
+        let config = ServerConfig::new(storage, None);
+        // draining is false by default.
+        let response = route_request(
+            HttpRequest {
+                method: "GET".to_string(),
+                target: "/health/ready".to_string(),
+                version: "HTTP/1.1".to_string(),
+                headers: Vec::new(),
+                body: Vec::new(),
+            },
+            &config,
+        );
+
+        assert_eq!(response.status, "200 OK");
+        let body: serde_json::Value =
+            serde_json::from_slice(&response.body).expect("parse ready body");
+        assert_eq!(body["status"], "ok");
+        // Should not have a draining check entry.
+        let checks = body["checks"].as_array().expect("checks array");
+        assert!(!checks.iter().any(|c| c["name"] == "draining"));
+    }
+
+    // ── Drain during normal request processing (m10) ─────────────
+
+    #[test]
+    fn health_live_returns_200_while_draining() {
+        let storage = temp_dir("live-draining");
+        let config = ServerConfig::new(storage, None);
+        config.draining.store(true, Ordering::Relaxed);
+
+        let response = route_request(
+            HttpRequest {
+                method: "GET".to_string(),
+                target: "/health/live".to_string(),
+                version: "HTTP/1.1".to_string(),
+                headers: Vec::new(),
+                body: Vec::new(),
+            },
+            &config,
+        );
+
+        // Liveness should always return 200 even when draining — only
+        // readiness returns 503.
+        assert_eq!(response.status, "200 OK");
+    }
+
+    #[test]
+    fn normal_request_processed_while_draining() {
+        let storage = temp_dir("normal-draining");
+        let config = ServerConfig::new(storage, None);
+        config.draining.store(true, Ordering::Relaxed);
+
+        // A non-health, non-image request should still be routed (e.g. 404
+        // because the path doesn't match any route) — it should NOT get a
+        // 503 just because the server is draining.
+        let response = route_request(
+            HttpRequest {
+                method: "GET".to_string(),
+                target: "/nonexistent".to_string(),
+                version: "HTTP/1.1".to_string(),
+                headers: Vec::new(),
+                body: Vec::new(),
+            },
+            &config,
+        );
+
+        // The path doesn't match any route, so we get 404 — NOT 503.
+        assert_eq!(response.status, "404 Not Found");
     }
 }
