@@ -266,6 +266,8 @@ truss validate
 | `TRUSS_MAX_UPLOAD_BYTES` | Max upload body size in bytes; excess requests receive 413 (default: `104857600` = 100 MB, range: 1-10737418240) |
 | `TRUSS_STORAGE_TIMEOUT_SECS` | Download timeout for object storage backends in seconds (default: `30`, range: 1-300) |
 | `TRUSS_KEEP_ALIVE_MAX_REQUESTS` | Max requests per keep-alive connection before the server closes it (default: `100`, range: 1-100000) |
+| `TRUSS_HEALTH_CACHE_MIN_FREE_BYTES` | Minimum free bytes on cache disk; `/health/ready` returns 503 when breached (disabled by default) |
+| `TRUSS_HEALTH_MAX_MEMORY_BYTES` | Maximum process RSS in bytes; `/health/ready` returns 503 when breached (disabled by default, Linux only) |
 
 `TRUSS_STORAGE_BACKEND` selects the source for public `GET /images/by-path`. When set to `s3`, `gcs`, or `azure`, the `path` query parameter is used as the object key. Only one backend can be active at a time. Private endpoints can still use `kind: storage` regardless of this setting.
 

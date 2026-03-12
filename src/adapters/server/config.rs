@@ -231,6 +231,16 @@ pub struct ServerConfig {
     ///
     /// Configurable via `TRUSS_DISABLE_METRICS`. When enabled, `/metrics` returns 404.
     pub disable_metrics: bool,
+    /// Minimum free bytes on the cache disk before `/health/ready` reports failure.
+    ///
+    /// Configurable via `TRUSS_HEALTH_CACHE_MIN_FREE_BYTES`. When unset, the cache
+    /// disk free-space check is skipped.
+    pub health_cache_min_free_bytes: Option<u64>,
+    /// Maximum resident memory (RSS) in bytes before `/health/ready` reports failure.
+    ///
+    /// Configurable via `TRUSS_HEALTH_MAX_MEMORY_BYTES`. When unset, the memory
+    /// check is skipped. Only effective on Linux.
+    pub health_max_memory_bytes: Option<u64>,
     /// Per-server counter tracking the number of image transforms currently in
     /// flight.  This is runtime state (not configuration) but lives here so that
     /// each `serve_with_config` invocation gets an independent counter, avoiding
@@ -283,6 +293,8 @@ impl Clone for ServerConfig {
             keep_alive_max_requests: self.keep_alive_max_requests,
             metrics_token: self.metrics_token.clone(),
             disable_metrics: self.disable_metrics,
+            health_cache_min_free_bytes: self.health_cache_min_free_bytes,
+            health_max_memory_bytes: self.health_max_memory_bytes,
             transforms_in_flight: Arc::clone(&self.transforms_in_flight),
             presets: self.presets.clone(),
             #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
@@ -342,6 +354,11 @@ impl fmt::Debug for ServerConfig {
                 &self.metrics_token.as_ref().map(|_| "[REDACTED]"),
             )
             .field("disable_metrics", &self.disable_metrics)
+            .field(
+                "health_cache_min_free_bytes",
+                &self.health_cache_min_free_bytes,
+            )
+            .field("health_max_memory_bytes", &self.health_max_memory_bytes)
             .field("presets", &self.presets.keys().collect::<Vec<_>>());
         #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
         {
@@ -384,6 +401,8 @@ impl PartialEq for ServerConfig {
             && self.keep_alive_max_requests == other.keep_alive_max_requests
             && self.metrics_token == other.metrics_token
             && self.disable_metrics == other.disable_metrics
+            && self.health_cache_min_free_bytes == other.health_cache_min_free_bytes
+            && self.health_max_memory_bytes == other.health_max_memory_bytes
             && self.presets == other.presets
             && cfg_storage_eq(self, other)
     }
@@ -479,6 +498,8 @@ impl ServerConfig {
             keep_alive_max_requests: DEFAULT_KEEP_ALIVE_MAX_REQUESTS,
             metrics_token: None,
             disable_metrics: false,
+            health_cache_min_free_bytes: None,
+            health_max_memory_bytes: None,
             transforms_in_flight: Arc::new(AtomicU64::new(0)),
             presets: HashMap::new(),
             #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
@@ -908,6 +929,11 @@ impl ServerConfig {
             .filter(|value| !value.is_empty());
         let disable_metrics = env_flag("TRUSS_DISABLE_METRICS");
 
+        let health_cache_min_free_bytes =
+            parse_env_u64_ranged("TRUSS_HEALTH_CACHE_MIN_FREE_BYTES", 1, u64::MAX)?;
+        let health_max_memory_bytes =
+            parse_env_u64_ranged("TRUSS_HEALTH_MAX_MEMORY_BYTES", 1, u64::MAX)?;
+
         let presets = parse_presets_from_env()?;
 
         Ok(Self {
@@ -930,6 +956,8 @@ impl ServerConfig {
             keep_alive_max_requests,
             metrics_token,
             disable_metrics,
+            health_cache_min_free_bytes,
+            health_max_memory_bytes,
             transforms_in_flight: Arc::new(AtomicU64::new(0)),
             presets,
             #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]

@@ -1325,6 +1325,49 @@ fn handle_upload_request(request: HttpRequest, config: &ServerConfig) -> HttpRes
     )
 }
 
+/// Returns the number of free bytes on the filesystem containing `path`,
+/// or `None` if the query fails.
+#[cfg(target_os = "linux")]
+fn disk_free_bytes(path: &std::path::Path) -> Option<u64> {
+    use std::ffi::CString;
+
+    let c_path = CString::new(path.to_str()?).ok()?;
+    let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+    let ret = unsafe { libc::statvfs(c_path.as_ptr(), &mut stat) };
+    if ret == 0 {
+        Some(stat.f_bavail * stat.f_frsize)
+    } else {
+        None
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn disk_free_bytes(_path: &std::path::Path) -> Option<u64> {
+    None
+}
+
+/// Returns the current process RSS (Resident Set Size) in bytes by reading
+/// `/proc/self/status`. Returns `None` on non-Linux platforms or on read failure.
+#[cfg(target_os = "linux")]
+fn process_rss_bytes() -> Option<u64> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    for line in status.lines() {
+        if let Some(value) = line.strip_prefix("VmRSS:") {
+            let value = value.trim();
+            // Format: "123456 kB"
+            let kb_str = value.strip_suffix(" kB")?.trim();
+            let kb: u64 = kb_str.parse().ok()?;
+            return Some(kb * 1024);
+        }
+    }
+    None
+}
+
+#[cfg(not(target_os = "linux"))]
+fn process_rss_bytes() -> Option<u64> {
+    None
+}
+
 /// Returns a minimal liveness response confirming the process is running.
 fn handle_health_live() -> HttpResponse {
     let body = serde_json::to_vec(&json!({
@@ -1340,8 +1383,7 @@ fn handle_health_live() -> HttpResponse {
 
 /// Returns a readiness response after checking that critical infrastructure
 /// dependencies are available (storage root, cache root if configured, S3
-/// reachability).  Transform capacity is intentionally excluded — it is a
-/// runtime signal reported only by the full `/health` diagnostic endpoint.
+/// reachability) and configurable resource thresholds.
 fn handle_health_ready(config: &ServerConfig) -> HttpResponse {
     let mut checks: Vec<serde_json::Value> = Vec::new();
     let mut all_ok = true;
@@ -1363,6 +1405,32 @@ fn handle_health_ready(config: &ServerConfig) -> HttpResponse {
             "status": if cache_ok { "ok" } else { "fail" },
         }));
         if !cache_ok {
+            all_ok = false;
+        }
+    }
+
+    if let Some(min_free) = config.health_cache_min_free_bytes {
+        if let Some(cache_root) = &config.cache_root {
+            let free = disk_free_bytes(cache_root);
+            let ok = free.is_some_and(|f| f >= min_free);
+            checks.push(json!({
+                "name": "cacheDiskFree",
+                "status": if ok { "ok" } else { "fail" },
+            }));
+            if !ok {
+                all_ok = false;
+            }
+        }
+    }
+
+    if let Some(max_mem) = config.health_max_memory_bytes {
+        let rss = process_rss_bytes();
+        let ok = rss.is_none_or(|r| r <= max_mem);
+        checks.push(json!({
+            "name": "memoryUsage",
+            "status": if ok { "ok" } else { "fail" },
+        }));
+        if !ok {
             all_ok = false;
         }
     }
@@ -1438,14 +1506,60 @@ fn handle_health(config: &ServerConfig) -> HttpResponse {
         }
     }
 
+    // Cache disk free space
+    if let Some(cache_root) = &config.cache_root {
+        let free = disk_free_bytes(cache_root);
+        let threshold = config.health_cache_min_free_bytes;
+        let disk_ok = match (free, threshold) {
+            (Some(f), Some(min)) => f >= min,
+            _ => true,
+        };
+        let mut check = json!({
+            "name": "cacheDiskFree",
+            "status": if disk_ok { "ok" } else { "fail" },
+        });
+        if let Some(f) = free {
+            check["freeBytes"] = json!(f);
+        }
+        if let Some(min) = threshold {
+            check["thresholdBytes"] = json!(min);
+        }
+        checks.push(check);
+        if !disk_ok {
+            all_ok = false;
+        }
+    }
+
+    // Concurrency utilization
     let in_flight = config.transforms_in_flight.load(Ordering::Relaxed);
     let overloaded = in_flight >= config.max_concurrent_transforms;
     checks.push(json!({
         "name": "transformCapacity",
         "status": if overloaded { "fail" } else { "ok" },
+        "current": in_flight,
+        "max": config.max_concurrent_transforms,
     }));
     if overloaded {
         all_ok = false;
+    }
+
+    // Memory usage (Linux only)
+    let rss = process_rss_bytes();
+    if let Some(rss_bytes) = rss {
+        let threshold = config.health_max_memory_bytes;
+        let mem_ok = threshold.is_none_or(|max| rss_bytes <= max);
+        let mut check = json!({
+            "name": "memoryUsage",
+            "status": if mem_ok { "ok" } else { "fail" },
+            "rssBytes": rss_bytes,
+        });
+        if let Some(max) = threshold {
+            check["thresholdBytes"] = json!(max);
+        }
+        checks.push(check);
+        if !mem_ok {
+            all_ok = false;
+        }
     }
 
     let status_str = if all_ok { "ok" } else { "fail" };

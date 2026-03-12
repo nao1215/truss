@@ -348,8 +348,18 @@ paths:
                 checks:
                   - name: storageRoot
                     status: ok
+                  - name: cacheDiskFree
+                    status: ok
+                    freeBytes: 53687091200
+                    thresholdBytes: 1073741824
                   - name: transformCapacity
                     status: ok
+                    current: 2
+                    max: 64
+                  - name: memoryUsage
+                    status: ok
+                    rssBytes: 134217728
+                    thresholdBytes: 536870912
                 maxInputPixels: 40000000
 
   /health/live:
@@ -382,8 +392,10 @@ paths:
         Readiness probe for container orchestrators (e.g. Kubernetes
         `readinessProbe`). Checks that the server is able to accept traffic by
         verifying the storage root is accessible, the cache root (if configured)
-        is accessible, and the object-storage backend (if configured) is
-        network-reachable.
+        is accessible, the object-storage backend (if configured) is
+        network-reachable, cache disk free space is above the configured
+        threshold (`TRUSS_HEALTH_CACHE_MIN_FREE_BYTES`), and process memory
+        usage is below the configured limit (`TRUSS_HEALTH_MAX_MEMORY_BYTES`).
 
         The object-storage reachability check (S3, GCS, or Azure) confirms
         that the configured bucket/container exists and the service responds to
