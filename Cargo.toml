@@ -7,7 +7,7 @@ license = "MIT"
 readme = "README.md"
 repository = "https://github.com/nao1215/truss"
 homepage = "https://nao1215.github.io/truss/"
-keywords = ["image", "cli", "server", "wasm", "avif"]
+keywords = ["image", "image-processing", "cli", "wasm", "webp"]
 categories = ["command-line-utilities", "multimedia::images", "web-programming::http-server"]
 
 [features]
