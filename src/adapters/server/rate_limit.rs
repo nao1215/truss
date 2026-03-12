@@ -62,7 +62,9 @@ impl RateLimiter {
         // Lazy cleanup when the map grows large.
         if buckets.len() > CLEANUP_THRESHOLD {
             buckets.retain(|_, bucket| {
-                now.duration_since(bucket.last_refill).as_secs_f64() < CLEANUP_IDLE_SECS
+                now.saturating_duration_since(bucket.last_refill)
+                    .as_secs_f64()
+                    < CLEANUP_IDLE_SECS
             });
         }
 
@@ -72,7 +74,9 @@ impl RateLimiter {
         });
 
         // Refill tokens based on elapsed time.
-        let elapsed = now.duration_since(bucket.last_refill).as_secs_f64();
+        let elapsed = now
+            .saturating_duration_since(bucket.last_refill)
+            .as_secs_f64();
         bucket.tokens = (bucket.tokens + elapsed * self.rate).min(self.burst);
         bucket.last_refill = now;
 
@@ -163,10 +167,16 @@ mod tests {
     fn cleanup_removes_idle_entries() {
         let limiter = RateLimiter::new(10.0, 1.0);
 
+        // On some platforms (Windows), Instant cannot represent times before
+        // process start, so checked_sub may return None.  Skip the test in
+        // that case rather than panicking.
+        let Some(old) = Instant::now().checked_sub(Duration::from_secs(600)) else {
+            return; // Platform does not support backward Instant arithmetic.
+        };
+
         // Insert more than CLEANUP_THRESHOLD entries with old timestamps.
         {
             let mut buckets = limiter.buckets.lock().unwrap();
-            let old = Instant::now() - Duration::from_secs(600);
             for i in 0..CLEANUP_THRESHOLD + 100 {
                 let ip = IpAddr::V4(Ipv4Addr::from((i as u32).to_be_bytes()));
                 buckets.insert(
