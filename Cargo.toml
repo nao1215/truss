@@ -57,7 +57,7 @@ aws-config = { version = "1", optional = true }
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "io-util", "time"], optional = true }
 google-cloud-storage = { version = "1", optional = true }
 google-cloud-auth = { version = "1", optional = true }
-azure_storage_blob = { version = "0.9", optional = true }
+azure_storage_blob = { version = "0.10", optional = true }
 azure_core = { version = "0.32", optional = true }
 futures = { version = "0.3", optional = true }
 flate2 = { version = "1", optional = true }
