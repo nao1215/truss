@@ -3139,11 +3139,7 @@ mod tests {
             ))
             .unwrap_or_else(|e| panic!("orientation {orientation} should succeed: {e}"));
 
-            let (expected_w, expected_h) = if orientation >= 5 {
-                (2, 4)
-            } else {
-                (4, 2)
-            };
+            let (expected_w, expected_h) = if orientation >= 5 { (2, 4) } else { (4, 2) };
             assert_eq!(
                 result.artifact.metadata.width,
                 Some(expected_w),

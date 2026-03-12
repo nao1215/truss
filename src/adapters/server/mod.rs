@@ -91,7 +91,7 @@ use std::io;
 use std::net::{TcpListener, TcpStream};
 use std::str::FromStr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use subtle::ConstantTimeEq;
 use url::Url;
@@ -728,9 +728,7 @@ fn preset_watcher(
     use config::parse_presets_file;
     use std::fs;
 
-    let mut last_modified = fs::metadata(&path)
-        .and_then(|m| m.modified())
-        .ok();
+    let mut last_modified = fs::metadata(&path).and_then(|m| m.modified()).ok();
 
     loop {
         std::thread::sleep(PRESET_WATCH_INTERVAL);
@@ -1297,9 +1295,7 @@ fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io::Result<()>
         if let (Some(limiter), Some(ip)) = (&config.rate_limiter, peer_ip)
             && !limiter.check(ip)
         {
-            let mut response = too_many_requests_response(
-                "rate limit exceeded — try again later",
-            );
+            let mut response = too_many_requests_response("rate limit exceeded — try again later");
             response
                 .headers
                 .push(("X-Request-Id".to_string(), request_id.clone()));
@@ -2202,14 +2198,11 @@ fn transform_source_bytes(
         }
     };
 
-    let cache = config
-        .cache_root
-        .as_ref()
-        .map(|root| {
-            TransformCache::new(root.clone())
-                .with_log_handler(config.log_handler.clone())
-                .with_max_bytes(config.cache_max_bytes)
-        });
+    let cache = config.cache_root.as_ref().map(|root| {
+        TransformCache::new(root.clone())
+            .with_log_handler(config.log_handler.clone())
+            .with_max_bytes(config.cache_max_bytes)
+    });
 
     if let Some(ref cache) = cache
         && options.format.is_some()
@@ -2847,10 +2840,13 @@ mod tests {
 
     #[test]
     fn negotiate_output_format_prefers_alpha_safe_formats_for_transparent_inputs() {
-        let format =
-            negotiate_output_format(Some("image/jpeg,image/png"), &artifact_with_alpha(true), &[])
-                .expect("negotiate output format")
-                .expect("resolved output format");
+        let format = negotiate_output_format(
+            Some("image/jpeg,image/png"),
+            &artifact_with_alpha(true),
+            &[],
+        )
+        .expect("negotiate output format")
+        .expect("resolved output format");
 
         assert_eq!(format, MediaType::Png);
     }
@@ -6206,8 +6202,8 @@ mod tests {
 
     #[test]
     fn preset_watcher_reloads_on_file_change() {
-        use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
 
         let dir = std::env::temp_dir().join(format!(
             "truss_test_watcher_{}",
@@ -6281,8 +6277,8 @@ mod tests {
 
     #[test]
     fn preset_watcher_keeps_old_presets_on_invalid_file() {
-        use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
 
         let dir = std::env::temp_dir().join(format!(
             "truss_test_watcher_invalid_{}",

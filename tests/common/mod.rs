@@ -110,7 +110,11 @@ pub fn spawn_fixture_server(responses: Vec<FixtureResponse>) -> (String, thread:
     (url, handle)
 }
 
-pub fn send_transform_request(addr: SocketAddr, body: &str, authorization: Option<&str>) -> Vec<u8> {
+pub fn send_transform_request(
+    addr: SocketAddr,
+    body: &str,
+    authorization: Option<&str>,
+) -> Vec<u8> {
     let mut stream = TcpStream::connect(addr).expect("connect to test server");
     let authorization_header = authorization
         .map(|value| format!("Authorization: Bearer {value}\r\n"))

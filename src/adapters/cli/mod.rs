@@ -1,7 +1,5 @@
 use crate::adapters::server::SignedUrlSource;
-use crate::{
-    CropRegion, Fit, MediaType, Position, Rgba8, Rotation, TransformOptions,
-};
+use crate::{CropRegion, Fit, MediaType, Position, Rgba8, Rotation, TransformOptions};
 use clap::{CommandFactory, Parser, Subcommand};
 use std::fs;
 use std::io::{self, Read, Write};
@@ -1339,11 +1337,11 @@ where
 
 #[cfg(test)]
 mod tests {
+    use super::serve::resolve_server_config;
     use super::{
         Command, ConvertCommand, HelpTopic, InputSource, OutputTarget, ServeCommand, SignCommand,
         parse_args, preprocess_args, run_with_io,
     };
-    use super::serve::resolve_server_config;
     use crate::{Fit, MediaType, RawArtifact, SignedUrlSource, TransformOptions, sniff_artifact};
     use image::codecs::png::PngEncoder;
     use image::{ColorType, ImageEncoder, Rgba, RgbaImage};

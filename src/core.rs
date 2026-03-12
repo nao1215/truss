@@ -2372,7 +2372,10 @@ mod tests {
         );
         let msg = err.to_string();
         assert!(msg.contains("4 bytes"), "should include file size: {msg}");
-        assert!(msg.contains("01 02 03 04"), "should include hex preview: {msg}");
+        assert!(
+            msg.contains("01 02 03 04"),
+            "should include hex preview: {msg}"
+        );
     }
 
     #[test]

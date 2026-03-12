@@ -1,8 +1,8 @@
 mod common;
 
 use common::{
-    png_bytes, send_metrics_request, send_raw_request, send_transform_request, spawn_fixture_server,
-    spawn_server, split_response, temp_dir,
+    png_bytes, send_metrics_request, send_raw_request, send_transform_request,
+    spawn_fixture_server, spawn_server, split_response, temp_dir,
 };
 use serial_test::serial;
 use std::fs;

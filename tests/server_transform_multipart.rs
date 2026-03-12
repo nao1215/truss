@@ -1,8 +1,6 @@
 mod common;
 
-use common::{
-    png_bytes, send_upload_request, spawn_server, split_response, temp_dir, upload_body,
-};
+use common::{png_bytes, send_upload_request, spawn_server, split_response, temp_dir, upload_body};
 use truss::{MediaType, RawArtifact, ServerConfig, sniff_artifact};
 
 #[test]

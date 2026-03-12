@@ -2,8 +2,8 @@ use crate::adapters::server::{self, SignedUrlSource, sign_public_url};
 use std::io::Write;
 
 use super::{
-    ClapSignArgs, CliError, Command, HelpTopic, SignCommand, TransformFields, map_transform_error,
-    runtime_error, sign_error, EXIT_RUNTIME, EXIT_TRANSFORM, EXIT_USAGE,
+    ClapSignArgs, CliError, Command, EXIT_RUNTIME, EXIT_TRANSFORM, EXIT_USAGE, HelpTopic,
+    SignCommand, TransformFields, map_transform_error, runtime_error, sign_error,
 };
 
 // ---------------------------------------------------------------------------

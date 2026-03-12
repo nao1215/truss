@@ -204,7 +204,8 @@ fn fetch_remote_bytes(
             Ok(response) => {
                 let status = response.status().as_u16();
                 if is_redirect_status(status) {
-                    current_url = next_redirect_url(&target.url, &response, redirect_index, max_redirects)?;
+                    current_url =
+                        next_redirect_url(&target.url, &response, redirect_index, max_redirects)?;
                 } else if (200..=299).contains(&status) {
                     let bytes =
                         read_remote_response_body(target.url.as_str(), response, policy.max_bytes)?;
@@ -692,27 +693,23 @@ mod redirect_tests {
 
     #[test]
     fn validate_content_encoding_accepts_known_encodings() {
-        let response = build_response(
-            ureq::http::Response::builder().header("Content-Encoding", "gzip"),
-        );
+        let response =
+            build_response(ureq::http::Response::builder().header("Content-Encoding", "gzip"));
         assert!(validate_remote_content_encoding(&response).is_ok());
 
-        let response = build_response(
-            ureq::http::Response::builder().header("Content-Encoding", "br"),
-        );
+        let response =
+            build_response(ureq::http::Response::builder().header("Content-Encoding", "br"));
         assert!(validate_remote_content_encoding(&response).is_ok());
 
-        let response = build_response(
-            ureq::http::Response::builder().header("Content-Encoding", "identity"),
-        );
+        let response =
+            build_response(ureq::http::Response::builder().header("Content-Encoding", "identity"));
         assert!(validate_remote_content_encoding(&response).is_ok());
     }
 
     #[test]
     fn validate_content_encoding_rejects_unknown_encoding() {
-        let response = build_response(
-            ureq::http::Response::builder().header("Content-Encoding", "deflate"),
-        );
+        let response =
+            build_response(ureq::http::Response::builder().header("Content-Encoding", "deflate"));
         assert!(validate_remote_content_encoding(&response).is_err());
     }
 
@@ -807,7 +804,10 @@ mod redirect_tests {
         );
 
         let result = next_redirect_url(&current_url, &response, 3, 3);
-        assert!(result.is_err(), "should error when redirect_index == max_redirects");
+        assert!(
+            result.is_err(),
+            "should error when redirect_index == max_redirects"
+        );
     }
 
     #[test]
@@ -853,12 +853,13 @@ mod redirect_tests {
     #[test]
     fn next_redirect_url_missing_location_returns_error() {
         let current_url = Url::parse("http://example.com/a").unwrap();
-        let response = build_response(
-            ureq::http::Response::builder().status(302),
-        );
+        let response = build_response(ureq::http::Response::builder().status(302));
 
         let result = next_redirect_url(&current_url, &response, 0, 5);
-        assert!(result.is_err(), "missing Location header should produce an error");
+        assert!(
+            result.is_err(),
+            "missing Location header should produce an error"
+        );
     }
 
     #[test]

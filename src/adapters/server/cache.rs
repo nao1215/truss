@@ -730,7 +730,11 @@ mod tests {
         }
 
         let entries = collect_cache_entries(dir.path()).unwrap();
-        assert_eq!(entries.len(), 5, "all entries should survive when max_bytes is 0");
+        assert_eq!(
+            entries.len(),
+            5,
+            "all entries should survive when max_bytes is 0"
+        );
     }
 
     #[test]
@@ -745,7 +749,11 @@ mod tests {
         }
 
         let entries = collect_cache_entries(dir.path()).unwrap();
-        assert_eq!(entries.len(), 3, "all entries should survive when under limit");
+        assert_eq!(
+            entries.len(),
+            3,
+            "all entries should survive when under limit"
+        );
     }
 
     #[test]

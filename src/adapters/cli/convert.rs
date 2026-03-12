@@ -7,9 +7,9 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use super::{
-    ClapConvertArgs, CliError, Command, ConvertCommand, HelpTopic, InputSource, OutputTarget,
-    TransformFields, convert_error, convert_usage, map_transform_error, read_input_bytes,
-    runtime_error, validate_url, EXIT_INPUT, EXIT_IO, EXIT_RUNTIME, EXIT_USAGE,
+    ClapConvertArgs, CliError, Command, ConvertCommand, EXIT_INPUT, EXIT_IO, EXIT_RUNTIME,
+    EXIT_USAGE, HelpTopic, InputSource, OutputTarget, TransformFields, convert_error,
+    convert_usage, map_transform_error, read_input_bytes, runtime_error, validate_url,
 };
 
 // ---------------------------------------------------------------------------
@@ -140,7 +140,9 @@ where
         })?;
         Some(WatermarkInput {
             image: wm_artifact,
-            position: command.watermark_position.unwrap_or(crate::Position::BottomRight),
+            position: command
+                .watermark_position
+                .unwrap_or(crate::Position::BottomRight),
             opacity: command.watermark_opacity.unwrap_or(50),
             margin: command.watermark_margin.unwrap_or(10),
         })

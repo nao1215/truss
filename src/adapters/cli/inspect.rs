@@ -3,8 +3,8 @@ use std::io::{Read, Write};
 use std::path::PathBuf;
 
 use super::{
-    ClapInspectArgs, CliError, Command, HelpTopic, InputSource, InspectCommand, inspect_usage,
-    read_input_bytes, runtime_error, validate_url, EXIT_INPUT, EXIT_RUNTIME, EXIT_USAGE,
+    ClapInspectArgs, CliError, Command, EXIT_INPUT, EXIT_RUNTIME, EXIT_USAGE, HelpTopic,
+    InputSource, InspectCommand, inspect_usage, read_input_bytes, runtime_error, validate_url,
 };
 
 // ---------------------------------------------------------------------------

@@ -169,10 +169,13 @@ mod tests {
             let old = Instant::now() - Duration::from_secs(600);
             for i in 0..CLEANUP_THRESHOLD + 100 {
                 let ip = IpAddr::V4(Ipv4Addr::from((i as u32).to_be_bytes()));
-                buckets.insert(ip, Bucket {
-                    tokens: 0.0,
-                    last_refill: old,
-                });
+                buckets.insert(
+                    ip,
+                    Bucket {
+                        tokens: 0.0,
+                        last_refill: old,
+                    },
+                );
             }
         }
 

@@ -962,7 +962,8 @@ mod tests {
     #[test]
     fn test_negotiate_output_format_respects_client_q_preference() {
         let artifact = make_artifact(MediaType::Jpeg, None);
-        let result = negotiate_output_format(Some("image/avif;q=0.5, image/jpeg;q=1.0"), &artifact, &[]);
+        let result =
+            negotiate_output_format(Some("image/avif;q=0.5, image/jpeg;q=1.0"), &artifact, &[]);
         // jpeg has higher q, so it should win
         assert_eq!(result.unwrap(), Some(MediaType::Jpeg));
     }
@@ -1172,11 +1173,21 @@ mod tests {
     #[test]
     fn test_preferred_output_media_types_custom_preference_reorders() {
         let artifact = make_artifact(MediaType::Jpeg, Some(false));
-        let pref = &[MediaType::Webp, MediaType::Jpeg, MediaType::Png, MediaType::Avif];
+        let pref = &[
+            MediaType::Webp,
+            MediaType::Jpeg,
+            MediaType::Png,
+            MediaType::Avif,
+        ];
         let types = preferred_output_media_types(&artifact, pref);
         assert_eq!(
             types,
-            vec![MediaType::Webp, MediaType::Jpeg, MediaType::Png, MediaType::Avif]
+            vec![
+                MediaType::Webp,
+                MediaType::Jpeg,
+                MediaType::Png,
+                MediaType::Avif
+            ]
         );
     }
 
@@ -1208,7 +1219,12 @@ mod tests {
     #[test]
     fn test_negotiate_with_custom_preference_webp_first() {
         let artifact = make_artifact(MediaType::Jpeg, None);
-        let pref = &[MediaType::Webp, MediaType::Avif, MediaType::Jpeg, MediaType::Png];
+        let pref = &[
+            MediaType::Webp,
+            MediaType::Avif,
+            MediaType::Jpeg,
+            MediaType::Png,
+        ];
         // Both webp and avif have q=1.0, but webp is preferred by config.
         let result = negotiate_output_format(Some("image/avif, image/webp"), &artifact, pref);
         assert_eq!(result.unwrap(), Some(MediaType::Webp));

@@ -3,8 +3,8 @@ use std::io::{self, Write};
 use std::net::TcpListener;
 
 use super::{
-    ClapServeArgs, ClapValidateArgs, CliError, Command, HelpTopic, ServeCommand, runtime_error,
-    serve_usage, EXIT_RUNTIME, EXIT_USAGE,
+    ClapServeArgs, ClapValidateArgs, CliError, Command, EXIT_RUNTIME, EXIT_USAGE, HelpTopic,
+    ServeCommand, runtime_error, serve_usage,
 };
 
 // ---------------------------------------------------------------------------

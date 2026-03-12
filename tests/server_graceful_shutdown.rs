@@ -10,8 +10,8 @@ mod common;
 use common::{split_response, temp_dir};
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::thread;
 use std::time::Duration;
 use truss::{ServerConfig, serve_once_with_config, serve_with_config};
@@ -143,7 +143,10 @@ fn serve_with_config_exits_on_draining_flag() {
 
     // The server should exit within a reasonable time.
     let result = handle.join().expect("server thread should not panic");
-    assert!(result.is_ok(), "serve_with_config should return Ok on graceful shutdown");
+    assert!(
+        result.is_ok(),
+        "serve_with_config should return Ok on graceful shutdown"
+    );
 
     // Verify the draining flag was set.
     assert!(
@@ -195,5 +198,8 @@ fn in_flight_request_completes_during_drain() {
     // Connect once more so the accept loop wakes up and notices the flag.
     let _ = TcpStream::connect(addr);
 
-    handle.join().expect("server thread").expect("serve_with_config");
+    handle
+        .join()
+        .expect("server thread")
+        .expect("serve_with_config");
 }

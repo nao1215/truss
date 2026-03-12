@@ -17,7 +17,7 @@ use std::fmt;
 use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use url::Url;
 
 /// Log verbosity level for the server.
@@ -1121,10 +1121,9 @@ impl ServerConfig {
             parse_env_u64_ranged("TRUSS_MAX_WATERMARK_BYTES", 1, 1024 * 1024 * 1024)?
                 .unwrap_or(super::remote::MAX_WATERMARK_BYTES);
 
-        let max_remote_redirects =
-            parse_env_u64_ranged("TRUSS_MAX_REMOTE_REDIRECTS", 0, 20)?
-                .unwrap_or(super::remote::MAX_REMOTE_REDIRECTS as u64)
-                as usize;
+        let max_remote_redirects = parse_env_u64_ranged("TRUSS_MAX_REMOTE_REDIRECTS", 0, 20)?
+            .unwrap_or(super::remote::MAX_REMOTE_REDIRECTS as u64)
+            as usize;
 
         #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
         let storage_timeout_secs = parse_env_u64_ranged("TRUSS_STORAGE_TIMEOUT_SECS", 1, 300)?
@@ -1230,24 +1229,20 @@ impl ServerConfig {
         let compression_level =
             parse_env_u64_ranged("TRUSS_COMPRESSION_LEVEL", 0, 9)?.unwrap_or(1) as u32;
 
-        let log_level = match env::var("TRUSS_LOG_LEVEL")
-            .ok()
-            .filter(|v| !v.is_empty())
-        {
-            Some(val) => val.parse::<LogLevel>().map_err(|e| {
-                io::Error::new(io::ErrorKind::InvalidInput, e)
-            })?,
+        let log_level = match env::var("TRUSS_LOG_LEVEL").ok().filter(|v| !v.is_empty()) {
+            Some(val) => val
+                .parse::<LogLevel>()
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?,
             None => LogLevel::Info,
         };
 
         let format_preference = parse_format_preference_from_env()?;
 
         let rate_limiter = {
-            let rps = parse_env_u64_ranged("TRUSS_RATE_LIMIT_RPS", 0, 100_000)?
-                .unwrap_or(0);
+            let rps = parse_env_u64_ranged("TRUSS_RATE_LIMIT_RPS", 0, 100_000)?.unwrap_or(0);
             if rps > 0 {
-                let burst = parse_env_u64_ranged("TRUSS_RATE_LIMIT_BURST", 1, 100_000)?
-                    .unwrap_or(rps);
+                let burst =
+                    parse_env_u64_ranged("TRUSS_RATE_LIMIT_BURST", 1, 100_000)?.unwrap_or(rps);
                 Some(Arc::new(super::rate_limit::RateLimiter::new(
                     rps as f64,
                     burst as f64,
@@ -1396,8 +1391,8 @@ pub(super) fn parse_optional_env_u32(name: &str) -> io::Result<Option<u32>> {
 
 /// Parses presets from environment variables, returning both the preset map
 /// and the file path (if loaded from `TRUSS_PRESETS_FILE`).
-pub(super) fn parse_presets_from_env(
-) -> io::Result<(HashMap<String, TransformOptionsPayload>, Option<PathBuf>)> {
+pub(super) fn parse_presets_from_env()
+-> io::Result<(HashMap<String, TransformOptionsPayload>, Option<PathBuf>)> {
     let (json_str, source, file_path) = match env::var("TRUSS_PRESETS_FILE")
         .ok()
         .filter(|v| !v.is_empty())
@@ -1418,15 +1413,13 @@ pub(super) fn parse_presets_from_env(
         },
     };
 
-    let presets =
-        serde_json::from_str::<HashMap<String, TransformOptionsPayload>>(&json_str).map_err(
-            |e| {
-                io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!("{source} must be valid JSON: {e}"),
-                )
-            },
-        )?;
+    let presets = serde_json::from_str::<HashMap<String, TransformOptionsPayload>>(&json_str)
+        .map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{source} must be valid JSON: {e}"),
+            )
+        })?;
     Ok((presets, file_path))
 }
 
@@ -1752,7 +1745,8 @@ mod tests {
 
     #[test]
     fn parse_presets_file_nonexistent() {
-        let result = super::parse_presets_file(std::path::Path::new("/tmp/nonexistent_truss_test.json"));
+        let result =
+            super::parse_presets_file(std::path::Path::new("/tmp/nonexistent_truss_test.json"));
         assert!(result.is_err());
     }
 
@@ -1936,7 +1930,12 @@ mod tests {
 
     #[test]
     fn log_level_from_u8_roundtrip() {
-        for level in [LogLevel::Error, LogLevel::Warn, LogLevel::Info, LogLevel::Debug] {
+        for level in [
+            LogLevel::Error,
+            LogLevel::Warn,
+            LogLevel::Info,
+            LogLevel::Debug,
+        ] {
             assert_eq!(LogLevel::from_u8(level as u8), level);
         }
         // Unknown values default to Info.
@@ -1972,7 +1971,9 @@ mod tests {
         let mut config = ServerConfig::new(PathBuf::from("."), None);
         config.log_handler = Some(handler);
         // Set level to Warn — only Error and Warn should pass through.
-        config.log_level.store(LogLevel::Warn as u8, std::sync::atomic::Ordering::Relaxed);
+        config
+            .log_level
+            .store(LogLevel::Warn as u8, std::sync::atomic::Ordering::Relaxed);
 
         config.log_at(LogLevel::Error, "err");
         config.log_at(LogLevel::Warn, "wrn");
@@ -2065,9 +2066,6 @@ mod tests {
     fn parse_format_preference_trailing_comma_ok() {
         let _env = ScopedEnv::set("TRUSS_FORMAT_PREFERENCE", "avif,webp,");
         let result = parse_format_preference_from_env().unwrap();
-        assert_eq!(
-            result,
-            vec![crate::MediaType::Avif, crate::MediaType::Webp]
-        );
+        assert_eq!(result, vec![crate::MediaType::Avif, crate::MediaType::Webp]);
     }
 }
