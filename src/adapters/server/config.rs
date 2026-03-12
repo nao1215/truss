@@ -1022,6 +1022,14 @@ pub(super) fn parse_presets_from_env() -> io::Result<HashMap<String, TransformOp
     })
 }
 
+/// Validate that the `TRUSS_KEEP_ALIVE_MAX_REQUESTS` environment variable is
+/// correctly loaded into [`ServerConfig`].
+///
+/// ```
+/// # use std::path::PathBuf;
+/// let config = truss::ServerConfig::new(PathBuf::from("."), None);
+/// assert_eq!(config.keep_alive_max_requests, 100);
+/// ```
 pub(super) fn validate_public_base_url(value: String) -> io::Result<String> {
     let parsed = Url::parse(&value).map_err(|error| {
         io::Error::new(
@@ -1036,5 +1044,43 @@ pub(super) fn validate_public_base_url(value: String) -> io::Result<String> {
             io::ErrorKind::InvalidInput,
             "TRUSS_PUBLIC_BASE_URL must use http or https",
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn keep_alive_default() {
+        let config = ServerConfig::new(PathBuf::from("."), None);
+        assert_eq!(config.keep_alive_max_requests, 100);
+    }
+
+    #[test]
+    fn parse_keep_alive_env_valid() {
+        // SAFETY: test-only, single-threaded access to this env var.
+        unsafe { env::set_var("TRUSS_KEEP_ALIVE_MAX_REQUESTS", "500") };
+        let result = parse_env_u64_ranged("TRUSS_KEEP_ALIVE_MAX_REQUESTS", 1, 100_000);
+        unsafe { env::remove_var("TRUSS_KEEP_ALIVE_MAX_REQUESTS") };
+        assert_eq!(result.unwrap(), Some(500));
+    }
+
+    #[test]
+    fn parse_keep_alive_env_zero_rejected() {
+        // SAFETY: test-only, single-threaded access to this env var.
+        unsafe { env::set_var("TRUSS_KEEP_ALIVE_MAX_REQUESTS", "0") };
+        let result = parse_env_u64_ranged("TRUSS_KEEP_ALIVE_MAX_REQUESTS", 1, 100_000);
+        unsafe { env::remove_var("TRUSS_KEEP_ALIVE_MAX_REQUESTS") };
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_keep_alive_env_over_max_rejected() {
+        // SAFETY: test-only, single-threaded access to this env var.
+        unsafe { env::set_var("TRUSS_KEEP_ALIVE_MAX_REQUESTS", "100001") };
+        let result = parse_env_u64_ranged("TRUSS_KEEP_ALIVE_MAX_REQUESTS", 1, 100_000);
+        unsafe { env::remove_var("TRUSS_KEEP_ALIVE_MAX_REQUESTS") };
+        assert!(result.is_err());
     }
 }
