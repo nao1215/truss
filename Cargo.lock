@@ -4574,7 +4574,7 @@ dependencies = [
 
 [[package]]
 name = "truss-image"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "aws-config",
  "aws-sdk-s3",

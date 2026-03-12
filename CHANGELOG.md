@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.7.2
+
+### Fixed
+
+- Fix aarch64 cross-compilation failure by using newer cross-rs base image with OpenSSL 3.x support.
+
+### Changed
+
+- Add PR-triggered build verification to release workflow for catching build failures before tagging.
+- Release workflow jobs (publish, container, GitHub release) now run only on tag push, not on PRs.
+
 ## v0.7.1
 
 ### Added

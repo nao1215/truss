@@ -1,4 +1,5 @@
 [target.aarch64-unknown-linux-gnu]
+image = "ghcr.io/cross-rs/aarch64-unknown-linux-gnu:main"
 pre-build = [
-    "dpkg --add-architecture arm64 && apt-get update && apt-get install -y libssl-dev:arm64",
+    "dpkg --add-architecture arm64 && apt-get update && apt-get install -y libssl-dev:arm64 pkg-config",
 ]
