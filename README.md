@@ -174,6 +174,37 @@ truss photo.jpg -o watermarked.jpg \
   --watermark-opacity 50 --watermark-margin 10
 ```
 
+#### Examples: Crop, Rotate & Fit
+
+| | Original | Crop (`--crop 100,50,400,300`) | Rotate (`--rotate 270`) | Fit cover (`--fit cover`) |
+|---|---|---|---|---|
+| | ![original](./doc/img/sample-bee.jpg) | ![cropped](./doc/img/sample-bee-cropped.jpg) | ![rotated](./doc/img/sample-bee-rotated.jpg) | ![cover](./doc/img/sample-bee-cover.jpg) |
+
+```sh
+# Crop a region (x, y, width, height) -- applied before resize
+truss photo.jpg -o cropped.jpg --crop 100,50,400,300
+
+# Rotate 270 degrees clockwise
+truss photo.jpg -o rotated.jpg --rotate 270
+
+# Fit into a 300x300 box using cover mode (fills the box, crops excess)
+truss photo.jpg -o cover.jpg --width 300 --height 300 --fit cover
+```
+
+#### Example: Inspect metadata
+
+```console
+$ truss inspect photo.jpg
+{
+  "format": "jpeg",
+  "mime": "image/jpeg",
+  "width": 640,
+  "height": 427,
+  "hasAlpha": false,
+  "isAnimated": false
+}
+```
+
 ### HTTP Server -- one curl to transform
 
 ```sh
