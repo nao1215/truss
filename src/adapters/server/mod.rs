@@ -17,7 +17,7 @@ pub mod s3;
 #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
 pub use config::StorageBackend;
 use config::StorageBackendLabel;
-pub use config::{DEFAULT_BIND_ADDR, DEFAULT_STORAGE_ROOT, LogHandler, ServerConfig};
+pub use config::{DEFAULT_BIND_ADDR, DEFAULT_STORAGE_ROOT, LogHandler, LogLevel, ServerConfig};
 
 use auth::{
     authorize_request, authorize_request_headers, authorize_signed_request,
@@ -66,7 +66,7 @@ use std::io;
 use std::net::{TcpListener, TcpStream};
 use std::str::FromStr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicU8, Ordering};
 use std::time::{Duration, Instant};
 use subtle::ConstantTimeEq;
 use url::Url;
@@ -372,7 +372,7 @@ pub fn serve_with_config(listener: TcpListener, config: ServerConfig) -> io::Res
                     }
                 }; // MutexGuard dropped here — before handle_stream runs.
                 if let Err(err) = handle_stream(stream, &cfg) {
-                    cfg.log(&format!("failed to handle connection: {err}"));
+                    cfg.log_warn(&format!("failed to handle connection: {err}"));
                 }
             }
         }));
@@ -382,7 +382,11 @@ pub fn serve_with_config(listener: TcpListener, config: ServerConfig) -> io::Res
     // shared `draining` flag (so /health/ready returns 503 immediately) and
     // writes a byte to a self-pipe to wake the accept loop.
     let (shutdown_read_fd, shutdown_write_fd) = create_shutdown_pipe()?;
-    install_signal_handler(Arc::clone(&config.draining), shutdown_write_fd);
+    install_signal_handler(
+        Arc::clone(&config.draining),
+        shutdown_write_fd,
+        Arc::clone(&config.log_level),
+    );
 
     // Set the listener to non-blocking so we can multiplex between incoming
     // connections and the shutdown pipe.
@@ -567,9 +571,12 @@ static SHUTDOWN_PIPE_WR: AtomicI32 = AtomicI32::new(-1);
 /// Global draining flag set by the signal handler.
 static GLOBAL_DRAINING: std::sync::atomic::AtomicPtr<AtomicBool> =
     std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
+/// Global log level, cycled by SIGUSR1 (Unix only).
+static GLOBAL_LOG_LEVEL: std::sync::atomic::AtomicPtr<AtomicU8> =
+    std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
 
 #[cfg(unix)]
-fn install_signal_handler(draining: Arc<AtomicBool>, write_fd: i32) {
+fn install_signal_handler(draining: Arc<AtomicBool>, write_fd: i32, log_level: Arc<AtomicU8>) {
     // Store the write fd and draining pointer in globals accessible from the
     // async-signal-safe handler.
     SHUTDOWN_PIPE_WR.store(write_fd, Ordering::SeqCst);
@@ -578,6 +585,9 @@ fn install_signal_handler(draining: Arc<AtomicBool>, write_fd: i32) {
     // and `libc::write`, both of which are async-signal-safe.
     let ptr = Arc::into_raw(draining).cast_mut();
     GLOBAL_DRAINING.store(ptr, Ordering::SeqCst);
+    // SAFETY: same as above — leaked intentionally for the process lifetime.
+    let lvl_ptr = Arc::into_raw(log_level).cast_mut();
+    GLOBAL_LOG_LEVEL.store(lvl_ptr, Ordering::SeqCst);
 
     // Use sigaction instead of signal to avoid SysV semantics where the handler
     // is reset to SIG_DFL after the first invocation. SA_RESTART ensures that
@@ -589,7 +599,38 @@ fn install_signal_handler(draining: Arc<AtomicBool>, write_fd: i32) {
         sa.sa_flags = libc::SA_RESTART;
         libc::sigaction(libc::SIGTERM, &sa, std::ptr::null_mut());
         libc::sigaction(libc::SIGINT, &sa, std::ptr::null_mut());
+
+        let mut sa_usr1: libc::sigaction = std::mem::zeroed();
+        sa_usr1.sa_sigaction = sigusr1_handler as *const () as libc::sighandler_t;
+        libc::sigemptyset(&mut sa_usr1.sa_mask);
+        sa_usr1.sa_flags = libc::SA_RESTART;
+        libc::sigaction(libc::SIGUSR1, &sa_usr1, std::ptr::null_mut());
     }
+}
+
+/// SIGUSR1 handler: cycles the log level.
+///
+/// This is async-signal-safe because it only performs atomic load/store
+/// operations and a raw `libc::write` to stderr.
+#[cfg(unix)]
+extern "C" fn sigusr1_handler(_sig: libc::c_int) {
+    let ptr = GLOBAL_LOG_LEVEL.load(Ordering::SeqCst);
+    if ptr.is_null() {
+        return;
+    }
+    let level_atomic = unsafe { &*ptr };
+    let current = level_atomic.load(Ordering::SeqCst);
+    let next = LogLevel::from_u8(current).cycle();
+    level_atomic.store(next as u8, Ordering::SeqCst);
+
+    // Write a log message directly to stderr (async-signal-safe).
+    let msg = match next {
+        LogLevel::Error => b"[log] level changed to error\n" as &[u8],
+        LogLevel::Warn => b"[log] level changed to warn\n",
+        LogLevel::Info => b"[log] level changed to info\n",
+        LogLevel::Debug => b"[log] level changed to debug\n",
+    };
+    unsafe { libc::write(2, msg.as_ptr().cast(), msg.len()) };
 }
 
 #[cfg(unix)]
@@ -608,7 +649,7 @@ extern "C" fn signal_handler(_sig: libc::c_int) {
 }
 
 #[cfg(windows)]
-fn install_signal_handler(draining: Arc<AtomicBool>, _write_fd: i32) {
+fn install_signal_handler(draining: Arc<AtomicBool>, _write_fd: i32, _log_level: Arc<AtomicU8>) {
     // Store the draining pointer in the global so the signal handler can set it.
     let ptr = Arc::into_raw(draining).cast_mut();
     GLOBAL_DRAINING.store(ptr, Ordering::SeqCst);
@@ -1116,10 +1157,10 @@ fn emit_access_log(config: &ServerConfig, entry: &AccessLogEntry<'_>) {
 fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io::Result<()> {
     // Prevent slow or stalled clients from blocking the accept loop indefinitely.
     if let Err(err) = stream.set_read_timeout(Some(SOCKET_READ_TIMEOUT)) {
-        config.log(&format!("failed to set socket read timeout: {err}"));
+        config.log_warn(&format!("failed to set socket read timeout: {err}"));
     }
     if let Err(err) = stream.set_write_timeout(Some(SOCKET_WRITE_TIMEOUT)) {
-        config.log(&format!("failed to set socket write timeout: {err}"));
+        config.log_warn(&format!("failed to set socket write timeout: {err}"));
     }
 
     let mut requests_served: u64 = 0;

@@ -17,8 +17,86 @@ use std::fmt;
 use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use url::Url;
+
+/// Log verbosity level for the server.
+///
+/// Levels are ordered from least verbose (`Error`) to most verbose (`Debug`).
+/// A message is emitted only when its level is less than or equal to the
+/// currently active level.
+///
+/// Configurable at startup via `TRUSS_LOG_LEVEL` (default: `info`) and
+/// switchable at runtime via `SIGUSR1` (Unix only), which cycles through
+/// `info → debug → error → warn → info`.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum LogLevel {
+    /// Errors that indicate a failed operation.
+    Error = 0,
+    /// Warnings about potentially harmful situations.
+    Warn = 1,
+    /// Informational messages about normal operations.
+    Info = 2,
+    /// Detailed diagnostic messages for debugging.
+    Debug = 3,
+}
+
+impl LogLevel {
+    /// Returns the next level in the SIGUSR1 cycle:
+    /// `Info → Debug → Error → Warn → Info`.
+    pub(super) fn cycle(self) -> Self {
+        match self {
+            Self::Info => Self::Debug,
+            Self::Debug => Self::Error,
+            Self::Error => Self::Warn,
+            Self::Warn => Self::Info,
+        }
+    }
+
+    /// Converts a `u8` to a `LogLevel`, defaulting to `Info` for unknown values.
+    pub(super) fn from_u8(v: u8) -> Self {
+        match v {
+            0 => Self::Error,
+            1 => Self::Warn,
+            2 => Self::Info,
+            3 => Self::Debug,
+            _ => Self::Info,
+        }
+    }
+
+    /// Returns the lowercase name of this level.
+    pub(super) fn as_str(self) -> &'static str {
+        match self {
+            Self::Error => "error",
+            Self::Warn => "warn",
+            Self::Info => "info",
+            Self::Debug => "debug",
+        }
+    }
+}
+
+impl fmt::Display for LogLevel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for LogLevel {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_ascii_lowercase().as_str() {
+            "error" => Ok(Self::Error),
+            "warn" => Ok(Self::Warn),
+            "info" => Ok(Self::Info),
+            "debug" => Ok(Self::Debug),
+            _ => Err(format!(
+                "invalid log level `{s}`: expected error, warn, info, or debug"
+            )),
+        }
+    }
+}
 
 /// Feature-flag-independent label for the active storage backend, used only
 /// by the metrics subsystem to tag duration histograms.
@@ -203,6 +281,11 @@ pub struct ServerConfig {
     /// failures, transform warnings) through this handler. When `None`, messages are
     /// written to stderr via `eprintln!`.
     pub log_handler: Option<LogHandler>,
+    /// Current log verbosity level.
+    ///
+    /// Configurable at startup via `TRUSS_LOG_LEVEL` (default: `info`).
+    /// Can be changed at runtime via `SIGUSR1` (Unix only).
+    pub log_level: Arc<AtomicU8>,
     /// Maximum number of concurrent image transforms.
     ///
     /// Configurable via `TRUSS_MAX_CONCURRENT_TRANSFORMS`. Defaults to 64.
@@ -319,6 +402,7 @@ impl Clone for ServerConfig {
             public_stale_while_revalidate_seconds: self.public_stale_while_revalidate_seconds,
             disable_accept_negotiation: self.disable_accept_negotiation,
             log_handler: self.log_handler.clone(),
+            log_level: Arc::clone(&self.log_level),
             max_concurrent_transforms: self.max_concurrent_transforms,
             transform_deadline_secs: self.transform_deadline_secs,
             max_input_pixels: self.max_input_pixels,
@@ -382,6 +466,7 @@ impl fmt::Debug for ServerConfig {
                 &self.disable_accept_negotiation,
             )
             .field("log_handler", &self.log_handler.as_ref().map(|_| ".."))
+            .field("log_level", &self.current_log_level())
             .field("max_concurrent_transforms", &self.max_concurrent_transforms)
             .field("transform_deadline_secs", &self.transform_deadline_secs)
             .field("max_input_pixels", &self.max_input_pixels)
@@ -540,6 +625,7 @@ impl ServerConfig {
             public_stale_while_revalidate_seconds: DEFAULT_PUBLIC_STALE_WHILE_REVALIDATE_SECONDS,
             disable_accept_negotiation: false,
             log_handler: None,
+            log_level: Arc::new(AtomicU8::new(LogLevel::Info as u8)),
             max_concurrent_transforms: DEFAULT_MAX_CONCURRENT_TRANSFORMS,
             transform_deadline_secs: DEFAULT_TRANSFORM_DEADLINE_SECS,
             max_input_pixels: DEFAULT_MAX_INPUT_PIXELS,
@@ -589,14 +675,46 @@ impl ServerConfig {
         }
     }
 
-    /// Emits a diagnostic message through the configured log handler, or falls
-    /// back to stderr when no handler is set.
-    pub(super) fn log(&self, msg: &str) {
+    /// Returns the current log level.
+    pub(super) fn current_log_level(&self) -> LogLevel {
+        LogLevel::from_u8(self.log_level.load(Ordering::Relaxed))
+    }
+
+    /// Emits a diagnostic message if the given `level` is at or below the
+    /// currently active log level.
+    pub(super) fn log_at(&self, level: LogLevel, msg: &str) {
+        if level > self.current_log_level() {
+            return;
+        }
         if let Some(handler) = &self.log_handler {
             handler(msg);
         } else {
             stderr_write(msg);
         }
+    }
+
+    /// Emits a diagnostic message through the configured log handler, or falls
+    /// back to stderr when no handler is set. Messages are emitted at
+    /// [`LogLevel::Info`].
+    pub(super) fn log(&self, msg: &str) {
+        self.log_at(LogLevel::Info, msg);
+    }
+
+    /// Emits an error-level diagnostic message.
+    #[allow(dead_code)]
+    pub(super) fn log_error(&self, msg: &str) {
+        self.log_at(LogLevel::Error, msg);
+    }
+
+    /// Emits a warning-level diagnostic message.
+    pub(super) fn log_warn(&self, msg: &str) {
+        self.log_at(LogLevel::Warn, msg);
+    }
+
+    /// Emits a debug-level diagnostic message.
+    #[allow(dead_code)]
+    pub(super) fn log_debug(&self, msg: &str) {
+        self.log_at(LogLevel::Debug, msg);
     }
 
     /// Returns a copy of the configuration with signed-URL verification credentials attached.
@@ -999,6 +1117,16 @@ impl ServerConfig {
         let compression_level =
             parse_env_u64_ranged("TRUSS_COMPRESSION_LEVEL", 0, 9)?.unwrap_or(1) as u32;
 
+        let log_level = match env::var("TRUSS_LOG_LEVEL")
+            .ok()
+            .filter(|v| !v.is_empty())
+        {
+            Some(val) => val.parse::<LogLevel>().map_err(|e| {
+                io::Error::new(io::ErrorKind::InvalidInput, e)
+            })?,
+            None => LogLevel::Info,
+        };
+
         Ok(Self {
             storage_root,
             bearer_token,
@@ -1012,6 +1140,7 @@ impl ServerConfig {
             public_stale_while_revalidate_seconds,
             disable_accept_negotiation: env_flag("TRUSS_DISABLE_ACCEPT_NEGOTIATION"),
             log_handler: None,
+            log_level: Arc::new(AtomicU8::new(log_level as u8)),
             max_concurrent_transforms,
             transform_deadline_secs,
             max_input_pixels,
@@ -1464,5 +1593,91 @@ mod tests {
     fn compression_enabled_by_default() {
         let config = ServerConfig::new(PathBuf::from("."), None);
         assert!(config.enable_compression);
+    }
+
+    // ── log_level ─────────────────────────────────────────────────────
+
+    #[test]
+    fn log_level_default_info() {
+        let config = ServerConfig::new(PathBuf::from("."), None);
+        assert_eq!(config.current_log_level(), LogLevel::Info);
+    }
+
+    #[test]
+    fn log_level_cycle() {
+        assert_eq!(LogLevel::Info.cycle(), LogLevel::Debug);
+        assert_eq!(LogLevel::Debug.cycle(), LogLevel::Error);
+        assert_eq!(LogLevel::Error.cycle(), LogLevel::Warn);
+        assert_eq!(LogLevel::Warn.cycle(), LogLevel::Info);
+    }
+
+    #[test]
+    fn log_level_from_str() {
+        assert_eq!("error".parse::<LogLevel>().unwrap(), LogLevel::Error);
+        assert_eq!("WARN".parse::<LogLevel>().unwrap(), LogLevel::Warn);
+        assert_eq!("Info".parse::<LogLevel>().unwrap(), LogLevel::Info);
+        assert_eq!("DEBUG".parse::<LogLevel>().unwrap(), LogLevel::Debug);
+        assert!("invalid".parse::<LogLevel>().is_err());
+    }
+
+    #[test]
+    fn log_level_display() {
+        assert_eq!(LogLevel::Error.to_string(), "error");
+        assert_eq!(LogLevel::Warn.to_string(), "warn");
+        assert_eq!(LogLevel::Info.to_string(), "info");
+        assert_eq!(LogLevel::Debug.to_string(), "debug");
+    }
+
+    #[test]
+    fn log_level_from_u8_roundtrip() {
+        for level in [LogLevel::Error, LogLevel::Warn, LogLevel::Info, LogLevel::Debug] {
+            assert_eq!(LogLevel::from_u8(level as u8), level);
+        }
+        // Unknown values default to Info.
+        assert_eq!(LogLevel::from_u8(42), LogLevel::Info);
+    }
+
+    #[test]
+    #[serial]
+    fn parse_log_level_from_env() {
+        // SAFETY: test-only, single-threaded access to this env var.
+        unsafe { env::set_var("TRUSS_LOG_LEVEL", "debug") };
+        let config = ServerConfig::from_env().unwrap();
+        unsafe { env::remove_var("TRUSS_LOG_LEVEL") };
+        assert_eq!(config.current_log_level(), LogLevel::Debug);
+    }
+
+    #[test]
+    #[serial]
+    fn parse_log_level_invalid_rejected() {
+        // SAFETY: test-only, single-threaded access to this env var.
+        unsafe { env::set_var("TRUSS_LOG_LEVEL", "verbose") };
+        let result = ServerConfig::from_env();
+        unsafe { env::remove_var("TRUSS_LOG_LEVEL") };
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn log_at_filters_by_level() {
+        use std::sync::Mutex;
+
+        let messages: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let msgs = Arc::clone(&messages);
+        let handler: LogHandler = Arc::new(move |msg: &str| {
+            msgs.lock().unwrap().push(msg.to_string());
+        });
+
+        let mut config = ServerConfig::new(PathBuf::from("."), None);
+        config.log_handler = Some(handler);
+        // Set level to Warn — only Error and Warn should pass through.
+        config.log_level.store(LogLevel::Warn as u8, std::sync::atomic::Ordering::Relaxed);
+
+        config.log_at(LogLevel::Error, "err");
+        config.log_at(LogLevel::Warn, "wrn");
+        config.log_at(LogLevel::Info, "inf");
+        config.log_at(LogLevel::Debug, "dbg");
+
+        let logged = messages.lock().unwrap();
+        assert_eq!(*logged, vec!["err", "wrn"]);
     }
 }
