@@ -1282,7 +1282,13 @@ fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io::Result<()>
         requests_served += 1;
         let close_after = client_wants_close || requests_served >= config.keep_alive_max_requests;
 
-        write_response_compressed(&mut stream, response, close_after, accepts_gzip)?;
+        write_response_compressed(
+            &mut stream,
+            response,
+            close_after,
+            accepts_gzip,
+            config.compression_level,
+        )?;
         record_http_request_duration(route, start);
 
         emit_access_log(

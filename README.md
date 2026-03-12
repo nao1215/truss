@@ -272,6 +272,7 @@ truss validate
 | `TRUSS_SHUTDOWN_DRAIN_SECS` | Drain period in seconds during graceful shutdown; `/health/ready` returns 503 immediately (default: `10`, range: 0-300). Total shutdown time is drain + 15 s worker drain. On Kubernetes, set `terminationGracePeriodSeconds` ≥ drain + 20 (e.g. `35` for the default 10 s drain) |
 | `TRUSS_RESPONSE_HEADERS` | JSON object of custom headers added to all image responses including private transforms (e.g. `{"CDN-Cache-Control":"max-age=86400"}`). Framing / hop-by-hop headers (`Content-Length`, `Transfer-Encoding`, `Content-Encoding`, `Content-Type`, `Connection`, etc.) are rejected at startup. Header names must be valid RFC 7230 tokens; values must contain only visible ASCII, SP, or HTAB (CRLF is rejected) |
 | `TRUSS_DISABLE_COMPRESSION` | Disable gzip compression for non-image responses (`true`/`1`/`yes`/`on`, case-insensitive). When compression is enabled (default), `Vary: Accept-Encoding` is added to compressible responses |
+| `TRUSS_COMPRESSION_LEVEL` | Gzip compression level (default: `1`, range: 0-9). `1` is fastest, `6` is a good trade-off, `9` is best compression |
 
 `TRUSS_STORAGE_BACKEND` selects the source for public `GET /images/by-path`. When set to `s3`, `gcs`, or `azure`, the `path` query parameter is used as the object key. Only one backend can be active at a time. Private endpoints can still use `kind: storage` regardless of this setting.
 

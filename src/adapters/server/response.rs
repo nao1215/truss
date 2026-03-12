@@ -101,7 +101,7 @@ pub(super) fn write_response(
     response: HttpResponse,
     close: bool,
 ) -> io::Result<()> {
-    write_response_compressed(stream, response, close, false)
+    write_response_compressed(stream, response, close, false, 1)
 }
 
 pub(super) fn write_response_compressed(
@@ -109,6 +109,7 @@ pub(super) fn write_response_compressed(
     response: HttpResponse,
     close: bool,
     accepts_gzip: bool,
+    compression_level: u32,
 ) -> io::Result<()> {
     use std::fmt::Write as FmtWrite;
 
@@ -119,7 +120,7 @@ pub(super) fn write_response_compressed(
             .is_some_and(is_compressible_content_type);
 
     let (body, is_compressed) = if should_compress {
-        match gzip_compress(&response.body) {
+        match gzip_compress(&response.body, compression_level) {
             Ok(compressed) if compressed.len() < response.body.len() => (compressed, true),
             _ => (response.body, false),
         }
@@ -182,11 +183,11 @@ pub(super) fn write_response_compressed(
     stream.flush()
 }
 
-fn gzip_compress(data: &[u8]) -> io::Result<Vec<u8>> {
+fn gzip_compress(data: &[u8], level: u32) -> io::Result<Vec<u8>> {
     use flate2::Compression;
     use flate2::write::GzEncoder;
 
-    let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::new(level));
     encoder.write_all(data)?;
     encoder.finish()
 }
@@ -805,7 +806,7 @@ mod tests {
 
         let original = b"hello world, this is test data that should compress well. \
                         repeating repeating repeating repeating repeating repeating.";
-        let compressed = gzip_compress(original).unwrap();
+        let compressed = gzip_compress(original, 1).unwrap();
         assert!(compressed.len() < original.len());
 
         let mut decoder = GzDecoder::new(&compressed[..]);

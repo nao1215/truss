@@ -268,6 +268,12 @@ pub struct ServerConfig {
     ///
     /// Configurable via `TRUSS_DISABLE_COMPRESSION`. Defaults to `true`.
     pub enable_compression: bool,
+    /// Gzip compression level (0-9). Higher values produce smaller output but
+    /// use more CPU. `1` is fastest, `6` is the default (a good trade-off),
+    /// and `9` is best compression.
+    ///
+    /// Configurable via `TRUSS_COMPRESSION_LEVEL`. Defaults to `1` (fast).
+    pub compression_level: u32,
     /// Per-server counter tracking the number of image transforms currently in
     /// flight.  This is runtime state (not configuration) but lives here so that
     /// each `serve_with_config` invocation gets an independent counter, avoiding
@@ -326,6 +332,7 @@ impl Clone for ServerConfig {
             draining: Arc::clone(&self.draining),
             custom_response_headers: self.custom_response_headers.clone(),
             enable_compression: self.enable_compression,
+            compression_level: self.compression_level,
             transforms_in_flight: Arc::clone(&self.transforms_in_flight),
             presets: self.presets.clone(),
             #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
@@ -396,6 +403,7 @@ impl fmt::Debug for ServerConfig {
                 &self.custom_response_headers.len(),
             )
             .field("enable_compression", &self.enable_compression)
+            .field("compression_level", &self.compression_level)
             .field("presets", &self.presets.keys().collect::<Vec<_>>());
         #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
         {
@@ -443,6 +451,7 @@ impl PartialEq for ServerConfig {
             && self.shutdown_drain_secs == other.shutdown_drain_secs
             && self.custom_response_headers == other.custom_response_headers
             && self.enable_compression == other.enable_compression
+            && self.compression_level == other.compression_level
             && self.presets == other.presets
             && cfg_storage_eq(self, other)
     }
@@ -544,6 +553,7 @@ impl ServerConfig {
             draining: Arc::new(AtomicBool::new(false)),
             custom_response_headers: Vec::new(),
             enable_compression: true,
+            compression_level: 1,
             transforms_in_flight: Arc::new(AtomicU64::new(0)),
             presets: HashMap::new(),
             #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
@@ -987,6 +997,8 @@ impl ServerConfig {
         let custom_response_headers = parse_response_headers_from_env()?;
 
         let enable_compression = !env_flag("TRUSS_DISABLE_COMPRESSION");
+        let compression_level =
+            parse_env_u64_ranged("TRUSS_COMPRESSION_LEVEL", 0, 9)?.unwrap_or(1) as u32;
 
         Ok(Self {
             storage_root,
@@ -1014,6 +1026,7 @@ impl ServerConfig {
             draining: Arc::new(AtomicBool::new(false)),
             custom_response_headers,
             enable_compression,
+            compression_level,
             transforms_in_flight: Arc::new(AtomicU64::new(0)),
             presets,
             #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
