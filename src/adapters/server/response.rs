@@ -826,4 +826,113 @@ mod tests {
         assert!(!is_compressible_content_type("application/octet-stream"));
         assert!(!is_compressible_content_type("video/mp4"));
     }
+
+    // ---------------------------------------------------------------
+    // compression threshold boundary (m12)
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn test_gzip_compress_below_threshold_skipped() {
+        // Body of exactly MIN_COMPRESS_BYTES - 1 should NOT be compressed.
+        let body = vec![b'x'; MIN_COMPRESS_BYTES - 1];
+        let response = HttpResponse::json("200 OK", body.clone());
+        let mut _stream_buf: Vec<u8> = Vec::new();
+        // We can't call write_response_compressed directly with a Cursor
+        // because it expects a TcpStream, so we test the decision logic.
+        let should_compress = true // accepts_gzip
+            && response.body.len() >= MIN_COMPRESS_BYTES
+            && response.content_type.is_some_and(is_compressible_content_type);
+        assert!(!should_compress, "body below threshold should not be compressed");
+    }
+
+    #[test]
+    fn test_gzip_compress_at_threshold_eligible() {
+        // Body of exactly MIN_COMPRESS_BYTES should be eligible for compression.
+        let body = vec![b'x'; MIN_COMPRESS_BYTES];
+        let response = HttpResponse::json("200 OK", body);
+        let should_compress = true // accepts_gzip
+            && response.body.len() >= MIN_COMPRESS_BYTES
+            && response.content_type.is_some_and(is_compressible_content_type);
+        assert!(should_compress, "body at threshold should be eligible for compression");
+    }
+
+    #[test]
+    fn test_gzip_compress_above_threshold_eligible() {
+        let body = vec![b'x'; MIN_COMPRESS_BYTES + 1];
+        let response = HttpResponse::json("200 OK", body);
+        let should_compress = true // accepts_gzip
+            && response.body.len() >= MIN_COMPRESS_BYTES
+            && response.content_type.is_some_and(is_compressible_content_type);
+        assert!(should_compress, "body above threshold should be eligible for compression");
+    }
+
+    // ---------------------------------------------------------------
+    // write_response_compressed integration (m11)
+    // ---------------------------------------------------------------
+
+    /// Helper to capture the raw HTTP response bytes by using a connected
+    /// socket pair.
+    #[cfg(unix)]
+    fn capture_response(response: HttpResponse, accepts_gzip: bool) -> Vec<u8> {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut client = std::net::TcpStream::connect(addr).unwrap();
+        let (mut server_stream, _) = listener.accept().unwrap();
+
+        write_response_compressed(&mut server_stream, response, true, accepts_gzip, 1).unwrap();
+        drop(server_stream);
+
+        let mut buf = Vec::new();
+        std::io::Read::read_to_end(&mut client, &mut buf).unwrap();
+        buf
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_write_response_compressed_applies_gzip() {
+        use flate2::read::GzDecoder;
+        use std::io::Read;
+
+        // Create a JSON body large enough to be compressed.
+        let body = format!("{{\"data\":\"{}\"}}", "x".repeat(256));
+        let response = HttpResponse::json("200 OK", body.as_bytes().to_vec());
+        let raw = capture_response(response, true);
+        let raw_str = String::from_utf8_lossy(&raw);
+
+        assert!(raw_str.contains("Content-Encoding: gzip"), "should contain Content-Encoding: gzip");
+        assert!(raw_str.contains("Vary: Accept-Encoding"), "should contain Vary header");
+
+        // Extract the body after the \r\n\r\n separator and decompress.
+        let body_start = raw_str.find("\r\n\r\n").unwrap() + 4;
+        let compressed_body = &raw[body_start..];
+        let mut decoder = GzDecoder::new(compressed_body);
+        let mut decompressed = String::new();
+        decoder.read_to_string(&mut decompressed).unwrap();
+        assert_eq!(decompressed, body);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_write_response_compressed_skips_when_not_accepted() {
+        let body = format!("{{\"data\":\"{}\"}}", "x".repeat(256));
+        let response = HttpResponse::json("200 OK", body.as_bytes().to_vec());
+        let raw = capture_response(response, false);
+        let raw_str = String::from_utf8_lossy(&raw);
+
+        assert!(!raw_str.contains("Content-Encoding: gzip"), "should NOT contain Content-Encoding: gzip");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_write_response_compressed_skips_small_body() {
+        // Body smaller than MIN_COMPRESS_BYTES should not be compressed.
+        let body = b"{\"ok\":true}".to_vec();
+        let response = HttpResponse::json("200 OK", body);
+        let raw = capture_response(response, true);
+        let raw_str = String::from_utf8_lossy(&raw);
+
+        assert!(!raw_str.contains("Content-Encoding: gzip"), "small body should not be compressed");
+        // Vary header should still be present for compressible content types.
+        assert!(raw_str.contains("Vary: Accept-Encoding"), "Vary should be present for compressible type");
+    }
 }

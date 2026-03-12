@@ -5937,4 +5937,52 @@ mod tests {
         let checks = body["checks"].as_array().expect("checks array");
         assert!(!checks.iter().any(|c| c["name"] == "draining"));
     }
+
+    // ── Drain during normal request processing (m10) ─────────────
+
+    #[test]
+    fn health_live_returns_200_while_draining() {
+        let storage = temp_dir("live-draining");
+        let config = ServerConfig::new(storage, None);
+        config.draining.store(true, Ordering::Relaxed);
+
+        let response = route_request(
+            HttpRequest {
+                method: "GET".to_string(),
+                target: "/health/live".to_string(),
+                version: "HTTP/1.1".to_string(),
+                headers: Vec::new(),
+                body: Vec::new(),
+            },
+            &config,
+        );
+
+        // Liveness should always return 200 even when draining — only
+        // readiness returns 503.
+        assert_eq!(response.status, "200 OK");
+    }
+
+    #[test]
+    fn normal_request_processed_while_draining() {
+        let storage = temp_dir("normal-draining");
+        let config = ServerConfig::new(storage, None);
+        config.draining.store(true, Ordering::Relaxed);
+
+        // A non-health, non-image request should still be routed (e.g. 404
+        // because the path doesn't match any route) — it should NOT get a
+        // 503 just because the server is draining.
+        let response = route_request(
+            HttpRequest {
+                method: "GET".to_string(),
+                target: "/nonexistent".to_string(),
+                version: "HTTP/1.1".to_string(),
+                headers: Vec::new(),
+                body: Vec::new(),
+            },
+            &config,
+        );
+
+        // The path doesn't match any route, so we get 404 — NOT 503.
+        assert_eq!(response.status, "404 Not Found");
+    }
 }
