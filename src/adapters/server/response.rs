@@ -92,13 +92,13 @@ const MIN_COMPRESS_BYTES: usize = 128;
 /// current endpoints (health, metrics, image transforms) do not include
 /// secrets in the response body, so the risk is low today.
 fn is_compressible_content_type(ct: &str) -> bool {
+    let media_type = ct.split(';').next().unwrap_or("").trim();
     matches!(
-        ct,
+        media_type,
         "application/json"
             | "application/problem+json"
             | "text/plain"
-            | "text/plain; charset=utf-8"
-            | "application/openmetrics-text; version=1.0.0; charset=utf-8"
+            | "application/openmetrics-text"
     )
 }
 
@@ -152,9 +152,10 @@ pub(super) fn write_response_compressed(
     // Collect Vary directives from response headers and compression, then emit
     // a single combined Vary header to avoid duplicate Vary lines.
     let mut vary_parts: Vec<&str> = Vec::new();
-    if response
-        .content_type
-        .is_some_and(is_compressible_content_type)
+    if accepts_gzip
+        && response
+            .content_type
+            .is_some_and(is_compressible_content_type)
     {
         vary_parts.push("Accept-Encoding");
     }

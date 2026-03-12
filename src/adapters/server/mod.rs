@@ -1631,12 +1631,16 @@ fn handle_health_ready(config: &ServerConfig) -> HttpResponse {
 
     // When the server is draining (shutdown signal received), immediately
     // report not-ready so that load balancers stop routing traffic.
+    // Skip expensive probes (storage, disk, memory) — they are irrelevant
+    // once the process is shutting down.
     if config.draining.load(Ordering::Relaxed) {
-        checks.push(json!({
-            "name": "draining",
+        let mut body = serde_json::to_vec(&json!({
             "status": "fail",
-        }));
-        all_ok = false;
+            "checks": [{ "name": "draining", "status": "fail" }],
+        }))
+        .expect("serialize readiness");
+        body.push(b'\n');
+        return HttpResponse::problem("503 Service Unavailable", body);
     }
 
     for (ok, name) in storage_health_check(config) {
