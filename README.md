@@ -246,6 +246,12 @@ By default, the server listens on `127.0.0.1:8080`. Configuration can be supplie
 truss serve --bind 0.0.0.0:8080 --storage-root /var/images
 ```
 
+To validate the server configuration without starting the server (useful in CI/CD pipelines):
+
+```sh
+truss validate
+```
+
 ### Core settings
 
 | Variable | Description |

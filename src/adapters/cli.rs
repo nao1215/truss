@@ -51,6 +51,7 @@ COMMANDS:
   convert       Convert and transform an image file
   inspect       Show metadata (format, dimensions, alpha) of an image
   serve         Start the HTTP image-transform server
+  validate      Check server configuration without starting the server
   sign          Generate a signed public URL for the server
   completions   Generate shell completion scripts
   help          Show help for a command (e.g. truss help convert)
@@ -299,6 +300,19 @@ EXAMPLES:
     --expires 1700000000 --width 640 --format webp
 ";
 
+const HELP_VALIDATE: &str = "\
+truss validate - check server configuration without starting the server
+
+USAGE:
+  truss validate
+
+Parses and validates all environment variables used by `truss serve`.
+Exits 0 when the configuration is valid, or exits 1 with a description
+of each error found.
+
+Useful in CI/CD pipelines to catch configuration mistakes early.
+";
+
 const HELP_COMPLETIONS: &str = "\
 truss completions - generate shell completion scripts
 
@@ -358,6 +372,9 @@ enum CliSubcommand {
     Help { topic: Option<String> },
     /// Print version information
     Version,
+    /// Validate server configuration without starting the server
+    #[command(disable_help_flag = true)]
+    Validate(ClapValidateArgs),
     /// Generate shell completion scripts
     #[command(disable_help_flag = true)]
     Completions {
@@ -479,6 +496,13 @@ struct ClapServeArgs {
     #[arg(long)]
     allow_insecure_url_sources: bool,
     /// Show help for serve
+    #[arg(short = 'h', long = "help")]
+    help: bool,
+}
+
+#[derive(clap::Args)]
+struct ClapValidateArgs {
+    /// Show help for validate
     #[arg(short = 'h', long = "help")]
     help: bool,
 }
@@ -716,6 +740,7 @@ enum HelpTopic {
     Convert,
     Inspect,
     Serve,
+    Validate,
     Sign,
     Completions,
     Version,
@@ -726,6 +751,7 @@ enum Command {
     Help(HelpTopic),
     Version,
     Serve(ServeCommand),
+    Validate,
     Inspect(InspectCommand),
     Convert(ConvertCommand),
     Sign(SignCommand),
@@ -816,6 +842,7 @@ where
                 HelpTopic::Convert => HELP_CONVERT.to_string(),
                 HelpTopic::Inspect => HELP_INSPECT.to_string(),
                 HelpTopic::Serve => help_serve(),
+                HelpTopic::Validate => HELP_VALIDATE.to_string(),
                 HelpTopic::Sign => HELP_SIGN.to_string(),
                 HelpTopic::Completions => HELP_COMPLETIONS.to_string(),
                 HelpTopic::Version => HELP_VERSION.to_string(),
@@ -830,6 +857,10 @@ where
             Err(_) => EXIT_RUNTIME,
         },
         Ok(Command::Serve(command)) => match execute_serve(command) {
+            Ok(()) => EXIT_SUCCESS,
+            Err(error) => write_error(stderr, error),
+        },
+        Ok(Command::Validate) => match execute_validate(stdout) {
             Ok(()) => EXIT_SUCCESS,
             Err(error) => write_error(stderr, error),
         },
@@ -861,6 +892,7 @@ const KNOWN_SUBCOMMANDS: &[&str] = &[
     "convert",
     "inspect",
     "serve",
+    "validate",
     "sign",
     "help",
     "completions",
@@ -989,6 +1021,7 @@ where
         Some(CliSubcommand::Convert(args)) => convert_from_clap(args),
         Some(CliSubcommand::Inspect(args)) => inspect_from_clap(args),
         Some(CliSubcommand::Serve(args)) => serve_from_clap(args),
+        Some(CliSubcommand::Validate(args)) => validate_from_clap(args),
         Some(CliSubcommand::Sign(args)) => sign_from_clap(args),
     }
 }
@@ -1017,6 +1050,7 @@ fn parse_help_topic(topic: Option<String>) -> Result<Command, CliError> {
         Some("convert") => Ok(Command::Help(HelpTopic::Convert)),
         Some("inspect") => Ok(Command::Help(HelpTopic::Inspect)),
         Some("serve") => Ok(Command::Help(HelpTopic::Serve)),
+        Some("validate") => Ok(Command::Help(HelpTopic::Validate)),
         Some("sign") => Ok(Command::Help(HelpTopic::Sign)),
         Some("completions") => Ok(Command::Help(HelpTopic::Completions)),
         Some("version") => Ok(Command::Help(HelpTopic::Version)),
@@ -1171,6 +1205,13 @@ fn serve_from_clap(args: ClapServeArgs) -> Result<Command, CliError> {
         signed_url_secret: args.signed_url_secret,
         allow_insecure_url_sources: args.allow_insecure_url_sources,
     }))
+}
+
+fn validate_from_clap(args: ClapValidateArgs) -> Result<Command, CliError> {
+    if args.help {
+        return Ok(Command::Help(HelpTopic::Validate));
+    }
+    Ok(Command::Validate)
 }
 
 fn sign_from_clap(args: ClapSignArgs) -> Result<Command, CliError> {
@@ -1444,6 +1485,26 @@ fn execute_serve(command: ServeCommand) -> Result<(), CliError> {
 
     server::serve_with_config(listener, config)
         .map_err(|error| runtime_error(EXIT_RUNTIME, &format!("server runtime failed: {error}")))
+}
+
+fn execute_validate<W: Write>(stdout: &mut W) -> Result<(), CliError> {
+    match ServerConfig::from_env() {
+        Ok(config) => {
+            writeln!(stdout, "configuration is valid").map_err(|error| {
+                runtime_error(EXIT_RUNTIME, &format!("failed to write stdout: {error}"))
+            })?;
+            writeln!(stdout, "  storage root: {}", config.storage_root.display()).map_err(
+                |error| {
+                    runtime_error(EXIT_RUNTIME, &format!("failed to write stdout: {error}"))
+                },
+            )?;
+            Ok(())
+        }
+        Err(error) => Err(runtime_error(
+            EXIT_RUNTIME,
+            &format!("invalid configuration: {error}"),
+        )),
+    }
 }
 
 fn resolve_server_config(command: ServeCommand) -> Result<ServerConfig, CliError> {
