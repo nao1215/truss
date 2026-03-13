@@ -97,7 +97,7 @@ pub struct WasmTransformResponse {
     /// Transformed output bytes.
     ///
     /// Skipped during JSON serialization because the bytes are passed separately
-    /// through the [`WasmTransformOutput`] getter to avoid duplicating potentially
+    /// through the [`WasmTransformResponse`] getter to avoid duplicating potentially
     /// megabytes of image data inside the JSON metadata string.
     #[serde(skip_serializing)]
     pub bytes: Vec<u8>,
