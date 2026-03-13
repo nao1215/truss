@@ -136,14 +136,14 @@ pub(super) fn parse_upload_request(
     let has_orphaned_watermark_params =
         watermark_position.is_some() || watermark_opacity.is_some() || watermark_margin.is_some();
     let watermark = if let Some(wm_range) = watermark_range {
-        Some(super::resolve_multipart_watermark(
+        Some(super::handler::resolve_multipart_watermark(
             body[wm_range].to_vec(),
             watermark_position,
             watermark_opacity,
             watermark_margin,
         )?)
     } else if has_orphaned_watermark_params {
-        return Err(super::bad_request_response(
+        return Err(bad_request_response(
             "watermark_position, watermark_opacity, and watermark_margin require a `watermark` file field",
         ));
     } else {

@@ -1,5 +1,4 @@
 /// Signed URL generation and bind address resolution.
-
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use url::Url;
@@ -10,7 +9,7 @@ use super::auth::{
 use super::config::DEFAULT_BIND_ADDR;
 use crate::TransformOptions;
 
-type HmacSha256 = Hmac<Sha256>;
+pub(super) type HmacSha256 = Hmac<Sha256>;
 
 /// Source selector used when generating a signed public transform URL.
 #[derive(Debug, Clone, PartialEq, Eq)]

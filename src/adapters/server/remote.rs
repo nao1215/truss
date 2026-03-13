@@ -18,8 +18,8 @@
 //! tightening restrictions invalidates previously cached responses.
 
 use super::ServerConfig;
-use super::TransformSourcePayload;
 use super::cache::OriginCache;
+use super::handler::TransformSourcePayload;
 use super::http_parse::resolve_storage_path;
 use super::metrics::{ORIGIN_CACHE_HITS_TOTAL, ORIGIN_CACHE_MISSES_TOTAL};
 use super::response::map_source_io_error;
