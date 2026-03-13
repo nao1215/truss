@@ -6,11 +6,13 @@ truss exposes a `/metrics` endpoint in [Prometheus text exposition format](https
 
 | Path       | Method | Authentication |
 |------------|--------|----------------|
-| `/metrics` | GET    | **None**       |
+| `/metrics` | GET    | Optional (`TRUSS_METRICS_TOKEN`) |
 
-The endpoint does not require Bearer-token authentication so that Prometheus scrapers can collect metrics without additional configuration.
+When `TRUSS_METRICS_TOKEN` is set, the endpoint requires a `Bearer` token matching the configured value. When unset, the endpoint is open so that Prometheus scrapers can collect metrics without additional configuration.
 
-> **Security note:** The metrics endpoint exposes operational information such as request counts, error rates, and latency distributions. In production, restrict access to `/metrics` at the network level (e.g., Kubernetes NetworkPolicy, firewall rules, or reverse-proxy path restrictions) rather than exposing it to the public internet.
+Set `TRUSS_DISABLE_METRICS=true` to disable the `/metrics` endpoint entirely (returns 404).
+
+> **Security note:** The metrics endpoint exposes operational information such as request counts, error rates, and latency distributions. In production, restrict access to `/metrics` at the network level (e.g., Kubernetes NetworkPolicy, firewall rules, or reverse-proxy path restrictions) or set `TRUSS_METRICS_TOKEN` to require authentication.
 
 ## Scrape Configuration
 
@@ -18,6 +20,19 @@ The endpoint does not require Bearer-token authentication so that Prometheus scr
 scrape_configs:
   - job_name: truss
     scrape_interval: 15s
+    static_configs:
+      - targets: ["localhost:8080"]
+```
+
+If `TRUSS_METRICS_TOKEN` is configured, add Bearer token authentication to the scrape config:
+
+```yaml
+scrape_configs:
+  - job_name: truss
+    scrape_interval: 15s
+    authorization:
+      type: Bearer
+      credentials: "<your-metrics-token>"
     static_configs:
       - targets: ["localhost:8080"]
 ```
@@ -43,6 +58,7 @@ scrape_configs:
 | `truss_cache_misses_total` | | Transform cache misses. |
 | `truss_origin_cache_hits_total` | | Origin (remote URL) cache hits. |
 | `truss_origin_cache_misses_total` | | Origin cache misses. |
+| `truss_watermark_transforms_total` | | Total transforms that included a watermark. |
 | `truss_transform_errors_total` | `error_type` | Transform errors by category. |
 
 #### `error_type` values
@@ -78,7 +94,7 @@ All histograms use the following bucket boundaries (seconds):
 
 #### `format` values
 
-`jpeg`, `png`, `webp`, `avif`, `svg`, `bmp`
+`jpeg`, `png`, `webp`, `avif`, `svg`, `bmp`, `tiff`
 
 #### `backend` values
 
