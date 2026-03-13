@@ -286,10 +286,7 @@ pub(super) fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io:
                 ))
             } else if let Some(expected) = &config.metrics_token {
                 let provided = http_parse::header_value(&partial.headers, "authorization")
-                    .and_then(|value| {
-                        let (scheme, token) = value.split_once(|c: char| c.is_whitespace())?;
-                        scheme.eq_ignore_ascii_case("Bearer").then(|| token.trim())
-                    });
+                    .and_then(super::auth::extract_bearer_token);
                 match provided {
                     Some(token) if token.as_bytes().ct_eq(expected.as_bytes()).into() => None,
                     _ => Some(super::response::auth_required_response(
@@ -340,11 +337,8 @@ pub(super) fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io:
             ("GET" | "HEAD", "/health")
         ) && let Some(expected) = &config.health_token
         {
-            let provided =
-                http_parse::header_value(&partial.headers, "authorization").and_then(|value| {
-                    let (scheme, token) = value.split_once(|c: char| c.is_whitespace())?;
-                    scheme.eq_ignore_ascii_case("Bearer").then(|| token.trim())
-                });
+            let provided = http_parse::header_value(&partial.headers, "authorization")
+                .and_then(super::auth::extract_bearer_token);
             let early_response = match provided {
                 Some(token) if token.as_bytes().ct_eq(expected.as_bytes()).into() => None,
                 _ => Some(super::response::auth_required_response(
