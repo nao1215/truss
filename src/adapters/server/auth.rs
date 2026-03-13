@@ -277,11 +277,12 @@ pub(super) fn parse_query_params(
     for (name, value) in url::form_urlencoded::parse(query.as_bytes()) {
         let name = name.into_owned();
         let value = value.into_owned();
-        if params.insert(name.clone(), value).is_some() {
+        if params.contains_key(&name) {
             return Err(bad_request_response(&format!(
                 "query parameter `{name}` must not be repeated"
             )));
         }
+        params.insert(name, value);
     }
 
     Ok(params)
