@@ -270,7 +270,11 @@ pub(super) fn service_unavailable_response(message: &str) -> HttpResponse {
 }
 
 pub(super) fn too_many_requests_response(message: &str) -> HttpResponse {
-    problem_response("429 Too Many Requests", 429, "Too Many Requests", message)
+    let mut resp = problem_response("429 Too Many Requests", 429, "Too Many Requests", message);
+    // RFC 6585 §4: include Retry-After so well-behaved clients back off.
+    resp.headers
+        .push(("Retry-After".to_string(), "1".to_string()));
+    resp
 }
 
 pub(super) fn too_many_redirects_response(message: &str) -> HttpResponse {
