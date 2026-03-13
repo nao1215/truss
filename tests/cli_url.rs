@@ -1,5 +1,5 @@
-use image::codecs::png::PngEncoder;
-use image::{ColorType, ImageEncoder, Rgba, RgbaImage};
+mod common;
+
 use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -8,15 +8,6 @@ use std::process::Command;
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 use truss::{MediaType, RawArtifact, sniff_artifact};
-
-fn png_bytes() -> Vec<u8> {
-    let image = RgbaImage::from_pixel(4, 3, Rgba([10, 20, 30, 255]));
-    let mut bytes = Vec::new();
-    PngEncoder::new(&mut bytes)
-        .write_image(&image, 4, 3, ColorType::Rgba8.into())
-        .expect("encode png");
-    bytes
-}
 
 fn temp_file_path(name: &str) -> PathBuf {
     let unique = SystemTime::now()
@@ -52,7 +43,7 @@ fn spawn_http_server(
 
 #[test]
 fn inspect_url_reads_remote_png() {
-    let (url, handle) = spawn_http_server(png_bytes(), "image/png");
+    let (url, handle) = spawn_http_server(common::png_bytes(), "image/png");
     let output = Command::new(env!("CARGO_BIN_EXE_truss"))
         .arg("inspect")
         .arg("--url")
@@ -71,7 +62,7 @@ fn inspect_url_reads_remote_png() {
 
 #[test]
 fn convert_url_writes_a_local_output_file() {
-    let (url, handle) = spawn_http_server(png_bytes(), "image/png");
+    let (url, handle) = spawn_http_server(common::png_bytes(), "image/png");
     let output_path = temp_file_path("convert-url-output").with_extension("jpg");
     let output = Command::new(env!("CARGO_BIN_EXE_truss"))
         .arg("--url")
@@ -94,7 +85,7 @@ fn convert_url_writes_a_local_output_file() {
 
 #[test]
 fn convert_url_can_infer_avif_output_from_the_file_extension() {
-    let (url, handle) = spawn_http_server(png_bytes(), "image/png");
+    let (url, handle) = spawn_http_server(common::png_bytes(), "image/png");
     let output_path = temp_file_path("convert-url-output-avif").with_extension("avif");
     let output = Command::new(env!("CARGO_BIN_EXE_truss"))
         .arg("--url")
