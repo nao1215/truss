@@ -1,15 +1,23 @@
 mod common;
 
 use common::{send_raw_request, spawn_server, split_response, temp_dir};
+use rstest::rstest;
 use truss::ServerConfig;
 
-#[test]
-fn head_health_live_returns_200_with_empty_body() {
-    let storage_root = temp_dir("head-health-live");
+#[rstest]
+#[case::health_live("/health/live", 200)]
+#[case::health_ready("/health/ready", 200)]
+#[case::metrics("/metrics", 200)]
+#[case::unknown_route("/nonexistent", 404)]
+fn head_request_returns_expected_status_with_empty_body(
+    #[case] path: &str,
+    #[case] expected_status: u16,
+) {
+    let storage_root = temp_dir("head-test");
     let (addr, handle) = spawn_server(ServerConfig::new(storage_root, None));
     let response = send_raw_request(
         addr,
-        "HEAD /health/live HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        &format!("HEAD {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"),
     );
 
     handle
@@ -19,74 +27,8 @@ fn head_health_live_returns_200_with_empty_body() {
 
     let (header, _, body) = split_response(&response);
     assert!(
-        header.starts_with("HTTP/1.1 200"),
-        "expected 200, got: {header}"
-    );
-    assert!(body.is_empty(), "HEAD response body must be empty");
-}
-
-#[test]
-fn head_health_ready_returns_200_with_empty_body() {
-    let storage_root = temp_dir("head-health-ready");
-    let (addr, handle) = spawn_server(ServerConfig::new(storage_root, None));
-    let response = send_raw_request(
-        addr,
-        "HEAD /health/ready HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
-    );
-
-    handle
-        .join()
-        .expect("join server thread")
-        .expect("serve one request");
-
-    let (header, _, body) = split_response(&response);
-    assert!(
-        header.starts_with("HTTP/1.1 200"),
-        "expected 200, got: {header}"
-    );
-    assert!(body.is_empty(), "HEAD response body must be empty");
-}
-
-#[test]
-fn head_metrics_returns_200_with_empty_body() {
-    let storage_root = temp_dir("head-metrics");
-    let (addr, handle) = spawn_server(ServerConfig::new(storage_root, None));
-    let response = send_raw_request(
-        addr,
-        "HEAD /metrics HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
-    );
-
-    handle
-        .join()
-        .expect("join server thread")
-        .expect("serve one request");
-
-    let (header, _, body) = split_response(&response);
-    assert!(
-        header.starts_with("HTTP/1.1 200"),
-        "expected 200, got: {header}"
-    );
-    assert!(body.is_empty(), "HEAD response body must be empty");
-}
-
-#[test]
-fn head_unknown_route_returns_404_with_empty_body() {
-    let storage_root = temp_dir("head-unknown");
-    let (addr, handle) = spawn_server(ServerConfig::new(storage_root, None));
-    let response = send_raw_request(
-        addr,
-        "HEAD /nonexistent HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
-    );
-
-    handle
-        .join()
-        .expect("join server thread")
-        .expect("serve one request");
-
-    let (header, _, body) = split_response(&response);
-    assert!(
-        header.starts_with("HTTP/1.1 404"),
-        "expected 404, got: {header}"
+        header.starts_with(&format!("HTTP/1.1 {expected_status}")),
+        "expected {expected_status}, got: {header}"
     );
     assert!(body.is_empty(), "HEAD response body must be empty");
 }
