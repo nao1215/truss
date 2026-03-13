@@ -430,7 +430,10 @@ pub struct ServerConfig {
     ///
     /// The TTL is configurable via `TRUSS_HEALTH_CACHE_TTL_SECS`. Defaults to 5
     /// seconds. Set to `0` to disable caching.
-    pub health_cache: Arc<super::handler::HealthCache>,
+    ///
+    /// Use [`ServerConfig::with_health_cache_ttl_secs`] to override the TTL
+    /// programmatically.
+    pub(crate) health_cache: Arc<super::handler::HealthCache>,
     /// Drain period (in seconds) during graceful shutdown.
     ///
     /// On receiving a shutdown signal the server immediately marks itself as
@@ -831,6 +834,15 @@ impl ServerConfig {
             #[cfg(feature = "azure")]
             azure_context: None,
         }
+    }
+
+    /// Overrides the health-check syscall cache TTL.
+    ///
+    /// This builder-style method allows embedders to configure the TTL
+    /// programmatically without relying on environment variables.
+    pub fn with_health_cache_ttl_secs(mut self, ttl_secs: u64) -> Self {
+        self.health_cache = Arc::new(super::handler::HealthCache::new(ttl_secs));
+        self
     }
 
     #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
@@ -2352,5 +2364,19 @@ mod tests {
         let _env = ScopedEnv::set("TRUSS_HEALTH_CACHE_TTL_SECS", "0");
         let result = parse_env_u64_ranged("TRUSS_HEALTH_CACHE_TTL_SECS", 0, 300);
         assert_eq!(result.unwrap(), Some(0));
+    }
+
+    #[test]
+    #[serial]
+    fn from_env_wires_health_cache_ttl_secs() {
+        let _env = ScopedEnv::set("TRUSS_HEALTH_CACHE_TTL_SECS", "10");
+        let config = ServerConfig::from_env().unwrap();
+        assert_eq!(config.health_cache.ttl_nanos, 10 * 1_000_000_000);
+    }
+
+    #[test]
+    fn with_health_cache_ttl_secs_overrides_default() {
+        let config = ServerConfig::new(PathBuf::from("."), None).with_health_cache_ttl_secs(20);
+        assert_eq!(config.health_cache.ttl_nanos, 20 * 1_000_000_000);
     }
 }

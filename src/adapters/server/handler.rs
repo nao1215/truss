@@ -523,7 +523,7 @@ pub(super) const DEFAULT_HEALTH_CACHE_TTL_SECS: u64 = 5;
 /// Caches `disk_free_bytes()` and `process_rss_bytes()` with a configurable
 /// TTL so that high-frequency polling does not generate redundant kernel
 /// context switches and file I/O.
-pub struct HealthCache {
+pub(crate) struct HealthCache {
     disk_free: AtomicU64,
     disk_free_at: AtomicU64,
     rss: AtomicU64,
@@ -767,7 +767,7 @@ fn collect_resource_checks(config: &ServerConfig) -> (Vec<serde_json::Value>, bo
     (checks, all_ok)
 }
 
-/// Returns storage backend health checks (storage root writability and cloud
+/// Returns storage backend health checks (storage root existence and cloud
 /// backend reachability).
 pub(super) fn storage_health_check(config: &ServerConfig) -> Vec<(bool, &'static str)> {
     #[allow(unused_mut)]

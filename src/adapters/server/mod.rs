@@ -48,7 +48,7 @@ mod signing;
 #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
 pub use config::StorageBackend;
 pub use config::{DEFAULT_BIND_ADDR, DEFAULT_STORAGE_ROOT, LogHandler, LogLevel, ServerConfig};
-pub use handler::{HealthCache, TransformOptionsPayload};
+pub use handler::TransformOptionsPayload;
 pub use lifecycle::{serve, serve_once, serve_once_with_config, serve_with_config};
 pub use signing::{SignedUrlSource, SignedWatermarkParams, bind_addr, sign_public_url};
 
