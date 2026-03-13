@@ -252,10 +252,10 @@ Use `-` for input and/or output to integrate truss into shell pipelines. When re
 
 ```sh
 # Pipe from stdin to stdout
-cat photo.png | truss convert - -o - --format jpeg > photo.jpg
+cat photo.png | truss - -o - --format jpeg > photo.jpg
 
 # Download, convert, and upload in one pipeline
-curl -s https://example.com/img.png | truss convert - -o - --format webp --width 800 | \
+curl -s https://example.com/img.png | truss - -o - --format webp --width 800 | \
   aws s3 cp - s3://bucket/thumb.webp
 
 # Combine with other tools
@@ -274,13 +274,16 @@ truss diagram.svg -o safe.svg
 truss diagram.svg -o diagram.png --width 1024
 ```
 
-#### Escaping filenames starting with `-`
+#### Filenames starting with `-`
 
-Use `--` to separate options from file paths that start with a dash:
+Use `--output=` (or `--output`) to avoid ambiguity with filenames that start with a dash:
 
 ```sh
-truss convert -- -input.png -o out.jpg
-truss convert input.png -o -- -output.jpg
+# Dash-prefixed output: use --output= to assign the value unambiguously
+truss convert input.png --output=-output.jpg
+
+# Dash-prefixed input: use a path prefix
+truss convert ./-input.png -o out.jpg
 ```
 
 ### HTTP Server -- one curl to transform
