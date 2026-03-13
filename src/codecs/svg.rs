@@ -70,6 +70,7 @@ use std::time::Instant;
 /// )).unwrap();
 /// assert_eq!(result.artifact.media_type, MediaType::Png);
 /// ```
+#[must_use = "this function returns the transform result without side effects"]
 pub fn transform_svg(request: TransformRequest) -> Result<TransformResult, TransformError> {
     if request.options.blur.is_some() {
         return Err(TransformError::InvalidOptions(
