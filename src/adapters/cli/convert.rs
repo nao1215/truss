@@ -1,6 +1,4 @@
-use crate::{
-    MediaType, RawArtifact, TransformRequest, WatermarkInput, sniff_artifact, transform,
-};
+use crate::{MediaType, RawArtifact, TransformRequest, WatermarkInput, sniff_artifact, transform};
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
