@@ -1,5 +1,45 @@
 # Changelog
 
+## v0.8.0
+
+### Added
+
+- Lock-free syscall caching for health check endpoints (`disk_free_bytes`, `process_rss_bytes`) with configurable TTL via `TRUSS_HEALTH_CACHE_TTL_SECS` (default: 5s, range: 0–300). Eliminates redundant kernel context switches under high-frequency polling (#74).
+- `ServerConfig::with_health_cache_ttl_secs()` builder method for programmatic TTL override.
+- Per-IP rate limiting with sharded buckets to reduce mutex contention (#127).
+- Reverse proxy support: resolve real client IP behind trusted proxies for rate limiting via `TRUSS_TRUSTED_PROXIES` (#117).
+- `#[must_use]` annotations on key public types and functions (#130).
+- `#[non_exhaustive]` on public enums for semver safety (#122).
+- Integration tests for HEAD requests (#123).
+- Unit tests for routing, signing, and inspect modules (#124).
+- Non-ASCII input tests for `Rgba8::from_hex` (#131).
+- Security audit CI on pull requests (#128).
+- PR template and updated stale bug report placeholder (#126).
+
+### Fixed
+
+- Block SSRF bypass via IPv4-compatible, 6to4, and Teredo IPv6 addresses (#118).
+- Add element count and nesting depth limits to SVG sanitizer; fix CSS `url()` search performance (#119).
+- Disambiguate NUL escape to avoid clippy `octal_escapes` lint (#124).
+- Guard `Rgba8::from_hex` against non-ASCII input (#131).
+- Add `#[serial]` to cloud integration tests that use `env::set_var` (#116).
+- Prevent flaky redirect-limit test on Windows (WSAECONNABORTED).
+- Use acquire/release memory ordering in `HealthCache` for correctness on weakly-ordered architectures.
+
+### Changed
+
+- Extract `collect_resource_checks()` to deduplicate ~70 lines of identical logic between `handle_health()` and `handle_health_ready()`.
+- Introduce unified transform dispatch to eliminate SVG/raster routing duplication (#115).
+- Remove ~2400 lines of duplicated code from `server/mod.rs` (#114).
+- Replace relay imports with direct submodule references in `auth.rs` and `metrics.rs`.
+- Consolidate duplicated test helpers in CLI integration tests (#121).
+- Replace manual JSON construction with `serde_json` in inspect command (#129).
+- Throttle cache eviction scans and remove unnecessary `fsync` (#120).
+- Hide `HealthCache` from public API; expose TTL via builder method.
+- Document `TRUSS_HEALTH_CACHE_TTL_SECS`, `TRUSS_HEALTH_CACHE_MIN_FREE_BYTES`, and `TRUSS_HEALTH_MAX_MEMORY_BYTES` in `from_env` rustdoc.
+- Update pipeline and Prometheus docs with crop/sharpen stages and watermark metric (#125).
+- Bump clap 4.5→4.6, clap_complete 4.5→4.6, aws-sdk-s3 1.125→1.126.
+
 ## v0.7.2
 
 ### Fixed
