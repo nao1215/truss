@@ -18,9 +18,9 @@
 #![cfg(feature = "azure")]
 
 use hmac::{Hmac, Mac};
-use serial_test::serial;
 use image::codecs::png::PngEncoder;
 use image::{ColorType, ImageEncoder, Rgba, RgbaImage};
+use serial_test::serial;
 use sha2::Sha256;
 use std::collections::BTreeMap;
 use std::io::{Read as _, Write as _};
