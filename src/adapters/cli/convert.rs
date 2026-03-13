@@ -1,6 +1,5 @@
 use crate::{
-    MediaType, RawArtifact, TransformRequest, WatermarkInput, sniff_artifact, transform_raster,
-    transform_svg,
+    MediaType, RawArtifact, TransformRequest, WatermarkInput, sniff_artifact, transform,
 };
 use std::fs;
 use std::io::{Read, Write};
@@ -150,16 +149,9 @@ where
         None
     };
 
-    let result = if input.media_type == MediaType::Svg {
-        let mut request = TransformRequest::new(input, options);
-        request.watermark = watermark;
-        transform_svg(request)
-    } else {
-        let mut request = TransformRequest::new(input, options);
-        request.watermark = watermark;
-        transform_raster(request)
-    }
-    .map_err(map_transform_error)?;
+    let mut request = TransformRequest::new(input, options);
+    request.watermark = watermark;
+    let result = transform(request).map_err(map_transform_error)?;
 
     for warning in &result.warnings {
         eprintln!("warning: {warning}");

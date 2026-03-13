@@ -24,6 +24,7 @@ pub use adapters::server::{
 pub use codecs::raster::transform_raster;
 #[cfg(feature = "svg")]
 pub use codecs::svg::transform_svg;
+pub use codecs::transform;
 pub use core::{
     Artifact, ArtifactMetadata, CropRegion, Dimensions, Fit, MAX_DECODED_PIXELS, MAX_OUTPUT_PIXELS,
     MAX_WATERMARK_PIXELS, MediaType, MetadataKind, MetadataPolicy, NormalizedTransformOptions,
