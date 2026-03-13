@@ -426,6 +426,14 @@ pub struct ServerConfig {
     /// Configurable via `TRUSS_HEALTH_MAX_MEMORY_BYTES`. When unset, the memory
     /// check is skipped. Only effective on Linux.
     pub health_max_memory_bytes: Option<u64>,
+    /// Cached syscall results for health endpoints.
+    ///
+    /// The TTL is configurable via `TRUSS_HEALTH_CACHE_TTL_SECS`. Defaults to 5
+    /// seconds. Set to `0` to disable caching.
+    ///
+    /// Use [`ServerConfig::with_health_cache_ttl_secs`] to override the TTL
+    /// programmatically.
+    pub(crate) health_cache: Arc<super::handler::HealthCache>,
     /// Drain period (in seconds) during graceful shutdown.
     ///
     /// On receiving a shutdown signal the server immediately marks itself as
@@ -545,6 +553,7 @@ impl Clone for ServerConfig {
             disable_metrics: self.disable_metrics,
             health_cache_min_free_bytes: self.health_cache_min_free_bytes,
             health_max_memory_bytes: self.health_max_memory_bytes,
+            health_cache: Arc::clone(&self.health_cache),
             shutdown_drain_secs: self.shutdown_drain_secs,
             draining: Arc::clone(&self.draining),
             custom_response_headers: self.custom_response_headers.clone(),
@@ -623,6 +632,7 @@ impl fmt::Debug for ServerConfig {
                 &self.health_cache_min_free_bytes,
             )
             .field("health_max_memory_bytes", &self.health_max_memory_bytes)
+            .field("health_cache_ttl_nanos", &self.health_cache.ttl_nanos)
             .field("shutdown_drain_secs", &self.shutdown_drain_secs)
             .field(
                 "custom_response_headers",
@@ -686,6 +696,7 @@ impl PartialEq for ServerConfig {
             && self.disable_metrics == other.disable_metrics
             && self.health_cache_min_free_bytes == other.health_cache_min_free_bytes
             && self.health_max_memory_bytes == other.health_max_memory_bytes
+            && self.health_cache.ttl_nanos == other.health_cache.ttl_nanos
             && self.shutdown_drain_secs == other.shutdown_drain_secs
             && self.custom_response_headers == other.custom_response_headers
             && self.max_source_bytes == other.max_source_bytes
@@ -796,6 +807,9 @@ impl ServerConfig {
             disable_metrics: false,
             health_cache_min_free_bytes: None,
             health_max_memory_bytes: None,
+            health_cache: Arc::new(super::handler::HealthCache::new(
+                super::handler::DEFAULT_HEALTH_CACHE_TTL_SECS,
+            )),
             shutdown_drain_secs: DEFAULT_SHUTDOWN_DRAIN_SECS,
             draining: Arc::new(AtomicBool::new(false)),
             custom_response_headers: Vec::new(),
@@ -820,6 +834,15 @@ impl ServerConfig {
             #[cfg(feature = "azure")]
             azure_context: None,
         }
+    }
+
+    /// Overrides the health-check syscall cache TTL.
+    ///
+    /// This builder-style method allows embedders to configure the TTL
+    /// programmatically without relying on environment variables.
+    pub fn with_health_cache_ttl_secs(mut self, ttl_secs: u64) -> Self {
+        self.health_cache = Arc::new(super::handler::HealthCache::new(ttl_secs));
+        self
     }
 
     #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
@@ -1079,6 +1102,13 @@ impl ServerConfig {
     ///   endpoint entirely (returns 404).
     /// - `TRUSS_STORAGE_TIMEOUT_SECS`: download timeout for storage backends in seconds
     ///   (default: 30, range: 1–300).
+    /// - `TRUSS_HEALTH_CACHE_MIN_FREE_BYTES`: minimum free bytes on the cache disk before
+    ///   `/health/ready` reports failure. When unset, the disk free-space check is skipped.
+    /// - `TRUSS_HEALTH_MAX_MEMORY_BYTES`: maximum resident memory (RSS) in bytes before
+    ///   `/health/ready` reports failure. When unset, the memory check is skipped (Linux only).
+    /// - `TRUSS_HEALTH_CACHE_TTL_SECS`: TTL in seconds for cached syscall results
+    ///   (`disk_free_bytes`, `process_rss_bytes`) used by health endpoints (default: 5,
+    ///   range: 0–300). Set to `0` to disable caching and call syscalls on every request.
     ///
     /// # Errors
     ///
@@ -1308,6 +1338,9 @@ impl ServerConfig {
             parse_env_u64_ranged("TRUSS_HEALTH_CACHE_MIN_FREE_BYTES", 1, u64::MAX)?;
         let health_max_memory_bytes =
             parse_env_u64_ranged("TRUSS_HEALTH_MAX_MEMORY_BYTES", 1, u64::MAX)?;
+        let health_cache_ttl_secs = parse_env_u64_ranged("TRUSS_HEALTH_CACHE_TTL_SECS", 0, 300)?
+            .unwrap_or(super::handler::DEFAULT_HEALTH_CACHE_TTL_SECS);
+        let health_cache = Arc::new(super::handler::HealthCache::new(health_cache_ttl_secs));
 
         let (presets, presets_file_path) = parse_presets_from_env()?;
 
@@ -1381,6 +1414,7 @@ impl ServerConfig {
             disable_metrics,
             health_cache_min_free_bytes,
             health_max_memory_bytes,
+            health_cache,
             shutdown_drain_secs,
             draining: Arc::new(AtomicBool::new(false)),
             custom_response_headers,
@@ -2314,5 +2348,35 @@ mod tests {
     fn from_env_trusted_proxies_invalid_rejects() {
         let _env = ScopedEnv::set("TRUSS_TRUSTED_PROXIES", "not-an-ip");
         assert!(ServerConfig::from_env().is_err());
+    }
+
+    #[test]
+    #[serial]
+    fn parse_health_cache_ttl_secs_valid() {
+        let _env = ScopedEnv::set("TRUSS_HEALTH_CACHE_TTL_SECS", "10");
+        let result = parse_env_u64_ranged("TRUSS_HEALTH_CACHE_TTL_SECS", 0, 300);
+        assert_eq!(result.unwrap(), Some(10));
+    }
+
+    #[test]
+    #[serial]
+    fn parse_health_cache_ttl_secs_zero_disables_caching() {
+        let _env = ScopedEnv::set("TRUSS_HEALTH_CACHE_TTL_SECS", "0");
+        let result = parse_env_u64_ranged("TRUSS_HEALTH_CACHE_TTL_SECS", 0, 300);
+        assert_eq!(result.unwrap(), Some(0));
+    }
+
+    #[test]
+    #[serial]
+    fn from_env_wires_health_cache_ttl_secs() {
+        let _env = ScopedEnv::set("TRUSS_HEALTH_CACHE_TTL_SECS", "10");
+        let config = ServerConfig::from_env().unwrap();
+        assert_eq!(config.health_cache.ttl_nanos, 10 * 1_000_000_000);
+    }
+
+    #[test]
+    fn with_health_cache_ttl_secs_overrides_default() {
+        let config = ServerConfig::new(PathBuf::from("."), None).with_health_cache_ttl_secs(20);
+        assert_eq!(config.health_cache.ttl_nanos, 20 * 1_000_000_000);
     }
 }

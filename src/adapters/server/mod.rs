@@ -94,6 +94,7 @@ pub(crate) fn stderr_write(msg: &str) {
 }
 
 #[cfg(test)]
+#[allow(unused_imports)] // Some imports are only used by feature-gated tests (e.g. s3).
 mod tests {
     use serial_test::serial;
 
@@ -120,8 +121,9 @@ mod tests {
         authorize_request_headers, authorize_signed_request, canonical_query_without_signature,
     };
     use super::handler::{
-        TransformImageRequestPayload, TransformSlot, TransformSourcePayload, WatermarkSource,
-        disk_free_bytes, parse_public_get_request, process_rss_bytes, transform_source_bytes,
+        HealthCache, TransformImageRequestPayload, TransformSlot, TransformSourcePayload,
+        WatermarkSource, disk_free_bytes, parse_public_get_request, process_rss_bytes,
+        transform_source_bytes,
     };
     use super::lifecycle::preset_watcher;
     use super::negotiate::{
@@ -4264,5 +4266,61 @@ mod tests {
             body: vec![],
         };
         assert!(matches!(classify_route(&req), RouteMetric::Unknown));
+    }
+
+    // ── HealthCache tests ────────────────────────────────────────────
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn health_cache_returns_cached_rss_within_ttl() {
+        // Use a very long TTL so the cache never expires during the test.
+        let cache = HealthCache::new(3600);
+        let first = cache.rss();
+        let second = cache.rss();
+        // Both calls should return the same cached value.
+        assert_eq!(first, second);
+        assert!(first.is_some());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn health_cache_returns_cached_disk_free_within_ttl() {
+        let dir = temp_dir("hc-disk");
+        let cache = HealthCache::new(3600);
+        let first = cache.disk_free(&dir);
+        let second = cache.disk_free(&dir);
+        assert_eq!(first, second);
+        assert!(first.is_some());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn health_cache_refreshes_rss_after_ttl() {
+        // TTL of 0 means every call should perform a fresh syscall.
+        let cache = HealthCache::new(0);
+        let first = cache.rss();
+        let second = cache.rss();
+        // Both should succeed (fresh reads).
+        assert!(first.is_some());
+        assert!(second.is_some());
+    }
+
+    #[test]
+    fn health_cache_ttl_zero_always_refreshes_disk_free() {
+        let dir = temp_dir("hc-disk-zero");
+        let cache = HealthCache::new(0);
+        // With TTL=0, the cache timestamp check should never short-circuit.
+        let first = cache.disk_free(&dir);
+        let second = cache.disk_free(&dir);
+        // On Linux both are Some; on other platforms both are None.
+        assert_eq!(first.is_some(), second.is_some());
+    }
+
+    #[test]
+    fn health_cache_default_ttl_in_server_config() {
+        let storage = temp_dir("hc-default-ttl");
+        let config = ServerConfig::new(storage, None);
+        // Default TTL is 5 seconds = 5_000_000_000 nanoseconds.
+        assert_eq!(config.health_cache.ttl_nanos, 5_000_000_000);
     }
 }

@@ -508,6 +508,80 @@ impl WatermarkSource {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Cached syscall helpers for health endpoints (#74)
+// ---------------------------------------------------------------------------
+
+/// Sentinel value representing `None` in atomic storage.
+const CACHED_NONE: u64 = u64::MAX;
+
+/// Default TTL for health-check syscall caching (5 seconds).
+pub(super) const DEFAULT_HEALTH_CACHE_TTL_SECS: u64 = 5;
+
+/// Lock-free cache for expensive syscall results used by health endpoints.
+///
+/// Caches `disk_free_bytes()` and `process_rss_bytes()` with a configurable
+/// TTL so that high-frequency polling does not generate redundant kernel
+/// context switches and file I/O.
+pub(crate) struct HealthCache {
+    disk_free: AtomicU64,
+    disk_free_at: AtomicU64,
+    rss: AtomicU64,
+    rss_at: AtomicU64,
+    pub(super) ttl_nanos: u64,
+}
+
+impl HealthCache {
+    /// Creates a new cache with the given TTL in seconds.
+    pub(super) fn new(ttl_secs: u64) -> Self {
+        Self {
+            disk_free: AtomicU64::new(CACHED_NONE),
+            disk_free_at: AtomicU64::new(0),
+            rss: AtomicU64::new(CACHED_NONE),
+            rss_at: AtomicU64::new(0),
+            ttl_nanos: ttl_secs.saturating_mul(1_000_000_000),
+        }
+    }
+
+    /// Returns the monotonic timestamp in nanoseconds since `START_TIME`.
+    fn now_nanos() -> u64 {
+        super::metrics::START_TIME
+            .get_or_init(Instant::now)
+            .elapsed()
+            .as_nanos() as u64
+    }
+
+    /// Returns the cached disk free bytes, refreshing if the TTL has expired.
+    pub(super) fn disk_free(&self, path: &std::path::Path) -> Option<u64> {
+        let now = Self::now_nanos();
+        let last = self.disk_free_at.load(Ordering::Acquire);
+        if now.wrapping_sub(last) < self.ttl_nanos && last != 0 {
+            let v = self.disk_free.load(Ordering::Relaxed);
+            return if v == CACHED_NONE { None } else { Some(v) };
+        }
+        let fresh = disk_free_bytes(path);
+        self.disk_free
+            .store(fresh.unwrap_or(CACHED_NONE), Ordering::Relaxed);
+        self.disk_free_at.store(now, Ordering::Release);
+        fresh
+    }
+
+    /// Returns the cached process RSS bytes, refreshing if the TTL has expired.
+    pub(super) fn rss(&self) -> Option<u64> {
+        let now = Self::now_nanos();
+        let last = self.rss_at.load(Ordering::Acquire);
+        if now.wrapping_sub(last) < self.ttl_nanos && last != 0 {
+            let v = self.rss.load(Ordering::Relaxed);
+            return if v == CACHED_NONE { None } else { Some(v) };
+        }
+        let fresh = process_rss_bytes();
+        self.rss
+            .store(fresh.unwrap_or(CACHED_NONE), Ordering::Relaxed);
+        self.rss_at.store(now, Ordering::Release);
+        fresh
+    }
+}
+
 /// Returns the number of free bytes on the filesystem containing `path`,
 /// or `None` if the query fails.
 #[cfg(target_os = "linux")]
@@ -572,9 +646,6 @@ pub(super) fn handle_health_live() -> HttpResponse {
 /// dependencies are available (storage root, cache root if configured, S3
 /// reachability) and configurable resource thresholds.
 pub(super) fn handle_health_ready(config: &ServerConfig) -> HttpResponse {
-    let mut checks: Vec<serde_json::Value> = Vec::new();
-    let mut all_ok = true;
-
     // When the server is draining (shutdown signal received), immediately
     // report not-ready so that load balancers stop routing traffic.
     // Skip expensive probes (storage, disk, memory) — they are irrelevant
@@ -586,8 +657,37 @@ pub(super) fn handle_health_ready(config: &ServerConfig) -> HttpResponse {
         }))
         .expect("serialize readiness");
         body.push(b'\n');
+        // Draining is an operational error (RFC 7807 problem+json).
         return HttpResponse::problem("503 Service Unavailable", body);
     }
+
+    let (checks, all_ok) = collect_resource_checks(config);
+
+    let status_str = if all_ok { "ok" } else { "fail" };
+    let mut body = serde_json::to_vec(&json!({
+        "status": status_str,
+        "checks": checks,
+    }))
+    .expect("serialize readiness");
+    body.push(b'\n');
+
+    // Resource check results use application/json (health-check format),
+    // not problem+json, because they represent a structured health report
+    // rather than an error condition.
+    if all_ok {
+        HttpResponse::json("200 OK", body)
+    } else {
+        HttpResponse::json("503 Service Unavailable", body)
+    }
+}
+
+/// Collects all resource health checks shared by `/health` and `/health/ready`.
+///
+/// Returns the accumulated check entries and a boolean indicating whether all
+/// checks passed.
+fn collect_resource_checks(config: &ServerConfig) -> (Vec<serde_json::Value>, bool) {
+    let mut checks: Vec<serde_json::Value> = Vec::new();
+    let mut all_ok = true;
 
     for (ok, name) in storage_health_check(config) {
         checks.push(json!({
@@ -611,7 +711,7 @@ pub(super) fn handle_health_ready(config: &ServerConfig) -> HttpResponse {
     }
 
     if let Some(cache_root) = &config.cache_root {
-        let free = disk_free_bytes(cache_root);
+        let free = config.health_cache.disk_free(cache_root);
         let threshold = config.health_cache_min_free_bytes;
         let disk_ok = match (free, threshold) {
             (Some(f), Some(min)) => f >= min,
@@ -647,7 +747,7 @@ pub(super) fn handle_health_ready(config: &ServerConfig) -> HttpResponse {
     }
 
     // Memory usage (Linux only) — skip entirely when RSS is unavailable
-    if let Some(rss_bytes) = process_rss_bytes() {
+    if let Some(rss_bytes) = config.health_cache.rss() {
         let threshold = config.health_max_memory_bytes;
         let mem_ok = threshold.is_none_or(|max| rss_bytes <= max);
         let mut check = json!({
@@ -664,22 +764,11 @@ pub(super) fn handle_health_ready(config: &ServerConfig) -> HttpResponse {
         }
     }
 
-    let status_str = if all_ok { "ok" } else { "fail" };
-    let mut body = serde_json::to_vec(&json!({
-        "status": status_str,
-        "checks": checks,
-    }))
-    .expect("serialize readiness");
-    body.push(b'\n');
-
-    if all_ok {
-        HttpResponse::json("200 OK", body)
-    } else {
-        HttpResponse::json("503 Service Unavailable", body)
-    }
+    (checks, all_ok)
 }
 
-/// Returns a comprehensive diagnostic health response.
+/// Returns storage backend health checks (storage root existence and cloud
+/// backend reachability).
 pub(super) fn storage_health_check(config: &ServerConfig) -> Vec<(bool, &'static str)> {
     #[allow(unused_mut)]
     let mut checks = vec![(config.storage_root.is_dir(), "storageRoot")];
@@ -711,85 +800,7 @@ pub(super) fn storage_health_check(config: &ServerConfig) -> Vec<(bool, &'static
 }
 
 pub(super) fn handle_health(config: &ServerConfig) -> HttpResponse {
-    let mut checks: Vec<serde_json::Value> = Vec::new();
-    let mut all_ok = true;
-
-    for (ok, name) in storage_health_check(config) {
-        checks.push(json!({
-            "name": name,
-            "status": if ok { "ok" } else { "fail" },
-        }));
-        if !ok {
-            all_ok = false;
-        }
-    }
-
-    if let Some(cache_root) = &config.cache_root {
-        let cache_ok = cache_root.is_dir();
-        checks.push(json!({
-            "name": "cacheRoot",
-            "status": if cache_ok { "ok" } else { "fail" },
-        }));
-        if !cache_ok {
-            all_ok = false;
-        }
-    }
-
-    // Cache disk free space
-    if let Some(cache_root) = &config.cache_root {
-        let free = disk_free_bytes(cache_root);
-        let threshold = config.health_cache_min_free_bytes;
-        let disk_ok = match (free, threshold) {
-            (Some(f), Some(min)) => f >= min,
-            _ => true,
-        };
-        let mut check = json!({
-            "name": "cacheDiskFree",
-            "status": if disk_ok { "ok" } else { "fail" },
-        });
-        if let Some(f) = free {
-            check["freeBytes"] = json!(f);
-        }
-        if let Some(min) = threshold {
-            check["thresholdBytes"] = json!(min);
-        }
-        checks.push(check);
-        if !disk_ok {
-            all_ok = false;
-        }
-    }
-
-    // Concurrency utilization
-    let in_flight = config.transforms_in_flight.load(Ordering::Relaxed);
-    let overloaded = in_flight >= config.max_concurrent_transforms;
-    checks.push(json!({
-        "name": "transformCapacity",
-        "status": if overloaded { "fail" } else { "ok" },
-        "current": in_flight,
-        "max": config.max_concurrent_transforms,
-    }));
-    if overloaded {
-        all_ok = false;
-    }
-
-    // Memory usage (Linux only)
-    let rss = process_rss_bytes();
-    if let Some(rss_bytes) = rss {
-        let threshold = config.health_max_memory_bytes;
-        let mem_ok = threshold.is_none_or(|max| rss_bytes <= max);
-        let mut check = json!({
-            "name": "memoryUsage",
-            "status": if mem_ok { "ok" } else { "fail" },
-            "rssBytes": rss_bytes,
-        });
-        if let Some(max) = threshold {
-            check["thresholdBytes"] = json!(max);
-        }
-        checks.push(check);
-        if !mem_ok {
-            all_ok = false;
-        }
-    }
+    let (checks, all_ok) = collect_resource_checks(config);
 
     let status_str = if all_ok { "ok" } else { "fail" };
     let mut body = serde_json::to_vec(&json!({
