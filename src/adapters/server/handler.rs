@@ -657,6 +657,7 @@ pub(super) fn handle_health_ready(config: &ServerConfig) -> HttpResponse {
         }))
         .expect("serialize readiness");
         body.push(b'\n');
+        // Draining is an operational error (RFC 7807 problem+json).
         return HttpResponse::problem("503 Service Unavailable", body);
     }
 
@@ -670,6 +671,9 @@ pub(super) fn handle_health_ready(config: &ServerConfig) -> HttpResponse {
     .expect("serialize readiness");
     body.push(b'\n');
 
+    // Resource check results use application/json (health-check format),
+    // not problem+json, because they represent a structured health report
+    // rather than an error condition.
     if all_ok {
         HttpResponse::json("200 OK", body)
     } else {

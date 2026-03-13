@@ -1090,6 +1090,13 @@ impl ServerConfig {
     ///   endpoint entirely (returns 404).
     /// - `TRUSS_STORAGE_TIMEOUT_SECS`: download timeout for storage backends in seconds
     ///   (default: 30, range: 1–300).
+    /// - `TRUSS_HEALTH_CACHE_MIN_FREE_BYTES`: minimum free bytes on the cache disk before
+    ///   `/health/ready` reports failure. When unset, the disk free-space check is skipped.
+    /// - `TRUSS_HEALTH_MAX_MEMORY_BYTES`: maximum resident memory (RSS) in bytes before
+    ///   `/health/ready` reports failure. When unset, the memory check is skipped (Linux only).
+    /// - `TRUSS_HEALTH_CACHE_TTL_SECS`: TTL in seconds for cached syscall results
+    ///   (`disk_free_bytes`, `process_rss_bytes`) used by health endpoints (default: 5,
+    ///   range: 0–300). Set to `0` to disable caching and call syscalls on every request.
     ///
     /// # Errors
     ///
