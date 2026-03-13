@@ -26,6 +26,17 @@ pub fn png_bytes() -> Vec<u8> {
 /// watermark). 64x64 is large enough to accept a 4x3 watermark with default margin.
 /// Uses a visibly different color from `png_bytes()` so watermark compositing tests are
 /// meaningful.
+/// Small 2x2 PNG suitable for cloud integration tests where image content
+/// does not matter and a minimal payload is preferred.
+pub fn tiny_png() -> Vec<u8> {
+    let image = RgbaImage::from_pixel(2, 2, Rgba([255, 0, 0, 255]));
+    let mut bytes = Vec::new();
+    PngEncoder::new(&mut bytes)
+        .write_image(&image, 2, 2, ColorType::Rgba8.into())
+        .expect("encode tiny png");
+    bytes
+}
+
 pub fn large_png_bytes() -> Vec<u8> {
     let image = RgbaImage::from_pixel(64, 64, Rgba([200, 100, 50, 255]));
     let mut bytes = Vec::new();
@@ -284,4 +295,32 @@ pub fn signed_target(
         serializer.append_pair(&name, &value);
     }
     format!("{path}?{}", serializer.finish())
+}
+
+pub fn send_signed_get(addr: SocketAddr, target: &str, authority: &str) -> (String, Vec<u8>) {
+    let mut stream = TcpStream::connect_timeout(&addr, Duration::from_secs(5)).expect("connect");
+    stream.set_read_timeout(Some(Duration::from_secs(10))).ok();
+    let req = format!("GET {target} HTTP/1.1\r\nHost: {authority}\r\nConnection: close\r\n\r\n");
+    stream.write_all(req.as_bytes()).expect("write request");
+    stream.flush().ok();
+
+    let mut raw = Vec::new();
+    stream.read_to_end(&mut raw).expect("read response");
+    let raw_str = String::from_utf8_lossy(&raw);
+
+    let header_end = raw_str.find("\r\n\r\n").unwrap_or(raw.len());
+    let header = raw_str[..header_end].to_string();
+    let body = raw[(header_end + 4).min(raw.len())..].to_vec();
+    (header, body)
+}
+
+pub fn status_code(header: &str) -> u16 {
+    header
+        .lines()
+        .next()
+        .unwrap_or("")
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0)
 }
