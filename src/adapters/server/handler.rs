@@ -1,5 +1,4 @@
 /// Request handler implementations (transform, health, metrics, public, upload).
-
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -15,9 +14,9 @@ use super::config::StorageBackend;
 use super::config::{ServerConfig, StorageBackendLabel};
 
 use super::auth::{
-    authorize_request, authorize_signed_request, parse_query_params, required_query_param,
-    validate_public_query_names, parse_optional_bool_query, parse_optional_float_query,
-    parse_optional_integer_query, parse_optional_u8_query,
+    authorize_request, authorize_signed_request, parse_optional_bool_query,
+    parse_optional_float_query, parse_optional_integer_query, parse_optional_u8_query,
+    parse_query_params, required_query_param, validate_public_query_names,
 };
 use super::cache::{
     CacheLookup, TransformCache, compute_cache_key, compute_watermark_identity,
@@ -811,10 +810,7 @@ pub(super) fn handle_health(config: &ServerConfig) -> HttpResponse {
 // Metrics handler
 // ---------------------------------------------------------------------------
 
-pub(super) fn handle_metrics_request(
-    request: HttpRequest,
-    config: &ServerConfig,
-) -> HttpResponse {
+pub(super) fn handle_metrics_request(request: HttpRequest, config: &ServerConfig) -> HttpResponse {
     if config.disable_metrics {
         return HttpResponse::problem("404 Not Found", NOT_FOUND_BODY.as_bytes().to_vec());
     }
@@ -1029,10 +1025,7 @@ fn handle_public_get_request(
 // Upload handler
 // ---------------------------------------------------------------------------
 
-pub(super) fn handle_upload_request(
-    request: HttpRequest,
-    config: &ServerConfig,
-) -> HttpResponse {
+pub(super) fn handle_upload_request(request: HttpRequest, config: &ServerConfig) -> HttpResponse {
     if let Err(response) = authorize_request(&request, config) {
         return response;
     }
@@ -1177,14 +1170,11 @@ pub(super) fn transform_source_bytes(
         }
     };
 
-    let cache = config
-        .cache_root
-        .as_ref()
-        .map(|root| {
-            TransformCache::new(root.clone())
-                .with_log_handler(config.log_handler.clone())
-                .with_max_bytes(config.cache_max_bytes)
-        });
+    let cache = config.cache_root.as_ref().map(|root| {
+        TransformCache::new(root.clone())
+            .with_log_handler(config.log_handler.clone())
+            .with_max_bytes(config.cache_max_bytes)
+    });
 
     if let Some(ref cache) = cache
         && options.format.is_some()

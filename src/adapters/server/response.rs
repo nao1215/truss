@@ -24,6 +24,14 @@ impl HttpResponse {
         }
     }
 
+    /// Clears the response body when `is_head` is true, ensuring HEAD
+    /// requests never carry a body per RFC 9110.
+    pub(super) fn strip_body_if_head(&mut self, is_head: bool) {
+        if is_head {
+            self.body = Vec::new();
+        }
+    }
+
     pub(super) fn problem(status: &'static str, body: Vec<u8>) -> Self {
         Self {
             status,

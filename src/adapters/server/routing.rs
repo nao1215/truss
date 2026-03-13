@@ -1,5 +1,4 @@
 /// Route dispatch, connection handling, and access logging.
-
 use std::io;
 use std::net::{IpAddr, TcpStream};
 use std::time::Instant;
@@ -15,9 +14,7 @@ use super::handler::{
 };
 use super::http_parse;
 use super::lifecycle::{SOCKET_READ_TIMEOUT, SOCKET_WRITE_TIMEOUT};
-use super::metrics::{
-    RouteMetric, record_http_metrics, record_http_request_duration, status_code,
-};
+use super::metrics::{RouteMetric, record_http_metrics, record_http_request_duration, status_code};
 use super::response::{
     HttpResponse, NOT_FOUND_BODY, too_many_requests_response, write_response,
     write_response_compressed,
@@ -185,6 +182,8 @@ pub(super) fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io:
         let request_id =
             extract_request_id(&partial.headers).unwrap_or_else(|| Uuid::new_v4().to_string());
 
+        let is_head = partial.method == "HEAD";
+
         // --- Per-IP rate limiting ---
         // When behind a trusted reverse proxy, resolve the real client IP
         // from X-Forwarded-For / X-Real-IP so each end-user gets an
@@ -196,35 +195,34 @@ pub(super) fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io:
                 resolve_client_ip(ip, &partial.headers, &config.trusted_proxies)
             }
         });
-        if let (Some(ref limiter), Some(ip)) = (&config.rate_limiter, client_ip) {
-            if !limiter.check(ip) {
-                let mut response = too_many_requests_response(
-                    "rate limit exceeded — try again later",
-                );
-                response
-                    .headers
-                    .push(("X-Request-Id".to_string(), request_id.clone()));
-                record_http_metrics(RouteMetric::Unknown, response.status);
-                let sc = status_code(response.status).unwrap_or("unknown");
-                let method_log = partial.method.clone();
-                let path_log = partial.path().to_string();
-                let _ = write_response(&mut stream, response, true);
-                record_http_request_duration(RouteMetric::Unknown, start);
-                emit_access_log(
-                    config,
-                    &AccessLogEntry {
-                        request_id: &request_id,
-                        method: &method_log,
-                        path: &path_log,
-                        route: &path_log,
-                        status: sc,
-                        start,
-                        cache_status: None,
-                        watermark: false,
-                    },
-                );
-                return Ok(());
-            }
+        if let (Some(limiter), Some(ip)) = (&config.rate_limiter, client_ip)
+            && !limiter.check(ip)
+        {
+            let mut response = too_many_requests_response("rate limit exceeded — try again later");
+            response
+                .headers
+                .push(("X-Request-Id".to_string(), request_id.clone()));
+            response.strip_body_if_head(is_head);
+            record_http_metrics(RouteMetric::Unknown, response.status);
+            let sc = status_code(response.status).unwrap_or("unknown");
+            let method_log = partial.method.clone();
+            let path_log = partial.path().to_string();
+            let _ = write_response(&mut stream, response, true);
+            record_http_request_duration(RouteMetric::Unknown, start);
+            emit_access_log(
+                config,
+                &AccessLogEntry {
+                    request_id: &request_id,
+                    method: &method_log,
+                    path: &path_log,
+                    route: &path_log,
+                    status: sc,
+                    start,
+                    cache_status: None,
+                    watermark: false,
+                },
+            );
+            return Ok(());
         }
 
         let client_wants_close = partial
@@ -235,8 +233,6 @@ pub(super) fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io:
         let accepts_gzip = config.enable_compression
             && http_parse::header_value(&partial.headers, "accept-encoding")
                 .is_some_and(|v| http_parse::accepts_encoding(v, "gzip"));
-
-        let is_head = partial.method == "HEAD";
 
         let requires_auth = matches!(
             (partial.method.as_str(), partial.path()),
@@ -308,6 +304,7 @@ pub(super) fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io:
                 response
                     .headers
                     .push(("X-Request-Id".to_string(), request_id.clone()));
+                response.strip_body_if_head(is_head);
                 record_http_metrics(RouteMetric::Metrics, response.status);
                 let sc = status_code(response.status).unwrap_or("unknown");
                 let method_log = partial.method.clone();
@@ -386,9 +383,7 @@ pub(super) fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io:
 
         let sc = status_code(response.status).unwrap_or("unknown");
 
-        if is_head {
-            response.body = Vec::new();
-        }
+        response.strip_body_if_head(is_head);
 
         requests_served += 1;
         let close_after = client_wants_close || requests_served >= config.keep_alive_max_requests;

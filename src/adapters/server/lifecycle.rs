@@ -1,5 +1,4 @@
 /// Server startup, shutdown, signal handling, and connection management.
-
 use std::io;
 use std::net::{TcpListener, TcpStream};
 use std::sync::Arc;
@@ -437,9 +436,7 @@ pub(super) fn preset_watcher(
     use super::config::parse_presets_file;
     use std::fs;
 
-    let mut last_modified = fs::metadata(&path)
-        .and_then(|m| m.modified())
-        .ok();
+    let mut last_modified = fs::metadata(&path).and_then(|m| m.modified()).ok();
 
     loop {
         std::thread::sleep(PRESET_WATCH_INTERVAL);
