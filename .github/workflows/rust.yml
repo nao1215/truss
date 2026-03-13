@@ -140,9 +140,8 @@ jobs:
       - name: Validate OpenAPI spec
         run: python -m openapi_spec_validator doc/openapi.yaml
 
-  # ── main only: security audit ───────────────────────────────────────
+  # ── security audit ──────────────────────────────────────────────────
   security-audit:
-    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
