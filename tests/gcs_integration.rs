@@ -16,20 +16,11 @@
 
 #![cfg(feature = "gcs")]
 
-use hmac::{Hmac, Mac};
-use image::codecs::png::PngEncoder;
-use image::{ColorType, ImageEncoder, Rgba, RgbaImage};
+mod common;
+
 use serial_test::serial;
-use sha2::Sha256;
 use std::collections::BTreeMap;
-use std::io::{Read as _, Write as _};
-use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::path::PathBuf;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use truss::{
-    GcsContext, MediaType, RawArtifact, ServerConfig, build_gcs_context, serve_once_with_config,
-    sniff_artifact,
-};
+use truss::{GcsContext, MediaType, RawArtifact, ServerConfig, build_gcs_context, sniff_artifact};
 
 /// fake-gcs-server default HTTP endpoint.
 const GCS_MOCK_ENDPOINT: &str = "http://localhost:4443";
@@ -44,15 +35,6 @@ const AUTHORITY: &str = "localhost";
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn tiny_png() -> Vec<u8> {
-    let image = RgbaImage::from_pixel(2, 2, Rgba([255, 0, 0, 255]));
-    let mut buf = Vec::new();
-    PngEncoder::new(&mut buf)
-        .write_image(&image, 2, 2, ColorType::Rgba8.into())
-        .expect("encode png");
-    buf
-}
-
 /// Build a [`GcsContext`] pointing at the local fake-gcs-server instance.
 fn gcs_mock_context() -> GcsContext {
     // SAFETY: These tests are `#[ignore]`d and run sequentially via
@@ -65,17 +47,6 @@ fn gcs_mock_context() -> GcsContext {
     }
 
     build_gcs_context(TEST_BUCKET.to_string(), true).expect("build gcs context for fake-gcs-server")
-}
-
-/// Create a persistent temp directory that is not automatically deleted.
-fn temp_dir(name: &str) -> PathBuf {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("current time")
-        .as_nanos();
-    let path = std::env::temp_dir().join(format!("truss-gcs-integration-{name}-{unique}"));
-    std::fs::create_dir_all(&path).expect("create temp dir");
-    path
 }
 
 /// Build a [`ServerConfig`] with GCS backend and signed URL credentials.
@@ -106,72 +77,9 @@ fn put_object(key: &str, body: Vec<u8>) {
         .expect("upload object to fake-gcs-server");
 }
 
-fn spawn_server(
-    config: ServerConfig,
-) -> (SocketAddr, std::thread::JoinHandle<std::io::Result<()>>) {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
-    let addr = listener.local_addr().expect("addr");
-    let handle = std::thread::spawn(move || serve_once_with_config(listener, config));
-    (addr, handle)
-}
-
 /// Generate a signed URL target for `GET /images/by-path`.
 fn signed_by_path_target(query: BTreeMap<String, String>) -> String {
-    let mut query = query;
-    let signature = sign_query("GET", AUTHORITY, "/images/by-path", &query, SECRET);
-    query.insert("signature".to_string(), signature);
-    let mut serializer = url::form_urlencoded::Serializer::new(String::new());
-    for (name, value) in &query {
-        serializer.append_pair(name, value);
-    }
-    format!("/images/by-path?{}", serializer.finish())
-}
-
-fn sign_query(
-    method: &str,
-    authority: &str,
-    path: &str,
-    query: &BTreeMap<String, String>,
-    secret: &str,
-) -> String {
-    let mut serializer = url::form_urlencoded::Serializer::new(String::new());
-    for (name, value) in query {
-        if name != "signature" {
-            serializer.append_pair(name, value);
-        }
-    }
-    let canonical = format!("{method}\n{authority}\n{path}\n{}", serializer.finish());
-    let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).expect("hmac");
-    mac.update(canonical.as_bytes());
-    hex::encode(mac.finalize().into_bytes())
-}
-
-fn send_signed_get(addr: SocketAddr, target: &str) -> (String, Vec<u8>) {
-    let mut stream = TcpStream::connect_timeout(&addr, Duration::from_secs(5)).expect("connect");
-    stream.set_read_timeout(Some(Duration::from_secs(10))).ok();
-    let req = format!("GET {target} HTTP/1.1\r\nHost: {AUTHORITY}\r\nConnection: close\r\n\r\n");
-    stream.write_all(req.as_bytes()).expect("write request");
-    stream.flush().ok();
-
-    let mut raw = Vec::new();
-    stream.read_to_end(&mut raw).expect("read response");
-    let raw_str = String::from_utf8_lossy(&raw);
-
-    let header_end = raw_str.find("\r\n\r\n").unwrap_or(raw.len());
-    let header = raw_str[..header_end].to_string();
-    let body = raw[(header_end + 4).min(raw.len())..].to_vec();
-    (header, body)
-}
-
-fn status_code(header: &str) -> u16 {
-    header
-        .lines()
-        .next()
-        .unwrap_or("")
-        .split_whitespace()
-        .nth(1)
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0)
+    common::signed_target("/images/by-path", query, AUTHORITY, SECRET)
 }
 
 // ---------------------------------------------------------------------------
@@ -186,11 +94,11 @@ fn status_code(header: &str) -> u16 {
 #[serial]
 fn gcs_mock_put_then_get_by_path() {
     let ctx = gcs_mock_context();
-    put_object("photos/red.png", tiny_png());
+    put_object("photos/red.png", common::tiny_png());
 
-    let storage = temp_dir("get-by-path");
+    let storage = common::temp_dir("get-by-path");
     let config = gcs_mock_server_config(ctx, &storage);
-    let (addr, handle) = spawn_server(config);
+    let (addr, handle) = common::spawn_server(config);
 
     let target = signed_by_path_target(BTreeMap::from([
         ("path".to_string(), "/photos/red.png".to_string()),
@@ -198,9 +106,9 @@ fn gcs_mock_put_then_get_by_path() {
         ("expires".to_string(), "4102444800".to_string()),
         ("format".to_string(), "png".to_string()),
     ]));
-    let (header, body) = send_signed_get(addr, &target);
+    let (header, body) = common::send_signed_get(addr, &target, AUTHORITY);
 
-    assert_eq!(status_code(&header), 200, "header: {header}");
+    assert_eq!(common::status_code(&header), 200, "header: {header}");
     let artifact = sniff_artifact(RawArtifact::new(body, None)).expect("sniff transformed output");
     assert_eq!(artifact.media_type, MediaType::Png);
 
@@ -213,9 +121,9 @@ fn gcs_mock_put_then_get_by_path() {
 #[serial]
 fn gcs_mock_nonexistent_key_returns_404() {
     let ctx = gcs_mock_context();
-    let storage = temp_dir("nonexistent-key");
+    let storage = common::temp_dir("nonexistent-key");
     let config = gcs_mock_server_config(ctx, &storage);
-    let (addr, handle) = spawn_server(config);
+    let (addr, handle) = common::spawn_server(config);
 
     let target = signed_by_path_target(BTreeMap::from([
         ("path".to_string(), "/does/not/exist.png".to_string()),
@@ -223,10 +131,10 @@ fn gcs_mock_nonexistent_key_returns_404() {
         ("expires".to_string(), "4102444800".to_string()),
         ("format".to_string(), "png".to_string()),
     ]));
-    let (header, _body) = send_signed_get(addr, &target);
+    let (header, _body) = common::send_signed_get(addr, &target, AUTHORITY);
 
     assert_eq!(
-        status_code(&header),
+        common::status_code(&header),
         404,
         "expected 404 for missing key: {header}"
     );
@@ -248,9 +156,9 @@ fn gcs_mock_forbidden_returns_error() {
     let ctx = gcs_mock_context();
     // Use a bucket that has no objects uploaded — requesting any key
     // should surface a non-200 response from the backend.
-    let storage = temp_dir("forbidden");
+    let storage = common::temp_dir("forbidden");
     let config = gcs_mock_server_config(ctx, &storage);
-    let (addr, handle) = spawn_server(config);
+    let (addr, handle) = common::spawn_server(config);
 
     let target = signed_by_path_target(BTreeMap::from([
         ("path".to_string(), "/forbidden/object.png".to_string()),
@@ -258,9 +166,9 @@ fn gcs_mock_forbidden_returns_error() {
         ("expires".to_string(), "4102444800".to_string()),
         ("format".to_string(), "png".to_string()),
     ]));
-    let (header, _body) = send_signed_get(addr, &target);
+    let (header, _body) = common::send_signed_get(addr, &target, AUTHORITY);
 
-    let code = status_code(&header);
+    let code = common::status_code(&header);
     assert!(
         code == 403 || code == 404,
         "expected 403 or 404 for forbidden/missing key, got {code}: {header}"
@@ -275,12 +183,12 @@ fn gcs_mock_forbidden_returns_error() {
 #[serial]
 fn gcs_mock_multiple_objects() {
     let ctx = gcs_mock_context();
-    put_object("images/blue.png", tiny_png());
-    put_object("images/green.png", tiny_png());
+    put_object("images/blue.png", common::tiny_png());
+    put_object("images/green.png", common::tiny_png());
 
-    let storage = temp_dir("multiple-objects");
+    let storage = common::temp_dir("multiple-objects");
     let config = gcs_mock_server_config(ctx, &storage);
-    let (addr, handle) = spawn_server(config);
+    let (addr, handle) = common::spawn_server(config);
 
     let target = signed_by_path_target(BTreeMap::from([
         ("path".to_string(), "/images/green.png".to_string()),
@@ -288,10 +196,10 @@ fn gcs_mock_multiple_objects() {
         ("expires".to_string(), "4102444800".to_string()),
         ("format".to_string(), "png".to_string()),
     ]));
-    let (header, body) = send_signed_get(addr, &target);
+    let (header, body) = common::send_signed_get(addr, &target, AUTHORITY);
 
     assert_eq!(
-        status_code(&header),
+        common::status_code(&header),
         200,
         "should serve the second uploaded object: {header}"
     );

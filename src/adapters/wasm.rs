@@ -94,7 +94,12 @@ pub struct WasmInspectResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WasmTransformResponse {
-    /// Transformed output bytes. JavaScript receives this as a `Uint8Array`.
+    /// Transformed output bytes.
+    ///
+    /// Skipped during JSON serialization because the bytes are passed separately
+    /// through the [`WasmTransformResponse`] getter to avoid duplicating potentially
+    /// megabytes of image data inside the JSON metadata string.
+    #[serde(skip_serializing)]
     pub bytes: Vec<u8>,
     /// Metadata describing the transformed artifact.
     pub artifact: WasmArtifactInfo,
