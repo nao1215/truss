@@ -19,9 +19,7 @@ mod common;
 
 use serial_test::serial;
 use std::collections::BTreeMap;
-use truss::{
-    MediaType, RawArtifact, S3Context, ServerConfig, build_s3_context, sniff_artifact,
-};
+use truss::{MediaType, RawArtifact, S3Context, ServerConfig, build_s3_context, sniff_artifact};
 
 /// S3Mock default HTTP endpoint.
 const S3MOCK_ENDPOINT: &str = "http://localhost:9090";

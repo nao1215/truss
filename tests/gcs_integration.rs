@@ -20,9 +20,7 @@ mod common;
 
 use serial_test::serial;
 use std::collections::BTreeMap;
-use truss::{
-    GcsContext, MediaType, RawArtifact, ServerConfig, build_gcs_context, sniff_artifact,
-};
+use truss::{GcsContext, MediaType, RawArtifact, ServerConfig, build_gcs_context, sniff_artifact};
 
 /// fake-gcs-server default HTTP endpoint.
 const GCS_MOCK_ENDPOINT: &str = "http://localhost:4443";
