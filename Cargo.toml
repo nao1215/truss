@@ -75,6 +75,6 @@ aws-smithy-types = "1"
 bytes = "1"
 http = "1"
 rustls = { version = "0.23", features = ["ring"] }
-rstest = "0.25"
+rstest = "0.26"
 serial_test = "3"
 tempfile = "3"
