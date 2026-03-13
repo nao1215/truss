@@ -16,6 +16,7 @@
 #![cfg(feature = "s3")]
 
 use hmac::{Hmac, Mac};
+use serial_test::serial;
 use image::codecs::png::PngEncoder;
 use image::{ColorType, ImageEncoder, Rgba, RgbaImage};
 use sha2::Sha256;
@@ -181,6 +182,7 @@ fn status_code(header: &str) -> u16 {
 /// by-path endpoint and verify that truss transforms and returns a valid image.
 #[test]
 #[ignore]
+#[serial]
 fn s3mock_put_then_get_by_path() {
     let ctx = s3mock_context();
     put_object(&ctx, "photos/red.png", tiny_png());
@@ -207,6 +209,7 @@ fn s3mock_put_then_get_by_path() {
 /// Request a key that does not exist in s3mock → expect 404.
 #[test]
 #[ignore]
+#[serial]
 fn s3mock_nonexistent_key_returns_404() {
     let ctx = s3mock_context();
     let storage = temp_dir("nonexistent-key");
@@ -235,6 +238,7 @@ fn s3mock_nonexistent_key_returns_404() {
 /// request would fail with a DNS error instead of returning 200.
 #[test]
 #[ignore]
+#[serial]
 fn s3mock_force_path_style_works() {
     let ctx = s3mock_context();
     put_object(&ctx, "style-test/image.png", tiny_png());

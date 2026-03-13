@@ -18,6 +18,7 @@
 #![cfg(feature = "azure")]
 
 use hmac::{Hmac, Mac};
+use serial_test::serial;
 use image::codecs::png::PngEncoder;
 use image::{ColorType, ImageEncoder, Rgba, RgbaImage};
 use sha2::Sha256;
@@ -180,6 +181,7 @@ fn status_code(header: &str) -> u16 {
 /// valid image.
 #[test]
 #[ignore]
+#[serial]
 fn azure_mock_put_then_get_by_path() {
     let ctx = azure_mock_context();
     put_object("photos/red.png", tiny_png());
@@ -206,6 +208,7 @@ fn azure_mock_put_then_get_by_path() {
 /// Request a key that does not exist in Azurite -> expect 404.
 #[test]
 #[ignore]
+#[serial]
 fn azure_mock_nonexistent_key_returns_404() {
     let ctx = azure_mock_context();
     let storage = temp_dir("nonexistent-key");
@@ -238,6 +241,7 @@ fn azure_mock_nonexistent_key_returns_404() {
 /// well-formed error response.
 #[test]
 #[ignore]
+#[serial]
 fn azure_mock_forbidden_returns_error() {
     let ctx = azure_mock_context();
     // Use a container that has no objects uploaded -- requesting any key
@@ -266,6 +270,7 @@ fn azure_mock_forbidden_returns_error() {
 /// Upload a second object and retrieve it to verify independent keys work.
 #[test]
 #[ignore]
+#[serial]
 fn azure_mock_multiple_objects() {
     let ctx = azure_mock_context();
     put_object("images/blue.png", tiny_png());
