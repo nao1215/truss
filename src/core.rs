@@ -1189,7 +1189,7 @@ pub struct TransformResult {
 /// assert_eq!(artifact.metadata.height, Some(3));
 /// ```
 ///
-/// ```
+/// ```ignore
 /// use image::codecs::avif::AvifEncoder;
 /// use image::{ColorType, ImageEncoder, Rgba, RgbaImage};
 /// use truss::{sniff_artifact, MediaType, RawArtifact};
@@ -1937,6 +1937,7 @@ mod tests {
         Artifact, ArtifactMetadata, Fit, MediaType, MetadataPolicy, Position, RawArtifact, Rgba8,
         Rotation, TransformError, TransformOptions, TransformRequest, sniff_artifact,
     };
+    #[cfg(feature = "avif")]
     use image::codecs::avif::AvifEncoder;
     use image::{ColorType, ImageEncoder, Rgba, RgbaImage};
 
@@ -2037,6 +2038,7 @@ mod tests {
         bytes
     }
 
+    #[cfg(feature = "avif")]
     fn encoded_avif_bytes(width: u32, height: u32, fill: Rgba<u8>) -> Vec<u8> {
         let image = RgbaImage::from_pixel(width, height, fill);
         let mut bytes = Vec::new();
@@ -2340,6 +2342,7 @@ mod tests {
         assert_eq!(artifact.metadata, ArtifactMetadata::default());
     }
 
+    #[cfg(feature = "avif")]
     #[test]
     fn sniff_artifact_detects_avif_dimensions_and_alpha() {
         let artifact = sniff_artifact(RawArtifact::new(
@@ -2354,6 +2357,7 @@ mod tests {
         assert_eq!(artifact.metadata.has_alpha, Some(true));
     }
 
+    #[cfg(feature = "avif")]
     #[test]
     fn sniff_artifact_detects_opaque_avif_without_alpha_item() {
         let artifact = sniff_artifact(RawArtifact::new(

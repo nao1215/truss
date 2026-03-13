@@ -696,12 +696,25 @@ fn encode_raster_output(
             }
         }
         MediaType::Avif => {
-            let quality = quality.unwrap_or(80);
-            let encoder =
-                image::codecs::avif::AvifEncoder::new_with_speed_quality(&mut bytes, 4, quality);
-            encoder
-                .write_image(image.as_ref(), width, height, ColorType::Rgba8.into())
-                .map_err(|e| TransformError::EncodeFailed(format!("AVIF encode failed: {e}")))?;
+            #[cfg(feature = "avif")]
+            {
+                let quality = quality.unwrap_or(80);
+                let encoder = image::codecs::avif::AvifEncoder::new_with_speed_quality(
+                    &mut bytes, 4, quality,
+                );
+                encoder
+                    .write_image(image.as_ref(), width, height, ColorType::Rgba8.into())
+                    .map_err(|e| {
+                        TransformError::EncodeFailed(format!("AVIF encode failed: {e}"))
+                    })?;
+            }
+            #[cfg(not(feature = "avif"))]
+            {
+                let _ = quality;
+                return Err(TransformError::CapabilityMissing(
+                    "AVIF encoding is not enabled in this build".to_string(),
+                ));
+            }
         }
         MediaType::Bmp => {
             let encoder = image::codecs::bmp::BmpEncoder::new(&mut bytes);

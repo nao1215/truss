@@ -62,6 +62,8 @@ pub struct WasmCapabilities {
     pub svg: bool,
     /// Whether quality-controlled lossy WebP encoding is available in this build.
     pub webp_lossy: bool,
+    /// Whether AVIF decoding and encoding are available in this build.
+    pub avif: bool,
 }
 
 /// Serializable metadata about an inspected or transformed artifact.
@@ -122,6 +124,7 @@ pub fn browser_capabilities() -> WasmCapabilities {
     WasmCapabilities {
         svg: cfg!(feature = "svg"),
         webp_lossy: cfg!(feature = "webp-lossy"),
+        avif: cfg!(feature = "avif"),
     }
 }
 
@@ -548,6 +551,7 @@ mod tests {
 
         assert_eq!(capabilities.svg, cfg!(feature = "svg"));
         assert_eq!(capabilities.webp_lossy, cfg!(feature = "webp-lossy"));
+        assert_eq!(capabilities.avif, cfg!(feature = "avif"));
     }
 
     #[test]
@@ -731,5 +735,227 @@ mod tests {
         assert!(!response.bytes.is_empty());
         // Verify the output is a valid PNG (magic bytes)
         assert!(response.bytes.starts_with(&[0x89, b'P', b'N', b'G']));
+    }
+
+    #[test]
+    fn output_extension_returns_expected_values() {
+        assert_eq!(output_extension(MediaType::Jpeg), "jpg");
+        assert_eq!(output_extension(MediaType::Png), "png");
+        assert_eq!(output_extension(MediaType::Webp), "webp");
+        assert_eq!(output_extension(MediaType::Avif), "avif");
+        assert_eq!(output_extension(MediaType::Svg), "svg");
+        assert_eq!(output_extension(MediaType::Bmp), "bmp");
+        assert_eq!(output_extension(MediaType::Tiff), "tiff");
+    }
+
+    #[test]
+    fn parse_rotation_accepts_valid_values() {
+        assert_eq!(parse_rotation(None).unwrap(), Rotation::Deg0);
+        assert_eq!(parse_rotation(Some(0)).unwrap(), Rotation::Deg0);
+        assert_eq!(parse_rotation(Some(90)).unwrap(), Rotation::Deg90);
+        assert_eq!(parse_rotation(Some(180)).unwrap(), Rotation::Deg180);
+        assert_eq!(parse_rotation(Some(270)).unwrap(), Rotation::Deg270);
+    }
+
+    #[test]
+    fn parse_rotation_rejects_invalid_values() {
+        let error = parse_rotation(Some(45)).expect_err("45 degrees should fail");
+        assert!(matches!(error, TransformError::InvalidOptions(_)));
+    }
+
+    #[test]
+    fn inspect_rejects_garbage_bytes() {
+        let error = inspect_browser_artifact(vec![0xDE, 0xAD, 0xBE, 0xEF], None)
+            .expect_err("garbage bytes should fail");
+
+        assert!(matches!(
+            error,
+            TransformError::UnsupportedInputMediaType(_)
+        ));
+    }
+
+    #[test]
+    fn wasm_transform_options_serde_roundtrip() {
+        let options = WasmTransformOptions {
+            width: Some(800),
+            height: Some(600),
+            format: Some("jpeg".to_string()),
+            quality: Some(85),
+            rotate: Some(90),
+            auto_orient: Some(false),
+            blur: Some(1.5),
+            sharpen: Some(2.0),
+            ..WasmTransformOptions::default()
+        };
+        let json = serde_json::to_string(&options).expect("serialize");
+        let parsed: WasmTransformOptions = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(options, parsed);
+    }
+
+    #[test]
+    fn wasm_watermark_options_serde_roundtrip() {
+        let options = WasmWatermarkOptions {
+            position: Some("top-left".to_string()),
+            opacity: Some(75),
+            margin: Some(20),
+        };
+        let json = serde_json::to_string(&options).expect("serialize");
+        let parsed: WasmWatermarkOptions = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(options, parsed);
+    }
+
+    #[test]
+    fn transform_png_to_bmp() {
+        let response = transform_browser_artifact(
+            png_bytes(4, 3),
+            Some("png"),
+            WasmTransformOptions {
+                format: Some("bmp".to_string()),
+                ..WasmTransformOptions::default()
+            },
+        )
+        .expect("transform png to bmp");
+
+        assert_eq!(response.artifact.media_type, "bmp");
+        assert_eq!(response.suggested_extension, "bmp");
+        assert!(!response.bytes.is_empty());
+    }
+
+    #[test]
+    fn transform_png_to_tiff() {
+        let response = transform_browser_artifact(
+            png_bytes(4, 3),
+            Some("png"),
+            WasmTransformOptions {
+                format: Some("tiff".to_string()),
+                ..WasmTransformOptions::default()
+            },
+        )
+        .expect("transform png to tiff");
+
+        assert_eq!(response.artifact.media_type, "tiff");
+        assert_eq!(response.suggested_extension, "tiff");
+        assert!(!response.bytes.is_empty());
+    }
+
+    #[test]
+    fn transform_png_to_webp_lossless() {
+        let response = transform_browser_artifact(
+            png_bytes(4, 3),
+            Some("png"),
+            WasmTransformOptions {
+                format: Some("webp".to_string()),
+                ..WasmTransformOptions::default()
+            },
+        )
+        .expect("transform png to webp");
+
+        assert_eq!(response.artifact.media_type, "webp");
+        assert_eq!(response.suggested_extension, "webp");
+        assert!(!response.bytes.is_empty());
+    }
+
+    #[test]
+    fn transform_with_resize_and_rotate() {
+        let response = transform_browser_artifact(
+            png_bytes(8, 6),
+            None,
+            WasmTransformOptions {
+                width: Some(4),
+                height: Some(3),
+                rotate: Some(90),
+                format: Some("png".to_string()),
+                ..WasmTransformOptions::default()
+            },
+        )
+        .expect("resize and rotate");
+
+        assert_eq!(response.artifact.media_type, "png");
+        assert!(response.artifact.width.is_some());
+        assert!(response.artifact.height.is_some());
+    }
+
+    #[cfg(feature = "avif")]
+    #[test]
+    fn transform_png_to_avif() {
+        let response = transform_browser_artifact(
+            png_bytes(4, 3),
+            Some("png"),
+            WasmTransformOptions {
+                format: Some("avif".to_string()),
+                quality: Some(72),
+                ..WasmTransformOptions::default()
+            },
+        )
+        .expect("transform png to avif");
+
+        assert_eq!(response.artifact.media_type, "avif");
+        assert_eq!(response.suggested_extension, "avif");
+        assert!(!response.bytes.is_empty());
+    }
+
+    #[cfg(feature = "avif")]
+    #[test]
+    fn transform_avif_round_trip() {
+        let avif = transform_browser_artifact(
+            png_bytes(4, 3),
+            Some("png"),
+            WasmTransformOptions {
+                format: Some("avif".to_string()),
+                ..WasmTransformOptions::default()
+            },
+        )
+        .expect("png to avif");
+
+        let png = transform_browser_artifact(
+            avif.bytes,
+            Some("avif"),
+            WasmTransformOptions {
+                format: Some("png".to_string()),
+                ..WasmTransformOptions::default()
+            },
+        )
+        .expect("avif to png");
+
+        assert_eq!(png.artifact.media_type, "png");
+        assert!(png.artifact.width.is_some());
+    }
+
+    #[test]
+    fn parse_wasm_options_rejects_invalid_background() {
+        let error = parse_wasm_options(WasmTransformOptions {
+            background: Some("ZZZZZZ".to_string()),
+            ..WasmTransformOptions::default()
+        })
+        .expect_err("invalid background should fail");
+
+        assert!(matches!(
+            error,
+            TransformError::InvalidOptions(ref msg) if msg.contains("background")
+        ));
+    }
+
+    #[test]
+    fn parse_wasm_options_rejects_invalid_format() {
+        let error = parse_wasm_options(WasmTransformOptions {
+            format: Some("gif".to_string()),
+            ..WasmTransformOptions::default()
+        })
+        .expect_err("invalid format should fail");
+
+        assert!(matches!(error, TransformError::InvalidOptions(_)));
+    }
+
+    #[test]
+    fn parse_wasm_options_accepts_blur_and_sharpen() {
+        let options = parse_wasm_options(WasmTransformOptions {
+            blur: Some(5.0),
+            sharpen: Some(3.0),
+            ..WasmTransformOptions::default()
+        })
+        .expect("blur and sharpen should parse");
+
+        assert_eq!(options.blur, Some(5.0));
+        assert_eq!(options.sharpen, Some(3.0));
     }
 }
