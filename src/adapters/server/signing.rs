@@ -157,3 +157,135 @@ pub fn sign_public_url(
 pub fn bind_addr() -> String {
     std::env::var("TRUSS_BIND_ADDR").unwrap_or_else(|_| DEFAULT_BIND_ADDR.to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::TransformOptions;
+
+    #[test]
+    fn sign_public_url_rejects_invalid_base_url() {
+        let result = sign_public_url(
+            "not-a-url",
+            SignedUrlSource::Path {
+                path: "/img.png".to_string(),
+                version: None,
+            },
+            &TransformOptions::default(),
+            "key",
+            "secret",
+            0,
+            None,
+            None,
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("base URL is invalid"));
+    }
+
+    #[test]
+    fn sign_public_url_rejects_non_http_scheme() {
+        let result = sign_public_url(
+            "ftp://example.com",
+            SignedUrlSource::Path {
+                path: "/img.png".to_string(),
+                version: None,
+            },
+            &TransformOptions::default(),
+            "key",
+            "secret",
+            0,
+            None,
+            None,
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("http or https"));
+    }
+
+    #[test]
+    fn sign_public_url_path_source_generates_by_path_url() {
+        let url = sign_public_url(
+            "https://cdn.example.com",
+            SignedUrlSource::Path {
+                path: "/photo.jpg".to_string(),
+                version: None,
+            },
+            &TransformOptions::default(),
+            "mykey",
+            "mysecret",
+            9999,
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(url.starts_with("https://cdn.example.com/images/by-path?"));
+        assert!(url.contains("keyId=mykey"));
+        assert!(url.contains("signature="));
+        assert!(url.contains("expires=9999"));
+    }
+
+    #[test]
+    fn sign_public_url_url_source_generates_by_url() {
+        let url = sign_public_url(
+            "https://cdn.example.com",
+            SignedUrlSource::Url {
+                url: "https://remote.example.com/img.png".to_string(),
+                version: None,
+            },
+            &TransformOptions::default(),
+            "key",
+            "secret",
+            0,
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(url.starts_with("https://cdn.example.com/images/by-url?"));
+    }
+
+    #[test]
+    fn sign_public_url_includes_preset() {
+        let url = sign_public_url(
+            "https://cdn.example.com",
+            SignedUrlSource::Path {
+                path: "/img.png".to_string(),
+                version: None,
+            },
+            &TransformOptions::default(),
+            "key",
+            "secret",
+            0,
+            None,
+            Some("thumbnail"),
+        )
+        .unwrap();
+        assert!(url.contains("preset=thumbnail"));
+    }
+
+    #[test]
+    fn sign_public_url_includes_watermark_params() {
+        let wm = SignedWatermarkParams {
+            url: "https://example.com/logo.png".to_string(),
+            position: Some("southeast".to_string()),
+            opacity: Some(80),
+            margin: Some(10),
+        };
+        let url = sign_public_url(
+            "https://cdn.example.com",
+            SignedUrlSource::Path {
+                path: "/img.png".to_string(),
+                version: None,
+            },
+            &TransformOptions::default(),
+            "key",
+            "secret",
+            0,
+            Some(&wm),
+            None,
+        )
+        .unwrap();
+        assert!(url.contains("watermarkUrl="));
+        assert!(url.contains("watermarkPosition=southeast"));
+        assert!(url.contains("watermarkOpacity=80"));
+        assert!(url.contains("watermarkMargin=10"));
+    }
+}

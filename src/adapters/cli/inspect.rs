@@ -101,3 +101,85 @@ fn render_inspection_json(artifact: &crate::Artifact) -> String {
     json.push('\n');
     json
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Artifact, ArtifactMetadata, MediaType};
+    use std::time::Duration;
+
+    fn make_artifact(
+        media_type: MediaType,
+        width: Option<u32>,
+        height: Option<u32>,
+        has_alpha: Option<bool>,
+        frame_count: u32,
+        duration: Option<Duration>,
+    ) -> Artifact {
+        Artifact {
+            bytes: vec![],
+            media_type,
+            metadata: ArtifactMetadata {
+                width,
+                height,
+                has_alpha,
+                frame_count,
+                duration,
+            },
+        }
+    }
+
+    #[test]
+    fn render_inspection_json_static_image() {
+        let artifact = make_artifact(MediaType::Png, Some(100), Some(200), Some(true), 1, None);
+        let json = render_inspection_json(&artifact);
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["format"], "png");
+        assert_eq!(parsed["mime"], "image/png");
+        assert_eq!(parsed["width"], 100);
+        assert_eq!(parsed["height"], 200);
+        assert_eq!(parsed["hasAlpha"], true);
+        assert_eq!(parsed["isAnimated"], false);
+    }
+
+    #[test]
+    fn render_inspection_json_animated_by_frame_count() {
+        let artifact = make_artifact(MediaType::Webp, Some(50), Some(50), None, 5, None);
+        let json = render_inspection_json(&artifact);
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["isAnimated"], true);
+        assert_eq!(parsed["format"], "webp");
+    }
+
+    #[test]
+    fn render_inspection_json_animated_by_duration() {
+        let artifact = make_artifact(
+            MediaType::Webp,
+            Some(50),
+            Some(50),
+            None,
+            1,
+            Some(Duration::from_millis(2500)),
+        );
+        let json = render_inspection_json(&artifact);
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["isAnimated"], true);
+    }
+
+    #[test]
+    fn render_inspection_json_ends_with_newline() {
+        let artifact = make_artifact(MediaType::Jpeg, Some(10), Some(10), None, 1, None);
+        let json = render_inspection_json(&artifact);
+        assert!(json.ends_with('\n'));
+    }
+
+    #[test]
+    fn render_inspection_json_null_dimensions() {
+        let artifact = make_artifact(MediaType::Svg, None, None, None, 1, None);
+        let json = render_inspection_json(&artifact);
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(parsed["width"].is_null());
+        assert!(parsed["height"].is_null());
+        assert!(parsed["hasAlpha"].is_null());
+    }
+}

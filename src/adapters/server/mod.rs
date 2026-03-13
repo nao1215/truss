@@ -2547,10 +2547,12 @@ mod tests {
         CacheHitStatus, DEFAULT_BIND_ADDR, ImageResponsePolicy, PublicSourceKind, ServerConfig,
         SignedUrlSource, TransformOptionsPayload, TransformSourcePayload, WatermarkSource,
         authorize_signed_request, bind_addr, build_image_etag, build_image_response_headers,
-        canonical_query_without_signature, negotiate_output_format, parse_public_get_request,
-        route_request, serve_once_with_config, sign_public_url, transform_source_bytes,
+        canonical_query_without_signature, classify_route, extract_cache_status,
+        extract_request_id, extract_watermark_flag, negotiate_output_format,
+        parse_public_get_request, resolve_client_ip, route_request, serve_once_with_config,
+        sign_public_url, transform_source_bytes,
     };
-    use super::{config, resolve_client_ip};
+    use super::{config, metrics::RouteMetric};
     use crate::{
         Artifact, ArtifactMetadata, Fit, MediaType, RawArtifact, TransformOptions, sniff_artifact,
     };
@@ -6513,5 +6515,174 @@ mod tests {
         let headers = vec![h("X-Forwarded-For", "5.5.5.5")];
         let expected: IpAddr = "5.5.5.5".parse().unwrap();
         assert_eq!(resolve_client_ip(peer, &headers, &trusted), expected);
+    }
+
+    // --- extract_request_id tests ---
+
+    #[test]
+    fn extract_request_id_returns_value_when_present() {
+        let headers = vec![h("x-request-id", "abc-123")];
+        assert_eq!(extract_request_id(&headers), Some("abc-123".to_string()));
+    }
+
+    #[test]
+    fn extract_request_id_returns_none_when_absent() {
+        let headers = vec![h("content-type", "text/plain")];
+        assert_eq!(extract_request_id(&headers), None);
+    }
+
+    #[test]
+    fn extract_request_id_returns_none_for_empty_value() {
+        let headers = vec![h("x-request-id", "")];
+        assert_eq!(extract_request_id(&headers), None);
+    }
+
+    #[test]
+    fn extract_request_id_rejects_cr() {
+        let headers = vec![h("x-request-id", "abc\r123")];
+        assert_eq!(extract_request_id(&headers), None);
+    }
+
+    #[test]
+    fn extract_request_id_rejects_lf() {
+        let headers = vec![h("x-request-id", "abc\n123")];
+        assert_eq!(extract_request_id(&headers), None);
+    }
+
+    #[test]
+    fn extract_request_id_rejects_nul() {
+        let headers = vec![h("x-request-id", "abc\0123")];
+        assert_eq!(extract_request_id(&headers), None);
+    }
+
+    // --- extract_cache_status tests ---
+
+    #[test]
+    fn extract_cache_status_returns_none_when_absent() {
+        let headers = vec![h("content-type", "text/plain")];
+        assert_eq!(extract_cache_status(&headers), None);
+    }
+
+    #[test]
+    fn extract_cache_status_returns_hit_when_present() {
+        let headers = vec![h("Cache-Status", "hit;detail=memory")];
+        assert_eq!(extract_cache_status(&headers), Some("hit"));
+    }
+
+    #[test]
+    fn extract_cache_status_returns_miss_when_no_hit() {
+        let headers = vec![h("Cache-Status", "miss")];
+        assert_eq!(extract_cache_status(&headers), Some("miss"));
+    }
+
+    // --- extract_watermark_flag tests ---
+
+    #[test]
+    fn extract_watermark_flag_removes_header_and_returns_true() {
+        let mut headers = vec![h("content-type", "text/plain"), h("X-Truss-Watermark", "1")];
+        assert!(extract_watermark_flag(&mut headers));
+        assert_eq!(headers.len(), 1);
+        assert_eq!(headers[0].0, "content-type");
+    }
+
+    #[test]
+    fn extract_watermark_flag_returns_false_when_absent() {
+        let mut headers = vec![h("content-type", "text/plain")];
+        assert!(!extract_watermark_flag(&mut headers));
+        assert_eq!(headers.len(), 1);
+    }
+
+    // --- classify_route tests ---
+
+    #[test]
+    fn classify_route_health_endpoints() {
+        let make_req = |method: &str, path: &str| HttpRequest {
+            method: method.to_string(),
+            target: path.to_string(),
+            version: "HTTP/1.1".to_string(),
+            headers: vec![],
+            body: vec![],
+        };
+
+        assert!(matches!(
+            classify_route(&make_req("GET", "/health")),
+            RouteMetric::Health
+        ));
+        assert!(matches!(
+            classify_route(&make_req("HEAD", "/health")),
+            RouteMetric::Health
+        ));
+        assert!(matches!(
+            classify_route(&make_req("GET", "/health/live")),
+            RouteMetric::HealthLive
+        ));
+        assert!(matches!(
+            classify_route(&make_req("GET", "/health/ready")),
+            RouteMetric::HealthReady
+        ));
+    }
+
+    #[test]
+    fn classify_route_image_endpoints() {
+        let make_req = |method: &str, path: &str| HttpRequest {
+            method: method.to_string(),
+            target: path.to_string(),
+            version: "HTTP/1.1".to_string(),
+            headers: vec![],
+            body: vec![],
+        };
+
+        assert!(matches!(
+            classify_route(&make_req("GET", "/images/by-path")),
+            RouteMetric::PublicByPath
+        ));
+        assert!(matches!(
+            classify_route(&make_req("GET", "/images/by-url")),
+            RouteMetric::PublicByUrl
+        ));
+        assert!(matches!(
+            classify_route(&make_req("POST", "/images:transform")),
+            RouteMetric::Transform
+        ));
+        assert!(matches!(
+            classify_route(&make_req("POST", "/images")),
+            RouteMetric::Upload
+        ));
+    }
+
+    #[test]
+    fn classify_route_metrics_endpoint() {
+        let req = HttpRequest {
+            method: "GET".to_string(),
+            target: "/metrics".to_string(),
+            version: "HTTP/1.1".to_string(),
+            headers: vec![],
+            body: vec![],
+        };
+        assert!(matches!(classify_route(&req), RouteMetric::Metrics));
+    }
+
+    #[test]
+    fn classify_route_unknown_path() {
+        let req = HttpRequest {
+            method: "GET".to_string(),
+            target: "/nonexistent".to_string(),
+            version: "HTTP/1.1".to_string(),
+            headers: vec![],
+            body: vec![],
+        };
+        assert!(matches!(classify_route(&req), RouteMetric::Unknown));
+    }
+
+    #[test]
+    fn classify_route_wrong_method() {
+        let req = HttpRequest {
+            method: "POST".to_string(),
+            target: "/health".to_string(),
+            version: "HTTP/1.1".to_string(),
+            headers: vec![],
+            body: vec![],
+        };
+        assert!(matches!(classify_route(&req), RouteMetric::Unknown));
     }
 }
