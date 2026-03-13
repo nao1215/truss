@@ -202,9 +202,7 @@ pub(super) fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io:
             response
                 .headers
                 .push(("X-Request-Id".to_string(), request_id.clone()));
-            if is_head {
-                response.body = Vec::new();
-            }
+            response.strip_body_if_head(is_head);
             record_http_metrics(RouteMetric::Unknown, response.status);
             let sc = status_code(response.status).unwrap_or("unknown");
             let method_log = partial.method.clone();
@@ -306,9 +304,7 @@ pub(super) fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io:
                 response
                     .headers
                     .push(("X-Request-Id".to_string(), request_id.clone()));
-                if is_head {
-                    response.body = Vec::new();
-                }
+                response.strip_body_if_head(is_head);
                 record_http_metrics(RouteMetric::Metrics, response.status);
                 let sc = status_code(response.status).unwrap_or("unknown");
                 let method_log = partial.method.clone();
@@ -387,9 +383,7 @@ pub(super) fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io:
 
         let sc = status_code(response.status).unwrap_or("unknown");
 
-        if is_head {
-            response.body = Vec::new();
-        }
+        response.strip_body_if_head(is_head);
 
         requests_served += 1;
         let close_after = client_wants_close || requests_served >= config.keep_alive_max_requests;

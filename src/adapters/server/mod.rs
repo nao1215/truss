@@ -93,34 +93,6 @@ pub(crate) fn stderr_write(msg: &str) {
     }
 }
 
-// --- Re-exports for internal use by the test module ---
-//
-// The test module (`mod tests`) uses `use super::X` to access items that
-// previously lived directly in this file but have been extracted into
-// submodules. These `use` declarations keep the test imports working
-// without modifying the ~4000-line test module.
-
-#[cfg(test)]
-use auth::{
-    authorize_request_headers, authorize_signed_request, canonical_query_without_signature,
-};
-#[cfg(test)]
-use handler::{
-    TransformImageRequestPayload, TransformSlot, TransformSourcePayload, WatermarkSource,
-    disk_free_bytes, parse_public_get_request, process_rss_bytes, transform_source_bytes,
-};
-#[cfg(test)]
-use lifecycle::preset_watcher;
-#[cfg(test)]
-use negotiate::{
-    CacheHitStatus, ImageResponsePolicy, PublicSourceKind, build_image_etag,
-    build_image_response_headers, negotiate_output_format,
-};
-#[cfg(test)]
-use routing::{
-    AccessLogEntry, classify_route, emit_access_log, extract_cache_status, extract_request_id,
-    extract_watermark_flag, resolve_client_ip, route_request,
-};
 #[cfg(test)]
 mod tests {
     use serial_test::serial;
@@ -138,14 +110,27 @@ mod tests {
     use super::remote::{PinnedResolver, prepare_remote_fetch_target};
     use super::response::auth_required_response;
     use super::response::{HttpResponse, bad_request_response};
+    // Items re-exported via `pub use` in mod.rs — accessible as `super::X`.
     use super::{
-        CacheHitStatus, DEFAULT_BIND_ADDR, ImageResponsePolicy, PublicSourceKind, ServerConfig,
-        SignedUrlSource, TransformOptionsPayload, TransformSourcePayload, WatermarkSource,
-        authorize_signed_request, bind_addr, build_image_etag, build_image_response_headers,
-        canonical_query_without_signature, classify_route, extract_cache_status,
-        extract_request_id, extract_watermark_flag, negotiate_output_format,
-        parse_public_get_request, resolve_client_ip, route_request, serve_once_with_config,
-        sign_public_url, transform_source_bytes,
+        DEFAULT_BIND_ADDR, ServerConfig, SignedUrlSource, TransformOptionsPayload, bind_addr,
+        serve_once_with_config, sign_public_url,
+    };
+    // Items from submodules — imported via direct submodule paths.
+    use super::auth::{
+        authorize_request_headers, authorize_signed_request, canonical_query_without_signature,
+    };
+    use super::handler::{
+        TransformImageRequestPayload, TransformSlot, TransformSourcePayload, WatermarkSource,
+        disk_free_bytes, parse_public_get_request, process_rss_bytes, transform_source_bytes,
+    };
+    use super::lifecycle::preset_watcher;
+    use super::negotiate::{
+        CacheHitStatus, ImageResponsePolicy, PublicSourceKind, build_image_etag,
+        build_image_response_headers, negotiate_output_format,
+    };
+    use super::routing::{
+        AccessLogEntry, classify_route, emit_access_log, extract_cache_status, extract_request_id,
+        extract_watermark_flag, resolve_client_ip, route_request,
     };
     use super::{config, metrics::RouteMetric};
     use crate::{
@@ -1947,7 +1932,7 @@ mod tests {
     #[cfg(feature = "s3")]
     fn storage_payload_deserializes_storage_variant() {
         let json = r#"{"source":{"kind":"storage","key":"photos/hero.jpg"},"options":{}}"#;
-        let payload: super::TransformImageRequestPayload = serde_json::from_str(json).unwrap();
+        let payload: TransformImageRequestPayload = serde_json::from_str(json).unwrap();
         match payload.source {
             TransformSourcePayload::Storage {
                 bucket,
@@ -1966,7 +1951,7 @@ mod tests {
     #[cfg(feature = "s3")]
     fn storage_payload_deserializes_with_bucket() {
         let json = r#"{"source":{"kind":"storage","bucket":"my-bucket","key":"img.png","version":"v2"},"options":{}}"#;
-        let payload: super::TransformImageRequestPayload = serde_json::from_str(json).unwrap();
+        let payload: TransformImageRequestPayload = serde_json::from_str(json).unwrap();
         match payload.source {
             TransformSourcePayload::Storage {
                 bucket,
@@ -2954,7 +2939,7 @@ mod tests {
             "authorization".to_string(),
             "Bearer correct-token".to_string(),
         )];
-        assert!(super::authorize_request_headers(&headers, &config).is_ok());
+        assert!(authorize_request_headers(&headers, &config).is_ok());
     }
 
     #[test]
@@ -2964,7 +2949,7 @@ mod tests {
             "authorization".to_string(),
             "Bearer wrong-token".to_string(),
         )];
-        let err = super::authorize_request_headers(&headers, &config).unwrap_err();
+        let err = authorize_request_headers(&headers, &config).unwrap_err();
         assert_eq!(err.status, "401 Unauthorized");
     }
 
@@ -2972,7 +2957,7 @@ mod tests {
     fn authorize_headers_rejects_missing_header() {
         let config = ServerConfig::new(temp_dir("auth-missing"), Some("correct-token".to_string()));
         let headers: Vec<(String, String)> = vec![];
-        let err = super::authorize_request_headers(&headers, &config).unwrap_err();
+        let err = authorize_request_headers(&headers, &config).unwrap_err();
         assert_eq!(err.status, "401 Unauthorized");
     }
 
@@ -2984,7 +2969,7 @@ mod tests {
         use std::sync::atomic::AtomicU64;
 
         let counter = Arc::new(AtomicU64::new(0));
-        let slot = super::TransformSlot::try_acquire(&counter, 2);
+        let slot = TransformSlot::try_acquire(&counter, 2);
         assert!(slot.is_some());
         assert_eq!(counter.load(Ordering::Relaxed), 1);
     }
@@ -2995,8 +2980,8 @@ mod tests {
         use std::sync::atomic::AtomicU64;
 
         let counter = Arc::new(AtomicU64::new(0));
-        let _s1 = super::TransformSlot::try_acquire(&counter, 1).unwrap();
-        let s2 = super::TransformSlot::try_acquire(&counter, 1);
+        let _s1 = TransformSlot::try_acquire(&counter, 1).unwrap();
+        let s2 = TransformSlot::try_acquire(&counter, 1);
         assert!(s2.is_none());
         // Counter must still be 1 (failed acquire must not leak).
         assert_eq!(counter.load(Ordering::Relaxed), 1);
@@ -3009,7 +2994,7 @@ mod tests {
 
         let counter = Arc::new(AtomicU64::new(0));
         {
-            let _slot = super::TransformSlot::try_acquire(&counter, 4).unwrap();
+            let _slot = TransformSlot::try_acquire(&counter, 4).unwrap();
             assert_eq!(counter.load(Ordering::Relaxed), 1);
         }
         // After drop the counter must return to zero.
@@ -3025,11 +3010,11 @@ mod tests {
         let limit = 3u64;
         let mut slots = Vec::new();
         for _ in 0..limit {
-            slots.push(super::TransformSlot::try_acquire(&counter, limit).unwrap());
+            slots.push(TransformSlot::try_acquire(&counter, limit).unwrap());
         }
         assert_eq!(counter.load(Ordering::Relaxed), limit);
         // One more must fail.
-        assert!(super::TransformSlot::try_acquire(&counter, limit).is_none());
+        assert!(TransformSlot::try_acquire(&counter, limit).is_none());
         assert_eq!(counter.load(Ordering::Relaxed), limit);
         // Drop all slots.
         slots.clear();
@@ -3052,9 +3037,9 @@ mod tests {
         config.log_handler = Some(handler);
 
         let start = Instant::now();
-        super::emit_access_log(
+        emit_access_log(
             &config,
-            &super::AccessLogEntry {
+            &AccessLogEntry {
                 request_id: "req-123",
                 method: "GET",
                 path: "/image.png",
@@ -3091,9 +3076,9 @@ mod tests {
         let mut config = ServerConfig::new(temp_dir("access-log-none"), None);
         config.log_handler = Some(handler);
 
-        super::emit_access_log(
+        emit_access_log(
             &config,
-            &super::AccessLogEntry {
+            &AccessLogEntry {
                 request_id: "req-456",
                 method: "POST",
                 path: "/upload",
@@ -3119,7 +3104,7 @@ mod tests {
             ("x-request-id".to_string(), "custom-id-abc".to_string()),
         ];
         assert_eq!(
-            super::extract_request_id(&headers),
+            extract_request_id(&headers),
             Some("custom-id-abc".to_string())
         );
     }
@@ -3127,13 +3112,13 @@ mod tests {
     #[test]
     fn x_request_id_not_extracted_when_empty() {
         let headers = vec![("x-request-id".to_string(), "".to_string())];
-        assert!(super::extract_request_id(&headers).is_none());
+        assert!(extract_request_id(&headers).is_none());
     }
 
     #[test]
     fn x_request_id_not_extracted_when_absent() {
         let headers = vec![("host".to_string(), "localhost".to_string())];
-        assert!(super::extract_request_id(&headers).is_none());
+        assert!(extract_request_id(&headers).is_none());
     }
 
     // ── Cache status extraction ───────────────────────────────────────
@@ -3142,7 +3127,7 @@ mod tests {
     fn cache_status_hit_detected() {
         let headers: Vec<(String, String)> =
             vec![("Cache-Status".to_string(), "\"truss\"; hit".to_string())];
-        assert_eq!(super::extract_cache_status(&headers), Some("hit"));
+        assert_eq!(extract_cache_status(&headers), Some("hit"));
     }
 
     #[test]
@@ -3151,14 +3136,14 @@ mod tests {
             "Cache-Status".to_string(),
             "\"truss\"; fwd=miss".to_string(),
         )];
-        assert_eq!(super::extract_cache_status(&headers), Some("miss"));
+        assert_eq!(extract_cache_status(&headers), Some("miss"));
     }
 
     #[test]
     fn cache_status_none_when_header_absent() {
         let headers: Vec<(String, String)> =
             vec![("Content-Type".to_string(), "image/png".to_string())];
-        assert!(super::extract_cache_status(&headers).is_none());
+        assert!(extract_cache_status(&headers).is_none());
     }
 
     #[test]
@@ -3226,7 +3211,7 @@ mod tests {
             "evil\r\nX-Injected: true".to_string(),
         )];
         assert!(
-            super::extract_request_id(&headers).is_none(),
+            extract_request_id(&headers).is_none(),
             "CRLF in request ID must be rejected"
         );
     }
@@ -3234,19 +3219,19 @@ mod tests {
     #[test]
     fn x_request_id_rejects_lone_cr() {
         let headers = vec![("x-request-id".to_string(), "evil\rid".to_string())];
-        assert!(super::extract_request_id(&headers).is_none());
+        assert!(extract_request_id(&headers).is_none());
     }
 
     #[test]
     fn x_request_id_rejects_lone_lf() {
         let headers = vec![("x-request-id".to_string(), "evil\nid".to_string())];
-        assert!(super::extract_request_id(&headers).is_none());
+        assert!(extract_request_id(&headers).is_none());
     }
 
     #[test]
     fn x_request_id_rejects_nul_byte() {
         let headers = vec![("x-request-id".to_string(), "evil\0id".to_string())];
-        assert!(super::extract_request_id(&headers).is_none());
+        assert!(extract_request_id(&headers).is_none());
     }
 
     #[test]
@@ -3256,7 +3241,7 @@ mod tests {
             "550e8400-e29b-41d4-a716-446655440000".to_string(),
         )];
         assert_eq!(
-            super::extract_request_id(&headers),
+            extract_request_id(&headers),
             Some("550e8400-e29b-41d4-a716-446655440000".to_string())
         );
     }
@@ -3350,7 +3335,7 @@ mod tests {
                 let acquired = Arc::clone(&acquired);
                 thread::spawn(move || {
                     barrier.wait();
-                    if let Some(_slot) = super::TransformSlot::try_acquire(&counter, limit) {
+                    if let Some(_slot) = TransformSlot::try_acquire(&counter, limit) {
                         acquired.fetch_add(1, Ordering::Relaxed);
                         thread::sleep(Duration::from_millis(10));
                     }
@@ -3575,7 +3560,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn process_rss_bytes_returns_some() {
-        let rss = super::process_rss_bytes();
+        let rss = process_rss_bytes();
         assert!(rss.is_some());
         assert!(rss.unwrap() > 0);
     }
@@ -3584,7 +3569,7 @@ mod tests {
     #[test]
     fn disk_free_bytes_returns_some_for_existing_dir() {
         let dir = temp_dir("disk-free");
-        let free = super::disk_free_bytes(&dir);
+        let free = disk_free_bytes(&dir);
         assert!(free.is_some());
         assert!(free.unwrap() > 0);
     }
@@ -3643,7 +3628,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn disk_free_bytes_returns_none_for_nonexistent_path() {
-        let free = super::disk_free_bytes(std::path::Path::new("/nonexistent/path/xyz"));
+        let free = disk_free_bytes(std::path::Path::new("/nonexistent/path/xyz"));
         assert!(free.is_none());
     }
 
@@ -3906,7 +3891,7 @@ mod tests {
         let path_clone = path.clone();
 
         let handle = std::thread::spawn(move || {
-            super::preset_watcher(presets_clone, path_clone, draining_clone, config_clone);
+            preset_watcher(presets_clone, path_clone, draining_clone, config_clone);
         });
 
         // Wait a moment, then update the file with a new mtime.
@@ -3981,7 +3966,7 @@ mod tests {
         let path_clone = path.clone();
 
         let handle = std::thread::spawn(move || {
-            super::preset_watcher(presets_clone, path_clone, draining_clone, config_clone);
+            preset_watcher(presets_clone, path_clone, draining_clone, config_clone);
         });
 
         // Write invalid JSON after a brief delay.
