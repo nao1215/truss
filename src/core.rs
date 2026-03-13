@@ -2089,6 +2089,10 @@ mod tests {
             })
         );
         assert!(Rgba8::from_hex("AABB").is_err());
+
+        // Non-ASCII input must not panic (even if byte length happens to be 6 or 8).
+        assert!(Rgba8::from_hex("\u{00e9}\u{00e9}\u{00e9}").is_err());
+        assert!(Rgba8::from_hex("\u{1f600}\u{1f600}").is_err());
     }
 
     #[test]
