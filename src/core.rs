@@ -213,6 +213,7 @@ impl Default for ArtifactMetadata {
 /// assert!(!MediaType::Svg.is_raster());
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum MediaType {
     /// JPEG image data.
     Jpeg,
@@ -1024,6 +1025,7 @@ pub fn resolve_metadata_flags(
 /// let _: &dyn std::error::Error = &err;
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum TransformError {
     /// The input artifact is structurally invalid.
     InvalidInput(String),
@@ -1078,6 +1080,7 @@ impl Error for TransformError {}
 /// assert_eq!(format!("{}", MetadataKind::Icc), "ICC profile");
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum MetadataKind {
     /// XMP (Extensible Metadata Platform) metadata.
     Xmp,
@@ -1116,6 +1119,7 @@ impl fmt::Display for MetadataKind {
 /// );
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum TransformWarning {
     /// Metadata of the given kind was present in the input but could not be preserved
     /// by the output encoder and was silently dropped.
