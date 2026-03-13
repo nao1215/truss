@@ -336,6 +336,15 @@ paths:
         because it is designed for dashboards and operators who need to see the
         full picture.
       operationId: getHealth
+      parameters:
+        - name: Authorization
+          in: header
+          required: false
+          description: >
+            Bearer token required when `TRUSS_HEALTH_TOKEN` is set.
+          schema:
+            type: string
+            example: 'Bearer my-secret-token'
       responses:
         '200':
           description: Comprehensive health diagnostic
@@ -364,6 +373,12 @@ paths:
                     rssBytes: 134217728
                     thresholdBytes: 536870912
                 maxInputPixels: 40000000
+        '401':
+          description: Authentication required (when TRUSS_HEALTH_TOKEN is set)
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
 
   /health/live:
     get:

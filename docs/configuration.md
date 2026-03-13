@@ -83,6 +83,7 @@ The server exposes a `/metrics` endpoint in Prometheus text exposition format. B
 |------|------|
 | `TRUSS_METRICS_TOKEN` | Bearer token for `/metrics`; when set, requests must include `Authorization: Bearer <token>` |
 | `TRUSS_DISABLE_METRICS` | Disable the `/metrics` endpoint entirely (`true`/`1`; returns 404) |
+| `TRUSS_HEALTH_TOKEN` | Bearer token for `/health`; when set, requests must include `Authorization: Bearer <token>`. `/health/live` and `/health/ready` remain unauthenticated |
 
 For the full metrics reference, bucket boundaries, and example PromQL queries, see [../doc/prometheus.md](../doc/prometheus.md).
 

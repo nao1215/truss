@@ -416,6 +416,12 @@ pub struct ServerConfig {
     ///
     /// Configurable via `TRUSS_DISABLE_METRICS`. When enabled, `/metrics` returns 404.
     pub disable_metrics: bool,
+    /// Bearer token for the `/health` diagnostic endpoint.
+    ///
+    /// When set, `GET /health` requires `Authorization: Bearer <token>`.
+    /// The `/health/live` and `/health/ready` probe endpoints remain
+    /// unauthenticated. Configurable via `TRUSS_HEALTH_TOKEN`.
+    pub health_token: Option<String>,
     /// Minimum free bytes on the cache disk before `/health/ready` reports failure.
     ///
     /// Configurable via `TRUSS_HEALTH_CACHE_MIN_FREE_BYTES`. When unset, the cache
@@ -551,6 +557,7 @@ impl Clone for ServerConfig {
             keep_alive_max_requests: self.keep_alive_max_requests,
             metrics_token: self.metrics_token.clone(),
             disable_metrics: self.disable_metrics,
+            health_token: self.health_token.clone(),
             health_cache_min_free_bytes: self.health_cache_min_free_bytes,
             health_max_memory_bytes: self.health_max_memory_bytes,
             health_cache: Arc::clone(&self.health_cache),
@@ -628,6 +635,10 @@ impl fmt::Debug for ServerConfig {
             )
             .field("disable_metrics", &self.disable_metrics)
             .field(
+                "health_token",
+                &self.health_token.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field(
                 "health_cache_min_free_bytes",
                 &self.health_cache_min_free_bytes,
             )
@@ -694,6 +705,7 @@ impl PartialEq for ServerConfig {
             && self.keep_alive_max_requests == other.keep_alive_max_requests
             && self.metrics_token == other.metrics_token
             && self.disable_metrics == other.disable_metrics
+            && self.health_token == other.health_token
             && self.health_cache_min_free_bytes == other.health_cache_min_free_bytes
             && self.health_max_memory_bytes == other.health_max_memory_bytes
             && self.health_cache.ttl_nanos == other.health_cache.ttl_nanos
@@ -805,6 +817,7 @@ impl ServerConfig {
             keep_alive_max_requests: DEFAULT_KEEP_ALIVE_MAX_REQUESTS,
             metrics_token: None,
             disable_metrics: false,
+            health_token: None,
             health_cache_min_free_bytes: None,
             health_max_memory_bytes: None,
             health_cache: Arc::new(super::handler::HealthCache::new(
@@ -1100,6 +1113,9 @@ impl ServerConfig {
     ///   requires `Authorization: Bearer <token>`. When absent, no authentication is required.
     /// - `TRUSS_DISABLE_METRICS`: when set to `1`, `true`, `yes`, or `on`, disables the `/metrics`
     ///   endpoint entirely (returns 404).
+    /// - `TRUSS_HEALTH_TOKEN`: Bearer token for the `/health` diagnostic endpoint. When set,
+    ///   `GET /health` requires `Authorization: Bearer <token>`. The `/health/live` and
+    ///   `/health/ready` probe endpoints remain unauthenticated.
     /// - `TRUSS_STORAGE_TIMEOUT_SECS`: download timeout for storage backends in seconds
     ///   (default: 30, range: 1–300).
     /// - `TRUSS_HEALTH_CACHE_MIN_FREE_BYTES`: minimum free bytes on the cache disk before
@@ -1333,6 +1349,9 @@ impl ServerConfig {
             .ok()
             .filter(|value| !value.is_empty());
         let disable_metrics = env_flag("TRUSS_DISABLE_METRICS");
+        let health_token = env::var("TRUSS_HEALTH_TOKEN")
+            .ok()
+            .filter(|value| !value.is_empty());
 
         let health_cache_min_free_bytes =
             parse_env_u64_ranged("TRUSS_HEALTH_CACHE_MIN_FREE_BYTES", 1, u64::MAX)?;
@@ -1412,6 +1431,7 @@ impl ServerConfig {
             keep_alive_max_requests,
             metrics_token,
             disable_metrics,
+            health_token,
             health_cache_min_free_bytes,
             health_max_memory_bytes,
             health_cache,
