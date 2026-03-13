@@ -18,12 +18,11 @@
 //! header + raw bytes) and allows operators to touch files to extend their lifetime.
 //!
 //! **Optional size-based eviction:** When `TRUSS_CACHE_MAX_BYTES` is set to a
-//! positive value, the cache performs LRU-style eviction after each write. It
-//! scans all files under the cache root, sorts by modification time, and removes
-//! the oldest entries until the total size drops below the configured limit.
-//! When the variable is unset or `0`, no size-based eviction is performed and
-//! operators should use external tools (e.g., `tmpwatch`, `tmpreaper`, cron)
-//! for disk management.
+//! positive value, the cache performs LRU-style eviction after writes. Eviction
+//! scans are throttled to at most once per 60 seconds to avoid expensive
+//! directory walks on every cache write. When the variable is unset or `0`, no
+//! size-based eviction is performed and operators should use external tools
+//! (e.g., `tmpwatch`, `tmpreaper`, cron) for disk management.
 
 use super::LogHandler;
 use crate::MediaType;
@@ -63,12 +62,17 @@ pub(super) static CACHE_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 ///
 /// When `max_bytes` is set to a positive value, the cache performs LRU-style eviction
 /// after each write to keep the total on-disk size under the configured limit.
+/// Minimum interval between eviction scans (seconds).
+const EVICTION_INTERVAL_SECS: u64 = 60;
+
 pub(super) struct TransformCache {
     pub(super) root: PathBuf,
     pub(super) ttl: Duration,
     pub(super) log_handler: Option<LogHandler>,
     /// Maximum total cache size in bytes. `0` means unlimited (no eviction).
     pub(super) max_bytes: u64,
+    /// Unix timestamp of the last eviction scan, used to throttle scans.
+    last_eviction_secs: AtomicU64,
 }
 
 /// The result of a cache lookup.
@@ -92,6 +96,7 @@ impl TransformCache {
             ttl: Duration::from_secs(DEFAULT_CACHE_TTL_SECONDS),
             log_handler: None,
             max_bytes: 0,
+            last_eviction_secs: AtomicU64::new(0),
         }
     }
 
@@ -228,7 +233,7 @@ impl TransformCache {
             let mut file = fs::File::create(&tmp_path)?;
             file.write_all(&header)?;
             file.write_all(body)?;
-            file.sync_all()?;
+            drop(file);
             fs::rename(&tmp_path, &path)?;
             Ok(())
         })();
@@ -246,11 +251,29 @@ impl TransformCache {
     ///
     /// Scans all files under the cache root, sorts them by modification time
     /// (oldest first), and removes entries until the total size drops below
-    /// `self.max_bytes`. Errors on individual files (e.g. concurrent deletion)
-    /// are silently ignored.
+    /// `self.max_bytes`. Eviction scans are throttled to at most once per
+    /// [`EVICTION_INTERVAL_SECS`]. Errors on individual files (e.g. concurrent
+    /// deletion) are silently ignored.
     fn maybe_evict(&self) {
         if self.max_bytes == 0 {
             return;
+        }
+        // Throttle eviction scans to at most once per EVICTION_INTERVAL_SECS
+        // to avoid O(n log n) directory walks on every cache write.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let last = self.last_eviction_secs.load(Ordering::Relaxed);
+        if now.saturating_sub(last) < EVICTION_INTERVAL_SECS {
+            return;
+        }
+        if self
+            .last_eviction_secs
+            .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+            .is_err()
+        {
+            return; // another thread won the race
         }
         if let Err(err) = self.evict_to_limit() {
             self.log(&format!("truss: cache eviction scan failed: {err}"));
@@ -418,7 +441,7 @@ impl OriginCache {
         let result = (|| -> io::Result<()> {
             let mut file = fs::File::create(&tmp_path)?;
             file.write_all(body)?;
-            file.sync_all()?;
+            drop(file);
             fs::rename(&tmp_path, &path)?;
             Ok(())
         })();
@@ -682,8 +705,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cache = TransformCache::new(dir.path().to_path_buf()).with_max_bytes(200);
 
-        // Write three entries, each ~60 bytes on disk (header + body).
-        // Total will exceed 200 bytes after the third write.
+        // Write four entries, each ~60 bytes on disk (header + body).
+        // Total will exceed 200 bytes after all writes.
         let body = vec![0u8; 50];
         cache.put(&test_key(0), MediaType::Jpeg, &body);
         // Ensure distinct mtimes by touching the file timestamps manually.
@@ -692,8 +715,10 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(50));
         cache.put(&test_key(2), MediaType::Jpeg, &body);
         std::thread::sleep(std::time::Duration::from_millis(50));
-        // Fourth entry triggers eviction; oldest entries should be removed.
         cache.put(&test_key(3), MediaType::Jpeg, &body);
+
+        // Directly trigger eviction (maybe_evict is throttled in production).
+        let _ = cache.evict_to_limit();
 
         // Collect remaining files.
         let remaining: Vec<_> = collect_cache_entries(dir.path())
