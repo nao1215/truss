@@ -88,7 +88,7 @@ Prebuilt binaries are available on the [GitHub Releases](https://github.com/nao1
 
 ### CLI
 
-The `convert` subcommand can be omitted: `truss photo.png -o photo.jpg` is equivalent to `truss convert photo.png -o photo.jpg`. Run `truss --help` to see the full set of options.
+The `convert` subcommand can be omitted: `truss photo.png -o photo.jpg` is equivalent to `truss convert photo.png -o photo.jpg`. Run `truss convert --help` to see the full set of options.
 
 ```sh
 # Convert format
@@ -107,40 +107,180 @@ truss diagram.svg -o safe.svg
 truss inspect photo.jpg
 ```
 
-#### Examples: Blur & Watermark
+#### Format conversion & quality
 
-| | Original | Gaussian Blur (`--blur 5.0`) | Watermark (`--watermark`) |
-|---|---|---|---|
-| | ![original](./doc/img/sample-bee.jpg) | ![blurred](./doc/img/sample-bee-blurred.jpg) | ![watermarked](./doc/img/sample-bee-watermarked.jpg) |
+truss supports **JPEG, PNG, WebP, AVIF, BMP, TIFF, and SVG**. The output format is inferred from the file extension, or you can specify it explicitly with `--format`.
+
+| Format | File size (640 × 427) | Notes |
+|--------|----------------------:|-------|
+| JPEG (original) | 80 KB | Lossy, widely supported |
+| WebP (`--quality 80`) | 38 KB | ~52 % smaller than JPEG |
+| AVIF (`--quality 50`) | 17 KB | ~79 % smaller than JPEG |
+| PNG | 480 KB | Lossless |
 
 ```sh
-# Blur
-truss photo.jpg -o blurred.jpg --blur 5.0
+# JPEG → WebP (smaller file, same visual quality)
+truss photo.jpg -o photo.webp --quality 80
 
-# Sharpen
-truss photo.jpg -o sharpened.jpg --sharpen 2.0
+# JPEG → AVIF (best compression)
+truss photo.jpg -o photo.avif --quality 50
 
-# Watermark
-truss photo.jpg -o watermarked.jpg \
-  --watermark logo.png --watermark-position bottom-right \
-  --watermark-opacity 50 --watermark-margin 10
+# Explicit format override (ignore extension)
+truss photo.jpg -o output.bin --format png
 ```
 
-#### Examples: Crop, Rotate & Fit
+Use `--quality <1-100>` to control lossy encoding. Lower values produce smaller files at the cost of visual quality.
 
-| | Original | Crop (`--crop 100,50,400,300`) | Rotate (`--rotate 270`) | Fit cover (`--fit cover`) |
+| Quality 90 (95 KB) | Original (80 KB) | Quality 30 (27 KB) |
+|---|---|---|
+| ![q90](./doc/img/sample-bee-q90.jpg) | ![original](./doc/img/sample-bee.jpg) | ![q30](./doc/img/sample-bee-q30.jpg) |
+
+#### Resize & fit modes
+
+Specify `--width` and/or `--height` to resize. When both are given, `--fit` controls how the image fits the target box:
+
+| Mode | Behavior |
+|------|----------|
+| `contain` (default) | Scale down to fit entirely inside the box, preserving aspect ratio. Padding is filled with `--background`. |
+| `cover` | Scale to fill the box completely, cropping excess. Use `--position` to choose the crop anchor. |
+| `fill` | Stretch to exact dimensions (ignores aspect ratio). |
+| `inside` | Like `contain`, but never upscales a smaller image. |
+
+| Original (640 × 427) | contain 300 × 300 | cover 300 × 300 | fill 300 × 300 | inside 300 × 300 |
 |---|---|---|---|---|
-| | ![original](./doc/img/sample-bee.jpg) | ![cropped](./doc/img/sample-bee-cropped.jpg) | ![rotated](./doc/img/sample-bee-rotated.jpg) | ![cover](./doc/img/sample-bee-cover.jpg) |
+| ![original](./doc/img/sample-bee.jpg) | ![contain](./doc/img/sample-bee-contain.jpg) | ![cover](./doc/img/sample-bee-cover.jpg) | ![fill](./doc/img/sample-bee-fill.jpg) | ![inside](./doc/img/sample-bee-inside.jpg) |
+
+```sh
+# contain -- fit inside the box, pad with gray background
+truss photo.jpg -o out.jpg --width 300 --height 300 --fit contain --background CCCCCC
+
+# cover -- fill the box, crop the excess
+truss photo.jpg -o out.jpg --width 300 --height 300 --fit cover
+
+# fill -- stretch to exact dimensions
+truss photo.jpg -o out.jpg --width 300 --height 300 --fit fill
+
+# inside -- like contain, but never upscale
+truss photo.jpg -o out.jpg --width 300 --height 300 --fit inside
+
+# Width only -- height is calculated to preserve aspect ratio
+truss photo.jpg -o out.jpg --width 800
+```
+
+#### Cover position
+
+When using `--fit cover`, `--position` controls which part of the image is kept:
+
+| `--position top-left` | `--position center` (default) | `--position bottom-right` |
+|---|---|---|
+| ![top-left](./doc/img/sample-bee-cover-topleft.jpg) | ![center](./doc/img/sample-bee-cover.jpg) | ![bottom-right](./doc/img/sample-bee-cover-bottomright.jpg) |
+
+Available positions: `center`, `top`, `right`, `bottom`, `left`, `top-left`, `top-right`, `bottom-left`, `bottom-right`.
+
+```sh
+truss photo.jpg -o thumb.jpg --width 300 --height 300 --fit cover --position top-left
+```
+
+#### Crop, rotate & background
 
 ```sh
 # Crop a region (x, y, width, height) -- applied before resize
 truss photo.jpg -o cropped.jpg --crop 100,50,400,300
 
-# Rotate 270 degrees clockwise
+# Rotate 270 degrees clockwise (accepts 0, 90, 180, 270)
 truss photo.jpg -o rotated.jpg --rotate 270
 
-# Fit into a 300x300 box using cover mode (fills the box, crops excess)
-truss photo.jpg -o cover.jpg --width 300 --height 300 --fit cover
+# Background color as RRGGBB or RRGGBBAA hex (useful with contain or PNG alpha)
+truss photo.jpg -o out.png --width 300 --height 300 --fit contain --background FF6B35FF
+```
+
+| Original | Crop (`--crop 100,50,400,300`) | Rotate (`--rotate 270`) | Background (`--background FF6B35FF`) |
+|---|---|---|---|
+| ![original](./doc/img/sample-bee.jpg) | ![cropped](./doc/img/sample-bee-cropped.jpg) | ![rotated](./doc/img/sample-bee-rotated.jpg) | ![background](./doc/img/sample-bee-bg.png) |
+
+#### Blur, sharpen & watermark
+
+| Original | Gaussian Blur (`--blur 5.0`) | Sharpen (`--sharpen 3.0`) | Watermark |
+|---|---|---|---|
+| ![original](./doc/img/sample-bee.jpg) | ![blurred](./doc/img/sample-bee-blurred.jpg) | ![sharpened](./doc/img/sample-bee-sharpened.jpg) | ![watermarked](./doc/img/sample-bee-watermarked.jpg) |
+
+```sh
+# Gaussian blur (sigma 0.1 - 100.0)
+truss photo.jpg -o blurred.jpg --blur 5.0
+
+# Sharpen (sigma 0.1 - 100.0)
+truss photo.jpg -o sharpened.jpg --sharpen 3.0
+
+# Watermark with full control
+truss photo.jpg -o watermarked.jpg \
+  --watermark logo.png \
+  --watermark-position bottom-right \
+  --watermark-opacity 50 \
+  --watermark-margin 10
+```
+
+Watermark positions are the same as cover positions: `center`, `top`, `right`, `bottom`, `left`, `top-left`, `top-right`, `bottom-left`, `bottom-right`.
+
+> **Note:** `--blur`, `--sharpen`, and `--watermark` are raster-only and not supported for SVG inputs.
+
+#### Metadata control
+
+By default, truss strips all metadata for smaller and safer output.
+
+| Flag | Behavior |
+|------|----------|
+| `--strip-metadata` (default) | Remove all EXIF, ICC, and other metadata |
+| `--keep-metadata` | Preserve EXIF, ICC, and all other supported metadata |
+| `--preserve-exif` | Keep EXIF only, strip ICC and others |
+| `--auto-orient` (default) | Apply EXIF orientation tag and reset it |
+| `--no-auto-orient` | Skip EXIF orientation correction |
+
+```sh
+# Keep all metadata (useful for archival)
+truss photo.jpg -o out.jpg --keep-metadata
+
+# Keep EXIF only (strip ICC profiles)
+truss photo.jpg -o out.jpg --preserve-exif
+
+# Disable auto-orientation
+truss photo.jpg -o out.jpg --no-auto-orient
+```
+
+#### Stdin / stdout piping
+
+Use `-` for input and/or output to integrate truss into shell pipelines. When reading from stdin, `--format` is required for output.
+
+```sh
+# Pipe from stdin to stdout
+cat photo.png | truss convert - -o - --format jpeg > photo.jpg
+
+# Download, convert, and upload in one pipeline
+curl -s https://example.com/img.png | truss convert - -o - --format webp --width 800 | \
+  aws s3 cp - s3://bucket/thumb.webp
+
+# Combine with other tools
+truss photo.jpg -o - --format png --width 400 | pngquant - -o optimized.png
+```
+
+#### SVG handling
+
+truss sanitizes SVG files by removing scripts and external references, making them safe for user-generated content.
+
+```sh
+# Sanitize SVG (remove scripts, external refs)
+truss diagram.svg -o safe.svg
+
+# Rasterize SVG to PNG at a specific width
+truss diagram.svg -o diagram.png --width 1024
+```
+
+#### Escaping filenames starting with `-`
+
+Use `--` to separate options from file paths that start with a dash:
+
+```sh
+truss convert -- -input.png -o out.jpg
+truss convert input.png -o -- -output.jpg
 ```
 
 ### HTTP Server -- one curl to transform
