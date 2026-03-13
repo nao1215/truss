@@ -35,7 +35,7 @@ body:
     attributes:
       label: truss version
       description: Output of `truss version`.
-      placeholder: "0.7.2"
+      placeholder: "0.8.0"
     validations:
       required: true
   - type: dropdown
