@@ -22,10 +22,6 @@ pub fn png_bytes() -> Vec<u8> {
     bytes
 }
 
-/// Larger PNG suitable as a watermark base image (the main image must be larger than the
-/// watermark). 64x64 is large enough to accept a 4x3 watermark with default margin.
-/// Uses a visibly different color from `png_bytes()` so watermark compositing tests are
-/// meaningful.
 /// Small 2x2 PNG suitable for cloud integration tests where image content
 /// does not matter and a minimal payload is preferred.
 pub fn tiny_png() -> Vec<u8> {
@@ -37,6 +33,10 @@ pub fn tiny_png() -> Vec<u8> {
     bytes
 }
 
+/// Larger PNG suitable as a watermark base image (the main image must be larger than the
+/// watermark). 64x64 is large enough to accept a 4x3 watermark with default margin.
+/// Uses a visibly different color from `png_bytes()` so watermark compositing tests are
+/// meaningful.
 pub fn large_png_bytes() -> Vec<u8> {
     let image = RgbaImage::from_pixel(64, 64, Rgba([200, 100, 50, 255]));
     let mut bytes = Vec::new();
