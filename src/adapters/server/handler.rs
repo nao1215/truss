@@ -508,6 +508,80 @@ impl WatermarkSource {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Cached syscall helpers for health endpoints (#74)
+// ---------------------------------------------------------------------------
+
+/// Sentinel value representing `None` in atomic storage.
+const CACHED_NONE: u64 = u64::MAX;
+
+/// Default TTL for health-check syscall caching (5 seconds).
+pub(super) const DEFAULT_HEALTH_CACHE_TTL_SECS: u64 = 5;
+
+/// Lock-free cache for expensive syscall results used by health endpoints.
+///
+/// Caches `disk_free_bytes()` and `process_rss_bytes()` with a configurable
+/// TTL so that high-frequency polling does not generate redundant kernel
+/// context switches and file I/O.
+pub struct HealthCache {
+    disk_free: AtomicU64,
+    disk_free_at: AtomicU64,
+    rss: AtomicU64,
+    rss_at: AtomicU64,
+    pub(super) ttl_nanos: u64,
+}
+
+impl HealthCache {
+    /// Creates a new cache with the given TTL in seconds.
+    pub(super) fn new(ttl_secs: u64) -> Self {
+        Self {
+            disk_free: AtomicU64::new(CACHED_NONE),
+            disk_free_at: AtomicU64::new(0),
+            rss: AtomicU64::new(CACHED_NONE),
+            rss_at: AtomicU64::new(0),
+            ttl_nanos: ttl_secs.saturating_mul(1_000_000_000),
+        }
+    }
+
+    /// Returns the monotonic timestamp in nanoseconds since `START_TIME`.
+    fn now_nanos() -> u64 {
+        super::metrics::START_TIME
+            .get_or_init(Instant::now)
+            .elapsed()
+            .as_nanos() as u64
+    }
+
+    /// Returns the cached disk free bytes, refreshing if the TTL has expired.
+    pub(super) fn disk_free(&self, path: &std::path::Path) -> Option<u64> {
+        let now = Self::now_nanos();
+        let last = self.disk_free_at.load(Ordering::Relaxed);
+        if now.wrapping_sub(last) < self.ttl_nanos && last != 0 {
+            let v = self.disk_free.load(Ordering::Relaxed);
+            return if v == CACHED_NONE { None } else { Some(v) };
+        }
+        let fresh = disk_free_bytes(path);
+        self.disk_free
+            .store(fresh.unwrap_or(CACHED_NONE), Ordering::Relaxed);
+        self.disk_free_at.store(now, Ordering::Relaxed);
+        fresh
+    }
+
+    /// Returns the cached process RSS bytes, refreshing if the TTL has expired.
+    pub(super) fn rss(&self) -> Option<u64> {
+        let now = Self::now_nanos();
+        let last = self.rss_at.load(Ordering::Relaxed);
+        if now.wrapping_sub(last) < self.ttl_nanos && last != 0 {
+            let v = self.rss.load(Ordering::Relaxed);
+            return if v == CACHED_NONE { None } else { Some(v) };
+        }
+        let fresh = process_rss_bytes();
+        self.rss
+            .store(fresh.unwrap_or(CACHED_NONE), Ordering::Relaxed);
+        self.rss_at.store(now, Ordering::Relaxed);
+        fresh
+    }
+}
+
 /// Returns the number of free bytes on the filesystem containing `path`,
 /// or `None` if the query fails.
 #[cfg(target_os = "linux")]
@@ -611,7 +685,7 @@ pub(super) fn handle_health_ready(config: &ServerConfig) -> HttpResponse {
     }
 
     if let Some(cache_root) = &config.cache_root {
-        let free = disk_free_bytes(cache_root);
+        let free = config.health_cache.disk_free(cache_root);
         let threshold = config.health_cache_min_free_bytes;
         let disk_ok = match (free, threshold) {
             (Some(f), Some(min)) => f >= min,
@@ -647,7 +721,7 @@ pub(super) fn handle_health_ready(config: &ServerConfig) -> HttpResponse {
     }
 
     // Memory usage (Linux only) — skip entirely when RSS is unavailable
-    if let Some(rss_bytes) = process_rss_bytes() {
+    if let Some(rss_bytes) = config.health_cache.rss() {
         let threshold = config.health_max_memory_bytes;
         let mem_ok = threshold.is_none_or(|max| rss_bytes <= max);
         let mut check = json!({
@@ -737,7 +811,7 @@ pub(super) fn handle_health(config: &ServerConfig) -> HttpResponse {
 
     // Cache disk free space
     if let Some(cache_root) = &config.cache_root {
-        let free = disk_free_bytes(cache_root);
+        let free = config.health_cache.disk_free(cache_root);
         let threshold = config.health_cache_min_free_bytes;
         let disk_ok = match (free, threshold) {
             (Some(f), Some(min)) => f >= min,
@@ -773,7 +847,7 @@ pub(super) fn handle_health(config: &ServerConfig) -> HttpResponse {
     }
 
     // Memory usage (Linux only)
-    let rss = process_rss_bytes();
+    let rss = config.health_cache.rss();
     if let Some(rss_bytes) = rss {
         let threshold = config.health_max_memory_bytes;
         let mem_ok = threshold.is_none_or(|max| rss_bytes <= max);
