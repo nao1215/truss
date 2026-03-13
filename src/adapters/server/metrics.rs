@@ -251,12 +251,14 @@ fn media_type_index(mt: MediaType) -> usize {
 const STORAGE_BACKEND_COUNT: usize = 4;
 const STORAGE_BACKEND_LABELS: [&str; STORAGE_BACKEND_COUNT] = ["filesystem", "s3", "gcs", "azure"];
 
-pub(super) fn storage_backend_index_from_config(backend: &super::StorageBackendLabel) -> usize {
+pub(super) fn storage_backend_index_from_config(
+    backend: &super::config::StorageBackendLabel,
+) -> usize {
     match backend {
-        super::StorageBackendLabel::Filesystem => 0,
-        super::StorageBackendLabel::S3 => 1,
-        super::StorageBackendLabel::Gcs => 2,
-        super::StorageBackendLabel::Azure => 3,
+        super::config::StorageBackendLabel::Filesystem => 0,
+        super::config::StorageBackendLabel::S3 => 1,
+        super::config::StorageBackendLabel::Gcs => 2,
+        super::config::StorageBackendLabel::Azure => 3,
     }
 }
 

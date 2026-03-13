@@ -198,8 +198,7 @@ pub(super) fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io:
         if let (Some(limiter), Some(ip)) = (&config.rate_limiter, client_ip)
             && !limiter.check(ip)
         {
-            let mut response =
-                too_many_requests_response("rate limit exceeded — try again later");
+            let mut response = too_many_requests_response("rate limit exceeded — try again later");
             response
                 .headers
                 .push(("X-Request-Id".to_string(), request_id.clone()));

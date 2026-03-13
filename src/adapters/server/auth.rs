@@ -1,10 +1,11 @@
+use super::config::ServerConfig;
 use super::http_parse::HttpRequest;
 use super::negotiate::PublicSourceKind;
 use super::response::{
     HttpResponse, auth_required_response, bad_request_response, internal_error_response,
     service_unavailable_response, signed_url_unauthorized_response,
 };
-use super::{HmacSha256, ServerConfig, SignedUrlSource};
+use super::signing::{HmacSha256, SignedUrlSource};
 use crate::{Rgba8, Rotation, TransformOptions};
 use hmac::Mac;
 use std::collections::BTreeMap;

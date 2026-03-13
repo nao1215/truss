@@ -52,10 +52,6 @@ pub use handler::TransformOptionsPayload;
 pub use lifecycle::{serve, serve_once, serve_once_with_config, serve_with_config};
 pub use signing::{SignedUrlSource, SignedWatermarkParams, bind_addr, sign_public_url};
 
-// Re-exports for sibling submodules that reference items via `super::`.
-use config::StorageBackendLabel;
-use signing::HmacSha256;
-
 /// Writes a line to stderr using a raw file-descriptor/handle write, bypassing
 /// Rust's `std::io::Stderr` type whose internal `ReentrantLock` can interfere
 /// with `MutexGuard` drop ordering in Rust 2024 edition, breaking HTTP
