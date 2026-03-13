@@ -1,7 +1,7 @@
 /// Request handler implementations (transform, health, metrics, public, upload).
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use serde::Deserialize;
@@ -518,6 +518,13 @@ const CACHED_NONE: u64 = u64::MAX;
 /// Default TTL for health-check syscall caching (5 seconds).
 pub(super) const DEFAULT_HEALTH_CACHE_TTL_SECS: u64 = 5;
 
+/// Recovery margin for hysteresis-based resource checks.
+///
+/// When a resource check transitions to "fail", it must recover past
+/// `threshold * (1 ± HYSTERESIS_MARGIN)` before returning to "ok",
+/// preventing rapid oscillation (flapping) near the boundary.
+const HYSTERESIS_MARGIN: f64 = 0.05;
+
 /// Lock-free cache for expensive syscall results used by health endpoints.
 ///
 /// Caches `disk_free_bytes()` and `process_rss_bytes()` with a configurable
@@ -529,6 +536,10 @@ pub(crate) struct HealthCache {
     rss: AtomicU64,
     rss_at: AtomicU64,
     pub(super) ttl_nanos: u64,
+    /// Hysteresis state for disk free-space checks (0 = ok, 1 = fail).
+    disk_state: AtomicU8,
+    /// Hysteresis state for RSS memory checks (0 = ok, 1 = fail).
+    rss_state: AtomicU8,
 }
 
 impl HealthCache {
@@ -540,6 +551,8 @@ impl HealthCache {
             rss: AtomicU64::new(CACHED_NONE),
             rss_at: AtomicU64::new(0),
             ttl_nanos: ttl_secs.saturating_mul(1_000_000_000),
+            disk_state: AtomicU8::new(0),
+            rss_state: AtomicU8::new(0),
         }
     }
 
@@ -579,6 +592,41 @@ impl HealthCache {
             .store(fresh.unwrap_or(CACHED_NONE), Ordering::Relaxed);
         self.rss_at.store(now, Ordering::Release);
         fresh
+    }
+
+    /// Applies hysteresis to a threshold check, preventing flapping when
+    /// values hover near the boundary.
+    ///
+    /// `higher_is_worse` controls directionality:
+    /// - `true` (memory): fail when `current >= threshold`, recover when
+    ///   `current < threshold * (1 - margin)`
+    /// - `false` (disk): fail when `current < threshold`, recover when
+    ///   `current > threshold * (1 + margin)`
+    ///
+    /// Returns `true` if the check passes (ok).
+    pub(crate) fn check_with_hysteresis(
+        &self,
+        state: &AtomicU8,
+        current: u64,
+        threshold: u64,
+        higher_is_worse: bool,
+    ) -> bool {
+        let prev_fail = state.load(Ordering::Relaxed) == 1;
+        let ok = if higher_is_worse {
+            if prev_fail {
+                let recovery = (threshold as f64 * (1.0 - HYSTERESIS_MARGIN)) as u64;
+                current < recovery
+            } else {
+                current < threshold
+            }
+        } else if prev_fail {
+            let recovery = (threshold as f64 * (1.0 + HYSTERESIS_MARGIN)) as u64;
+            current > recovery
+        } else {
+            current >= threshold
+        };
+        state.store(if ok { 0 } else { 1 }, Ordering::Relaxed);
+        ok
     }
 }
 
@@ -714,7 +762,12 @@ fn collect_resource_checks(config: &ServerConfig) -> (Vec<serde_json::Value>, bo
         let free = config.health_cache.disk_free(cache_root);
         let threshold = config.health_cache_min_free_bytes;
         let disk_ok = match (free, threshold) {
-            (Some(f), Some(min)) => f >= min,
+            (Some(f), Some(min)) => config.health_cache.check_with_hysteresis(
+                &config.health_cache.disk_state,
+                f,
+                min,
+                false,
+            ),
             _ => true,
         };
         let mut check = json!({
@@ -749,7 +802,15 @@ fn collect_resource_checks(config: &ServerConfig) -> (Vec<serde_json::Value>, bo
     // Memory usage (Linux only) — skip entirely when RSS is unavailable
     if let Some(rss_bytes) = config.health_cache.rss() {
         let threshold = config.health_max_memory_bytes;
-        let mem_ok = threshold.is_none_or(|max| rss_bytes <= max);
+        let mem_ok = match threshold {
+            Some(max) => config.health_cache.check_with_hysteresis(
+                &config.health_cache.rss_state,
+                rss_bytes,
+                max,
+                true,
+            ),
+            None => true,
+        };
         let mut check = json!({
             "name": "memoryUsage",
             "status": if mem_ok { "ok" } else { "fail" },
@@ -1438,4 +1499,128 @@ fn transform_source_bytes_inner(
             .push(("X-Truss-Watermark".to_string(), "true".to_string()));
     }
     response
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -- Memory hysteresis (higher_is_worse = true) --
+
+    #[test]
+    fn hysteresis_memory_ok_below_threshold() {
+        let cache = HealthCache::new(5);
+        assert!(cache.check_with_hysteresis(&cache.rss_state, 999, 1000, true));
+    }
+
+    #[test]
+    fn hysteresis_memory_fails_at_threshold() {
+        let cache = HealthCache::new(5);
+        assert!(!cache.check_with_hysteresis(&cache.rss_state, 1000, 1000, true));
+    }
+
+    #[test]
+    fn hysteresis_memory_fails_above_threshold() {
+        let cache = HealthCache::new(5);
+        assert!(!cache.check_with_hysteresis(&cache.rss_state, 1100, 1000, true));
+    }
+
+    #[test]
+    fn hysteresis_memory_stays_failed_in_margin() {
+        let cache = HealthCache::new(5);
+        // Trigger fail
+        assert!(!cache.check_with_hysteresis(&cache.rss_state, 1000, 1000, true));
+        // 960 is above recovery point (950) -> still fail
+        assert!(!cache.check_with_hysteresis(&cache.rss_state, 960, 1000, true));
+        // 950 is at recovery boundary (not strictly below) -> still fail
+        assert!(!cache.check_with_hysteresis(&cache.rss_state, 950, 1000, true));
+    }
+
+    #[test]
+    fn hysteresis_memory_recovers_below_margin() {
+        let cache = HealthCache::new(5);
+        // Trigger fail
+        assert!(!cache.check_with_hysteresis(&cache.rss_state, 1000, 1000, true));
+        // 949 is below recovery point (950) -> recovers
+        assert!(cache.check_with_hysteresis(&cache.rss_state, 949, 1000, true));
+    }
+
+    #[test]
+    fn hysteresis_memory_full_cycle() {
+        let cache = HealthCache::new(5);
+        // Start ok
+        assert!(cache.check_with_hysteresis(&cache.rss_state, 900, 1000, true));
+        // Cross threshold -> fail
+        assert!(!cache.check_with_hysteresis(&cache.rss_state, 1000, 1000, true));
+        // Hover in margin -> still fail
+        assert!(!cache.check_with_hysteresis(&cache.rss_state, 960, 1000, true));
+        // Drop below recovery -> ok
+        assert!(cache.check_with_hysteresis(&cache.rss_state, 940, 1000, true));
+        // Rise but stay below threshold -> still ok
+        assert!(cache.check_with_hysteresis(&cache.rss_state, 999, 1000, true));
+        // Re-fail after recovery
+        assert!(!cache.check_with_hysteresis(&cache.rss_state, 1000, 1000, true));
+    }
+
+    // -- Disk hysteresis (higher_is_worse = false) --
+
+    #[test]
+    fn hysteresis_disk_ok_at_threshold() {
+        let cache = HealthCache::new(5);
+        assert!(cache.check_with_hysteresis(&cache.disk_state, 1000, 1000, false));
+    }
+
+    #[test]
+    fn hysteresis_disk_fails_below_threshold() {
+        let cache = HealthCache::new(5);
+        assert!(!cache.check_with_hysteresis(&cache.disk_state, 999, 1000, false));
+    }
+
+    #[test]
+    fn hysteresis_disk_stays_failed_in_margin() {
+        let cache = HealthCache::new(5);
+        // Trigger fail
+        assert!(!cache.check_with_hysteresis(&cache.disk_state, 999, 1000, false));
+        // 1040 is below recovery point (1050) -> still fail
+        assert!(!cache.check_with_hysteresis(&cache.disk_state, 1040, 1000, false));
+        // 1050 is at recovery boundary (not strictly above) -> still fail
+        assert!(!cache.check_with_hysteresis(&cache.disk_state, 1050, 1000, false));
+    }
+
+    #[test]
+    fn hysteresis_disk_recovers_above_margin() {
+        let cache = HealthCache::new(5);
+        // Trigger fail
+        assert!(!cache.check_with_hysteresis(&cache.disk_state, 999, 1000, false));
+        // 1051 is above recovery point (1050) -> recovers
+        assert!(cache.check_with_hysteresis(&cache.disk_state, 1051, 1000, false));
+    }
+
+    #[test]
+    fn hysteresis_disk_full_cycle() {
+        let cache = HealthCache::new(5);
+        // Start ok
+        assert!(cache.check_with_hysteresis(&cache.disk_state, 2000, 1000, false));
+        // Drop below threshold -> fail
+        assert!(!cache.check_with_hysteresis(&cache.disk_state, 999, 1000, false));
+        // Hover in margin -> still fail
+        assert!(!cache.check_with_hysteresis(&cache.disk_state, 1040, 1000, false));
+        // Rise above recovery -> ok
+        assert!(cache.check_with_hysteresis(&cache.disk_state, 1051, 1000, false));
+        // Drop but stay at threshold -> still ok
+        assert!(cache.check_with_hysteresis(&cache.disk_state, 1000, 1000, false));
+        // Re-fail after recovery
+        assert!(!cache.check_with_hysteresis(&cache.disk_state, 999, 1000, false));
+    }
+
+    #[test]
+    fn hysteresis_independent_states() {
+        let cache = HealthCache::new(5);
+        // Disk fails while memory stays ok
+        assert!(!cache.check_with_hysteresis(&cache.disk_state, 500, 1000, false));
+        assert!(cache.check_with_hysteresis(&cache.rss_state, 500, 1000, true));
+        // States are independent
+        assert_eq!(cache.disk_state.load(Ordering::Relaxed), 1);
+        assert_eq!(cache.rss_state.load(Ordering::Relaxed), 0);
+    }
 }

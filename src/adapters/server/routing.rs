@@ -340,8 +340,8 @@ pub(super) fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io:
             ("GET" | "HEAD", "/health")
         ) && let Some(expected) = &config.health_token
         {
-            let provided = http_parse::header_value(&partial.headers, "authorization")
-                .and_then(|value| {
+            let provided =
+                http_parse::header_value(&partial.headers, "authorization").and_then(|value| {
                     let (scheme, token) = value.split_once(|c: char| c.is_whitespace())?;
                     scheme.eq_ignore_ascii_case("Bearer").then(|| token.trim())
                 });
