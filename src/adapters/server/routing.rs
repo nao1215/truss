@@ -286,10 +286,7 @@ pub(super) fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io:
                 ))
             } else if let Some(expected) = &config.metrics_token {
                 let provided = http_parse::header_value(&partial.headers, "authorization")
-                    .and_then(|value| {
-                        let (scheme, token) = value.split_once(|c: char| c.is_whitespace())?;
-                        scheme.eq_ignore_ascii_case("Bearer").then(|| token.trim())
-                    });
+                    .and_then(super::auth::extract_bearer_token);
                 match provided {
                     Some(token) if token.as_bytes().ct_eq(expected.as_bytes()).into() => None,
                     _ => Some(super::response::auth_required_response(
@@ -324,6 +321,55 @@ pub(super) fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io:
                         method: &method_log,
                         path: &path_log,
                         route: "/metrics",
+                        status: sc,
+                        start,
+                        cache_status: None,
+                        watermark: false,
+                    },
+                );
+                return Ok(());
+            }
+        }
+
+        // Early-reject /health requests when a health token is configured.
+        if matches!(
+            (partial.method.as_str(), partial.path()),
+            ("GET" | "HEAD", "/health")
+        ) && let Some(expected) = &config.health_token
+        {
+            let provided = http_parse::header_value(&partial.headers, "authorization")
+                .and_then(super::auth::extract_bearer_token);
+            let early_response = match provided {
+                Some(token) if token.as_bytes().ct_eq(expected.as_bytes()).into() => None,
+                _ => Some(super::response::auth_required_response(
+                    "health endpoint requires authentication",
+                )),
+            };
+
+            if let Some(mut response) = early_response {
+                response
+                    .headers
+                    .push(("X-Request-Id".to_string(), request_id.clone()));
+                response.strip_body_if_head(is_head);
+                record_http_metrics(RouteMetric::Health, response.status);
+                let sc = status_code(response.status).unwrap_or("unknown");
+                let method_log = partial.method.clone();
+                let path_log = partial.path().to_string();
+                let _ = write_response_compressed(
+                    &mut stream,
+                    response,
+                    true,
+                    accepts_gzip,
+                    config.compression_level,
+                );
+                record_http_request_duration(RouteMetric::Health, start);
+                emit_access_log(
+                    config,
+                    &AccessLogEntry {
+                        request_id: &request_id,
+                        method: &method_log,
+                        path: &path_log,
+                        route: "/health",
                         status: sc,
                         start,
                         cache_status: None,

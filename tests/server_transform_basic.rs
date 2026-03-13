@@ -306,6 +306,143 @@ fn serve_once_health_endpoint_returns_200() {
 
 #[test]
 #[serial]
+fn serve_once_health_token_rejects_unauthenticated() {
+    let storage = temp_dir("health-auth-reject");
+    let mut config = ServerConfig::new(storage, None);
+    config.health_token = Some("health-secret".to_string());
+    let (addr, handle) = spawn_server(config);
+
+    let response = send_raw_request(
+        addr,
+        "GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    );
+    handle
+        .join()
+        .expect("join server thread")
+        .expect("serve one request");
+
+    let (header, content_type, _body) = split_response(&response);
+    assert!(
+        header.starts_with("HTTP/1.1 401"),
+        "expected 401 from /health without token, got: {header}"
+    );
+    assert_eq!(content_type, "application/problem+json");
+    assert!(
+        header.contains("WWW-Authenticate: Bearer"),
+        "expected WWW-Authenticate header in: {header}"
+    );
+    let body_str = String::from_utf8_lossy(&_body);
+    assert!(
+        body_str.contains("health endpoint requires authentication"),
+        "expected auth error message, got: {body_str}"
+    );
+}
+
+#[test]
+#[serial]
+fn serve_once_health_token_rejects_wrong_token() {
+    let storage = temp_dir("health-auth-wrong");
+    let mut config = ServerConfig::new(storage, None);
+    config.health_token = Some("health-secret".to_string());
+    let (addr, handle) = spawn_server(config);
+
+    let response = send_raw_request(
+        addr,
+        "GET /health HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer wrong-token\r\nConnection: close\r\n\r\n",
+    );
+    handle
+        .join()
+        .expect("join server thread")
+        .expect("serve one request");
+
+    let (header, content_type, _body) = split_response(&response);
+    assert!(
+        header.starts_with("HTTP/1.1 401"),
+        "expected 401 from /health with wrong token, got: {header}"
+    );
+    assert_eq!(content_type, "application/problem+json");
+}
+
+#[test]
+#[serial]
+fn serve_once_health_token_accepts_valid_token() {
+    let storage = temp_dir("health-auth-ok");
+    let mut config = ServerConfig::new(storage, None);
+    config.health_token = Some("health-secret".to_string());
+    let (addr, handle) = spawn_server(config);
+
+    let response = send_raw_request(
+        addr,
+        "GET /health HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer health-secret\r\nConnection: close\r\n\r\n",
+    );
+    handle
+        .join()
+        .expect("join server thread")
+        .expect("serve one request");
+
+    let (header, content_type, body) = split_response(&response);
+    assert!(
+        header.starts_with("HTTP/1.1 200"),
+        "expected 200 from /health with valid token, got: {header}"
+    );
+    assert_eq!(content_type, "application/json");
+    let body_str = String::from_utf8_lossy(&body);
+    assert!(
+        body_str.contains("\"status\":\"ok\""),
+        "expected JSON health body, got: {body_str}"
+    );
+}
+
+#[test]
+#[serial]
+fn serve_once_health_live_unaffected_by_health_token() {
+    let storage = temp_dir("health-live-no-auth");
+    let mut config = ServerConfig::new(storage, None);
+    config.health_token = Some("health-secret".to_string());
+    let (addr, handle) = spawn_server(config);
+
+    let response = send_raw_request(
+        addr,
+        "GET /health/live HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    );
+    handle
+        .join()
+        .expect("join server thread")
+        .expect("serve one request");
+
+    let (header, _content_type, _body) = split_response(&response);
+    assert!(
+        header.starts_with("HTTP/1.1 200"),
+        "expected 200 from /health/live without token, got: {header}"
+    );
+}
+
+#[test]
+#[serial]
+fn serve_once_health_ready_unaffected_by_health_token() {
+    let storage = temp_dir("health-ready-no-auth");
+    let mut config = ServerConfig::new(storage, None);
+    config.health_token = Some("health-secret".to_string());
+    let (addr, handle) = spawn_server(config);
+
+    let response = send_raw_request(
+        addr,
+        "GET /health/ready HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    );
+    handle
+        .join()
+        .expect("join server thread")
+        .expect("serve one request");
+
+    let (header, _content_type, _body) = split_response(&response);
+    assert!(
+        header.starts_with("HTTP/1.1 200"),
+        "expected 200 from /health/ready without token, got: {header}"
+    );
+}
+
+#[test]
+#[serial]
 fn serve_once_returns_404_for_unknown_path() {
     let storage = temp_dir("not-found-404");
     let config = ServerConfig::new(storage, Some("secret".to_string()));

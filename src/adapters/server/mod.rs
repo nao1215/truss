@@ -121,9 +121,9 @@ mod tests {
         authorize_request_headers, authorize_signed_request, canonical_query_without_signature,
     };
     use super::handler::{
-        HealthCache, TransformImageRequestPayload, TransformSlot, TransformSourcePayload,
-        WatermarkSource, disk_free_bytes, parse_public_get_request, process_rss_bytes,
-        transform_source_bytes,
+        DEFAULT_HYSTERESIS_MARGIN, HealthCache, TransformImageRequestPayload, TransformSlot,
+        TransformSourcePayload, WatermarkSource, disk_free_bytes, parse_public_get_request,
+        process_rss_bytes, transform_source_bytes,
     };
     use super::lifecycle::preset_watcher;
     use super::negotiate::{
@@ -4274,7 +4274,7 @@ mod tests {
     #[test]
     fn health_cache_returns_cached_rss_within_ttl() {
         // Use a very long TTL so the cache never expires during the test.
-        let cache = HealthCache::new(3600);
+        let cache = HealthCache::new(3600, DEFAULT_HYSTERESIS_MARGIN);
         let first = cache.rss();
         let second = cache.rss();
         // Both calls should return the same cached value.
@@ -4286,7 +4286,7 @@ mod tests {
     #[test]
     fn health_cache_returns_cached_disk_free_within_ttl() {
         let dir = temp_dir("hc-disk");
-        let cache = HealthCache::new(3600);
+        let cache = HealthCache::new(3600, DEFAULT_HYSTERESIS_MARGIN);
         let first = cache.disk_free(&dir);
         let second = cache.disk_free(&dir);
         assert_eq!(first, second);
@@ -4297,7 +4297,7 @@ mod tests {
     #[test]
     fn health_cache_refreshes_rss_after_ttl() {
         // TTL of 0 means every call should perform a fresh syscall.
-        let cache = HealthCache::new(0);
+        let cache = HealthCache::new(0, DEFAULT_HYSTERESIS_MARGIN);
         let first = cache.rss();
         let second = cache.rss();
         // Both should succeed (fresh reads).
@@ -4308,7 +4308,7 @@ mod tests {
     #[test]
     fn health_cache_ttl_zero_always_refreshes_disk_free() {
         let dir = temp_dir("hc-disk-zero");
-        let cache = HealthCache::new(0);
+        let cache = HealthCache::new(0, DEFAULT_HYSTERESIS_MARGIN);
         // With TTL=0, the cache timestamp check should never short-circuit.
         let first = cache.disk_free(&dir);
         let second = cache.disk_free(&dir);

@@ -416,6 +416,12 @@ pub struct ServerConfig {
     ///
     /// Configurable via `TRUSS_DISABLE_METRICS`. When enabled, `/metrics` returns 404.
     pub disable_metrics: bool,
+    /// Bearer token for the `/health` diagnostic endpoint.
+    ///
+    /// When set, `GET /health` requires `Authorization: Bearer <token>`.
+    /// The `/health/live` and `/health/ready` probe endpoints remain
+    /// unauthenticated. Configurable via `TRUSS_HEALTH_TOKEN`.
+    pub health_token: Option<String>,
     /// Minimum free bytes on the cache disk before `/health/ready` reports failure.
     ///
     /// Configurable via `TRUSS_HEALTH_CACHE_MIN_FREE_BYTES`. When unset, the cache
@@ -551,6 +557,7 @@ impl Clone for ServerConfig {
             keep_alive_max_requests: self.keep_alive_max_requests,
             metrics_token: self.metrics_token.clone(),
             disable_metrics: self.disable_metrics,
+            health_token: self.health_token.clone(),
             health_cache_min_free_bytes: self.health_cache_min_free_bytes,
             health_max_memory_bytes: self.health_max_memory_bytes,
             health_cache: Arc::clone(&self.health_cache),
@@ -628,6 +635,10 @@ impl fmt::Debug for ServerConfig {
             )
             .field("disable_metrics", &self.disable_metrics)
             .field(
+                "health_token",
+                &self.health_token.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field(
                 "health_cache_min_free_bytes",
                 &self.health_cache_min_free_bytes,
             )
@@ -694,9 +705,11 @@ impl PartialEq for ServerConfig {
             && self.keep_alive_max_requests == other.keep_alive_max_requests
             && self.metrics_token == other.metrics_token
             && self.disable_metrics == other.disable_metrics
+            && self.health_token == other.health_token
             && self.health_cache_min_free_bytes == other.health_cache_min_free_bytes
             && self.health_max_memory_bytes == other.health_max_memory_bytes
             && self.health_cache.ttl_nanos == other.health_cache.ttl_nanos
+            && self.health_cache.hysteresis_margin == other.health_cache.hysteresis_margin
             && self.shutdown_drain_secs == other.shutdown_drain_secs
             && self.custom_response_headers == other.custom_response_headers
             && self.max_source_bytes == other.max_source_bytes
@@ -805,10 +818,12 @@ impl ServerConfig {
             keep_alive_max_requests: DEFAULT_KEEP_ALIVE_MAX_REQUESTS,
             metrics_token: None,
             disable_metrics: false,
+            health_token: None,
             health_cache_min_free_bytes: None,
             health_max_memory_bytes: None,
             health_cache: Arc::new(super::handler::HealthCache::new(
                 super::handler::DEFAULT_HEALTH_CACHE_TTL_SECS,
+                super::handler::DEFAULT_HYSTERESIS_MARGIN,
             )),
             shutdown_drain_secs: DEFAULT_SHUTDOWN_DRAIN_SECS,
             draining: Arc::new(AtomicBool::new(false)),
@@ -841,7 +856,8 @@ impl ServerConfig {
     /// This builder-style method allows embedders to configure the TTL
     /// programmatically without relying on environment variables.
     pub fn with_health_cache_ttl_secs(mut self, ttl_secs: u64) -> Self {
-        self.health_cache = Arc::new(super::handler::HealthCache::new(ttl_secs));
+        let margin = self.health_cache.hysteresis_margin;
+        self.health_cache = Arc::new(super::handler::HealthCache::new(ttl_secs, margin));
         self
     }
 
@@ -1100,12 +1116,18 @@ impl ServerConfig {
     ///   requires `Authorization: Bearer <token>`. When absent, no authentication is required.
     /// - `TRUSS_DISABLE_METRICS`: when set to `1`, `true`, `yes`, or `on`, disables the `/metrics`
     ///   endpoint entirely (returns 404).
+    /// - `TRUSS_HEALTH_TOKEN`: Bearer token for the `/health` diagnostic endpoint. When set,
+    ///   `GET /health` requires `Authorization: Bearer <token>`. The `/health/live` and
+    ///   `/health/ready` probe endpoints remain unauthenticated.
     /// - `TRUSS_STORAGE_TIMEOUT_SECS`: download timeout for storage backends in seconds
     ///   (default: 30, range: 1–300).
     /// - `TRUSS_HEALTH_CACHE_MIN_FREE_BYTES`: minimum free bytes on the cache disk before
     ///   `/health/ready` reports failure. When unset, the disk free-space check is skipped.
     /// - `TRUSS_HEALTH_MAX_MEMORY_BYTES`: maximum resident memory (RSS) in bytes before
     ///   `/health/ready` reports failure. When unset, the memory check is skipped (Linux only).
+    /// - `TRUSS_HEALTH_HYSTERESIS_MARGIN`: recovery margin for readiness probe hysteresis
+    ///   (default: 0.05, range: 0.01–0.50). A 5 % margin means that after a threshold is
+    ///   breached, the value must recover past `threshold ± 5 %` before the check returns to ok.
     /// - `TRUSS_HEALTH_CACHE_TTL_SECS`: TTL in seconds for cached syscall results
     ///   (`disk_free_bytes`, `process_rss_bytes`) used by health endpoints (default: 5,
     ///   range: 0–300). Set to `0` to disable caching and call syscalls on every request.
@@ -1331,8 +1353,16 @@ impl ServerConfig {
 
         let metrics_token = env::var("TRUSS_METRICS_TOKEN")
             .ok()
-            .filter(|value| !value.is_empty());
+            .filter(|value| !value.trim().is_empty());
         let disable_metrics = env_flag("TRUSS_DISABLE_METRICS");
+        let health_token = env::var("TRUSS_HEALTH_TOKEN")
+            .ok()
+            .filter(|value| !value.trim().is_empty());
+        if health_token.is_some() {
+            eprintln!(
+                "truss: /health endpoint requires Bearer authentication (TRUSS_HEALTH_TOKEN is set)"
+            );
+        }
 
         let health_cache_min_free_bytes =
             parse_env_u64_ranged("TRUSS_HEALTH_CACHE_MIN_FREE_BYTES", 1, u64::MAX)?;
@@ -1340,7 +1370,12 @@ impl ServerConfig {
             parse_env_u64_ranged("TRUSS_HEALTH_MAX_MEMORY_BYTES", 1, u64::MAX)?;
         let health_cache_ttl_secs = parse_env_u64_ranged("TRUSS_HEALTH_CACHE_TTL_SECS", 0, 300)?
             .unwrap_or(super::handler::DEFAULT_HEALTH_CACHE_TTL_SECS);
-        let health_cache = Arc::new(super::handler::HealthCache::new(health_cache_ttl_secs));
+        let hysteresis_margin = parse_env_f64_ranged("TRUSS_HEALTH_HYSTERESIS_MARGIN", 0.01, 0.50)?
+            .unwrap_or(super::handler::DEFAULT_HYSTERESIS_MARGIN);
+        let health_cache = Arc::new(super::handler::HealthCache::new(
+            health_cache_ttl_secs,
+            hysteresis_margin,
+        ));
 
         let (presets, presets_file_path) = parse_presets_from_env()?;
 
@@ -1412,6 +1447,7 @@ impl ServerConfig {
             keep_alive_max_requests,
             metrics_token,
             disable_metrics,
+            health_token,
             health_cache_min_free_bytes,
             health_max_memory_bytes,
             health_cache,
@@ -1453,6 +1489,31 @@ pub(super) fn parse_env_u64_ranged(name: &str, min: u64, max: u64) -> io::Result
                 io::Error::new(
                     io::ErrorKind::InvalidInput,
                     format!("{name} must be a positive integer"),
+                )
+            })?;
+            if n < min || n > max {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("{name} must be between {min} and {max}"),
+                ));
+            }
+            Ok(Some(n))
+        }
+        None => Ok(None),
+    }
+}
+
+/// Parse an optional environment variable as `f64`, validating that its value
+/// falls within `[min, max]`. Returns `Ok(None)` when the variable is unset or
+/// empty, `Ok(Some(value))` on success, or an `io::Error` on parse / range
+/// failure.
+fn parse_env_f64_ranged(name: &str, min: f64, max: f64) -> io::Result<Option<f64>> {
+    match env::var(name).ok().filter(|v| !v.is_empty()) {
+        Some(value) => {
+            let n: f64 = value.parse().map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("{name} must be a number"),
                 )
             })?;
             if n < min || n > max {

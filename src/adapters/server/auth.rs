@@ -12,6 +12,18 @@ use std::collections::BTreeMap;
 use subtle::ConstantTimeEq;
 use url::Url;
 
+/// Extracts the Bearer token from an `Authorization` header value.
+///
+/// Returns `Some(token)` when the value starts with `Bearer ` (case-insensitive),
+/// or `None` if the scheme does not match or the value is malformed.
+pub(super) fn extract_bearer_token(value: &str) -> Option<&str> {
+    let (scheme, token) = value.split_once(|c: char| c.is_whitespace())?;
+    scheme
+        .eq_ignore_ascii_case("Bearer")
+        .then(|| token.trim())
+        .filter(|t| !t.is_empty())
+}
+
 pub(super) fn authorize_request(
     request: &HttpRequest,
     config: &ServerConfig,
@@ -32,10 +44,7 @@ pub(super) fn authorize_request_headers(
     let provided = headers
         .iter()
         .find_map(|(name, value)| (name == "authorization").then_some(value.as_str()))
-        .and_then(|value| {
-            let (scheme, token) = value.split_once(|c: char| c.is_whitespace())?;
-            scheme.eq_ignore_ascii_case("Bearer").then(|| token.trim())
-        });
+        .and_then(extract_bearer_token);
 
     match provided {
         Some(token) if token.as_bytes().ct_eq(expected.as_bytes()).into() => Ok(()),
