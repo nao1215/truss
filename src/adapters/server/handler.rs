@@ -554,7 +554,7 @@ impl HealthCache {
     /// Returns the cached disk free bytes, refreshing if the TTL has expired.
     pub(super) fn disk_free(&self, path: &std::path::Path) -> Option<u64> {
         let now = Self::now_nanos();
-        let last = self.disk_free_at.load(Ordering::Relaxed);
+        let last = self.disk_free_at.load(Ordering::Acquire);
         if now.wrapping_sub(last) < self.ttl_nanos && last != 0 {
             let v = self.disk_free.load(Ordering::Relaxed);
             return if v == CACHED_NONE { None } else { Some(v) };
@@ -562,14 +562,14 @@ impl HealthCache {
         let fresh = disk_free_bytes(path);
         self.disk_free
             .store(fresh.unwrap_or(CACHED_NONE), Ordering::Relaxed);
-        self.disk_free_at.store(now, Ordering::Relaxed);
+        self.disk_free_at.store(now, Ordering::Release);
         fresh
     }
 
     /// Returns the cached process RSS bytes, refreshing if the TTL has expired.
     pub(super) fn rss(&self) -> Option<u64> {
         let now = Self::now_nanos();
-        let last = self.rss_at.load(Ordering::Relaxed);
+        let last = self.rss_at.load(Ordering::Acquire);
         if now.wrapping_sub(last) < self.ttl_nanos && last != 0 {
             let v = self.rss.load(Ordering::Relaxed);
             return if v == CACHED_NONE { None } else { Some(v) };
@@ -577,7 +577,7 @@ impl HealthCache {
         let fresh = process_rss_bytes();
         self.rss
             .store(fresh.unwrap_or(CACHED_NONE), Ordering::Relaxed);
-        self.rss_at.store(now, Ordering::Relaxed);
+        self.rss_at.store(now, Ordering::Release);
         fresh
     }
 }

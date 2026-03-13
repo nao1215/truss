@@ -94,6 +94,7 @@ pub(crate) fn stderr_write(msg: &str) {
 }
 
 #[cfg(test)]
+#[allow(unused_imports)] // Some imports are only used by feature-gated tests (e.g. s3).
 mod tests {
     use serial_test::serial;
 
@@ -120,8 +121,9 @@ mod tests {
         authorize_request_headers, authorize_signed_request, canonical_query_without_signature,
     };
     use super::handler::{
-        HealthCache, TransformSlot, TransformSourcePayload, WatermarkSource, disk_free_bytes,
-        parse_public_get_request, process_rss_bytes, transform_source_bytes,
+        HealthCache, TransformImageRequestPayload, TransformSlot, TransformSourcePayload,
+        WatermarkSource, disk_free_bytes, parse_public_get_request, process_rss_bytes,
+        transform_source_bytes,
     };
     use super::lifecycle::preset_watcher;
     use super::negotiate::{

@@ -629,10 +629,7 @@ impl fmt::Debug for ServerConfig {
                 &self.health_cache_min_free_bytes,
             )
             .field("health_max_memory_bytes", &self.health_max_memory_bytes)
-            .field(
-                "health_cache_ttl_nanos",
-                &self.health_cache.ttl_nanos,
-            )
+            .field("health_cache_ttl_nanos", &self.health_cache.ttl_nanos)
             .field("shutdown_drain_secs", &self.shutdown_drain_secs)
             .field(
                 "custom_response_headers",
@@ -1322,11 +1319,9 @@ impl ServerConfig {
             parse_env_u64_ranged("TRUSS_HEALTH_CACHE_MIN_FREE_BYTES", 1, u64::MAX)?;
         let health_max_memory_bytes =
             parse_env_u64_ranged("TRUSS_HEALTH_MAX_MEMORY_BYTES", 1, u64::MAX)?;
-        let health_cache_ttl_secs =
-            parse_env_u64_ranged("TRUSS_HEALTH_CACHE_TTL_SECS", 0, 300)?
-                .unwrap_or(super::handler::DEFAULT_HEALTH_CACHE_TTL_SECS);
-        let health_cache =
-            Arc::new(super::handler::HealthCache::new(health_cache_ttl_secs));
+        let health_cache_ttl_secs = parse_env_u64_ranged("TRUSS_HEALTH_CACHE_TTL_SECS", 0, 300)?
+            .unwrap_or(super::handler::DEFAULT_HEALTH_CACHE_TTL_SECS);
+        let health_cache = Arc::new(super::handler::HealthCache::new(health_cache_ttl_secs));
 
         let (presets, presets_file_path) = parse_presets_from_env()?;
 
