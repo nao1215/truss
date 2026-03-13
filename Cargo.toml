@@ -11,7 +11,8 @@ keywords = ["image", "image-processing", "resize", "thumbnail", "webp"]
 categories = ["command-line-utilities", "multimedia::images", "web-programming::http-server"]
 
 [features]
-default = ["cli", "server", "svg", "webp-lossy"]
+default = ["cli", "server", "svg", "webp-lossy", "avif"]
+avif = ["dep:rav1d-safe", "dep:mp4parse", "dep:yuvutils-rs", "image/avif"]
 cli = ["dep:clap", "dep:clap_complete", "dep:ureq", "server"]
 server = ["dep:hmac", "dep:hex", "dep:serde_json", "dep:sha2", "dep:subtle", "dep:ureq", "dep:url", "dep:uuid", "dep:libc", "dep:flate2", "svg"]
 s3 = ["server", "dep:aws-sdk-s3", "dep:aws-config", "dep:tokio"]
@@ -36,7 +37,7 @@ clap = { version = "4", features = ["derive"], optional = true }
 clap_complete = { version = "4", optional = true }
 hmac = { version = "0.12.1", optional = true }
 hex = { version = "0.4.3", optional = true }
-image = { version = "0.25.10", default-features = false, features = ["avif", "bmp", "jpeg", "png", "tiff", "webp"] }
+image = { version = "0.25.10", default-features = false, features = ["bmp", "jpeg", "png", "tiff", "webp"] }
 kamadak-exif = "0.6.1"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = { version = "1.0.145", optional = true }
@@ -45,9 +46,9 @@ subtle = { version = "2", optional = true }
 ureq = { version = "3.2.0", optional = true }
 url = { version = "2.5.8", optional = true }
 uuid = { version = "1", features = ["v4"], optional = true }
-rav1d-safe = { version = "0.3", default-features = false, features = ["bitdepth_8", "bitdepth_16"] }
-mp4parse = "0.17"
-yuvutils-rs = "0.8"
+rav1d-safe = { version = "0.3", default-features = false, features = ["bitdepth_8", "bitdepth_16"], optional = true }
+mp4parse = { version = "0.17", optional = true }
+yuvutils-rs = { version = "0.8", optional = true }
 wasm-bindgen = { version = "0.2.114", optional = true }
 webp = { version = "0.3", optional = true }
 quick-xml = { version = "0.39", optional = true }

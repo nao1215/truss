@@ -22,7 +22,7 @@ cargo build \
   --target wasm32-unknown-unknown \
   --lib \
   --no-default-features \
-  --features "wasm,svg,webp-lossy" \
+  --features "wasm,svg" \
   --manifest-path "$ROOT_DIR/Cargo.toml"
 
 wasm-bindgen \

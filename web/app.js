@@ -261,6 +261,11 @@ async function loadFile(file) {
     return;
   }
 
+  if (response.artifact.mediaType === "avif" && !state.capabilities.avif) {
+    setStatus("AVIF input was loaded, but this build cannot decode or encode AVIF.");
+    return;
+  }
+
   setStatus(`${file.name} loaded. Adjust options and run the transform.`);
 }
 
@@ -371,6 +376,16 @@ function refreshFormatState() {
     elements.format.value = state.inputArtifact?.mediaType === "png" ? "png" : "jpeg";
   }
 
+  const avifOption = elements.format.querySelector('option[value="avif"]');
+  if (avifOption) {
+    avifOption.disabled = !state.capabilities?.avif;
+    avifOption.textContent = state.capabilities?.avif ? "AVIF" : "AVIF (not in this build)";
+  }
+
+  if (elements.format.value === "avif" && !state.capabilities?.avif) {
+    elements.format.value = "jpeg";
+  }
+
   refreshQualityState();
 }
 
@@ -423,6 +438,12 @@ function renderCapabilities() {
       copy: state.capabilities.webpLossy
         ? "Lossy WebP is available."
         : "WebP stays lossless here.",
+    },
+    {
+      title: "AVIF",
+      copy: state.capabilities.avif
+        ? "Decode and encode available."
+        : "Not available in this build.",
     },
   ];
 
@@ -629,7 +650,7 @@ function qualityEnabled() {
   const format = elements.format.value;
   return (
     format === "jpeg" ||
-    format === "avif" ||
+    (format === "avif" && state.capabilities?.avif) ||
     (format === "webp" && state.capabilities?.webpLossy)
   );
 }

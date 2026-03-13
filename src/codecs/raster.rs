@@ -5,6 +5,7 @@ use crate::core::{
     TransformResult, TransformWarning, WatermarkInput,
 };
 use exif::{In, Reader, Tag, Value};
+#[cfg(feature = "avif")]
 use image::codecs::avif::AvifEncoder;
 use image::codecs::jpeg::JpegDecoder;
 use image::codecs::jpeg::JpegEncoder;
@@ -18,10 +19,13 @@ use image::{
     ColorType, DynamicImage, GenericImageView, ImageDecoder, ImageEncoder, ImageFormat, Rgba,
     RgbaImage,
 };
+#[cfg(feature = "avif")]
 use mp4parse::ParseStrictness;
+#[cfg(feature = "avif")]
 use rav1d_safe::{Decoder, Planes};
 use std::io::Cursor;
 use std::time::{Duration, Instant};
+#[cfg(feature = "avif")]
 use yuvutils_rs::{YuvGrayImage, YuvPlanarImage, YuvRange, YuvStandardMatrix};
 
 /// Checks the transform deadline and returns an error if exceeded.
@@ -285,7 +289,18 @@ fn decode_input(input: &Artifact) -> Result<DynamicImage, TransformError> {
         MediaType::Jpeg => ImageFormat::Jpeg,
         MediaType::Png => ImageFormat::Png,
         MediaType::Webp => ImageFormat::WebP,
-        MediaType::Avif => return decode_avif(&input.bytes),
+        MediaType::Avif => {
+            #[cfg(feature = "avif")]
+            {
+                return decode_avif(&input.bytes);
+            }
+            #[cfg(not(feature = "avif"))]
+            {
+                return Err(TransformError::CapabilityMissing(
+                    "AVIF decoding is not enabled in this build".to_string(),
+                ));
+            }
+        }
         MediaType::Bmp => ImageFormat::Bmp,
         MediaType::Tiff => ImageFormat::Tiff,
         MediaType::Svg => {
@@ -307,6 +322,7 @@ fn decode_input(input: &Artifact) -> Result<DynamicImage, TransformError> {
 ///
 /// Supports 8-bit YUV 4:2:0, 4:2:2, 4:4:4, and 4:0:0 (grayscale) layouts.
 /// 10/12-bit images are downscaled to 8-bit with rounding.
+#[cfg(feature = "avif")]
 fn decode_avif(bytes: &[u8]) -> Result<DynamicImage, TransformError> {
     let mut cursor = Cursor::new(bytes);
     let context = mp4parse::read_avif(&mut cursor, ParseStrictness::Normal)
@@ -339,6 +355,7 @@ fn decode_avif(bytes: &[u8]) -> Result<DynamicImage, TransformError> {
 }
 
 /// Feeds AV1 OBU data to a `rav1d` decoder and returns the first decoded frame.
+#[cfg(feature = "avif")]
 fn decode_av1_frame(obu_data: &[u8]) -> Result<rav1d_safe::Frame, TransformError> {
     let mut decoder = Decoder::new()
         .map_err(|e| TransformError::DecodeFailed(format!("AV1 decoder init failed: {e}")))?;
@@ -362,6 +379,7 @@ fn decode_av1_frame(obu_data: &[u8]) -> Result<rav1d_safe::Frame, TransformError
 }
 
 /// Maps rav1d `MatrixCoefficients` to the corresponding `yuvutils_rs` standard matrix.
+#[cfg(feature = "avif")]
 fn map_yuv_matrix(mc: rav1d_safe::MatrixCoefficients) -> YuvStandardMatrix {
     match mc {
         rav1d_safe::MatrixCoefficients::BT601 => YuvStandardMatrix::Bt601,
@@ -375,6 +393,7 @@ fn map_yuv_matrix(mc: rav1d_safe::MatrixCoefficients) -> YuvStandardMatrix {
 }
 
 /// Maps rav1d `ColorRange` to `yuvutils_rs` range.
+#[cfg(feature = "avif")]
 fn map_yuv_range(cr: rav1d_safe::ColorRange) -> YuvRange {
     match cr {
         rav1d_safe::ColorRange::Full => YuvRange::Full,
@@ -386,6 +405,7 @@ fn map_yuv_range(cr: rav1d_safe::ColorRange) -> YuvRange {
 ///
 /// Handles 8-bit and 10/12-bit depth by downscaling higher bit depths to 8-bit.
 /// Supports I420, I422, I444, and I400 (grayscale) pixel layouts.
+#[cfg(feature = "avif")]
 fn yuv_frame_to_rgba(
     frame: &rav1d_safe::Frame,
     width: u32,
@@ -471,6 +491,7 @@ fn yuv_frame_to_rgba(
 /// Converts 8-bit YUV plane data to RGBA, dispatching by pixel layout.
 ///
 /// U and V planes are `None` for I400 (grayscale). For I420/I422/I444, both must be present.
+#[cfg(feature = "avif")]
 #[allow(clippy::too_many_arguments)]
 fn convert_8bit_yuv_to_rgba(
     layout: rav1d_safe::PixelLayout,
@@ -530,6 +551,7 @@ fn convert_8bit_yuv_to_rgba(
 ///
 /// The alpha frame's Y plane is used as the alpha channel. If the alpha frame dimensions
 /// do not match the primary frame, the merge is silently skipped.
+#[cfg(feature = "avif")]
 fn merge_alpha_plane(alpha_frame: &rav1d_safe::Frame, rgba: &mut [u8], width: u32, height: u32) {
     if alpha_frame.width() != width || alpha_frame.height() != height {
         return;
@@ -1079,17 +1101,27 @@ fn encode_output(
             }
         }
         MediaType::Avif => {
-            if retained_metadata.is_some_and(|metadata| !metadata.is_empty()) {
+            #[cfg(feature = "avif")]
+            {
+                if retained_metadata.is_some_and(|metadata| !metadata.is_empty()) {
+                    return Err(TransformError::CapabilityMissing(
+                        "metadata retention is not implemented for avif output".to_string(),
+                    ));
+                }
+                let quality = quality.unwrap_or(80);
+                let encoder = AvifEncoder::new_with_speed_quality(&mut bytes, 4, quality);
+                let rgba = image.to_rgba8();
+                encoder
+                    .write_image(&rgba, rgba.width(), rgba.height(), ColorType::Rgba8.into())
+                    .map_err(|error| TransformError::EncodeFailed(error.to_string()))?;
+            }
+            #[cfg(not(feature = "avif"))]
+            {
+                let _ = (quality, retained_metadata, &image);
                 return Err(TransformError::CapabilityMissing(
-                    "metadata retention is not implemented for avif output".to_string(),
+                    "AVIF encoding is not enabled in this build".to_string(),
                 ));
             }
-            let quality = quality.unwrap_or(80);
-            let encoder = AvifEncoder::new_with_speed_quality(&mut bytes, 4, quality);
-            let rgba = image.to_rgba8();
-            encoder
-                .write_image(&rgba, rgba.width(), rgba.height(), ColorType::Rgba8.into())
-                .map_err(|error| TransformError::EncodeFailed(error.to_string()))?;
         }
         MediaType::Bmp => {
             let rgba = image.to_rgba8();
@@ -2059,6 +2091,7 @@ mod tests {
         assert_eq!(result.artifact.metadata.height, Some(3));
     }
 
+    #[cfg(feature = "avif")]
     #[test]
     fn transform_raster_rejects_preserved_metadata_for_avif_output() {
         let artifact = jpeg_artifact_with_metadata(4, 2, Some(6), Some(b"demo-icc-profile"));
@@ -2135,6 +2168,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "avif")]
     #[test]
     fn transform_raster_can_convert_png_to_avif() {
         let artifact = png_artifact(4, 3, Rgba([10, 20, 30, 255]));
@@ -2156,6 +2190,7 @@ mod tests {
         assert_eq!(sniffed.media_type, MediaType::Avif);
     }
 
+    #[cfg(feature = "avif")]
     #[test]
     fn transform_raster_round_trips_avif_decode() {
         // Encode a known PNG to AVIF, then decode the AVIF back to PNG.
@@ -2187,6 +2222,7 @@ mod tests {
         assert_eq!(png_result.artifact.metadata.height, Some(3));
     }
 
+    #[cfg(feature = "avif")]
     #[test]
     fn transform_raster_decodes_avif_with_resize() {
         let source = png_artifact(8, 6, Rgba([100, 150, 200, 255]));
@@ -2214,6 +2250,7 @@ mod tests {
         assert_eq!(result.artifact.metadata.height, Some(3));
     }
 
+    #[cfg(feature = "avif")]
     #[test]
     fn transform_raster_rejects_invalid_avif_data() {
         let artifact = Artifact::new(
