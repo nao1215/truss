@@ -6551,7 +6551,7 @@ mod tests {
 
     #[test]
     fn extract_request_id_rejects_nul() {
-        let headers = vec![h("x-request-id", "abc\0123")];
+        let headers = vec![h("x-request-id", "abc\x00123")];
         assert_eq!(extract_request_id(&headers), None);
     }
 
