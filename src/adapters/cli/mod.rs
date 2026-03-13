@@ -1,5 +1,8 @@
 use crate::adapters::server::SignedUrlSource;
-use crate::{CropRegion, Fit, MediaType, Position, Rgba8, Rotation, TransformOptions};
+use crate::{
+    CropRegion, Fit, MediaType, OptimizeMode, Position, Rgba8, Rotation, TargetQuality,
+    TransformOptions,
+};
 use clap::{CommandFactory, Parser, Subcommand};
 use std::fs;
 use std::io::{self, Read, Write};
@@ -50,6 +53,7 @@ USAGE:
 
 COMMANDS:
   convert       Convert and transform an image file
+  optimize      Optimize an image for smaller output size
   inspect       Show metadata (format, dimensions, alpha) of an image
   serve         Start the HTTP image-transform server
   validate      Check server configuration without starting the server
@@ -116,6 +120,9 @@ OPTIONS:
       --format <FMT>       Output format: jpeg, png, webp, avif, bmp, tiff, svg
                            (default: inferred from output extension)
       --quality <1-100>    Encoding quality for lossy formats
+      --optimize <MODE>    Optimization mode: none, auto, lossless, lossy
+      --target-quality <TARGET>
+                           Perceptual target for lossy optimization (e.g. ssim:0.98, psnr:42)
       --background <COLOR> Background color as RRGGBB or RRGGBBAA hex
       --rotate <DEG>       Rotate: 0, 90, 180, 270
       --auto-orient        Apply EXIF orientation and reset tag (default)
@@ -140,6 +147,35 @@ EXAMPLES:
   truss photo.png -o thumb.png --width 200 --height 200 --fit cover
   truss diagram.svg -o safe.svg
   truss diagram.svg -o diagram.png --width 1024
+";
+
+const HELP_OPTIMIZE: &str = "\
+truss optimize - reduce image file size with format-aware optimization
+
+USAGE:
+  truss optimize <INPUT> -o <OUTPUT> [OPTIONS]
+  truss optimize --url <URL> -o <OUTPUT> [OPTIONS]
+  truss optimize - -o - --format webp
+
+OPTIONS:
+  -o, --output <OUTPUT>    Output file path, or - for stdout (required)
+      --url <URL>          Fetch input from an HTTP(S) URL
+      --format <FMT>       Output format: jpeg, png, webp, avif
+                           (default: inferred from output extension or input format)
+      --mode <MODE>        Optimization mode: auto (default), lossless, lossy, none
+      --quality <1-100>    Optional quality cap for lossy optimization
+      --target-quality <TARGET>
+                           Perceptual target for lossy optimization (e.g. ssim:0.98, psnr:42)
+      --auto-orient        Apply EXIF orientation and reset tag (default)
+      --no-auto-orient     Skip EXIF orientation correction
+      --strip-metadata     Remove all metadata (default)
+      --keep-metadata      Preserve EXIF, ICC, and other supported metadata
+      --preserve-exif      Preserve EXIF only (strip ICC and others)
+
+EXAMPLES:
+  truss optimize photo.jpg -o out.jpg
+  truss optimize photo.jpg -o out.jpg --mode lossy --target-quality ssim:0.98
+  truss optimize graphic.png -o out.png --mode lossless
 ";
 
 const HELP_INSPECT: &str = "\
@@ -287,7 +323,7 @@ REQUIRED:
 OPTIONAL:
       --version <VALUE>    Cache-busting version tag
       --width, --height, --fit, --position, --format, --quality,
-      --background, --rotate, --auto-orient, --no-auto-orient,
+      --optimize, --target-quality, --background, --rotate, --auto-orient, --no-auto-orient,
       --strip-metadata, --keep-metadata, --preserve-exif, --crop, --blur, --sharpen
       --watermark-url <URL>          Watermark image URL to embed in the signed URL
       --watermark-position <POS>     Watermark placement (default: bottom-right)
@@ -360,6 +396,9 @@ enum CliSubcommand {
     /// Convert and transform an image file
     #[command(disable_help_flag = true)]
     Convert(ClapConvertArgs),
+    /// Optimize an image for smaller output size
+    #[command(disable_help_flag = true)]
+    Optimize(ClapOptimizeArgs),
     /// Show metadata (format, dimensions, alpha) of an image
     #[command(disable_help_flag = true)]
     Inspect(ClapInspectArgs),
@@ -416,6 +455,12 @@ struct ClapConvertArgs {
     /// Encoding quality for lossy formats (1-100)
     #[arg(long)]
     quality: Option<u8>,
+    /// Optimization mode (none, auto, lossless, lossy)
+    #[arg(long, value_parser = parse_optimize_mode)]
+    optimize: Option<OptimizeMode>,
+    /// Perceptual target for lossy optimization
+    #[arg(long = "target-quality", value_parser = parse_target_quality)]
+    target_quality: Option<TargetQuality>,
     /// Background color as RRGGBB or RRGGBBAA hex
     #[arg(long, value_parser = parse_background)]
     background: Option<Rgba8>,
@@ -459,6 +504,49 @@ struct ClapConvertArgs {
     #[arg(long)]
     watermark_margin: Option<u32>,
     /// Show help for convert
+    #[arg(short = 'h', long = "help")]
+    help: bool,
+}
+
+#[derive(clap::Args)]
+struct ClapOptimizeArgs {
+    /// Input file path, or - for stdin
+    #[arg(allow_hyphen_values = true)]
+    input: Option<String>,
+    /// Output file path, or - for stdout
+    #[arg(short = 'o', long = "output", allow_hyphen_values = true)]
+    output: Option<String>,
+    /// Fetch input from an HTTP(S) URL
+    #[arg(long)]
+    url: Option<String>,
+    /// Output format (jpeg, png, webp, avif)
+    #[arg(long, value_parser = parse_media_type)]
+    format: Option<MediaType>,
+    /// Quality cap for lossy optimization (1-100)
+    #[arg(long)]
+    quality: Option<u8>,
+    /// Optimization mode (auto, lossless, lossy, none)
+    #[arg(long = "mode", value_parser = parse_optimize_mode)]
+    mode: Option<OptimizeMode>,
+    /// Perceptual target for lossy optimization
+    #[arg(long = "target-quality", value_parser = parse_target_quality)]
+    target_quality: Option<TargetQuality>,
+    /// Apply EXIF orientation and reset tag
+    #[arg(long)]
+    auto_orient: bool,
+    /// Skip EXIF orientation correction
+    #[arg(long)]
+    no_auto_orient: bool,
+    /// Remove all metadata
+    #[arg(long)]
+    strip_metadata: bool,
+    /// Preserve EXIF, ICC, and other supported metadata
+    #[arg(long)]
+    keep_metadata: bool,
+    /// Preserve EXIF only (strip ICC and others)
+    #[arg(long)]
+    preserve_exif: bool,
+    /// Show help for optimize
     #[arg(short = 'h', long = "help")]
     help: bool,
 }
@@ -549,6 +637,12 @@ struct ClapSignArgs {
     /// Encoding quality for lossy formats
     #[arg(long)]
     quality: Option<u8>,
+    /// Optimization mode (none, auto, lossless, lossy)
+    #[arg(long, value_parser = parse_optimize_mode)]
+    optimize: Option<OptimizeMode>,
+    /// Perceptual target for lossy optimization
+    #[arg(long = "target-quality", value_parser = parse_target_quality)]
+    target_quality: Option<TargetQuality>,
     /// Background color as RRGGBB or RRGGBBAA hex
     #[arg(long, value_parser = parse_background)]
     background: Option<Rgba8>,
@@ -615,6 +709,14 @@ fn parse_media_type(s: &str) -> Result<MediaType, String> {
     MediaType::from_str(s)
 }
 
+fn parse_optimize_mode(s: &str) -> Result<OptimizeMode, String> {
+    OptimizeMode::from_str(s)
+}
+
+fn parse_target_quality(s: &str) -> Result<TargetQuality, String> {
+    TargetQuality::from_str(s)
+}
+
 fn parse_rotation(s: &str) -> Result<Rotation, String> {
     Rotation::from_str(s)
 }
@@ -671,6 +773,10 @@ fn parse_url_value(s: &str) -> Result<String, String> {
 
 fn convert_usage() -> &'static str {
     "usage: truss convert <INPUT> -o <OUTPUT> [OPTIONS]"
+}
+
+fn optimize_usage() -> &'static str {
+    "usage: truss optimize <INPUT> -o <OUTPUT> [OPTIONS]"
 }
 
 fn inspect_usage() -> &'static str {
@@ -739,6 +845,7 @@ where
 enum HelpTopic {
     TopLevel,
     Convert,
+    Optimize,
     Inspect,
     Serve,
     Validate,
@@ -755,6 +862,7 @@ enum Command {
     Validate,
     Inspect(InspectCommand),
     Convert(ConvertCommand),
+    Optimize(ConvertCommand),
     Sign(SignCommand),
     Completions(clap_complete::Shell),
 }
@@ -841,6 +949,7 @@ where
             let text = match topic {
                 HelpTopic::TopLevel => help_top_level(),
                 HelpTopic::Convert => HELP_CONVERT.to_string(),
+                HelpTopic::Optimize => HELP_OPTIMIZE.to_string(),
                 HelpTopic::Inspect => HELP_INSPECT.to_string(),
                 HelpTopic::Serve => help_serve(),
                 HelpTopic::Validate => HELP_VALIDATE.to_string(),
@@ -873,6 +982,10 @@ where
             Ok(()) => EXIT_SUCCESS,
             Err(error) => write_error(stderr, error),
         },
+        Ok(Command::Optimize(command)) => match convert::execute_convert(command, stdin, stdout) {
+            Ok(()) => EXIT_SUCCESS,
+            Err(error) => write_error(stderr, error),
+        },
         Ok(Command::Sign(command)) => match sign::execute_sign(command, stdout) {
             Ok(()) => EXIT_SUCCESS,
             Err(error) => write_error(stderr, error),
@@ -891,6 +1004,7 @@ where
 
 const KNOWN_SUBCOMMANDS: &[&str] = &[
     "convert",
+    "optimize",
     "inspect",
     "serve",
     "validate",
@@ -1020,6 +1134,7 @@ where
             hint: Some("try 'truss completions bash'".to_string()),
         }),
         Some(CliSubcommand::Convert(args)) => convert::convert_from_clap(args),
+        Some(CliSubcommand::Optimize(args)) => convert::optimize_from_clap(args),
         Some(CliSubcommand::Inspect(args)) => inspect::inspect_from_clap(args),
         Some(CliSubcommand::Serve(args)) => serve::serve_from_clap(args),
         Some(CliSubcommand::Validate(args)) => serve::validate_from_clap(args),
@@ -1049,6 +1164,7 @@ fn parse_help_topic(topic: Option<String>) -> Result<Command, CliError> {
     match topic.as_deref() {
         None => Ok(Command::Help(HelpTopic::TopLevel)),
         Some("convert") => Ok(Command::Help(HelpTopic::Convert)),
+        Some("optimize") => Ok(Command::Help(HelpTopic::Optimize)),
         Some("inspect") => Ok(Command::Help(HelpTopic::Inspect)),
         Some("serve") => Ok(Command::Help(HelpTopic::Serve)),
         Some("validate") => Ok(Command::Help(HelpTopic::Validate)),
@@ -1060,7 +1176,7 @@ fn parse_help_topic(topic: Option<String>) -> Result<Command, CliError> {
             message: format!("unknown help topic '{other}'"),
             usage: None,
             hint: Some(
-                "available topics: convert, inspect, serve, validate, sign, completions, version"
+                "available topics: convert, optimize, inspect, serve, validate, sign, completions, version"
                     .to_string(),
             ),
         }),
@@ -1079,6 +1195,8 @@ struct TransformFields {
     position: Option<Position>,
     format: Option<MediaType>,
     quality: Option<u8>,
+    optimize: Option<OptimizeMode>,
+    target_quality: Option<TargetQuality>,
     background: Option<Rgba8>,
     rotate: Option<Rotation>,
     auto_orient: bool,
@@ -1117,6 +1235,8 @@ impl TransformFields {
             position: self.position,
             format: self.format,
             quality: self.quality,
+            optimize: self.optimize.unwrap_or(defaults.optimize),
+            target_quality: self.target_quality,
             background: self.background,
             rotate: self.rotate.unwrap_or(defaults.rotate),
             auto_orient,
@@ -1299,6 +1419,15 @@ fn convert_error(message: &str) -> CliError {
     }
 }
 
+fn optimize_error(message: &str) -> CliError {
+    CliError {
+        exit_code: EXIT_USAGE,
+        message: message.to_string(),
+        usage: Some(optimize_usage().to_string()),
+        hint: Some("run 'truss optimize --help' for optimize options".to_string()),
+    }
+}
+
 fn sign_error(message: &str) -> CliError {
     CliError {
         exit_code: EXIT_USAGE,
@@ -1342,7 +1471,10 @@ mod tests {
         Command, ConvertCommand, HelpTopic, InputSource, OutputTarget, ServeCommand, SignCommand,
         parse_args, preprocess_args, run_with_io,
     };
-    use crate::{Fit, MediaType, RawArtifact, SignedUrlSource, TransformOptions, sniff_artifact};
+    use crate::{
+        Fit, MediaType, OptimizeMode, RawArtifact, SignedUrlSource, TransformOptions,
+        sniff_artifact,
+    };
     use image::codecs::png::PngEncoder;
     use image::{ColorType, ImageEncoder, Rgba, RgbaImage};
     use serial_test::serial;
@@ -1499,6 +1631,31 @@ mod tests {
         assert!(output.contains("--output"));
         assert!(output.contains("--width"));
         assert!(!output.contains("--bind")); // Should NOT contain serve options
+    }
+
+    #[test]
+    fn help_optimize_shows_optimize_help() {
+        let mut stdin = Cursor::new(Vec::<u8>::new());
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let exit_code = run_with_io(
+            vec![
+                "truss".to_string(),
+                "help".to_string(),
+                "optimize".to_string(),
+            ],
+            &mut stdin,
+            &mut stdout,
+            &mut stderr,
+        );
+
+        assert_eq!(exit_code, 0);
+        assert!(stderr.is_empty());
+        let output = String::from_utf8(stdout).expect("utf8 stdout");
+        assert!(output.contains("truss optimize"));
+        assert!(output.contains("--mode"));
+        assert!(output.contains("--target-quality"));
     }
 
     // ===== Mandatory test 5: `truss convert --help` shows convert help =====
@@ -2155,6 +2312,36 @@ mod tests {
     }
 
     #[test]
+    fn parse_args_supports_optimize_subcommand() {
+        let command = parse_args(vec![
+            "truss".to_string(),
+            "optimize".to_string(),
+            "input.png".to_string(),
+            "-o".to_string(),
+            "output.png".to_string(),
+            "--mode".to_string(),
+            "lossless".to_string(),
+        ])
+        .expect("parse optimize");
+
+        assert_eq!(
+            command,
+            Command::Optimize(ConvertCommand {
+                input: InputSource::Path(PathBuf::from("input.png")),
+                output: OutputTarget::Path(PathBuf::from("output.png")),
+                options: TransformOptions {
+                    optimize: OptimizeMode::Lossless,
+                    ..TransformOptions::default()
+                },
+                watermark_path: None,
+                watermark_position: None,
+                watermark_opacity: None,
+                watermark_margin: None,
+            })
+        );
+    }
+
+    #[test]
     fn parse_args_supports_convert_url_and_output() {
         let command = parse_args(vec![
             "truss".to_string(),
@@ -2478,6 +2665,43 @@ mod tests {
         assert!(stdout.is_empty());
         assert!(stderr.is_empty());
         assert_eq!(artifact.media_type, MediaType::Jpeg);
+    }
+
+    #[test]
+    fn run_with_io_optimizes_a_png_file() {
+        let input_path = temp_file_path("optimize-input");
+        let output_path = temp_file_path("optimize-output").with_extension("png");
+        fs::write(&input_path, png_bytes()).expect("write input file");
+
+        let mut stdin = Cursor::new(Vec::<u8>::new());
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let exit_code = run_with_io(
+            vec![
+                "truss".to_string(),
+                "optimize".to_string(),
+                input_path.display().to_string(),
+                "-o".to_string(),
+                output_path.display().to_string(),
+                "--mode".to_string(),
+                "lossless".to_string(),
+            ],
+            &mut stdin,
+            &mut stdout,
+            &mut stderr,
+        );
+
+        let output_bytes = fs::read(&output_path).expect("read output file");
+        let artifact = sniff_artifact(RawArtifact::new(output_bytes, None)).expect("sniff output");
+
+        let _ = fs::remove_file(&input_path);
+        let _ = fs::remove_file(&output_path);
+
+        assert_eq!(exit_code, 0);
+        assert!(stdout.is_empty());
+        assert!(stderr.is_empty());
+        assert_eq!(artifact.media_type, MediaType::Png);
     }
 
     #[test]

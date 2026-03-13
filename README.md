@@ -10,7 +10,7 @@
 
 ![logo](./doc/img/logo-small.png)
 
-Resize, crop, convert, blur, sharpen, and watermark images from the CLI, an HTTP server, or the browser -- written in Rust with signed-URL authentication and SSRF protection built in.
+Resize, crop, convert, optimize, blur, sharpen, and watermark images from the CLI, an HTTP server, or the browser -- written in Rust with signed-URL authentication and SSRF protection built in.
 
 [Try the WASM demo in your browser](https://nao1215.github.io/truss/) -- no install, no upload, runs 100 % client-side.
 
@@ -97,6 +97,9 @@ truss photo.png -o photo.jpg
 # Resize + convert
 truss photo.png -o thumb.webp --width 800 --format webp --quality 75
 
+# Optimize in place with the shared pipeline
+truss optimize photo.jpg -o photo-optimized.jpg --mode auto
+
 # Convert from a remote URL
 truss --url https://example.com/img.png -o out.avif --format avif
 
@@ -130,6 +133,8 @@ truss photo.jpg -o output.bin --format png
 ```
 
 Use `--quality <1-100>` to control lossy encoding. Lower values produce smaller files at the cost of visual quality.
+
+Use `--optimize auto|lossless|lossy` on `truss convert`, or the dedicated `truss optimize` subcommand, to reduce output size with format-aware encoding choices. Add `--target-quality ssim:0.98` or `--target-quality psnr:42` when you want lossy optimization to aim for a specific perceptual threshold.
 
 | Quality 90 (95 KB) | Original (80 KB) | Quality 30 (27 KB) |
 |---|---|---|
@@ -258,8 +263,8 @@ cat photo.png | truss - -o - --format jpeg > photo.jpg
 curl -s https://example.com/img.png | truss - -o - --format webp --width 800 | \
   aws s3 cp - s3://bucket/thumb.webp
 
-# Combine with other tools
-truss photo.jpg -o - --format png --width 400 | pngquant - -o optimized.png
+# Optimize after converting
+truss photo.jpg -o - --format webp --optimize auto | cat > optimized.webp
 ```
 
 #### SVG handling

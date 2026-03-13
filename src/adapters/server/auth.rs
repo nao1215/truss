@@ -190,6 +190,15 @@ pub(super) fn extend_transform_query(
     if let Some(quality) = options.quality {
         query.insert("quality".to_string(), quality.to_string());
     }
+    if options.optimize != crate::OptimizeMode::None {
+        query.insert(
+            "optimize".to_string(),
+            options.optimize.as_name().to_string(),
+        );
+    }
+    if let Some(target_quality) = options.target_quality {
+        query.insert("targetQuality".to_string(), target_quality.to_string());
+    }
     if let Some(background) = options.background {
         query.insert("background".to_string(), encode_background(background));
     }
@@ -247,6 +256,8 @@ pub(super) fn validate_public_query_names(
                 | "position"
                 | "format"
                 | "quality"
+                | "optimize"
+                | "targetQuality"
                 | "background"
                 | "rotate"
                 | "autoOrient"

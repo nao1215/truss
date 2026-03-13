@@ -136,7 +136,8 @@ mod tests {
     };
     use super::{config, metrics::RouteMetric};
     use crate::{
-        Artifact, ArtifactMetadata, Fit, MediaType, RawArtifact, TransformOptions, sniff_artifact,
+        Artifact, ArtifactMetadata, Fit, MediaType, OptimizeMode, RawArtifact, TransformOptions,
+        sniff_artifact,
     };
     use hmac::{Hmac, Mac};
     use image::codecs::png::PngEncoder;
@@ -948,6 +949,30 @@ mod tests {
         assert_eq!(options.width, Some(200));
         assert_eq!(options.height, Some(150));
         assert_eq!(options.format, Some(MediaType::Jpeg));
+    }
+
+    #[test]
+    fn parse_public_get_request_accepts_optimize_fields() {
+        let config = ServerConfig::new(temp_dir("optimize-query"), None);
+        let query = BTreeMap::from([
+            ("path".to_string(), "/image.png".to_string()),
+            ("format".to_string(), "jpeg".to_string()),
+            ("optimize".to_string(), "lossy".to_string()),
+            ("targetQuality".to_string(), "ssim:0.98".to_string()),
+        ]);
+
+        let (_, options, _) =
+            parse_public_get_request(&query, PublicSourceKind::Path, &config).unwrap();
+
+        assert_eq!(options.format, Some(MediaType::Jpeg));
+        assert_eq!(options.optimize, OptimizeMode::Lossy);
+        assert_eq!(
+            options
+                .target_quality
+                .expect("target quality should be parsed")
+                .to_string(),
+            "ssim:0.98"
+        );
     }
 
     #[test]
@@ -3872,6 +3897,8 @@ mod tests {
                     position: None,
                     format: None,
                     quality: None,
+                    optimize: None,
+                    target_quality: None,
                     background: None,
                     rotate: None,
                     auto_orient: None,
@@ -3947,6 +3974,8 @@ mod tests {
                     position: None,
                     format: None,
                     quality: None,
+                    optimize: None,
+                    target_quality: None,
                     background: None,
                     rotate: None,
                     auto_orient: None,

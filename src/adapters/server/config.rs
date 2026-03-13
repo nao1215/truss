@@ -1986,6 +1986,8 @@ mod tests {
                 position: None,
                 format: None,
                 quality: None,
+                optimize: None,
+                target_quality: None,
                 background: None,
                 rotate: None,
                 auto_orient: None,

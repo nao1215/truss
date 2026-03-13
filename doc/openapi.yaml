@@ -83,6 +83,8 @@ paths:
         - $ref: '#/components/parameters/Position'
         - $ref: '#/components/parameters/Format'
         - $ref: '#/components/parameters/Quality'
+        - $ref: '#/components/parameters/Optimize'
+        - $ref: '#/components/parameters/TargetQuality'
         - $ref: '#/components/parameters/Background'
         - $ref: '#/components/parameters/Rotate'
         - $ref: '#/components/parameters/AutoOrient'
@@ -166,6 +168,8 @@ paths:
         - $ref: '#/components/parameters/Position'
         - $ref: '#/components/parameters/Format'
         - $ref: '#/components/parameters/Quality'
+        - $ref: '#/components/parameters/Optimize'
+        - $ref: '#/components/parameters/TargetQuality'
         - $ref: '#/components/parameters/Background'
         - $ref: '#/components/parameters/Rotate'
         - $ref: '#/components/parameters/AutoOrient'
@@ -244,6 +248,8 @@ paths:
                 width: 1600
                 format: webp
                 quality: 82
+                optimize: auto
+                targetQuality: ssim:0.98
                 autoOrient: true
                 stripMetadata: true
       responses:
@@ -709,6 +715,32 @@ components:
         minimum: 1
         maximum: 100
       example: 82
+    Optimize:
+      name: optimize
+      in: query
+      required: false
+      description: |
+        Optimization mode for the final encoding stage.
+        `none` preserves the existing behavior.
+        `auto` picks a format-appropriate strategy.
+        `lossless` uses only pixel-preserving techniques.
+        `lossy` may reduce quality to save more bytes.
+      schema:
+        type: string
+        enum: [none, auto, lossless, lossy]
+        default: none
+      example: auto
+    TargetQuality:
+      name: targetQuality
+      in: query
+      required: false
+      description: |
+        Perceptual target used by lossy optimization, for example `ssim:0.98`
+        or `psnr:42`. Requires `optimize=auto` or `optimize=lossy`.
+      schema:
+        type: string
+        pattern: '^(ssim|psnr):.+$'
+      example: ssim:0.98
     Background:
       name: background
       in: query
@@ -985,6 +1017,17 @@ components:
           minimum: 1
           maximum: 100
           description: Quality for lossy outputs (`jpeg`, `webp`, `avif`).
+        optimize:
+          type: string
+          enum: [none, auto, lossless, lossy]
+          default: none
+          description: Optimization mode for the final encoding stage.
+        targetQuality:
+          type: string
+          pattern: '^(ssim|psnr):.+$'
+          description: >-
+            Perceptual target used by lossy optimization, for example
+            `ssim:0.98` or `psnr:42`. Requires `optimize=auto` or `optimize=lossy`.
         background:
           type: string
           pattern: '^[0-9A-Fa-f]{6}([0-9A-Fa-f]{2})?$'
@@ -1042,6 +1085,8 @@ components:
         position: center
         format: webp
         quality: 82
+        optimize: auto
+        targetQuality: ssim:0.98
         autoOrient: true
         stripMetadata: true
     WatermarkPayload:
@@ -1098,6 +1143,7 @@ components:
           width: 1600
           format: webp
           quality: 82
+          optimize: auto
     UploadImageTransformRequest:
       type: object
       description: |

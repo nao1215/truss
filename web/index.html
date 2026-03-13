@@ -171,6 +171,27 @@
             </label>
 
             <label>
+              <span>Optimize</span>
+              <select id="optimize-mode" name="optimizeMode">
+                <option value="none">None</option>
+                <option value="auto">Auto</option>
+                <option value="lossless">Lossless</option>
+                <option value="lossy">Lossy</option>
+              </select>
+            </label>
+
+            <label id="target-quality-field">
+              <span>Target quality</span>
+              <input
+                id="target-quality"
+                name="targetQuality"
+                type="text"
+                placeholder="ssim:0.98"
+                spellcheck="false"
+              />
+            </label>
+
+            <label>
               <span>Background</span>
               <input
                 id="background"
@@ -375,6 +396,10 @@
               Nothing has been transformed yet.
             </p>
           </div>
+
+          <p id="size-comparison" class="inline-note">
+            No size comparison yet.
+          </p>
 
           <div class="status-stack" aria-live="polite">
             <p id="status-line" class="status-line">WASM runtime is loading.</p>

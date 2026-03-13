@@ -536,6 +536,9 @@ pub(super) fn compute_cache_key(
         let buf = h.to_string();
         push_param(&mut canonical, "height", &buf);
     }
+    if options.optimize != crate::OptimizeMode::None {
+        push_param(&mut canonical, "optimize", options.optimize.as_name());
+    }
     if has_bounded_resize {
         let pos = options.position.unwrap_or(Position::Center);
         push_param(&mut canonical, "position", pos.as_name());
@@ -546,6 +549,10 @@ pub(super) fn compute_cache_key(
     if let Some(q) = options.quality {
         let buf = q.to_string();
         push_param(&mut canonical, "quality", &buf);
+    }
+    if let Some(target_quality) = options.target_quality {
+        let buf = target_quality.to_string();
+        push_param(&mut canonical, "targetQuality", &buf);
     }
     if options.rotate != Rotation::Deg0 {
         let buf = options.rotate.as_degrees().to_string();

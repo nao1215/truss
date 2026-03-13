@@ -53,6 +53,8 @@ pub(super) fn sign_from_clap(args: ClapSignArgs) -> Result<Command, CliError> {
         position: args.position,
         format: args.format,
         quality: args.quality,
+        optimize: args.optimize,
+        target_quality: args.target_quality,
         background: args.background,
         rotate: args.rotate,
         auto_orient: args.auto_orient,

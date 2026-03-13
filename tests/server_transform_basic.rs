@@ -35,6 +35,30 @@ fn serve_once_transforms_a_path_source_over_http() {
 }
 
 #[test]
+fn serve_once_accepts_optimize_options_in_json_body() {
+    let storage_root = temp_dir("optimize-json");
+    fs::write(storage_root.join("image.png"), png_bytes()).expect("write source fixture");
+    let (addr, handle) = spawn_server(ServerConfig::new(storage_root, Some("secret".to_string())));
+    let response = send_transform_request(
+        addr,
+        r#"{"source":{"kind":"path","path":"/image.png"},"options":{"format":"png","optimize":"lossless"}}"#,
+        Some("secret"),
+    );
+
+    handle
+        .join()
+        .expect("join server thread")
+        .expect("serve one request");
+
+    let (header, content_type, body) = split_response(&response);
+    let artifact = sniff_artifact(RawArtifact::new(body, None)).expect("sniff transformed output");
+
+    assert!(header.starts_with("HTTP/1.1 200 OK"));
+    assert_eq!(content_type, "image/png");
+    assert_eq!(artifact.media_type, MediaType::Png);
+}
+
+#[test]
 fn serve_once_rejects_private_url_sources_by_default() {
     let storage_root = temp_dir("url-blocked");
     let (addr, handle) = spawn_server(ServerConfig::new(storage_root, Some("secret".to_string())));

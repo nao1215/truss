@@ -46,6 +46,8 @@ truss is configured through environment variables and CLI flags. This page docum
 | `TRUSS_PRESETS_FILE` | Path to a JSON file defining named transform presets. The file is watched for changes every 5 seconds; valid updates are applied without restart, invalid files are ignored (previous presets are kept) |
 | `TRUSS_PRESETS` | Inline JSON defining named transform presets (ignored when `TRUSS_PRESETS_FILE` is set) |
 
+Preset objects accept the same fields as the HTTP `ImageTransformOptions` schema, including `optimize` and `targetQuality`.
+
 ## S3
 
 | Variable | Description |
