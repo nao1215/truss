@@ -79,7 +79,7 @@ pub fn spawn_fixture_server(responses: Vec<FixtureResponse>) -> (String, thread:
                         break;
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                        thread::sleep(Duration::from_millis(50));
+                        thread::sleep(Duration::from_millis(5));
                     }
                     Err(error) => panic!("accept fixture request: {error}"),
                 }
@@ -104,6 +104,12 @@ pub fn spawn_fixture_server(responses: Vec<FixtureResponse>) -> (String, thread:
                 .expect("write fixture headers");
             stream.write_all(&body).expect("write fixture body");
             stream.flush().expect("flush fixture response");
+            // Shut down the write half explicitly so the OS sends a clean FIN
+            // rather than an RST.  On Windows, dropping a TcpStream that still
+            // has unread data in the kernel buffer may trigger RST, which can
+            // cause the *next* connection to the same listener to fail with
+            // WSAECONNABORTED (os error 10053).
+            let _ = stream.shutdown(std::net::Shutdown::Write);
         }
     });
 
