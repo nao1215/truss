@@ -6,7 +6,7 @@ truss exposes a `/metrics` endpoint in [Prometheus text exposition format](https
 
 | Path       | Method | Authentication |
 |------------|--------|----------------|
-| `/metrics` | GET    | Optional (`TRUSS_METRICS_TOKEN`) |
+| `/metrics` | GET, HEAD | Optional (`TRUSS_METRICS_TOKEN`) |
 
 When `TRUSS_METRICS_TOKEN` is set, the endpoint requires a `Bearer` token matching the configured value. When unset, the endpoint is open so that Prometheus scrapers can collect metrics without additional configuration.
 

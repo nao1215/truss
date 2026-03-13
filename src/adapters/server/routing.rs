@@ -98,12 +98,16 @@ pub(super) fn resolve_client_ip(
     // addresses that are themselves trusted proxies.  The rightmost
     // non-trusted address is the most reliable client IP because each proxy
     // appends the upstream address it received the connection from.
-    if let Some(xff) = headers
+    // Per RFC 7230 §3.2.2, multiple headers with the same name are
+    // semantically equivalent to a single comma-joined header.
+    let xff_values: Vec<&str> = headers
         .iter()
-        .find(|(name, _)| name.eq_ignore_ascii_case("x-forwarded-for"))
+        .filter(|(name, _)| name.eq_ignore_ascii_case("x-forwarded-for"))
         .map(|(_, v)| v.as_str())
-    {
-        for segment in xff.rsplit(',') {
+        .collect();
+    if !xff_values.is_empty() {
+        let joined = xff_values.join(",");
+        for segment in joined.rsplit(',') {
             if let Ok(ip) = segment.trim().parse::<IpAddr>()
                 && !is_trusted_proxy(trusted_proxies, ip)
             {
@@ -115,6 +119,7 @@ pub(super) fn resolve_client_ip(
     // Fallback: X-Real-IP (single IP set by some proxies like nginx).
     if let Some(xri) = headers
         .iter()
+        .rev()
         .find(|(name, _)| name.eq_ignore_ascii_case("x-real-ip"))
         .map(|(_, v)| v.as_str())
         && let Ok(ip) = xri.trim().parse::<IpAddr>()

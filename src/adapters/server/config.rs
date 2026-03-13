@@ -104,6 +104,7 @@ impl std::str::FromStr for LogLevel {
 /// Used with `TRUSS_TRUSTED_PROXIES` to identify reverse proxies whose
 /// `X-Forwarded-For` / `X-Real-IP` headers should be trusted for
 /// client-IP extraction (rate limiting, access logging).
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TrustedProxy {
     /// An exact IP address (e.g. `10.0.0.1`).

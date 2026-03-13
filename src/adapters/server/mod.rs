@@ -1257,15 +1257,18 @@ fn resolve_client_ip(
         return peer_ip;
     }
 
-    // Try X-Forwarded-For first: walk from rightmost to leftmost, skipping
-    // addresses that are themselves trusted proxies.  The rightmost
-    // non-trusted address is the most reliable client IP.
-    if let Some(xff) = headers
+    // Try X-Forwarded-For first.  Multiple XFF headers are treated as a
+    // single comma-separated list (RFC 7230 §3.2.2).  We collect all XFF
+    // values, join them, then walk from rightmost to leftmost, skipping
+    // addresses that are themselves trusted proxies.
+    let xff_values: Vec<&str> = headers
         .iter()
-        .find(|(name, _)| name.eq_ignore_ascii_case("x-forwarded-for"))
+        .filter(|(name, _)| name.eq_ignore_ascii_case("x-forwarded-for"))
         .map(|(_, v)| v.as_str())
-    {
-        for segment in xff.rsplit(',') {
+        .collect();
+    if !xff_values.is_empty() {
+        let joined = xff_values.join(",");
+        for segment in joined.rsplit(',') {
             if let Ok(ip) = segment.trim().parse::<IpAddr>()
                 && !is_trusted_proxy(trusted_proxies, ip)
             {
@@ -1274,9 +1277,10 @@ fn resolve_client_ip(
         }
     }
 
-    // Fallback: X-Real-IP (single IP set by some proxies like nginx).
+    // Fallback: X-Real-IP — use the last occurrence (closest proxy).
     if let Some(xri) = headers
         .iter()
+        .rev()
         .find(|(name, _)| name.eq_ignore_ascii_case("x-real-ip"))
         .map(|(_, v)| v.as_str())
         && let Ok(ip) = xri.trim().parse::<IpAddr>()
@@ -1340,6 +1344,8 @@ fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io::Result<()>
         let request_id =
             extract_request_id(&partial.headers).unwrap_or_else(|| Uuid::new_v4().to_string());
 
+        let is_head = partial.method == "HEAD";
+
         // --- Per-IP rate limiting ---
         // When behind a trusted reverse proxy, resolve the real client IP
         // from X-Forwarded-For / X-Real-IP so each end-user gets an
@@ -1358,6 +1364,9 @@ fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io::Result<()>
             response
                 .headers
                 .push(("X-Request-Id".to_string(), request_id.clone()));
+            if is_head {
+                response.body = Vec::new();
+            }
             record_http_metrics(RouteMetric::Unknown, response.status);
             let sc = status_code(response.status).unwrap_or("unknown");
             let method_log = partial.method.clone();
@@ -1388,8 +1397,6 @@ fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io::Result<()>
         let accepts_gzip = config.enable_compression
             && http_parse::header_value(&partial.headers, "accept-encoding")
                 .is_some_and(|v| http_parse::accepts_encoding(v, "gzip"));
-
-        let is_head = partial.method == "HEAD";
 
         let requires_auth = matches!(
             (partial.method.as_str(), partial.path()),
@@ -1460,6 +1467,9 @@ fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io::Result<()>
                 response
                     .headers
                     .push(("X-Request-Id".to_string(), request_id.clone()));
+                if is_head {
+                    response.body = Vec::new();
+                }
                 record_http_metrics(RouteMetric::Metrics, response.status);
                 let sc = status_code(response.status).unwrap_or("unknown");
                 let method_log = partial.method.clone();
@@ -1499,6 +1509,9 @@ fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io::Result<()>
                 response
                     .headers
                     .push(("X-Request-Id".to_string(), request_id.clone()));
+                if is_head {
+                    response.body = Vec::new();
+                }
                 record_http_metrics(RouteMetric::Unknown, response.status);
                 let sc = status_code(response.status).unwrap_or("unknown");
                 let _ = write_response_compressed(

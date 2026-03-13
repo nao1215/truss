@@ -512,6 +512,23 @@ mod tests {
     }
 
     // ---------------------------------------------------------------
+    // too_many_requests_response
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn test_too_many_requests_response_includes_retry_after() {
+        let resp = too_many_requests_response("rate limit exceeded");
+        assert_eq!(resp.status, "429 Too Many Requests");
+
+        let v = parse_body(&resp);
+        assert_eq!(v["status"], 429);
+        assert_eq!(v["title"], "Too Many Requests");
+
+        let retry_after = resp.headers.iter().find(|(name, _)| name == "Retry-After");
+        assert_eq!(retry_after.map(|(_, v)| v.as_str()), Some("1"));
+    }
+
+    // ---------------------------------------------------------------
     // too_many_redirects_response
     // ---------------------------------------------------------------
 

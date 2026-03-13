@@ -28,4 +28,4 @@ The server adapter injects a 30-second deadline. The pipeline checks elapsed tim
 
 ## SVG path
 
-SVG inputs are handled by `transform_svg()`, not by this pipeline. If `blur`, `sharpen`, or `watermark` is requested for an SVG input, the request is rejected with `InvalidOptions`.
+SVG inputs are handled by `transform_svg()`, not by this pipeline. If `crop`, `blur`, `sharpen`, or `watermark` is requested for an SVG input, the request is rejected with `InvalidOptions`.
