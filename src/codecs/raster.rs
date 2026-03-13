@@ -180,6 +180,7 @@ macro_rules! check_deadline_if_set {
 /// let mut decoder = JpegDecoder::new(Cursor::new(&output.artifact.bytes)).unwrap();
 /// assert_eq!(decoder.icc_profile().unwrap(), Some(b"demo-icc-profile".to_vec()));
 /// ```
+#[must_use = "this function returns the transform result without side effects"]
 pub fn transform_raster(request: TransformRequest) -> Result<TransformResult, TransformError> {
     let normalized = request.normalize()?;
     let deadline = normalized.options.deadline;

@@ -48,6 +48,7 @@ pub const MAX_WATERMARK_PIXELS: u64 = 4_000_000;
 /// assert_eq!(d.pixel_count(), 1920 * 1080);
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[must_use]
 pub struct Dimensions {
     pub width: u32,
     pub height: u32,
@@ -119,6 +120,7 @@ impl RawArtifact {
 /// assert_eq!(artifact.metadata.frame_count, 1);
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[must_use]
 pub struct Artifact {
     /// The artifact bytes.
     pub bytes: Vec<u8>,
@@ -1205,6 +1207,7 @@ pub struct TransformResult {
 /// assert_eq!(artifact.metadata.height, Some(2));
 /// assert_eq!(artifact.metadata.has_alpha, Some(true));
 /// ```
+#[must_use = "this function returns the detected artifact without side effects"]
 pub fn sniff_artifact(input: RawArtifact) -> Result<Artifact, TransformError> {
     let (media_type, metadata) = detect_artifact(&input.bytes)?;
 

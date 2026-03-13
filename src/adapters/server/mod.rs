@@ -79,7 +79,7 @@ use response::{
 
 use crate::{
     CropRegion, Fit, MediaType, Position, RawArtifact, Rgba8, Rotation, TransformOptions,
-    TransformRequest, WatermarkInput, sniff_artifact, transform_raster, transform_svg,
+    TransformRequest, WatermarkInput, sniff_artifact, transform,
 };
 use hmac::{Hmac, Mac};
 use serde::Deserialize;
@@ -2465,21 +2465,11 @@ fn transform_source_bytes_inner(
     let transform_start = Instant::now();
     let mut request_obj = TransformRequest::new(artifact, options);
     request_obj.watermark = watermark;
-    let result = if is_svg {
-        match transform_svg(request_obj) {
-            Ok(result) => result,
-            Err(error) => {
-                record_transform_error(&error);
-                return transform_error_response(error);
-            }
-        }
-    } else {
-        match transform_raster(request_obj) {
-            Ok(result) => result,
-            Err(error) => {
-                record_transform_error(&error);
-                return transform_error_response(error);
-            }
+    let result = match transform(request_obj) {
+        Ok(result) => result,
+        Err(error) => {
+            record_transform_error(&error);
+            return transform_error_response(error);
         }
     };
     record_transform_duration(result.artifact.media_type, transform_start);

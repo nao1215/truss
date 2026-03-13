@@ -6,14 +6,10 @@
 
 use crate::{
     Artifact, CropRegion, MediaType, Position, RawArtifact, Rgba8, Rotation, TransformError,
-    TransformOptions, TransformRequest, TransformResult, WatermarkInput, sniff_artifact,
-    transform_raster,
+    TransformOptions, TransformRequest, TransformResult, WatermarkInput, sniff_artifact, transform,
 };
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
-
-#[cfg(feature = "svg")]
-use crate::transform_svg;
 #[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
 
@@ -263,32 +259,9 @@ fn dispatch_browser_transform_with_watermark(
     options: TransformOptions,
     watermark: Option<WatermarkInput>,
 ) -> Result<TransformResult, TransformError> {
-    if artifact.media_type != MediaType::Svg && options.format == Some(MediaType::Svg) {
-        return Err(TransformError::UnsupportedOutputMediaType(MediaType::Svg));
-    }
-
-    if artifact.media_type == MediaType::Svg {
-        if watermark.is_some() {
-            return Err(TransformError::InvalidOptions(
-                "watermark is not supported for SVG inputs".to_string(),
-            ));
-        }
-        #[cfg(feature = "svg")]
-        {
-            return transform_svg(TransformRequest::new(artifact, options));
-        }
-        #[cfg(not(feature = "svg"))]
-        {
-            let _ = options;
-            return Err(TransformError::CapabilityMissing(
-                "SVG processing is not enabled in this build".to_string(),
-            ));
-        }
-    }
-
     let mut request = TransformRequest::new(artifact, options);
     request.watermark = watermark;
-    transform_raster(request)
+    transform(request)
 }
 
 fn artifact_info(artifact: &Artifact) -> WasmArtifactInfo {
