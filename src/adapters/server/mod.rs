@@ -120,9 +120,8 @@ mod tests {
         authorize_request_headers, authorize_signed_request, canonical_query_without_signature,
     };
     use super::handler::{
-        HealthCache, TransformImageRequestPayload, TransformSlot, TransformSourcePayload,
-        WatermarkSource, disk_free_bytes, parse_public_get_request, process_rss_bytes,
-        transform_source_bytes,
+        HealthCache, TransformSlot, TransformSourcePayload, WatermarkSource, disk_free_bytes,
+        parse_public_get_request, process_rss_bytes, transform_source_bytes,
     };
     use super::lifecycle::preset_watcher;
     use super::negotiate::{
