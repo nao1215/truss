@@ -1,7 +1,7 @@
 /// Route dispatch, connection handling, and access logging.
 
 use std::io;
-use std::net::TcpStream;
+use std::net::{IpAddr, TcpStream};
 use std::time::Instant;
 
 use serde_json::json;
@@ -76,6 +76,58 @@ pub(super) fn extract_watermark_flag(headers: &mut Vec<(String, String)>) -> boo
     }
 }
 
+/// Resolves the real client IP when the server runs behind trusted reverse
+/// proxies.
+///
+/// When `peer_ip` belongs to a trusted proxy the function inspects
+/// `X-Forwarded-For` (right-to-left, skipping trusted entries) and then
+/// `X-Real-IP`.  If neither header yields a usable address the original
+/// `peer_ip` is returned.
+pub(super) fn resolve_client_ip(
+    peer_ip: IpAddr,
+    headers: &[(String, String)],
+    trusted_proxies: &[super::config::TrustedProxy],
+) -> IpAddr {
+    use super::config::is_trusted_proxy;
+
+    if trusted_proxies.is_empty() || !is_trusted_proxy(trusted_proxies, peer_ip) {
+        return peer_ip;
+    }
+
+    // Try X-Forwarded-For first: walk from rightmost to leftmost, skipping
+    // addresses that are themselves trusted proxies.  The rightmost
+    // non-trusted address is the most reliable client IP because each proxy
+    // appends the upstream address it received the connection from.
+    if let Some(xff) = headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("x-forwarded-for"))
+        .map(|(_, v)| v.as_str())
+    {
+        for segment in xff.rsplit(',') {
+            if let Ok(ip) = segment.trim().parse::<IpAddr>()
+                && !is_trusted_proxy(trusted_proxies, ip)
+            {
+                return ip;
+            }
+        }
+    }
+
+    // Fallback: X-Real-IP (single IP set by some proxies like nginx).
+    if let Some(xri) = headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("x-real-ip"))
+        .map(|(_, v)| v.as_str())
+        && let Ok(ip) = xri.trim().parse::<IpAddr>()
+        && !is_trusted_proxy(trusted_proxies, ip)
+    {
+        return ip;
+    }
+
+    // All forwarded addresses are trusted (or headers are absent/invalid) —
+    // fall back to the TCP peer address.
+    peer_ip
+}
+
 pub(super) fn emit_access_log(config: &ServerConfig, entry: &AccessLogEntry<'_>) {
     config.log(
         &json!({
@@ -129,7 +181,17 @@ pub(super) fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io:
             extract_request_id(&partial.headers).unwrap_or_else(|| Uuid::new_v4().to_string());
 
         // --- Per-IP rate limiting ---
-        if let (Some(ref limiter), Some(ip)) = (&config.rate_limiter, peer_ip) {
+        // When behind a trusted reverse proxy, resolve the real client IP
+        // from X-Forwarded-For / X-Real-IP so each end-user gets an
+        // independent rate-limit bucket.
+        let client_ip = peer_ip.map(|ip| {
+            if config.trusted_proxies.is_empty() {
+                ip
+            } else {
+                resolve_client_ip(ip, &partial.headers, &config.trusted_proxies)
+            }
+        });
+        if let (Some(ref limiter), Some(ip)) = (&config.rate_limiter, client_ip) {
             if !limiter.check(ip) {
                 let mut response = too_many_requests_response(
                     "rate limit exceeded — try again later",

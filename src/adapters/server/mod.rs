@@ -88,7 +88,7 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::env;
 use std::io;
-use std::net::{TcpListener, TcpStream};
+use std::net::{IpAddr, TcpListener, TcpStream};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU64, Ordering};
@@ -1239,6 +1239,55 @@ fn extract_watermark_flag(headers: &mut Vec<(String, String)>) -> bool {
     }
 }
 
+/// Resolves the real client IP when the server runs behind trusted reverse
+/// proxies.
+///
+/// When `peer_ip` belongs to a trusted proxy the function inspects
+/// `X-Forwarded-For` (right-to-left, skipping trusted entries) and then
+/// `X-Real-IP`.  If neither header yields a usable address the original
+/// `peer_ip` is returned.
+fn resolve_client_ip(
+    peer_ip: IpAddr,
+    headers: &[(String, String)],
+    trusted_proxies: &[config::TrustedProxy],
+) -> IpAddr {
+    use config::is_trusted_proxy;
+
+    if trusted_proxies.is_empty() || !is_trusted_proxy(trusted_proxies, peer_ip) {
+        return peer_ip;
+    }
+
+    // Try X-Forwarded-For first: walk from rightmost to leftmost, skipping
+    // addresses that are themselves trusted proxies.  The rightmost
+    // non-trusted address is the most reliable client IP.
+    if let Some(xff) = headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("x-forwarded-for"))
+        .map(|(_, v)| v.as_str())
+    {
+        for segment in xff.rsplit(',') {
+            if let Ok(ip) = segment.trim().parse::<IpAddr>()
+                && !is_trusted_proxy(trusted_proxies, ip)
+            {
+                return ip;
+            }
+        }
+    }
+
+    // Fallback: X-Real-IP (single IP set by some proxies like nginx).
+    if let Some(xri) = headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("x-real-ip"))
+        .map(|(_, v)| v.as_str())
+        && let Ok(ip) = xri.trim().parse::<IpAddr>()
+        && !is_trusted_proxy(trusted_proxies, ip)
+    {
+        return ip;
+    }
+
+    peer_ip
+}
+
 fn emit_access_log(config: &ServerConfig, entry: &AccessLogEntry<'_>) {
     config.log(
         &json!({
@@ -1292,7 +1341,17 @@ fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io::Result<()>
             extract_request_id(&partial.headers).unwrap_or_else(|| Uuid::new_v4().to_string());
 
         // --- Per-IP rate limiting ---
-        if let (Some(limiter), Some(ip)) = (&config.rate_limiter, peer_ip)
+        // When behind a trusted reverse proxy, resolve the real client IP
+        // from X-Forwarded-For / X-Real-IP so each end-user gets an
+        // independent rate-limit bucket.
+        let client_ip = peer_ip.map(|ip| {
+            if config.trusted_proxies.is_empty() {
+                ip
+            } else {
+                resolve_client_ip(ip, &partial.headers, &config.trusted_proxies)
+            }
+        });
+        if let (Some(limiter), Some(ip)) = (&config.rate_limiter, client_ip)
             && !limiter.check(ip)
         {
             let mut response = too_many_requests_response("rate limit exceeded — try again later");
@@ -2491,6 +2550,7 @@ mod tests {
         canonical_query_without_signature, negotiate_output_format, parse_public_get_request,
         route_request, serve_once_with_config, sign_public_url, transform_source_bytes,
     };
+    use super::{config, resolve_client_ip};
     use crate::{
         Artifact, ArtifactMetadata, Fit, MediaType, RawArtifact, TransformOptions, sniff_artifact,
     };
@@ -2502,6 +2562,7 @@ mod tests {
     use std::env;
     use std::fs;
     use std::io::{Cursor, Read, Write};
+    use std::net::IpAddr;
     use std::net::{SocketAddr, TcpListener, TcpStream};
     use std::path::{Path, PathBuf};
     use std::sync::atomic::Ordering;
@@ -6345,5 +6406,112 @@ mod tests {
         handle.join().unwrap();
 
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // --- resolve_client_ip tests ---
+
+    fn h(name: &str, value: &str) -> (String, String) {
+        (name.to_string(), value.to_string())
+    }
+
+    #[test]
+    fn resolve_client_ip_no_trusted_proxies_returns_peer() {
+        let peer: IpAddr = "10.0.0.1".parse().unwrap();
+        let headers = vec![h("x-forwarded-for", "1.2.3.4")];
+        assert_eq!(resolve_client_ip(peer, &headers, &[]), peer);
+    }
+
+    #[test]
+    fn resolve_client_ip_peer_not_trusted_returns_peer() {
+        let peer: IpAddr = "192.168.1.1".parse().unwrap();
+        let trusted = vec![config::TrustedProxy::Addr("10.0.0.1".parse().unwrap())];
+        let headers = vec![h("x-forwarded-for", "1.2.3.4")];
+        assert_eq!(resolve_client_ip(peer, &headers, &trusted), peer);
+    }
+
+    #[test]
+    fn resolve_client_ip_xff_extracts_rightmost_non_trusted() {
+        let peer: IpAddr = "10.0.0.1".parse().unwrap();
+        let trusted = vec![config::TrustedProxy::Addr("10.0.0.1".parse().unwrap())];
+        let headers = vec![h("x-forwarded-for", "1.1.1.1, 2.2.2.2")];
+        // Rightmost non-trusted: 2.2.2.2
+        let expected: IpAddr = "2.2.2.2".parse().unwrap();
+        assert_eq!(resolve_client_ip(peer, &headers, &trusted), expected);
+    }
+
+    #[test]
+    fn resolve_client_ip_xff_skips_trusted_in_chain() {
+        let peer: IpAddr = "10.0.0.1".parse().unwrap();
+        let trusted = vec![
+            config::TrustedProxy::Addr("10.0.0.1".parse().unwrap()),
+            config::TrustedProxy::Addr("10.0.0.2".parse().unwrap()),
+        ];
+        // Chain: client → proxy1(10.0.0.2) → proxy2(10.0.0.1)
+        let headers = vec![h("x-forwarded-for", "1.1.1.1, 10.0.0.2")];
+        let expected: IpAddr = "1.1.1.1".parse().unwrap();
+        assert_eq!(resolve_client_ip(peer, &headers, &trusted), expected);
+    }
+
+    #[test]
+    fn resolve_client_ip_xff_all_trusted_falls_back_to_peer() {
+        let peer: IpAddr = "10.0.0.1".parse().unwrap();
+        let trusted = vec![config::TrustedProxy::Cidr("10.0.0.0".parse().unwrap(), 8)];
+        let headers = vec![h("x-forwarded-for", "10.1.2.3, 10.4.5.6")];
+        assert_eq!(resolve_client_ip(peer, &headers, &trusted), peer);
+    }
+
+    #[test]
+    fn resolve_client_ip_xri_fallback() {
+        let peer: IpAddr = "10.0.0.1".parse().unwrap();
+        let trusted = vec![config::TrustedProxy::Addr("10.0.0.1".parse().unwrap())];
+        let headers = vec![h("x-real-ip", "3.3.3.3")];
+        let expected: IpAddr = "3.3.3.3".parse().unwrap();
+        assert_eq!(resolve_client_ip(peer, &headers, &trusted), expected);
+    }
+
+    #[test]
+    fn resolve_client_ip_xff_preferred_over_xri() {
+        let peer: IpAddr = "10.0.0.1".parse().unwrap();
+        let trusted = vec![config::TrustedProxy::Addr("10.0.0.1".parse().unwrap())];
+        let headers = vec![h("x-forwarded-for", "1.1.1.1"), h("x-real-ip", "2.2.2.2")];
+        let expected: IpAddr = "1.1.1.1".parse().unwrap();
+        assert_eq!(resolve_client_ip(peer, &headers, &trusted), expected);
+    }
+
+    #[test]
+    fn resolve_client_ip_no_headers_falls_back_to_peer() {
+        let peer: IpAddr = "10.0.0.1".parse().unwrap();
+        let trusted = vec![config::TrustedProxy::Addr("10.0.0.1".parse().unwrap())];
+        assert_eq!(resolve_client_ip(peer, &[], &trusted), peer);
+    }
+
+    #[test]
+    fn resolve_client_ip_xff_with_invalid_entries_skipped() {
+        let peer: IpAddr = "10.0.0.1".parse().unwrap();
+        let trusted = vec![config::TrustedProxy::Addr("10.0.0.1".parse().unwrap())];
+        let headers = vec![h("x-forwarded-for", "bogus, 1.1.1.1")];
+        let expected: IpAddr = "1.1.1.1".parse().unwrap();
+        assert_eq!(resolve_client_ip(peer, &headers, &trusted), expected);
+    }
+
+    #[test]
+    fn resolve_client_ip_cidr_trusted_proxy() {
+        let peer: IpAddr = "172.16.5.10".parse().unwrap();
+        let trusted = vec![config::TrustedProxy::Cidr(
+            "172.16.0.0".parse().unwrap(),
+            12,
+        )];
+        let headers = vec![h("x-forwarded-for", "8.8.8.8")];
+        let expected: IpAddr = "8.8.8.8".parse().unwrap();
+        assert_eq!(resolve_client_ip(peer, &headers, &trusted), expected);
+    }
+
+    #[test]
+    fn resolve_client_ip_case_insensitive_headers() {
+        let peer: IpAddr = "10.0.0.1".parse().unwrap();
+        let trusted = vec![config::TrustedProxy::Addr("10.0.0.1".parse().unwrap())];
+        let headers = vec![h("X-Forwarded-For", "5.5.5.5")];
+        let expected: IpAddr = "5.5.5.5".parse().unwrap();
+        assert_eq!(resolve_client_ip(peer, &headers, &trusted), expected);
     }
 }
