@@ -1,4 +1,5 @@
 use crate::{RawArtifact, sniff_artifact};
+use serde::Serialize;
 use std::io::{Read, Write};
 use std::path::PathBuf;
 
@@ -76,42 +77,27 @@ where
 // Helpers
 // ---------------------------------------------------------------------------
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct InspectionOutput {
+    format: String,
+    mime: String,
+    width: Option<u32>,
+    height: Option<u32>,
+    has_alpha: Option<bool>,
+    is_animated: bool,
+}
+
 fn render_inspection_json(artifact: &crate::Artifact) -> String {
-    format!(
-        concat!(
-            "{{\n",
-            "  \"format\": \"{}\",\n",
-            "  \"mime\": \"{}\",\n",
-            "  \"width\": {},\n",
-            "  \"height\": {},\n",
-            "  \"hasAlpha\": {},\n",
-            "  \"isAnimated\": {}\n",
-            "}}\n"
-        ),
-        artifact.media_type.as_name(),
-        artifact.media_type.as_mime(),
-        render_optional_u32(artifact.metadata.width),
-        render_optional_u32(artifact.metadata.height),
-        render_optional_bool(artifact.metadata.has_alpha),
-        render_bool(artifact.metadata.frame_count > 1 || artifact.metadata.duration.is_some()),
-    )
-}
-
-fn render_optional_u32(value: Option<u32>) -> String {
-    match value {
-        Some(value) => value.to_string(),
-        None => "null".to_string(),
-    }
-}
-
-fn render_optional_bool(value: Option<bool>) -> &'static str {
-    match value {
-        Some(true) => "true",
-        Some(false) => "false",
-        None => "null",
-    }
-}
-
-fn render_bool(value: bool) -> &'static str {
-    if value { "true" } else { "false" }
+    let output = InspectionOutput {
+        format: artifact.media_type.as_name().to_string(),
+        mime: artifact.media_type.as_mime().to_string(),
+        width: artifact.metadata.width,
+        height: artifact.metadata.height,
+        has_alpha: artifact.metadata.has_alpha,
+        is_animated: artifact.metadata.frame_count > 1 || artifact.metadata.duration.is_some(),
+    };
+    let mut json = serde_json::to_string_pretty(&output).expect("serialization cannot fail");
+    json.push('\n');
+    json
 }
