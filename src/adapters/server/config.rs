@@ -15,6 +15,7 @@ use std::collections::HashMap;
 use std::env;
 use std::fmt;
 use std::io;
+use std::net::IpAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
@@ -96,6 +97,85 @@ impl std::str::FromStr for LogLevel {
             )),
         }
     }
+}
+
+/// A trusted proxy specification: either a single IP address or a CIDR block.
+///
+/// Used with `TRUSS_TRUSTED_PROXIES` to identify reverse proxies whose
+/// `X-Forwarded-For` / `X-Real-IP` headers should be trusted for
+/// client-IP extraction (rate limiting, access logging).
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TrustedProxy {
+    /// An exact IP address (e.g. `10.0.0.1`).
+    Addr(IpAddr),
+    /// A CIDR block (e.g. `10.0.0.0/8`).  Stores the network address and
+    /// prefix length.
+    Cidr(IpAddr, u8),
+}
+
+impl TrustedProxy {
+    /// Parses a string as either `"<ip>"` or `"<ip>/<prefix>"`.
+    pub fn parse(s: &str) -> Result<Self, String> {
+        if let Some((addr_str, prefix_str)) = s.split_once('/') {
+            let addr: IpAddr = addr_str
+                .trim()
+                .parse()
+                .map_err(|e| format!("invalid IP in CIDR `{s}`: {e}"))?;
+            let prefix: u8 = prefix_str
+                .trim()
+                .parse()
+                .map_err(|e| format!("invalid prefix length in CIDR `{s}`: {e}"))?;
+            let max_prefix = match addr {
+                IpAddr::V4(_) => 32,
+                IpAddr::V6(_) => 128,
+            };
+            if prefix > max_prefix {
+                return Err(format!(
+                    "prefix length {prefix} exceeds maximum {max_prefix} for `{s}`"
+                ));
+            }
+            Ok(Self::Cidr(addr, prefix))
+        } else {
+            let addr: IpAddr = s
+                .trim()
+                .parse()
+                .map_err(|e| format!("invalid trusted proxy IP `{s}`: {e}"))?;
+            Ok(Self::Addr(addr))
+        }
+    }
+
+    /// Returns `true` if `ip` matches this proxy specification.
+    pub(super) fn contains(&self, ip: IpAddr) -> bool {
+        match self {
+            Self::Addr(a) => *a == ip,
+            Self::Cidr(network, prefix_len) => {
+                let prefix = *prefix_len;
+                match (network, ip) {
+                    (IpAddr::V4(net), IpAddr::V4(addr)) => {
+                        if prefix == 0 {
+                            return true;
+                        }
+                        let mask = u32::MAX << (32 - prefix);
+                        (u32::from(*net) & mask) == (u32::from(addr) & mask)
+                    }
+                    (IpAddr::V6(net), IpAddr::V6(addr)) => {
+                        if prefix == 0 {
+                            return true;
+                        }
+                        let mask = u128::MAX << (128 - prefix);
+                        (u128::from(*net) & mask) == (u128::from(addr) & mask)
+                    }
+                    _ => false, // v4 CIDR vs v6 addr (or vice versa) never matches.
+                }
+            }
+        }
+    }
+}
+
+/// Returns `true` if `ip` matches any entry in the trusted-proxy list.
+pub(super) fn is_trusted_proxy(trusted: &[TrustedProxy], ip: IpAddr) -> bool {
+    trusted.iter().any(|t| t.contains(ip))
 }
 
 /// Feature-flag-independent label for the active storage backend, used only
@@ -412,6 +492,13 @@ pub struct ServerConfig {
     /// Burst size defaults to the RPS value but can be overridden via
     /// `TRUSS_RATE_LIMIT_BURST`.  Disabled (no limiting) when unset or zero.
     pub rate_limiter: Option<Arc<super::rate_limit::RateLimiter>>,
+    /// Trusted reverse-proxy addresses or CIDR blocks.
+    ///
+    /// When a connection originates from one of these addresses, the server
+    /// extracts the real client IP from `X-Forwarded-For` (rightmost
+    /// non-trusted entry) or `X-Real-IP` instead of using the TCP peer
+    /// address.  Configurable via `TRUSS_TRUSTED_PROXIES` (comma-separated).
+    pub trusted_proxies: Vec<TrustedProxy>,
     /// Download timeout in seconds for object storage backends (S3, GCS, Azure).
     ///
     /// Configurable via `TRUSS_STORAGE_TIMEOUT_SECS`. Defaults to 30.
@@ -470,6 +557,7 @@ impl Clone for ServerConfig {
             presets: Arc::clone(&self.presets),
             presets_file_path: self.presets_file_path.clone(),
             rate_limiter: self.rate_limiter.as_ref().map(Arc::clone),
+            trusted_proxies: self.trusted_proxies.clone(),
             #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
             storage_timeout_secs: self.storage_timeout_secs,
             #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
@@ -551,7 +639,8 @@ impl fmt::Debug for ServerConfig {
                     .unwrap_or_default(),
             )
             .field("presets_file_path", &self.presets_file_path)
-            .field("rate_limiter", &self.rate_limiter.is_some());
+            .field("rate_limiter", &self.rate_limiter.is_some())
+            .field("trusted_proxies", &self.trusted_proxies);
         #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
         {
             d.field("storage_backend", &self.storage_backend);
@@ -607,6 +696,7 @@ impl PartialEq for ServerConfig {
             && *self.presets.read().unwrap() == *other.presets.read().unwrap()
             && self.presets_file_path == other.presets_file_path
             && self.rate_limiter.is_some() == other.rate_limiter.is_some()
+            && self.trusted_proxies == other.trusted_proxies
             && cfg_storage_eq(self, other)
     }
 }
@@ -718,6 +808,7 @@ impl ServerConfig {
             presets: Arc::new(std::sync::RwLock::new(HashMap::new())),
             presets_file_path: None,
             rate_limiter: None,
+            trusted_proxies: Vec::new(),
             #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
             storage_timeout_secs: STORAGE_DOWNLOAD_TIMEOUT_SECS,
             #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
@@ -1252,6 +1343,19 @@ impl ServerConfig {
             }
         };
 
+        let trusted_proxies = match env::var("TRUSS_TRUSTED_PROXIES")
+            .ok()
+            .filter(|v| !v.is_empty())
+        {
+            Some(val) => val
+                .split(',')
+                .filter(|s| !s.trim().is_empty())
+                .map(TrustedProxy::parse)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?,
+            None => Vec::new(),
+        };
+
         Ok(Self {
             storage_root,
             bearer_token,
@@ -1289,6 +1393,7 @@ impl ServerConfig {
             presets: Arc::new(std::sync::RwLock::new(presets)),
             presets_file_path,
             rate_limiter,
+            trusted_proxies,
             #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
             storage_timeout_secs,
             #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
@@ -2067,5 +2172,147 @@ mod tests {
         let _env = ScopedEnv::set("TRUSS_FORMAT_PREFERENCE", "avif,webp,");
         let result = parse_format_preference_from_env().unwrap();
         assert_eq!(result, vec![crate::MediaType::Avif, crate::MediaType::Webp]);
+    }
+
+    // --- TrustedProxy tests ---
+
+    #[test]
+    fn trusted_proxy_parse_single_ipv4() {
+        let tp = TrustedProxy::parse("10.0.0.1").unwrap();
+        assert_eq!(tp, TrustedProxy::Addr("10.0.0.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn trusted_proxy_parse_single_ipv6() {
+        let tp = TrustedProxy::parse("::1").unwrap();
+        assert_eq!(tp, TrustedProxy::Addr("::1".parse().unwrap()));
+    }
+
+    #[test]
+    fn trusted_proxy_parse_cidr_v4() {
+        let tp = TrustedProxy::parse("10.0.0.0/8").unwrap();
+        assert_eq!(tp, TrustedProxy::Cidr("10.0.0.0".parse().unwrap(), 8));
+    }
+
+    #[test]
+    fn trusted_proxy_parse_cidr_v6() {
+        let tp = TrustedProxy::parse("fd00::/8").unwrap();
+        assert_eq!(tp, TrustedProxy::Cidr("fd00::".parse().unwrap(), 8));
+    }
+
+    #[test]
+    fn trusted_proxy_parse_with_whitespace() {
+        let tp = TrustedProxy::parse("  10.0.0.1  ").unwrap();
+        assert_eq!(tp, TrustedProxy::Addr("10.0.0.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn trusted_proxy_parse_cidr_with_whitespace() {
+        let tp = TrustedProxy::parse(" 10.0.0.0 / 8 ").unwrap();
+        assert_eq!(tp, TrustedProxy::Cidr("10.0.0.0".parse().unwrap(), 8));
+    }
+
+    #[test]
+    fn trusted_proxy_parse_invalid_ip() {
+        assert!(TrustedProxy::parse("not-an-ip").is_err());
+    }
+
+    #[test]
+    fn trusted_proxy_parse_prefix_too_large_v4() {
+        assert!(TrustedProxy::parse("10.0.0.0/33").is_err());
+    }
+
+    #[test]
+    fn trusted_proxy_parse_prefix_too_large_v6() {
+        assert!(TrustedProxy::parse("::1/129").is_err());
+    }
+
+    #[test]
+    fn trusted_proxy_contains_exact_match() {
+        let tp = TrustedProxy::Addr("10.0.0.1".parse().unwrap());
+        assert!(tp.contains("10.0.0.1".parse().unwrap()));
+        assert!(!tp.contains("10.0.0.2".parse().unwrap()));
+    }
+
+    #[test]
+    fn trusted_proxy_contains_cidr_v4() {
+        let tp = TrustedProxy::Cidr("10.0.0.0".parse().unwrap(), 8);
+        assert!(tp.contains("10.1.2.3".parse().unwrap()));
+        assert!(tp.contains("10.255.255.255".parse().unwrap()));
+        assert!(!tp.contains("11.0.0.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn trusted_proxy_contains_cidr_v6() {
+        let tp = TrustedProxy::Cidr("fd00::".parse().unwrap(), 8);
+        assert!(tp.contains("fd12::1".parse().unwrap()));
+        assert!(!tp.contains("fe80::1".parse().unwrap()));
+    }
+
+    #[test]
+    fn trusted_proxy_cidr_v4_does_not_match_v6() {
+        let tp = TrustedProxy::Cidr("10.0.0.0".parse().unwrap(), 8);
+        assert!(!tp.contains("::1".parse().unwrap()));
+    }
+
+    #[test]
+    fn trusted_proxy_cidr_zero_prefix_matches_all() {
+        let tp = TrustedProxy::Cidr("0.0.0.0".parse().unwrap(), 0);
+        assert!(tp.contains("1.2.3.4".parse().unwrap()));
+        assert!(tp.contains("255.255.255.255".parse().unwrap()));
+    }
+
+    #[test]
+    fn trusted_proxy_cidr_32_matches_exact() {
+        let tp = TrustedProxy::Cidr("10.0.0.1".parse().unwrap(), 32);
+        assert!(tp.contains("10.0.0.1".parse().unwrap()));
+        assert!(!tp.contains("10.0.0.2".parse().unwrap()));
+    }
+
+    #[test]
+    fn is_trusted_proxy_checks_all_entries() {
+        let proxies = vec![
+            TrustedProxy::Addr("10.0.0.1".parse().unwrap()),
+            TrustedProxy::Cidr("172.16.0.0".parse().unwrap(), 12),
+        ];
+        assert!(is_trusted_proxy(&proxies, "10.0.0.1".parse().unwrap()));
+        assert!(is_trusted_proxy(&proxies, "172.20.1.1".parse().unwrap()));
+        assert!(!is_trusted_proxy(&proxies, "192.168.1.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn is_trusted_proxy_empty_list() {
+        assert!(!is_trusted_proxy(&[], "10.0.0.1".parse().unwrap()));
+    }
+
+    #[test]
+    #[serial]
+    fn from_env_trusted_proxies_parsed() {
+        let _env_proxies = ScopedEnv::set("TRUSS_TRUSTED_PROXIES", "10.0.0.1,172.16.0.0/12");
+        let config = ServerConfig::from_env().unwrap();
+        assert_eq!(config.trusted_proxies.len(), 2);
+        assert_eq!(
+            config.trusted_proxies[0],
+            TrustedProxy::Addr("10.0.0.1".parse().unwrap())
+        );
+        assert_eq!(
+            config.trusted_proxies[1],
+            TrustedProxy::Cidr("172.16.0.0".parse().unwrap(), 12)
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn from_env_trusted_proxies_empty_when_unset() {
+        let _env = ScopedEnv::remove("TRUSS_TRUSTED_PROXIES");
+        let config = ServerConfig::from_env().unwrap();
+        assert!(config.trusted_proxies.is_empty());
+    }
+
+    #[test]
+    #[serial]
+    fn from_env_trusted_proxies_invalid_rejects() {
+        let _env = ScopedEnv::set("TRUSS_TRUSTED_PROXIES", "not-an-ip");
+        assert!(ServerConfig::from_env().is_err());
     }
 }

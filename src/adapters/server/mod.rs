@@ -88,7 +88,7 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::env;
 use std::io;
-use std::net::{TcpListener, TcpStream};
+use std::net::{IpAddr, TcpListener, TcpStream};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU64, Ordering};
@@ -1239,6 +1239,59 @@ fn extract_watermark_flag(headers: &mut Vec<(String, String)>) -> bool {
     }
 }
 
+/// Resolves the real client IP when the server runs behind trusted reverse
+/// proxies.
+///
+/// When `peer_ip` belongs to a trusted proxy the function inspects
+/// `X-Forwarded-For` (right-to-left, skipping trusted entries) and then
+/// `X-Real-IP`.  If neither header yields a usable address the original
+/// `peer_ip` is returned.
+fn resolve_client_ip(
+    peer_ip: IpAddr,
+    headers: &[(String, String)],
+    trusted_proxies: &[config::TrustedProxy],
+) -> IpAddr {
+    use config::is_trusted_proxy;
+
+    if trusted_proxies.is_empty() || !is_trusted_proxy(trusted_proxies, peer_ip) {
+        return peer_ip;
+    }
+
+    // Try X-Forwarded-For first.  Multiple XFF headers are treated as a
+    // single comma-separated list (RFC 7230 §3.2.2).  We collect all XFF
+    // values, join them, then walk from rightmost to leftmost, skipping
+    // addresses that are themselves trusted proxies.
+    let xff_values: Vec<&str> = headers
+        .iter()
+        .filter(|(name, _)| name.eq_ignore_ascii_case("x-forwarded-for"))
+        .map(|(_, v)| v.as_str())
+        .collect();
+    if !xff_values.is_empty() {
+        let joined = xff_values.join(",");
+        for segment in joined.rsplit(',') {
+            if let Ok(ip) = segment.trim().parse::<IpAddr>()
+                && !is_trusted_proxy(trusted_proxies, ip)
+            {
+                return ip;
+            }
+        }
+    }
+
+    // Fallback: X-Real-IP — use the last occurrence (closest proxy).
+    if let Some(xri) = headers
+        .iter()
+        .rev()
+        .find(|(name, _)| name.eq_ignore_ascii_case("x-real-ip"))
+        .map(|(_, v)| v.as_str())
+        && let Ok(ip) = xri.trim().parse::<IpAddr>()
+        && !is_trusted_proxy(trusted_proxies, ip)
+    {
+        return ip;
+    }
+
+    peer_ip
+}
+
 fn emit_access_log(config: &ServerConfig, entry: &AccessLogEntry<'_>) {
     config.log(
         &json!({
@@ -1291,14 +1344,29 @@ fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io::Result<()>
         let request_id =
             extract_request_id(&partial.headers).unwrap_or_else(|| Uuid::new_v4().to_string());
 
+        let is_head = partial.method == "HEAD";
+
         // --- Per-IP rate limiting ---
-        if let (Some(limiter), Some(ip)) = (&config.rate_limiter, peer_ip)
+        // When behind a trusted reverse proxy, resolve the real client IP
+        // from X-Forwarded-For / X-Real-IP so each end-user gets an
+        // independent rate-limit bucket.
+        let client_ip = peer_ip.map(|ip| {
+            if config.trusted_proxies.is_empty() {
+                ip
+            } else {
+                resolve_client_ip(ip, &partial.headers, &config.trusted_proxies)
+            }
+        });
+        if let (Some(limiter), Some(ip)) = (&config.rate_limiter, client_ip)
             && !limiter.check(ip)
         {
             let mut response = too_many_requests_response("rate limit exceeded — try again later");
             response
                 .headers
                 .push(("X-Request-Id".to_string(), request_id.clone()));
+            if is_head {
+                response.body = Vec::new();
+            }
             record_http_metrics(RouteMetric::Unknown, response.status);
             let sc = status_code(response.status).unwrap_or("unknown");
             let method_log = partial.method.clone();
@@ -1329,8 +1397,6 @@ fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io::Result<()>
         let accepts_gzip = config.enable_compression
             && http_parse::header_value(&partial.headers, "accept-encoding")
                 .is_some_and(|v| http_parse::accepts_encoding(v, "gzip"));
-
-        let is_head = partial.method == "HEAD";
 
         let requires_auth = matches!(
             (partial.method.as_str(), partial.path()),
@@ -1401,6 +1467,9 @@ fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io::Result<()>
                 response
                     .headers
                     .push(("X-Request-Id".to_string(), request_id.clone()));
+                if is_head {
+                    response.body = Vec::new();
+                }
                 record_http_metrics(RouteMetric::Metrics, response.status);
                 let sc = status_code(response.status).unwrap_or("unknown");
                 let method_log = partial.method.clone();
@@ -1440,6 +1509,9 @@ fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io::Result<()>
                 response
                     .headers
                     .push(("X-Request-Id".to_string(), request_id.clone()));
+                if is_head {
+                    response.body = Vec::new();
+                }
                 record_http_metrics(RouteMetric::Unknown, response.status);
                 let sc = status_code(response.status).unwrap_or("unknown");
                 let _ = write_response_compressed(
@@ -2488,9 +2560,12 @@ mod tests {
         CacheHitStatus, DEFAULT_BIND_ADDR, ImageResponsePolicy, PublicSourceKind, ServerConfig,
         SignedUrlSource, TransformOptionsPayload, TransformSourcePayload, WatermarkSource,
         authorize_signed_request, bind_addr, build_image_etag, build_image_response_headers,
-        canonical_query_without_signature, negotiate_output_format, parse_public_get_request,
-        route_request, serve_once_with_config, sign_public_url, transform_source_bytes,
+        canonical_query_without_signature, classify_route, extract_cache_status,
+        extract_request_id, extract_watermark_flag, negotiate_output_format,
+        parse_public_get_request, resolve_client_ip, route_request, serve_once_with_config,
+        sign_public_url, transform_source_bytes,
     };
+    use super::{config, metrics::RouteMetric};
     use crate::{
         Artifact, ArtifactMetadata, Fit, MediaType, RawArtifact, TransformOptions, sniff_artifact,
     };
@@ -2502,6 +2577,7 @@ mod tests {
     use std::env;
     use std::fs;
     use std::io::{Cursor, Read, Write};
+    use std::net::IpAddr;
     use std::net::{SocketAddr, TcpListener, TcpStream};
     use std::path::{Path, PathBuf};
     use std::sync::atomic::Ordering;
@@ -6345,5 +6421,281 @@ mod tests {
         handle.join().unwrap();
 
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // --- resolve_client_ip tests ---
+
+    fn h(name: &str, value: &str) -> (String, String) {
+        (name.to_string(), value.to_string())
+    }
+
+    #[test]
+    fn resolve_client_ip_no_trusted_proxies_returns_peer() {
+        let peer: IpAddr = "10.0.0.1".parse().unwrap();
+        let headers = vec![h("x-forwarded-for", "1.2.3.4")];
+        assert_eq!(resolve_client_ip(peer, &headers, &[]), peer);
+    }
+
+    #[test]
+    fn resolve_client_ip_peer_not_trusted_returns_peer() {
+        let peer: IpAddr = "192.168.1.1".parse().unwrap();
+        let trusted = vec![config::TrustedProxy::Addr("10.0.0.1".parse().unwrap())];
+        let headers = vec![h("x-forwarded-for", "1.2.3.4")];
+        assert_eq!(resolve_client_ip(peer, &headers, &trusted), peer);
+    }
+
+    #[test]
+    fn resolve_client_ip_xff_extracts_rightmost_non_trusted() {
+        let peer: IpAddr = "10.0.0.1".parse().unwrap();
+        let trusted = vec![config::TrustedProxy::Addr("10.0.0.1".parse().unwrap())];
+        let headers = vec![h("x-forwarded-for", "1.1.1.1, 2.2.2.2")];
+        // Rightmost non-trusted: 2.2.2.2
+        let expected: IpAddr = "2.2.2.2".parse().unwrap();
+        assert_eq!(resolve_client_ip(peer, &headers, &trusted), expected);
+    }
+
+    #[test]
+    fn resolve_client_ip_xff_skips_trusted_in_chain() {
+        let peer: IpAddr = "10.0.0.1".parse().unwrap();
+        let trusted = vec![
+            config::TrustedProxy::Addr("10.0.0.1".parse().unwrap()),
+            config::TrustedProxy::Addr("10.0.0.2".parse().unwrap()),
+        ];
+        // Chain: client → proxy1(10.0.0.2) → proxy2(10.0.0.1)
+        let headers = vec![h("x-forwarded-for", "1.1.1.1, 10.0.0.2")];
+        let expected: IpAddr = "1.1.1.1".parse().unwrap();
+        assert_eq!(resolve_client_ip(peer, &headers, &trusted), expected);
+    }
+
+    #[test]
+    fn resolve_client_ip_xff_all_trusted_falls_back_to_peer() {
+        let peer: IpAddr = "10.0.0.1".parse().unwrap();
+        let trusted = vec![config::TrustedProxy::Cidr("10.0.0.0".parse().unwrap(), 8)];
+        let headers = vec![h("x-forwarded-for", "10.1.2.3, 10.4.5.6")];
+        assert_eq!(resolve_client_ip(peer, &headers, &trusted), peer);
+    }
+
+    #[test]
+    fn resolve_client_ip_xri_fallback() {
+        let peer: IpAddr = "10.0.0.1".parse().unwrap();
+        let trusted = vec![config::TrustedProxy::Addr("10.0.0.1".parse().unwrap())];
+        let headers = vec![h("x-real-ip", "3.3.3.3")];
+        let expected: IpAddr = "3.3.3.3".parse().unwrap();
+        assert_eq!(resolve_client_ip(peer, &headers, &trusted), expected);
+    }
+
+    #[test]
+    fn resolve_client_ip_xff_preferred_over_xri() {
+        let peer: IpAddr = "10.0.0.1".parse().unwrap();
+        let trusted = vec![config::TrustedProxy::Addr("10.0.0.1".parse().unwrap())];
+        let headers = vec![h("x-forwarded-for", "1.1.1.1"), h("x-real-ip", "2.2.2.2")];
+        let expected: IpAddr = "1.1.1.1".parse().unwrap();
+        assert_eq!(resolve_client_ip(peer, &headers, &trusted), expected);
+    }
+
+    #[test]
+    fn resolve_client_ip_no_headers_falls_back_to_peer() {
+        let peer: IpAddr = "10.0.0.1".parse().unwrap();
+        let trusted = vec![config::TrustedProxy::Addr("10.0.0.1".parse().unwrap())];
+        assert_eq!(resolve_client_ip(peer, &[], &trusted), peer);
+    }
+
+    #[test]
+    fn resolve_client_ip_xff_with_invalid_entries_skipped() {
+        let peer: IpAddr = "10.0.0.1".parse().unwrap();
+        let trusted = vec![config::TrustedProxy::Addr("10.0.0.1".parse().unwrap())];
+        let headers = vec![h("x-forwarded-for", "bogus, 1.1.1.1")];
+        let expected: IpAddr = "1.1.1.1".parse().unwrap();
+        assert_eq!(resolve_client_ip(peer, &headers, &trusted), expected);
+    }
+
+    #[test]
+    fn resolve_client_ip_cidr_trusted_proxy() {
+        let peer: IpAddr = "172.16.5.10".parse().unwrap();
+        let trusted = vec![config::TrustedProxy::Cidr(
+            "172.16.0.0".parse().unwrap(),
+            12,
+        )];
+        let headers = vec![h("x-forwarded-for", "8.8.8.8")];
+        let expected: IpAddr = "8.8.8.8".parse().unwrap();
+        assert_eq!(resolve_client_ip(peer, &headers, &trusted), expected);
+    }
+
+    #[test]
+    fn resolve_client_ip_case_insensitive_headers() {
+        let peer: IpAddr = "10.0.0.1".parse().unwrap();
+        let trusted = vec![config::TrustedProxy::Addr("10.0.0.1".parse().unwrap())];
+        let headers = vec![h("X-Forwarded-For", "5.5.5.5")];
+        let expected: IpAddr = "5.5.5.5".parse().unwrap();
+        assert_eq!(resolve_client_ip(peer, &headers, &trusted), expected);
+    }
+
+    // --- extract_request_id tests ---
+
+    #[test]
+    fn extract_request_id_returns_value_when_present() {
+        let headers = vec![h("x-request-id", "abc-123")];
+        assert_eq!(extract_request_id(&headers), Some("abc-123".to_string()));
+    }
+
+    #[test]
+    fn extract_request_id_returns_none_when_absent() {
+        let headers = vec![h("content-type", "text/plain")];
+        assert_eq!(extract_request_id(&headers), None);
+    }
+
+    #[test]
+    fn extract_request_id_returns_none_for_empty_value() {
+        let headers = vec![h("x-request-id", "")];
+        assert_eq!(extract_request_id(&headers), None);
+    }
+
+    #[test]
+    fn extract_request_id_rejects_cr() {
+        let headers = vec![h("x-request-id", "abc\r123")];
+        assert_eq!(extract_request_id(&headers), None);
+    }
+
+    #[test]
+    fn extract_request_id_rejects_lf() {
+        let headers = vec![h("x-request-id", "abc\n123")];
+        assert_eq!(extract_request_id(&headers), None);
+    }
+
+    #[test]
+    fn extract_request_id_rejects_nul() {
+        let headers = vec![h("x-request-id", "abc\x00123")];
+        assert_eq!(extract_request_id(&headers), None);
+    }
+
+    // --- extract_cache_status tests ---
+
+    #[test]
+    fn extract_cache_status_returns_none_when_absent() {
+        let headers = vec![h("content-type", "text/plain")];
+        assert_eq!(extract_cache_status(&headers), None);
+    }
+
+    #[test]
+    fn extract_cache_status_returns_hit_when_present() {
+        let headers = vec![h("Cache-Status", "hit;detail=memory")];
+        assert_eq!(extract_cache_status(&headers), Some("hit"));
+    }
+
+    #[test]
+    fn extract_cache_status_returns_miss_when_no_hit() {
+        let headers = vec![h("Cache-Status", "miss")];
+        assert_eq!(extract_cache_status(&headers), Some("miss"));
+    }
+
+    // --- extract_watermark_flag tests ---
+
+    #[test]
+    fn extract_watermark_flag_removes_header_and_returns_true() {
+        let mut headers = vec![h("content-type", "text/plain"), h("X-Truss-Watermark", "1")];
+        assert!(extract_watermark_flag(&mut headers));
+        assert_eq!(headers.len(), 1);
+        assert_eq!(headers[0].0, "content-type");
+    }
+
+    #[test]
+    fn extract_watermark_flag_returns_false_when_absent() {
+        let mut headers = vec![h("content-type", "text/plain")];
+        assert!(!extract_watermark_flag(&mut headers));
+        assert_eq!(headers.len(), 1);
+    }
+
+    // --- classify_route tests ---
+
+    #[test]
+    fn classify_route_health_endpoints() {
+        let make_req = |method: &str, path: &str| HttpRequest {
+            method: method.to_string(),
+            target: path.to_string(),
+            version: "HTTP/1.1".to_string(),
+            headers: vec![],
+            body: vec![],
+        };
+
+        assert!(matches!(
+            classify_route(&make_req("GET", "/health")),
+            RouteMetric::Health
+        ));
+        assert!(matches!(
+            classify_route(&make_req("HEAD", "/health")),
+            RouteMetric::Health
+        ));
+        assert!(matches!(
+            classify_route(&make_req("GET", "/health/live")),
+            RouteMetric::HealthLive
+        ));
+        assert!(matches!(
+            classify_route(&make_req("GET", "/health/ready")),
+            RouteMetric::HealthReady
+        ));
+    }
+
+    #[test]
+    fn classify_route_image_endpoints() {
+        let make_req = |method: &str, path: &str| HttpRequest {
+            method: method.to_string(),
+            target: path.to_string(),
+            version: "HTTP/1.1".to_string(),
+            headers: vec![],
+            body: vec![],
+        };
+
+        assert!(matches!(
+            classify_route(&make_req("GET", "/images/by-path")),
+            RouteMetric::PublicByPath
+        ));
+        assert!(matches!(
+            classify_route(&make_req("GET", "/images/by-url")),
+            RouteMetric::PublicByUrl
+        ));
+        assert!(matches!(
+            classify_route(&make_req("POST", "/images:transform")),
+            RouteMetric::Transform
+        ));
+        assert!(matches!(
+            classify_route(&make_req("POST", "/images")),
+            RouteMetric::Upload
+        ));
+    }
+
+    #[test]
+    fn classify_route_metrics_endpoint() {
+        let req = HttpRequest {
+            method: "GET".to_string(),
+            target: "/metrics".to_string(),
+            version: "HTTP/1.1".to_string(),
+            headers: vec![],
+            body: vec![],
+        };
+        assert!(matches!(classify_route(&req), RouteMetric::Metrics));
+    }
+
+    #[test]
+    fn classify_route_unknown_path() {
+        let req = HttpRequest {
+            method: "GET".to_string(),
+            target: "/nonexistent".to_string(),
+            version: "HTTP/1.1".to_string(),
+            headers: vec![],
+            body: vec![],
+        };
+        assert!(matches!(classify_route(&req), RouteMetric::Unknown));
+    }
+
+    #[test]
+    fn classify_route_wrong_method() {
+        let req = HttpRequest {
+            method: "POST".to_string(),
+            target: "/health".to_string(),
+            version: "HTTP/1.1".to_string(),
+            headers: vec![],
+            body: vec![],
+        };
+        assert!(matches!(classify_route(&req), RouteMetric::Unknown));
     }
 }

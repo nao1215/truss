@@ -19,6 +19,7 @@
 use hmac::{Hmac, Mac};
 use image::codecs::png::PngEncoder;
 use image::{ColorType, ImageEncoder, Rgba, RgbaImage};
+use serial_test::serial;
 use sha2::Sha256;
 use std::collections::BTreeMap;
 use std::io::{Read as _, Write as _};
@@ -182,6 +183,7 @@ fn status_code(header: &str) -> u16 {
 /// valid image.
 #[test]
 #[ignore]
+#[serial]
 fn gcs_mock_put_then_get_by_path() {
     let ctx = gcs_mock_context();
     put_object("photos/red.png", tiny_png());
@@ -208,6 +210,7 @@ fn gcs_mock_put_then_get_by_path() {
 /// Request a key that does not exist in fake-gcs-server → expect 404.
 #[test]
 #[ignore]
+#[serial]
 fn gcs_mock_nonexistent_key_returns_404() {
     let ctx = gcs_mock_context();
     let storage = temp_dir("nonexistent-key");
@@ -240,6 +243,7 @@ fn gcs_mock_nonexistent_key_returns_404() {
 /// well-formed error response.
 #[test]
 #[ignore]
+#[serial]
 fn gcs_mock_forbidden_returns_error() {
     let ctx = gcs_mock_context();
     // Use a bucket that has no objects uploaded — requesting any key
@@ -268,6 +272,7 @@ fn gcs_mock_forbidden_returns_error() {
 /// Upload a second object and retrieve it to verify independent keys work.
 #[test]
 #[ignore]
+#[serial]
 fn gcs_mock_multiple_objects() {
     let ctx = gcs_mock_context();
     put_object("images/blue.png", tiny_png());

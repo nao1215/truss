@@ -8,7 +8,7 @@ use std::time::Duration;
 /// Maximum number of pixels in the output image (width × height).
 ///
 /// This limit prevents resize operations from producing excessively large
-/// output buffers. The value matches the API specification in `doc/api.md`.
+/// output buffers. The value matches the API specification in `doc/openapi.yaml`.
 ///
 /// ```
 /// assert_eq!(truss::MAX_OUTPUT_PIXELS, 67_108_864);
@@ -18,7 +18,7 @@ pub const MAX_OUTPUT_PIXELS: u64 = 67_108_864;
 /// Maximum number of decoded pixels allowed for an input image (width × height).
 ///
 /// This limit prevents decompression bombs from consuming unbounded memory.
-/// The value matches the API specification in `doc/api.md`.
+/// The value matches the API specification in `doc/openapi.yaml`.
 ///
 /// ```
 /// assert_eq!(truss::MAX_DECODED_PIXELS, 100_000_000);
@@ -60,6 +60,7 @@ impl Dimensions {
     }
 
     /// Returns the total pixel count (width × height) as `u64` to avoid overflow.
+    #[must_use]
     pub const fn pixel_count(self) -> u64 {
         self.width as u64 * self.height as u64
     }
@@ -212,6 +213,7 @@ impl Default for ArtifactMetadata {
 /// assert!(!MediaType::Svg.is_raster());
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum MediaType {
     /// JPEG image data.
     Jpeg,
@@ -231,6 +233,7 @@ pub enum MediaType {
 
 impl MediaType {
     /// Returns the canonical media type name used by the API and CLI.
+    #[must_use]
     pub const fn as_name(self) -> &'static str {
         match self {
             Self::Jpeg => "jpeg",
@@ -244,6 +247,7 @@ impl MediaType {
     }
 
     /// Returns the canonical MIME type string.
+    #[must_use]
     pub const fn as_mime(self) -> &'static str {
         match self {
             Self::Jpeg => "image/jpeg",
@@ -257,11 +261,13 @@ impl MediaType {
     }
 
     /// Reports whether the media type is typically encoded with lossy quality controls.
+    #[must_use]
     pub const fn is_lossy(self) -> bool {
         matches!(self, Self::Jpeg | Self::Webp | Self::Avif)
     }
 
     /// Returns `true` if this is a raster (bitmap) format, `false` for vector formats.
+    #[must_use]
     pub const fn is_raster(self) -> bool {
         !matches!(self, Self::Svg)
     }
@@ -704,6 +710,7 @@ pub enum Fit {
 
 impl Fit {
     /// Returns the canonical option name used by the API and CLI.
+    #[must_use]
     pub const fn as_name(self) -> &'static str {
         match self {
             Self::Contain => "contain",
@@ -766,6 +773,7 @@ pub enum Position {
 
 impl Position {
     /// Returns the canonical option name used by the API and CLI.
+    #[must_use]
     pub const fn as_name(self) -> &'static str {
         match self {
             Self::Center => "center",
@@ -829,6 +837,7 @@ pub enum Rotation {
 
 impl Rotation {
     /// Returns the canonical degree value used by the API and CLI.
+    #[must_use]
     pub const fn as_degrees(self) -> u16 {
         match self {
             Self::Deg0 => 0,
@@ -886,7 +895,7 @@ pub struct Rgba8 {
 impl Rgba8 {
     /// Parses a hexadecimal RGB or RGBA color string without a leading `#`.
     pub fn from_hex(value: &str) -> Result<Self, String> {
-        if value.len() != 6 && value.len() != 8 {
+        if !value.is_ascii() || (value.len() != 6 && value.len() != 8) {
             return Err(format!("unsupported color `{value}`"));
         }
 
@@ -1016,6 +1025,7 @@ pub fn resolve_metadata_flags(
 /// let _: &dyn std::error::Error = &err;
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum TransformError {
     /// The input artifact is structurally invalid.
     InvalidInput(String),
@@ -1070,6 +1080,7 @@ impl Error for TransformError {}
 /// assert_eq!(format!("{}", MetadataKind::Icc), "ICC profile");
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum MetadataKind {
     /// XMP (Extensible Metadata Platform) metadata.
     Xmp,
@@ -1108,6 +1119,7 @@ impl fmt::Display for MetadataKind {
 /// );
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum TransformWarning {
     /// Metadata of the given kind was present in the input but could not be preserved
     /// by the output encoder and was silently dropped.
@@ -1130,6 +1142,7 @@ impl fmt::Display for TransformWarning {
 /// Warnings indicate aspects of the request that could not be fully honored, such as
 /// metadata types that were silently dropped because the output encoder does not support them.
 #[derive(Debug)]
+#[must_use]
 pub struct TransformResult {
     /// The transformed output artifact.
     pub artifact: Artifact,
@@ -2080,6 +2093,10 @@ mod tests {
             })
         );
         assert!(Rgba8::from_hex("AABB").is_err());
+
+        // Non-ASCII input must not panic (even if byte length happens to be 6 or 8).
+        assert!(Rgba8::from_hex("\u{00e9}\u{00e9}\u{00e9}").is_err());
+        assert!(Rgba8::from_hex("\u{1f600}\u{1f600}").is_err());
     }
 
     #[test]

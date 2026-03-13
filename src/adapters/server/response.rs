@@ -270,7 +270,11 @@ pub(super) fn service_unavailable_response(message: &str) -> HttpResponse {
 }
 
 pub(super) fn too_many_requests_response(message: &str) -> HttpResponse {
-    problem_response("429 Too Many Requests", 429, "Too Many Requests", message)
+    let mut resp = problem_response("429 Too Many Requests", 429, "Too Many Requests", message);
+    // RFC 6585 §4: include Retry-After so well-behaved clients back off.
+    resp.headers
+        .push(("Retry-After".to_string(), "1".to_string()));
+    resp
 }
 
 pub(super) fn too_many_redirects_response(message: &str) -> HttpResponse {
@@ -505,6 +509,23 @@ mod tests {
         let v = parse_body(&resp);
         assert_eq!(v["status"], 503);
         assert_eq!(v["title"], "Service Unavailable");
+    }
+
+    // ---------------------------------------------------------------
+    // too_many_requests_response
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn test_too_many_requests_response_includes_retry_after() {
+        let resp = too_many_requests_response("rate limit exceeded");
+        assert_eq!(resp.status, "429 Too Many Requests");
+
+        let v = parse_body(&resp);
+        assert_eq!(v["status"], 429);
+        assert_eq!(v["title"], "Too Many Requests");
+
+        let retry_after = resp.headers.iter().find(|(name, _)| name == "Retry-After");
+        assert_eq!(retry_after.map(|(_, v)| v.as_str()), Some("1"));
     }
 
     // ---------------------------------------------------------------

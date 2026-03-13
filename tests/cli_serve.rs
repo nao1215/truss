@@ -1,18 +1,8 @@
+mod common;
+
 use std::fs;
 use std::io::{BufRead, BufReader};
-use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::time::{SystemTime, UNIX_EPOCH};
-
-fn temp_dir(name: &str) -> PathBuf {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("current time")
-        .as_nanos();
-    let path = std::env::temp_dir().join(format!("truss-cli-{name}-{unique}"));
-    fs::create_dir_all(&path).expect("create temp dir");
-    path
-}
 
 #[test]
 fn help_lists_serve_runtime_options() {
@@ -92,7 +82,7 @@ fn convert_dash_help_shows_convert_specific_help() {
 
 #[test]
 fn top_level_server_flags_start_the_server() {
-    let storage_root = temp_dir("serve-startup");
+    let storage_root = common::temp_dir("serve-startup");
     let mut child = Command::new(env!("CARGO_BIN_EXE_truss"))
         .arg("--bind")
         .arg("127.0.0.1:0")
@@ -162,7 +152,7 @@ fn top_level_server_flags_start_the_server() {
 
 #[test]
 fn serve_startup_summary_includes_state_info() {
-    let storage_root = temp_dir("serve-summary");
+    let storage_root = common::temp_dir("serve-summary");
     let mut child = Command::new(env!("CARGO_BIN_EXE_truss"))
         .arg("serve")
         .arg("--bind")

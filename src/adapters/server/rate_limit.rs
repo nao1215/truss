@@ -1,29 +1,46 @@
-//! Per-IP token-bucket rate limiter.
+//! Per-IP token-bucket rate limiter with sharded locking.
 //!
 //! When `TRUSS_RATE_LIMIT_RPS` is set to a positive value, each client IP
 //! address is allocated a token bucket that refills at the configured rate.
 //! Requests that arrive when the bucket is empty receive HTTP 429 Too Many
 //! Requests.  The limiter is disabled (all requests allowed) when the RPS
 //! value is zero or unset.
+//!
+//! The bucket map is split across [`NUM_SHARDS`] independent mutexes so that
+//! concurrent worker threads rarely contend on the same lock.  Cleanup sweeps
+//! run per-shard, avoiding a global stop-the-world pause.
 
 use std::collections::HashMap;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::net::IpAddr;
 use std::sync::Mutex;
 use std::time::Instant;
 
+/// Number of independent shards.  Must be a power of two for fast modulo.
+const NUM_SHARDS: usize = 16;
+
+/// Per-shard entry count before a cleanup sweep is triggered.
+const CLEANUP_THRESHOLD_PER_SHARD: usize = 1_000;
+
+/// Idle duration (in seconds) after which an IP entry is evicted.
+const CLEANUP_IDLE_SECS: f64 = 300.0;
+
 /// A shared, thread-safe per-IP rate limiter.
 ///
-/// Each IP address gets an independent token bucket. A background-style
-/// cleanup is performed lazily during `check` calls: once the number of
-/// tracked IPs exceeds `CLEANUP_THRESHOLD`, entries that have been idle
-/// for longer than `CLEANUP_IDLE_SECS` are evicted.
+/// Each IP address gets an independent token bucket.  The bucket map is
+/// partitioned into [`NUM_SHARDS`] shards keyed by the hash of the IP
+/// address, so concurrent threads rarely contend on the same mutex.
+///
+/// A lazy cleanup is performed per-shard once its entry count exceeds
+/// [`CLEANUP_THRESHOLD_PER_SHARD`]: entries idle for longer than
+/// [`CLEANUP_IDLE_SECS`] are evicted.
 pub struct RateLimiter {
     /// Maximum tokens (burst capacity).
     burst: f64,
     /// Tokens added per second (refill rate).
     rate: f64,
-    /// Per-IP bucket state, protected by a mutex.
-    buckets: Mutex<HashMap<IpAddr, Bucket>>,
+    /// Sharded per-IP bucket state.
+    shards: [Mutex<HashMap<IpAddr, Bucket>>; NUM_SHARDS],
 }
 
 struct Bucket {
@@ -31,10 +48,12 @@ struct Bucket {
     last_refill: Instant,
 }
 
-/// Number of tracked IPs before a cleanup sweep is triggered.
-const CLEANUP_THRESHOLD: usize = 10_000;
-/// Idle duration (in seconds) after which an IP entry is evicted.
-const CLEANUP_IDLE_SECS: f64 = 300.0;
+/// Returns the shard index for a given IP address.
+fn shard_index(ip: IpAddr) -> usize {
+    let mut hasher = DefaultHasher::new();
+    ip.hash(&mut hasher);
+    hasher.finish() as usize & (NUM_SHARDS - 1)
+}
 
 impl RateLimiter {
     /// Creates a new rate limiter.
@@ -47,7 +66,7 @@ impl RateLimiter {
         Self {
             burst,
             rate,
-            buckets: Mutex::new(HashMap::new()),
+            shards: std::array::from_fn(|_| Mutex::new(HashMap::new())),
         }
     }
 
@@ -57,18 +76,21 @@ impl RateLimiter {
     /// is empty the request is rejected.
     pub fn check(&self, ip: IpAddr) -> bool {
         let now = Instant::now();
-        let mut buckets = self.buckets.lock().expect("rate limiter lock poisoned");
+        let idx = shard_index(ip);
+        let mut shard = self.shards[idx]
+            .lock()
+            .expect("rate limiter shard lock poisoned");
 
-        // Lazy cleanup when the map grows large.
-        if buckets.len() > CLEANUP_THRESHOLD {
-            buckets.retain(|_, bucket| {
+        // Lazy cleanup when this shard grows large.
+        if shard.len() > CLEANUP_THRESHOLD_PER_SHARD {
+            shard.retain(|_, bucket| {
                 now.saturating_duration_since(bucket.last_refill)
                     .as_secs_f64()
                     < CLEANUP_IDLE_SECS
             });
         }
 
-        let bucket = buckets.entry(ip).or_insert_with(|| Bucket {
+        let bucket = shard.entry(ip).or_insert_with(|| Bucket {
             tokens: self.burst,
             last_refill: now,
         });
@@ -174,12 +196,20 @@ mod tests {
             return; // Platform does not support backward Instant arithmetic.
         };
 
-        // Insert more than CLEANUP_THRESHOLD entries with old timestamps.
+        // Insert more than CLEANUP_THRESHOLD_PER_SHARD entries into one shard
+        // by using IPs that hash to the same shard.  We pick a fixed IP as
+        // the "target shard" and fill only that shard.
+        let target_ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
+        let target_shard = shard_index(target_ip);
+
         {
-            let mut buckets = limiter.buckets.lock().unwrap();
-            for i in 0..CLEANUP_THRESHOLD + 100 {
+            // Fill the target shard with old entries.
+            let mut shard = limiter.shards[target_shard].lock().unwrap();
+            for i in 0..(CLEANUP_THRESHOLD_PER_SHARD + 100) {
+                // Generate IPs; we insert directly into the shard regardless
+                // of their actual hash since we're manipulating internal state.
                 let ip = IpAddr::V4(Ipv4Addr::from((i as u32).to_be_bytes()));
-                buckets.insert(
+                shard.insert(
                     ip,
                     Bucket {
                         tokens: 0.0,
@@ -187,14 +217,47 @@ mod tests {
                     },
                 );
             }
+            assert!(shard.len() > CLEANUP_THRESHOLD_PER_SHARD);
         }
 
-        // A check call should trigger cleanup and evict all old entries.
-        let fresh_ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
-        limiter.check(fresh_ip);
+        // A check call on an IP in the same shard should trigger cleanup.
+        limiter.check(target_ip);
 
-        let buckets = limiter.buckets.lock().unwrap();
+        let shard = limiter.shards[target_shard].lock().unwrap();
         // Only the fresh IP should remain (old ones had idle > 300s).
-        assert_eq!(buckets.len(), 1);
+        assert_eq!(shard.len(), 1);
+    }
+
+    #[test]
+    fn shard_index_distributes_across_shards() {
+        let mut seen = std::collections::HashSet::new();
+        for i in 0..256u32 {
+            let ip = IpAddr::V4(Ipv4Addr::from(i.to_be_bytes()));
+            seen.insert(shard_index(ip));
+        }
+        // With 256 distinct IPs we should hit most of the 16 shards.
+        assert!(seen.len() >= NUM_SHARDS / 2, "poor distribution: {seen:?}");
+    }
+
+    #[test]
+    fn concurrent_access_does_not_panic() {
+        use std::sync::Arc;
+
+        let limiter = Arc::new(RateLimiter::new(100.0, 10.0));
+        let handles: Vec<_> = (0..8)
+            .map(|t| {
+                let limiter = Arc::clone(&limiter);
+                thread::spawn(move || {
+                    for i in 0..100u32 {
+                        let ip = IpAddr::V4(Ipv4Addr::new(10, 0, t, i as u8));
+                        limiter.check(ip);
+                    }
+                })
+            })
+            .collect();
+
+        for h in handles {
+            h.join().unwrap();
+        }
     }
 }

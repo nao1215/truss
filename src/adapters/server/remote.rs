@@ -594,6 +594,11 @@ pub(super) fn is_disallowed_ipv4(ip: Ipv4Addr) -> bool {
 }
 
 pub(super) fn is_disallowed_ipv6(ip: Ipv6Addr) -> bool {
+    // Check native IPv6 properties first.
+    if ip.is_loopback() || ip.is_unspecified() || ip.is_multicast() {
+        return true;
+    }
+
     // Check IPv4-mapped addresses (e.g. ::ffff:127.0.0.1) against IPv4 rules
     // to prevent SSRF bypass via mapped addresses.
     if let Some(v4) = ip.to_ipv4_mapped() {
@@ -601,10 +606,38 @@ pub(super) fn is_disallowed_ipv6(ip: Ipv6Addr) -> bool {
     }
 
     let segments = ip.segments();
-    ip.is_loopback()
-        || ip.is_unspecified()
-        || ip.is_multicast()
-        || ip.is_unique_local()
+
+    // Check deprecated IPv4-compatible addresses (e.g. ::127.0.0.1).
+    // Some network stacks still route these despite deprecation (RFC 4291 §2.5.5.1).
+    // Only applies when the upper 96 bits are zero and it's not IPv4-mapped.
+    if segments[..6] == [0, 0, 0, 0, 0, 0] {
+        let v4 = Ipv4Addr::new(
+            (segments[6] >> 8) as u8,
+            segments[6] as u8,
+            (segments[7] >> 8) as u8,
+            segments[7] as u8,
+        );
+        return is_disallowed_ipv4(v4);
+    }
+
+    // Block 6to4 addresses (2002::/16) which embed an IPv4 address in bits 16-48.
+    // An attacker can encode private IPs like 127.0.0.1 as 2002:7f00:0001::.
+    if segments[0] == 0x2002 {
+        let embedded = Ipv4Addr::new(
+            (segments[1] >> 8) as u8,
+            segments[1] as u8,
+            (segments[2] >> 8) as u8,
+            segments[2] as u8,
+        );
+        return is_disallowed_ipv4(embedded);
+    }
+
+    // Block Teredo addresses (2001:0000::/32) which can tunnel to arbitrary IPv4.
+    if segments[0] == 0x2001 && segments[1] == 0x0000 {
+        return true;
+    }
+
+    ip.is_unique_local()
         || ip.is_unicast_link_local()
         || (segments[0] == 0x2001 && segments[1] == 0x0db8)
 }
@@ -782,6 +815,48 @@ mod redirect_tests {
         // 2001:db8::/32
         let doc = Ipv6Addr::new(0x2001, 0x0db8, 0, 0, 0, 0, 0, 1);
         assert!(is_disallowed_ipv6(doc));
+    }
+
+    #[test]
+    fn disallowed_ipv6_blocks_ipv4_compatible_loopback() {
+        // ::127.0.0.1 (deprecated IPv4-compatible address)
+        let compat = Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0x7f00, 0x0001);
+        assert!(is_disallowed_ipv6(compat));
+    }
+
+    #[test]
+    fn disallowed_ipv6_blocks_ipv4_compatible_private() {
+        // ::10.0.0.1 (deprecated IPv4-compatible address embedding private IP)
+        let compat = Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0x0a00, 0x0001);
+        assert!(is_disallowed_ipv6(compat));
+    }
+
+    #[test]
+    fn disallowed_ipv6_blocks_6to4_loopback() {
+        // 2002:7f00:0001:: encodes 127.0.0.1 via 6to4
+        let addr = Ipv6Addr::new(0x2002, 0x7f00, 0x0001, 0, 0, 0, 0, 0);
+        assert!(is_disallowed_ipv6(addr));
+    }
+
+    #[test]
+    fn disallowed_ipv6_blocks_6to4_private() {
+        // 2002:c0a8:0001:: encodes 192.168.0.1 via 6to4
+        let addr = Ipv6Addr::new(0x2002, 0xc0a8, 0x0001, 0, 0, 0, 0, 0);
+        assert!(is_disallowed_ipv6(addr));
+    }
+
+    #[test]
+    fn disallowed_ipv6_allows_6to4_public() {
+        // 2002:0801:0101:: encodes 8.1.1.1 (public) via 6to4
+        let addr = Ipv6Addr::new(0x2002, 0x0801, 0x0101, 0, 0, 0, 0, 0);
+        assert!(!is_disallowed_ipv6(addr));
+    }
+
+    #[test]
+    fn disallowed_ipv6_blocks_teredo() {
+        // 2001:0000::/32 is the Teredo prefix
+        let teredo = Ipv6Addr::new(0x2001, 0x0000, 0x1234, 0, 0, 0, 0, 1);
+        assert!(is_disallowed_ipv6(teredo));
     }
 
     // ── max_remote_redirects config enforcement ─────────────────────────
