@@ -184,6 +184,14 @@ pub fn transform_svg(request: TransformRequest) -> Result<TransformResult, Trans
     })
 }
 
+/// Maximum number of XML elements allowed in a single SVG document.
+/// Prevents CPU exhaustion from extremely complex SVGs.
+const MAX_SVG_ELEMENTS: usize = 100_000;
+
+/// Maximum nesting depth allowed in an SVG document.
+/// Prevents stack-like exhaustion from deeply nested elements.
+const MAX_SVG_NESTING_DEPTH: usize = 256;
+
 /// Sanitizes an SVG document by removing dangerous elements and attributes.
 ///
 /// Removes:
@@ -201,6 +209,8 @@ fn sanitize_svg(bytes: &[u8]) -> Result<String, TransformError> {
     let mut writer = Writer::new(Cursor::new(Vec::new()));
     let mut skip_depth: usize = 0;
     let mut in_style = false;
+    let mut element_count: usize = 0;
+    let mut nesting_depth: usize = 0;
 
     loop {
         match reader.read_event() {
@@ -214,6 +224,18 @@ fn sanitize_svg(bytes: &[u8]) -> Result<String, TransformError> {
                 if is_forbidden_element(&name) {
                     skip_depth = 1;
                     continue;
+                }
+                element_count += 1;
+                if element_count > MAX_SVG_ELEMENTS {
+                    return Err(TransformError::LimitExceeded(format!(
+                        "SVG exceeds maximum element count ({MAX_SVG_ELEMENTS})"
+                    )));
+                }
+                nesting_depth += 1;
+                if nesting_depth > MAX_SVG_NESTING_DEPTH {
+                    return Err(TransformError::LimitExceeded(format!(
+                        "SVG exceeds maximum nesting depth ({MAX_SVG_NESTING_DEPTH})"
+                    )));
                 }
                 if name == "style" {
                     in_style = true;
@@ -232,6 +254,7 @@ fn sanitize_svg(bytes: &[u8]) -> Result<String, TransformError> {
                 if name == "style" {
                     in_style = false;
                 }
+                nesting_depth = nesting_depth.saturating_sub(1);
                 writer
                     .write_event(Event::End(e.to_owned()))
                     .map_err(|e| TransformError::DecodeFailed(format!("SVG write error: {e}")))?;
@@ -243,6 +266,12 @@ fn sanitize_svg(bytes: &[u8]) -> Result<String, TransformError> {
                 let name = local_name(e.name().as_ref());
                 if is_forbidden_element(&name) {
                     continue;
+                }
+                element_count += 1;
+                if element_count > MAX_SVG_ELEMENTS {
+                    return Err(TransformError::LimitExceeded(format!(
+                        "SVG exceeds maximum element count ({MAX_SVG_ELEMENTS})"
+                    )));
                 }
                 let sanitized = sanitize_attributes(e);
                 writer
@@ -436,35 +465,41 @@ fn sanitize_attributes<'a>(element: &'a BytesStart<'a>) -> BytesStart<'a> {
 /// by replacing them with `url()` (empty, which CSS treats as invalid and ignores).
 /// Also removes `@import` rules which can load external stylesheets.
 fn sanitize_css_urls(css: &str) -> String {
+    // Lowercase once upfront to avoid O(N*k) repeated allocations.
+    let lower = css.to_ascii_lowercase();
+
     // First remove @import rules (external stylesheet loading).
     let mut result = String::with_capacity(css.len());
-    let mut remaining = css;
+    let mut offset = 0;
 
     // Remove @import rules. They can appear as:
     //   @import url("...");
     //   @import "...";
-    while let Some(pos) = remaining.to_ascii_lowercase().find("@import") {
-        result.push_str(&remaining[..pos]);
+    while let Some(pos) = lower[offset..].find("@import") {
+        result.push_str(&css[offset..offset + pos]);
         // Skip everything until the next semicolon or end of string.
-        let after_import = &remaining[pos + 7..];
-        if let Some(semi) = after_import.find(';') {
-            remaining = &after_import[semi + 1..];
+        let after_import = offset + pos + 7;
+        if let Some(semi) = css[after_import..].find(';') {
+            offset = after_import + semi + 1;
         } else {
-            remaining = "";
+            offset = css.len();
         }
     }
-    result.push_str(remaining);
+    result.push_str(&css[offset..]);
 
     // Then sanitize url() references.
     let css_after_import = result;
+    let lower_after_import = css_after_import.to_ascii_lowercase();
     let mut result = String::with_capacity(css_after_import.len());
-    let mut remaining = css_after_import.as_str();
+    let mut offset = 0;
 
-    while let Some(start) = remaining.to_ascii_lowercase().find("url(") {
-        result.push_str(&remaining[..start]);
-        let after_url = &remaining[start + 4..];
+    while let Some(start) = lower_after_import[offset..].find("url(") {
+        result.push_str(&css_after_import[offset..offset + start]);
+        let url_open = offset + start + 4;
+        let after_url = &css_after_import[url_open..];
 
         let (url_value, rest) = extract_css_url_value(after_url);
+        let consumed = after_url.len() - rest.len();
         let trimmed = url_value
             .trim()
             .trim_matches(|c| c == '\'' || c == '"')
@@ -477,10 +512,10 @@ fn sanitize_css_urls(css: &str) -> String {
             result.push_str(url_value);
             result.push(')');
         }
-        remaining = rest;
+        offset = url_open + consumed;
     }
 
-    result.push_str(remaining);
+    result.push_str(&css_after_import[offset..]);
     result
 }
 
