@@ -33,7 +33,7 @@ wasm-bindgen \
 cp "$ROOT_DIR/web/index.html" "$DIST_DIR/index.html"
 cp "$ROOT_DIR/web/app.js" "$DIST_DIR/app.js"
 cp "$ROOT_DIR/web/styles.css" "$DIST_DIR/styles.css"
-cp "$ROOT_DIR/doc/openapi.yaml" "$DIST_DIR/openapi.yaml"
+cp "$ROOT_DIR/docs/openapi.yaml" "$DIST_DIR/openapi.yaml"
 cp "$ROOT_DIR/web/swagger/index.html" "$SWAGGER_DIST_DIR/index.html"
 cp "$ROOT_DIR/web/swagger/swagger.css" "$SWAGGER_DIST_DIR/swagger.css"
 : > "$DIST_DIR/.nojekyll"

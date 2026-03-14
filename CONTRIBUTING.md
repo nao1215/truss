@@ -128,7 +128,7 @@ integration/
     ├── compose.yml
     └── runbooks/*.yml
 
-doc/                         # Design documents and specs
+docs/                        # Design documents, API specs, and guides
 ```
 
 ### Architecture overview
@@ -165,7 +165,7 @@ truss follows a three-layer architecture:
 3. Implement the operation in `transform_raster()` in `codecs/raster.rs`
 4. Add CLI flag parsing in `cli/convert.rs`
 5. Add HTTP query parameter parsing in `server/http_parse.rs`
-6. Update the OpenAPI spec in `doc/openapi.yaml`
+6. Update the OpenAPI spec in `docs/openapi.yaml`
 
 **How to add a new storage backend:**
 

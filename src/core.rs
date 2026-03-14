@@ -8,7 +8,7 @@ use std::time::Duration;
 /// Maximum number of pixels in the output image (width × height).
 ///
 /// This limit prevents resize operations from producing excessively large
-/// output buffers. The value matches the API specification in `doc/openapi.yaml`.
+/// output buffers. The value matches the API specification in `docs/openapi.yaml`.
 ///
 /// ```
 /// assert_eq!(truss::MAX_OUTPUT_PIXELS, 67_108_864);
@@ -18,7 +18,7 @@ pub const MAX_OUTPUT_PIXELS: u64 = 67_108_864;
 /// Maximum number of decoded pixels allowed for an input image (width × height).
 ///
 /// This limit prevents decompression bombs from consuming unbounded memory.
-/// The value matches the API specification in `doc/openapi.yaml`.
+/// The value matches the API specification in `docs/openapi.yaml`.
 ///
 /// ```
 /// assert_eq!(truss::MAX_DECODED_PIXELS, 100_000_000);
