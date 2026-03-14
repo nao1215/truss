@@ -126,6 +126,10 @@ wasm-package-consumer-smoke:
 wasm-vite-example-smoke:
     node ./scripts/run-wasm-vite-example-smoke.mjs
 
+# Install the checked-in Vite example dependencies, serve it, and verify runtime output in headless Chrome
+wasm-vite-example-runtime-smoke:
+    node ./scripts/run-wasm-vite-example-runtime-smoke.mjs
+
 # Check WASM feature slice compiles
 wasm-check:
     cargo check --no-default-features --features wasm --lib

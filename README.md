@@ -331,7 +331,7 @@ const result = transformImage(
 
 The official npm package is generated with `wasm-bindgen --target bundler`, so it does not require an explicit `init()` step.
 
-For maintainers, `node ./scripts/run-wasm-consumer-smoke.mjs` packs the local npm artifact, installs it into a throwaway consumer, and runs one real transform through the published JS surface. `node ./scripts/run-wasm-vite-example-smoke.mjs` rewires the Vite example to the local tarball and verifies that a real bundler build still succeeds.
+For maintainers, `node ./scripts/run-wasm-consumer-smoke.mjs` packs the local npm artifact, installs it into a throwaway consumer, and runs one real transform through the published JS surface. `node ./scripts/run-wasm-vite-example-smoke.mjs` rewires the Vite example to the local tarball and verifies that a real bundler build still succeeds. `node ./scripts/run-wasm-vite-example-runtime-smoke.mjs` verifies the checked-in Vite example and confirms the browser runtime path in headless Chrome.
 
 The example below assumes your page is served from a directory that also contains `pkg/truss.js`. When using `./scripts/build-wasm-demo.sh`, that means `web/dist/index.html` importing `./pkg/truss.js`.
 

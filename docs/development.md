@@ -75,12 +75,14 @@ Release tags also build a `.tgz` artifact for this package and publish it to npm
 To build and smoke-check the package locally:
 
 ```sh
+cat .nvmrc  # Node.js version used in CI
 rustup target add wasm32-unknown-unknown
 # The wasm-bindgen-cli version must match the wasm-bindgen dependency in Cargo.toml.
 cargo install wasm-bindgen-cli --version 0.2.114
 just wasm-package-pack
 just wasm-package-consumer-smoke
 just wasm-vite-example-smoke
+just wasm-vite-example-runtime-smoke
 ```
 
 ## Benchmark

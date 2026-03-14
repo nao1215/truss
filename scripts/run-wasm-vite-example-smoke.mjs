@@ -54,6 +54,7 @@ try {
   console.log(
     JSON.stringify({
       example: "vite-truss-wasm",
+      mode: "local-tarball",
       output: builtIndexPath,
       packageUnderTest: tarballName,
     }),

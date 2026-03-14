@@ -15,7 +15,7 @@ Optional:
 - `cargo-audit` for security checks (`cargo install cargo-audit`)
 - `cargo-llvm-cov` + `llvm-tools-preview` for coverage (`just setup` installs these)
 - `wasm32-unknown-unknown` target and `wasm-bindgen-cli` for WASM builds
-- Node.js + npm for the official WASM package, consumer smoke test, and example app
+- Node.js 22.x + npm for the official WASM package, consumer smoke test, and example app (`.nvmrc` matches CI)
 
 Run `just setup` to install the optional development tools.
 
@@ -68,6 +68,7 @@ If your change touches the official npm package or browser-facing WASM integrati
 just wasm-package-pack            # Verify the npm tarball can be assembled
 just wasm-package-consumer-smoke  # Install the tarball into a throwaway app and run one transform
 just wasm-vite-example-smoke      # Build the Vite example against the local tarball
+just wasm-vite-example-runtime-smoke    # Verify the checked-in Vite example in headless Chrome
 ```
 
 ### 4. Run integration tests
@@ -203,6 +204,7 @@ Run `just` with no arguments to see the full list. Key recipes:
 | `just wasm-package-pack` | Pack the npm package without publishing |
 | `just wasm-package-consumer-smoke` | Install the local tarball into a throwaway consumer and run one transform |
 | `just wasm-vite-example-smoke` | Build the Vite example against the local tarball |
+| `just wasm-vite-example-runtime-smoke` | Serve the checked-in Vite example and verify runtime output in headless Chrome |
 | `just serve` | Start dev server |
 | `just docker-build` | Build Docker image |
 
