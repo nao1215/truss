@@ -1127,10 +1127,18 @@ fn optimize_jpeg_bytes_losslessly(
         match marker {
             0xD9 => {
                 output.extend_from_slice(&[0xFF, marker]);
-                break;
+                return Ok(output);
             }
             0xDA => {
                 let segment_end = jpeg_segment_end(bytes, index)?;
+                if !bytes[segment_end..]
+                    .windows(2)
+                    .any(|window| window == [0xFF, 0xD9])
+                {
+                    return Err(TransformError::InvalidInput(
+                        "input is not a valid JPEG bitstream".to_string(),
+                    ));
+                }
                 output.extend_from_slice(&[0xFF, marker]);
                 output.extend_from_slice(&bytes[index..segment_end]);
                 output.extend_from_slice(&bytes[segment_end..]);
@@ -1151,7 +1159,9 @@ fn optimize_jpeg_bytes_losslessly(
         }
     }
 
-    Ok(output)
+    Err(TransformError::InvalidInput(
+        "input is not a valid JPEG bitstream".to_string(),
+    ))
 }
 
 fn jpeg_segment_end(bytes: &[u8], index: usize) -> Result<usize, TransformError> {
@@ -2095,7 +2105,7 @@ fn output_has_alpha(image: &DynamicImage, media_type: MediaType) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_exif_orientation, transform_raster};
+    use super::{apply_exif_orientation, optimize_jpeg_bytes_losslessly, transform_raster};
     use crate::core::{
         Artifact, ArtifactMetadata, Fit, MediaType, MetadataKind, MetadataPolicy, OptimizeMode,
         Position, Rotation, TransformOptions, TransformRequest, TransformWarning, WatermarkInput,
@@ -2603,6 +2613,20 @@ mod tests {
         assert!(result.artifact.bytes.len() < input_len);
         assert_eq!(decoder.exif_metadata().expect("read jpeg exif"), None);
         assert_eq!(decoder.icc_profile().expect("read jpeg icc"), None);
+    }
+
+    #[test]
+    fn lossless_jpeg_optimization_rejects_truncated_scan_data() {
+        let mut bytes = jpeg_artifact_with_metadata(4, 2, Some(1), Some(b"demo-icc-profile")).bytes;
+        bytes.truncate(bytes.len() - 2);
+
+        let error = optimize_jpeg_bytes_losslessly(&bytes, MetadataPolicy::StripAll)
+            .expect_err("truncated jpeg should be rejected");
+
+        assert_eq!(
+            error,
+            TransformError::InvalidInput("input is not a valid JPEG bitstream".to_string())
+        );
     }
 
     #[test]
