@@ -291,6 +291,43 @@ truss convert input.png --output=-output.jpg
 truss convert ./-input.png -o out.jpg
 ```
 
+### WASM
+
+truss also ships a browser-oriented WASM adapter for local, client-side image processing. The generated package exposes a small JS-facing API over the same Rust core used by the CLI and HTTP server.
+
+The example below assumes your page is served from a directory that also contains `pkg/truss.js`. When using `./scripts/build-wasm-demo.sh`, that means `web/dist/index.html` importing `./pkg/truss.js`.
+
+```js
+import init, {
+  getCapabilitiesJson,
+  inspectImageJson,
+  transformImage,
+} from "./pkg/truss.js";
+
+await init();
+
+const inputBytes = new Uint8Array(await file.arrayBuffer());
+const capabilities = JSON.parse(getCapabilitiesJson());
+const inspected = JSON.parse(inspectImageJson(inputBytes, undefined));
+
+const result = transformImage(
+  inputBytes,
+  undefined,
+  JSON.stringify({
+    format: "jpeg",
+    width: 1200,
+    quality: 80,
+  }),
+);
+
+const response = JSON.parse(result.responseJson);
+const outputBlob = new Blob([result.bytes], {
+  type: response.artifact.mimeType,
+});
+```
+
+The GitHub Pages demo is intentionally built with `wasm,svg`. AVIF support and lossy WebP encoding are optional compile-time features, so browser builds can differ. Check capabilities at runtime and see [WASM Integration](docs/wasm.md) for build commands, import-path assumptions, API shapes, constraints, limits, and error handling.
+
 ### HTTP Server -- one curl to transform
 
 ```sh
@@ -330,6 +367,7 @@ See the [API Reference](docs/api-reference.md) for the full endpoint list and CD
 | [Signed URL Specification](docs/signed-url-spec.md) | Canonicalization rules, compatibility policy, and SDK guidance for public signed URLs |
 | [Deployment Guide](docs/deployment.md) | Docker, prebuilt binaries, cloud storage (S3/GCS/Azure), production setup |
 | [Development Guide](docs/development.md) | Building from source, testing, benchmarks, WASM demo, contributing |
+| [WASM Integration](docs/wasm.md) | Browser build flags, JS API contract, runtime capabilities, limits, and caveats |
 | [Prometheus Metrics](docs/prometheus.md) | Metrics reference, bucket boundaries, example PromQL queries |
 | [OpenAPI Spec](docs/openapi.yaml) | Machine-readable API specification |
 

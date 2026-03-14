@@ -561,6 +561,7 @@ mod tests {
     use super::*;
     use image::codecs::png::PngEncoder;
     use image::{ColorType, ImageEncoder, Rgba, RgbaImage};
+    const WASM_DOCS: &str = include_str!("../../docs/wasm.md");
 
     fn png_bytes(width: u32, height: u32) -> Vec<u8> {
         let image = RgbaImage::from_pixel(width, height, Rgba([10, 20, 30, 255]));
@@ -876,6 +877,22 @@ mod tests {
         let json = serde_json::to_string(&options).expect("serialize");
         let parsed: WasmWatermarkOptions = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(options, parsed);
+    }
+
+    #[test]
+    fn wasm_docs_reference_current_js_exports() {
+        for export_name in [
+            "getCapabilitiesJson",
+            "inspectImageJson",
+            "transformImage",
+            "transformImageWithWatermark",
+            "responseJson",
+        ] {
+            assert!(
+                WASM_DOCS.contains(export_name),
+                "docs/wasm.md should mention {export_name}"
+            );
+        }
     }
 
     #[test]
