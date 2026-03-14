@@ -295,6 +295,8 @@ truss convert ./-input.png -o out.jpg
 
 truss also ships a browser-oriented WASM adapter for local, client-side image processing. The generated package exposes a small JS-facing API over the same Rust core used by the CLI and HTTP server.
 
+The example below assumes your page is served from a directory that also contains `pkg/truss.js`. When using `./scripts/build-wasm-demo.sh`, that means `web/dist/index.html` importing `./pkg/truss.js`.
+
 ```js
 import init, {
   getCapabilitiesJson,
@@ -324,7 +326,7 @@ const outputBlob = new Blob([result.bytes], {
 });
 ```
 
-The GitHub Pages demo is intentionally built with `wasm,svg`. AVIF support and lossy WebP encoding are optional compile-time features, so browser builds can differ. Check capabilities at runtime and see [WASM Integration](docs/wasm.md) for build commands, API shapes, constraints, limits, and error handling.
+The GitHub Pages demo is intentionally built with `wasm,svg`. AVIF support and lossy WebP encoding are optional compile-time features, so browser builds can differ. Check capabilities at runtime and see [WASM Integration](docs/wasm.md) for build commands, import-path assumptions, API shapes, constraints, limits, and error handling.
 
 ### HTTP Server -- one curl to transform
 

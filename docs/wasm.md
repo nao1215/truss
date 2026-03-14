@@ -74,6 +74,8 @@ Feature flags relevant to browser builds:
 
 `truss` does not currently ship an npm package. The intended distribution model is the `wasm-bindgen` output pair: generated JS loader plus `.wasm` binary.
 
+The examples in this guide assume a static page that lives next to the generated `pkg/` directory, for example `web/dist/index.html` importing `./pkg/truss.js`. If your app serves the generated files from another asset root, adjust the import path and `wasm-bindgen --out-dir` accordingly.
+
 ## JavaScript Quick Start
 
 The generated package exports a default `init` function plus named helpers:
@@ -108,6 +110,8 @@ const outputBlob = new Blob([result.bytes], {
   type: response.artifact.mimeType,
 });
 ```
+
+This example assumes a main-thread browser page with `File`, `Blob`, and object URL APIs available. The low-level WASM exports themselves only require byte arrays and strings.
 
 If you already know the input format, `declaredMediaType` may be one of `jpeg`, `png`, `webp`, `avif`, `bmp`, `tiff`, or `svg`. Pass `undefined` if you want `truss` to rely on byte sniffing alone.
 
@@ -194,7 +198,7 @@ Watermark options:
 
 ```ts
 type WasmWatermarkOptions = {
-  position?: string;
+  position?: "center" | "top" | "right" | "bottom" | "left" | "top-left" | "top-right" | "bottom-left" | "bottom-right";
   opacity?: number;
   margin?: number;
 };
@@ -205,6 +209,11 @@ Defaults:
 - `position`: `bottom-right`
 - `opacity`: `50`
 - `margin`: `10`
+
+Validation:
+
+- `opacity` must be between `1` and `100`.
+- `margin` is a non-negative integer number of pixels.
 
 ## Transform Options Contract
 
@@ -233,9 +242,19 @@ type WasmTransformOptions = {
 
 Notes:
 
+- `width` and `height` must be greater than zero when provided.
+- `fit` and `position` require both `width` and `height`.
+- `format: "svg"` is only valid when the input is already SVG.
+- `quality` must be between `1` and `100`, and only applies to lossy output formats.
+- `quality` cannot be combined with `optimize: "lossless"`.
 - `targetQuality` accepts values such as `ssim:0.98` or `psnr:42`.
+- `targetQuality` requires `optimize: "auto"` or `optimize: "lossy"`.
+- `ssim:*` targets must be greater than `0.0` and at most `1.0`.
+- `psnr:*` targets must be greater than `0`.
 - `background` is `RRGGBB` or `RRGGBBAA`.
 - `crop` is `x,y,width,height`.
+- Crop width and height must be greater than zero.
+- `blur` and `sharpen` must each be between `0.1` and `100.0`.
 - `keepMetadata` and `preserveExif` are mutually exclusive.
 - `autoOrient` defaults to `true`.
 
@@ -272,6 +291,11 @@ Typical cases:
 | `encodeFailed` | Output encoding failed |
 | `capabilityMissing` | The build excluded a requested feature |
 | `limitExceeded` | Input, output, or watermark size exceeded a safety limit |
+
+Frontend note:
+
+- The documented `kind` values come from `truss` itself.
+- Your app may still see unrelated runtime exceptions from its own JS glue or browser APIs. The demo UI treats those as a separate fallback category.
 
 ## Browser-Specific Constraints And Caveats
 
@@ -310,8 +334,16 @@ Documented expectations today:
 - JavaScript must be enabled.
 - The runtime must support ES modules.
 - The runtime must support WebAssembly.
+- The examples in this repository assume a browser page with `File`, `Blob`, and `URL.createObjectURL`.
 
-If you need to support older or managed browser environments, validate them against your own generated artifact.
+Not currently documented or tested as first-class integration targets:
+
+- SSR environments
+- Node.js-only runtimes
+- Web Workers
+- Managed or legacy WebViews
+
+The raw exported functions accept `Uint8Array` and strings, so worker-style integrations are plausible, but this repository does not currently document or test them as a supported path.
 
 ## Packaging Notes
 
