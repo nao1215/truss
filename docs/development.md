@@ -53,6 +53,8 @@ truss completions powershell > truss.ps1
 
 The [browser demo](https://nao1215.github.io/truss/) is a static application built from the WASM target. Images are processed locally and never leave the browser.
 
+The Pages build intentionally enables `wasm,svg` only. If you need AVIF support or lossy WebP output in your own browser build, generate a custom artifact with `avif` and/or `webp-lossy`. See [WASM Integration](wasm.md) for the JS API contract, feature matrix, limits, and caveats.
+
 To build the demo locally, use [`scripts/build-wasm-demo.sh`](../scripts/build-wasm-demo.sh):
 
 ```sh
