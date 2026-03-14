@@ -41,7 +41,7 @@ fn serve_once_accepts_optimize_options_in_json_body() {
     let (addr, handle) = spawn_server(ServerConfig::new(storage_root, Some("secret".to_string())));
     let response = send_transform_request(
         addr,
-        r#"{"source":{"kind":"path","path":"/image.png"},"options":{"format":"png","optimize":"lossless"}}"#,
+        r#"{"source":{"kind":"path","path":"/image.png"},"options":{"format":"jpeg","optimize":"lossy","targetQuality":"ssim:0.98"}}"#,
         Some("secret"),
     );
 
@@ -54,8 +54,8 @@ fn serve_once_accepts_optimize_options_in_json_body() {
     let artifact = sniff_artifact(RawArtifact::new(body, None)).expect("sniff transformed output");
 
     assert!(header.starts_with("HTTP/1.1 200 OK"));
-    assert_eq!(content_type, "image/png");
-    assert_eq!(artifact.media_type, MediaType::Png);
+    assert_eq!(content_type, "image/jpeg");
+    assert_eq!(artifact.media_type, MediaType::Jpeg);
 }
 
 #[test]

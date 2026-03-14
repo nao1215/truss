@@ -282,6 +282,7 @@ async function loadFile(file) {
 
 async function runTransform() {
   clearMessages();
+  elements.sizeComparison.textContent = "No size comparison yet.";
 
   if (!state.inputBytes || !state.inputArtifact) {
     showError("Choose an image before running the transform.");
@@ -343,6 +344,7 @@ async function runTransform() {
     );
   } catch (error) {
     const payload = parseWasmError(error);
+    elements.sizeComparison.textContent = "No size comparison yet.";
     showError(payload.message);
     setStatus("Transform failed.");
   } finally {

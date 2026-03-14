@@ -701,6 +701,45 @@ mod tests {
         );
     }
 
+    #[test]
+    fn cache_key_differs_by_optimize_mode() {
+        let base = TransformOptions::default();
+        let optimized = TransformOptions {
+            optimize: crate::OptimizeMode::Auto,
+            ..TransformOptions::default()
+        };
+
+        assert_ne!(
+            compute_cache_key("img.png", &base, None, None),
+            compute_cache_key("img.png", &optimized, None, None)
+        );
+    }
+
+    #[test]
+    fn cache_key_differs_by_target_quality() {
+        let a = TransformOptions {
+            optimize: crate::OptimizeMode::Lossy,
+            target_quality: Some(crate::TargetQuality {
+                metric: crate::QualityMetric::Ssim,
+                value: 0.98,
+            }),
+            ..TransformOptions::default()
+        };
+        let b = TransformOptions {
+            optimize: crate::OptimizeMode::Lossy,
+            target_quality: Some(crate::TargetQuality {
+                metric: crate::QualityMetric::Ssim,
+                value: 0.99,
+            }),
+            ..TransformOptions::default()
+        };
+
+        assert_ne!(
+            compute_cache_key("img.png", &a, None, None),
+            compute_cache_key("img.png", &b, None, None)
+        );
+    }
+
     /// Helper to generate a deterministic 64-char hex key for testing.
     fn test_key(index: u8) -> String {
         let digest = Sha256::digest([index]);

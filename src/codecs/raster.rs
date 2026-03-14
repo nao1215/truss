@@ -256,12 +256,15 @@ pub fn transform_raster(request: TransformRequest) -> Result<TransformResult, Tr
 
     // Lossy WebP uses libwebp which cannot inject EXIF/ICC, so metadata is silently
     // dropped even when keep-metadata was requested. Warn the caller.
-    if normalized.options.format == MediaType::Webp
-        && encoded.used_lossy_webp
-        && retained_metadata.as_ref().is_some_and(|m| !m.is_empty())
-    {
-        warnings.push(TransformWarning::MetadataDropped(MetadataKind::Exif));
-        warnings.push(TransformWarning::MetadataDropped(MetadataKind::Icc));
+    if normalized.options.format == MediaType::Webp && encoded.used_lossy_webp {
+        if let Some(metadata) = retained_metadata.as_ref() {
+            if metadata.exif_metadata.is_some() {
+                warnings.push(TransformWarning::MetadataDropped(MetadataKind::Exif));
+            }
+            if metadata.icc_profile.is_some() {
+                warnings.push(TransformWarning::MetadataDropped(MetadataKind::Icc));
+            }
+        }
     }
 
     // Post-encode byte-level injection for XMP and IPTC metadata.
@@ -2093,8 +2096,8 @@ fn output_has_alpha(image: &DynamicImage, media_type: MediaType) -> bool {
 mod tests {
     use super::{apply_exif_orientation, transform_raster};
     use crate::core::{
-        Artifact, ArtifactMetadata, Fit, MediaType, MetadataPolicy, OptimizeMode, Position,
-        Rotation, TransformOptions, TransformRequest, WatermarkInput,
+        Artifact, ArtifactMetadata, Fit, MediaType, MetadataKind, MetadataPolicy, OptimizeMode,
+        Position, Rotation, TransformOptions, TransformRequest, TransformWarning, WatermarkInput,
     };
     use crate::{RawArtifact, Rgba8, TransformError, sniff_artifact};
     use image::codecs::jpeg::JpegDecoder;
@@ -2737,6 +2740,33 @@ mod tests {
             "low quality ({}) should be <= high quality ({})",
             low_q.artifact.bytes.len(),
             high_q.artifact.bytes.len()
+        );
+    }
+
+    #[cfg(feature = "webp-lossy")]
+    #[test]
+    fn transform_raster_lossy_webp_warns_only_for_metadata_that_existed() {
+        let artifact = webp_artifact_with_metadata(4, 2, None, Some(b"demo-icc-profile"));
+        let result = transform_raster(TransformRequest::new(
+            artifact,
+            TransformOptions {
+                format: Some(MediaType::Webp),
+                optimize: OptimizeMode::Lossy,
+                strip_metadata: false,
+                ..TransformOptions::default()
+            },
+        ))
+        .expect("lossy webp optimize should succeed");
+
+        assert!(
+            result
+                .warnings
+                .contains(&TransformWarning::MetadataDropped(MetadataKind::Icc))
+        );
+        assert!(
+            !result
+                .warnings
+                .contains(&TransformWarning::MetadataDropped(MetadataKind::Exif))
         );
     }
 

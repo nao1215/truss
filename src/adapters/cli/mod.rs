@@ -520,7 +520,7 @@ struct ClapOptimizeArgs {
     #[arg(long)]
     url: Option<String>,
     /// Output format (jpeg, png, webp, avif)
-    #[arg(long, value_parser = parse_media_type)]
+    #[arg(long, value_parser = parse_optimizable_media_type)]
     format: Option<MediaType>,
     /// Quality cap for lossy optimization (1-100)
     #[arg(long)]
@@ -707,6 +707,18 @@ fn parse_position(s: &str) -> Result<Position, String> {
 
 fn parse_media_type(s: &str) -> Result<MediaType, String> {
     MediaType::from_str(s)
+}
+
+fn parse_optimizable_media_type(s: &str) -> Result<MediaType, String> {
+    let media_type = parse_media_type(s)?;
+    if media_type.supports_optimization() {
+        Ok(media_type)
+    } else {
+        Err(format!(
+            "optimization is not supported for {} output",
+            media_type.as_name()
+        ))
+    }
 }
 
 fn parse_optimize_mode(s: &str) -> Result<OptimizeMode, String> {
@@ -978,14 +990,12 @@ where
             Ok(()) => EXIT_SUCCESS,
             Err(error) => write_error(stderr, error),
         },
-        Ok(Command::Convert(command)) => match convert::execute_convert(command, stdin, stdout) {
-            Ok(()) => EXIT_SUCCESS,
-            Err(error) => write_error(stderr, error),
-        },
-        Ok(Command::Optimize(command)) => match convert::execute_convert(command, stdin, stdout) {
-            Ok(()) => EXIT_SUCCESS,
-            Err(error) => write_error(stderr, error),
-        },
+        Ok(Command::Convert(command) | Command::Optimize(command)) => {
+            match convert::execute_convert(command, stdin, stdout) {
+                Ok(()) => EXIT_SUCCESS,
+                Err(error) => write_error(stderr, error),
+            }
+        }
         Ok(Command::Sign(command)) => match sign::execute_sign(command, stdout) {
             Ok(()) => EXIT_SUCCESS,
             Err(error) => write_error(stderr, error),
@@ -2338,6 +2348,54 @@ mod tests {
                 watermark_opacity: None,
                 watermark_margin: None,
             })
+        );
+    }
+
+    #[test]
+    fn parse_args_optimize_defaults_to_auto_mode() {
+        let command = parse_args(vec![
+            "truss".to_string(),
+            "optimize".to_string(),
+            "input.png".to_string(),
+            "-o".to_string(),
+            "output.webp".to_string(),
+        ])
+        .expect("parse optimize");
+
+        assert_eq!(
+            command,
+            Command::Optimize(ConvertCommand {
+                input: InputSource::Path(PathBuf::from("input.png")),
+                output: OutputTarget::Path(PathBuf::from("output.webp")),
+                options: TransformOptions {
+                    optimize: OptimizeMode::Auto,
+                    ..TransformOptions::default()
+                },
+                watermark_path: None,
+                watermark_position: None,
+                watermark_opacity: None,
+                watermark_margin: None,
+            })
+        );
+    }
+
+    #[test]
+    fn parse_args_rejects_non_optimizable_optimize_format() {
+        let error = parse_args(vec![
+            "truss".to_string(),
+            "optimize".to_string(),
+            "input.png".to_string(),
+            "-o".to_string(),
+            "output.svg".to_string(),
+            "--format".to_string(),
+            "svg".to_string(),
+        ])
+        .expect_err("svg optimize output should be rejected");
+
+        assert!(
+            error
+                .message
+                .contains("optimization is not supported for svg output")
         );
     }
 

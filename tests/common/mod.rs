@@ -66,6 +66,75 @@ pub fn spawn_server(config: ServerConfig) -> (SocketAddr, thread::JoinHandle<std
 
 pub type FixtureResponse = (String, Vec<(String, String)>, Vec<u8>);
 
+fn find_header_terminator(buf: &[u8]) -> Option<usize> {
+    buf.windows(4).position(|window| window == b"\r\n\r\n")
+}
+
+fn read_fixture_request(stream: &mut TcpStream) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let mut buffer = Vec::new();
+    let mut chunk = [0_u8; 1024];
+    let header_end = loop {
+        let read = match stream.read(&mut chunk) {
+            Ok(read) => read,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) && std::time::Instant::now() < deadline =>
+            {
+                thread::sleep(Duration::from_millis(10));
+                continue;
+            }
+            Err(error) => panic!("read fixture request headers: {error}"),
+        };
+        if read == 0 {
+            panic!("fixture request ended before headers were complete");
+        }
+        buffer.extend_from_slice(&chunk[..read]);
+        if let Some(index) = find_header_terminator(&buffer) {
+            break index;
+        }
+    };
+
+    let header_text = std::str::from_utf8(&buffer[..header_end]).expect("fixture request utf8");
+    let content_length = header_text
+        .split("\r\n")
+        .filter_map(|line| line.split_once(':'))
+        .find_map(|(name, value)| {
+            name.trim()
+                .eq_ignore_ascii_case("content-length")
+                .then_some(value.trim())
+        })
+        .map(|value| {
+            value
+                .parse::<usize>()
+                .expect("fixture content-length should be numeric")
+        })
+        .unwrap_or(0);
+
+    let mut body = buffer.len().saturating_sub(header_end + 4);
+    while body < content_length {
+        let read = match stream.read(&mut chunk) {
+            Ok(read) => read,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) && std::time::Instant::now() < deadline =>
+            {
+                thread::sleep(Duration::from_millis(10));
+                continue;
+            }
+            Err(error) => panic!("read fixture request body: {error}"),
+        };
+        if read == 0 {
+            panic!("fixture request body was truncated");
+        }
+        body += read;
+    }
+}
+
 pub fn spawn_fixture_server(responses: Vec<FixtureResponse>) -> (String, thread::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind fixture server");
     listener
@@ -100,8 +169,7 @@ pub fn spawn_fixture_server(responses: Vec<FixtureResponse>) -> (String, thread:
                 break;
             };
             served_any = true;
-            let mut request = [0_u8; 4096];
-            let _ = stream.read(&mut request);
+            read_fixture_request(&mut stream);
             let mut header = format!(
                 "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n",
                 body.len()

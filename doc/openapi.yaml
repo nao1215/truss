@@ -739,7 +739,7 @@ components:
         or `psnr:42`. Requires `optimize=auto` or `optimize=lossy`.
       schema:
         type: string
-        pattern: '^(ssim|psnr):.+$'
+        pattern: '^(ssim|psnr):[0-9]+(\.[0-9]+)?$'
       example: ssim:0.98
     Background:
       name: background
@@ -1024,7 +1024,7 @@ components:
           description: Optimization mode for the final encoding stage.
         targetQuality:
           type: string
-          pattern: '^(ssim|psnr):.+$'
+          pattern: '^(ssim|psnr):[0-9]+(\.[0-9]+)?$'
           description: >-
             Perceptual target used by lossy optimization, for example
             `ssim:0.98` or `psnr:42`. Requires `optimize=auto` or `optimize=lossy`.

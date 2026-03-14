@@ -761,6 +761,34 @@ mod tests {
     }
 
     #[test]
+    fn parse_wasm_options_rejects_invalid_optimize() {
+        let error = parse_wasm_options(WasmTransformOptions {
+            optimize: Some("fast".to_string()),
+            ..WasmTransformOptions::default()
+        })
+        .expect_err("invalid optimize should fail");
+
+        assert!(
+            matches!(error, TransformError::InvalidOptions(ref msg) if msg.contains("optimize")),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn parse_wasm_options_rejects_invalid_target_quality() {
+        let error = parse_wasm_options(WasmTransformOptions {
+            target_quality: Some("ssim:abc".to_string()),
+            ..WasmTransformOptions::default()
+        })
+        .expect_err("invalid targetQuality should fail");
+
+        assert!(
+            matches!(error, TransformError::InvalidOptions(ref msg) if msg.contains("targetQuality")),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
     fn test_transform_with_watermark_basic() {
         let response = transform_browser_artifact_with_watermark(
             png_bytes(16, 16),

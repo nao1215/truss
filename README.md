@@ -312,6 +312,7 @@ See the [API Reference](docs/api-reference.md) for the full endpoint list and CD
 | Command | Description |
 |---------|-------------|
 | `convert` | Convert and transform an image file (can be omitted; see above) |
+| `optimize` | Optimize an image with format-aware auto/lossless/lossy modes (`truss optimize photo.jpg -o photo-optimized.jpg --mode auto`) |
 | `inspect` | Show metadata (format, dimensions, alpha) of an image |
 | `serve` | Start the HTTP image-transform server (implied when server flags are used at the top level) |
 | `validate` | Validate server configuration without starting the server (useful in CI/CD) |

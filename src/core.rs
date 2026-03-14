@@ -2134,8 +2134,9 @@ fn read_u64_be(bytes: &[u8]) -> Result<u64, TransformError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Artifact, ArtifactMetadata, Fit, MediaType, MetadataPolicy, Position, RawArtifact, Rgba8,
-        Rotation, TransformError, TransformOptions, TransformRequest, sniff_artifact,
+        Artifact, ArtifactMetadata, Fit, MediaType, MetadataPolicy, OptimizeMode, Position,
+        QualityMetric, RawArtifact, Rgba8, Rotation, TargetQuality, TransformError,
+        TransformOptions, TransformRequest, sniff_artifact,
     };
     #[cfg(feature = "avif")]
     use image::codecs::avif::AvifEncoder;
@@ -2476,6 +2477,146 @@ mod tests {
                 "preserve_exif requires strip_metadata to be false".to_string()
             )
         );
+    }
+
+    #[test]
+    fn normalize_validates_optimize_and_target_quality_matrix() {
+        struct Case {
+            name: &'static str,
+            input_media_type: MediaType,
+            options: TransformOptions,
+            expected_error: Option<&'static str>,
+        }
+
+        let cases = [
+            Case {
+                name: "target quality requires optimize auto or lossy",
+                input_media_type: MediaType::Jpeg,
+                options: TransformOptions {
+                    format: Some(MediaType::Jpeg),
+                    target_quality: Some(TargetQuality {
+                        metric: QualityMetric::Ssim,
+                        value: 0.98,
+                    }),
+                    ..TransformOptions::default()
+                },
+                expected_error: Some("targetQuality requires optimize=auto or optimize=lossy"),
+            },
+            Case {
+                name: "target quality not allowed with lossless optimize",
+                input_media_type: MediaType::Webp,
+                options: TransformOptions {
+                    format: Some(MediaType::Webp),
+                    optimize: OptimizeMode::Lossless,
+                    target_quality: Some(TargetQuality {
+                        metric: QualityMetric::Ssim,
+                        value: 0.98,
+                    }),
+                    ..TransformOptions::default()
+                },
+                expected_error: Some("targetQuality requires optimize=auto or optimize=lossy"),
+            },
+            Case {
+                name: "target quality requires lossy optimizable output",
+                input_media_type: MediaType::Png,
+                options: TransformOptions {
+                    format: Some(MediaType::Png),
+                    optimize: OptimizeMode::Auto,
+                    target_quality: Some(TargetQuality {
+                        metric: QualityMetric::Ssim,
+                        value: 0.98,
+                    }),
+                    ..TransformOptions::default()
+                },
+                expected_error: Some("targetQuality requires jpeg, webp, or avif output"),
+            },
+            Case {
+                name: "quality cannot combine with lossless optimize",
+                input_media_type: MediaType::Jpeg,
+                options: TransformOptions {
+                    format: Some(MediaType::Jpeg),
+                    optimize: OptimizeMode::Lossless,
+                    quality: Some(80),
+                    ..TransformOptions::default()
+                },
+                expected_error: Some("quality cannot be combined with optimize=lossless"),
+            },
+            Case {
+                name: "lossy optimize requires lossy capable format",
+                input_media_type: MediaType::Png,
+                options: TransformOptions {
+                    format: Some(MediaType::Png),
+                    optimize: OptimizeMode::Lossy,
+                    ..TransformOptions::default()
+                },
+                expected_error: Some(
+                    "lossy optimization requires jpeg, webp, or avif output, got png",
+                ),
+            },
+            Case {
+                name: "optimize unsupported for svg output",
+                input_media_type: MediaType::Svg,
+                options: TransformOptions {
+                    format: Some(MediaType::Svg),
+                    optimize: OptimizeMode::Auto,
+                    ..TransformOptions::default()
+                },
+                expected_error: Some("optimization is not supported for svg output"),
+            },
+            Case {
+                name: "preserve exif unsupported for svg output",
+                input_media_type: MediaType::Svg,
+                options: TransformOptions {
+                    format: Some(MediaType::Svg),
+                    preserve_exif: true,
+                    strip_metadata: false,
+                    ..TransformOptions::default()
+                },
+                expected_error: Some("preserveExif is not supported with SVG output"),
+            },
+            Case {
+                name: "auto optimize accepts lossy target quality",
+                input_media_type: MediaType::Jpeg,
+                options: TransformOptions {
+                    format: Some(MediaType::Jpeg),
+                    optimize: OptimizeMode::Auto,
+                    target_quality: Some(TargetQuality {
+                        metric: QualityMetric::Ssim,
+                        value: 0.98,
+                    }),
+                    ..TransformOptions::default()
+                },
+                expected_error: None,
+            },
+            Case {
+                name: "lossless optimize accepts png without quality",
+                input_media_type: MediaType::Png,
+                options: TransformOptions {
+                    format: Some(MediaType::Png),
+                    optimize: OptimizeMode::Lossless,
+                    ..TransformOptions::default()
+                },
+                expected_error: None,
+            },
+        ];
+
+        for case in cases {
+            let result = case.options.normalize(case.input_media_type);
+            match case.expected_error {
+                Some(message) => {
+                    let error = result.expect_err(case.name);
+                    assert_eq!(
+                        error,
+                        TransformError::InvalidOptions(message.to_string()),
+                        "{}",
+                        case.name
+                    );
+                }
+                None => {
+                    result.expect(case.name);
+                }
+            }
+        }
     }
 
     #[test]
