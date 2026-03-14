@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.10.2
+
+### Fixed
+
+- Fix GitHub release workflow validation so the npm publish job no longer references `secrets` directly in an `if:` expression.
+- Align crate, package, OpenAPI, and changelog release metadata for the `v0.10.2` tag.
+
 ## v0.10.0
 
 ### Added
