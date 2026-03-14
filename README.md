@@ -8,13 +8,13 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-stable-orange)](https://www.rust-lang.org/)
 
-![logo](./doc/img/logo-small.png)
+![logo](./docs/img/logo-small.png)
 
-Resize, crop, convert, blur, sharpen, and watermark images from the CLI, an HTTP server, or the browser -- written in Rust with signed-URL authentication and SSRF protection built in.
+Resize, crop, convert, optimize, blur, sharpen, and watermark images from the CLI, an HTTP server, or the browser -- written in Rust with signed-URL authentication and SSRF protection built in.
 
 [Try the WASM demo in your browser](https://nao1215.github.io/truss/) -- no install, no upload, runs 100 % client-side.
 
-![WASM demo screenshot](./doc/img/wasm-sample.png)
+![WASM demo screenshot](./docs/img/wasm-sample.png)
 
 ## Why truss?
 
@@ -97,6 +97,9 @@ truss photo.png -o photo.jpg
 # Resize + convert
 truss photo.png -o thumb.webp --width 800 --format webp --quality 75
 
+# Optimize in place with the shared pipeline
+truss optimize photo.jpg -o photo-optimized.jpg --mode auto
+
 # Convert from a remote URL
 truss --url https://example.com/img.png -o out.avif --format avif
 
@@ -131,9 +134,11 @@ truss photo.jpg -o output.bin --format png
 
 Use `--quality <1-100>` to control lossy encoding. Lower values produce smaller files at the cost of visual quality.
 
+Use `--optimize auto|lossless|lossy` on `truss convert`, or the dedicated `truss optimize` subcommand, to reduce output size with format-aware encoding choices. Add `--target-quality ssim:0.98` or `--target-quality psnr:42` when you want lossy optimization to aim for a specific perceptual threshold.
+
 | Quality 90 (95 KB) | Original (80 KB) | Quality 30 (27 KB) |
 |---|---|---|
-| ![q90](./doc/img/sample-bee-q90.jpg) | ![original](./doc/img/sample-bee.jpg) | ![q30](./doc/img/sample-bee-q30.jpg) |
+| ![q90](./docs/img/sample-bee-q90.jpg) | ![original](./docs/img/sample-bee.jpg) | ![q30](./docs/img/sample-bee-q30.jpg) |
 
 #### Resize & fit modes
 
@@ -148,7 +153,7 @@ Specify `--width` and/or `--height` to resize. When both are given, `--fit` cont
 
 | Original (640 × 427) | contain 300 × 300 | cover 300 × 300 | fill 300 × 300 | inside 300 × 300 |
 |---|---|---|---|---|
-| ![original](./doc/img/sample-bee.jpg) | ![contain](./doc/img/sample-bee-contain.jpg) | ![cover](./doc/img/sample-bee-cover.jpg) | ![fill](./doc/img/sample-bee-fill.jpg) | ![inside](./doc/img/sample-bee-inside.jpg) |
+| ![original](./docs/img/sample-bee.jpg) | ![contain](./docs/img/sample-bee-contain.jpg) | ![cover](./docs/img/sample-bee-cover.jpg) | ![fill](./docs/img/sample-bee-fill.jpg) | ![inside](./docs/img/sample-bee-inside.jpg) |
 
 ```sh
 # contain -- fit inside the box, pad with gray background
@@ -173,7 +178,7 @@ When using `--fit cover`, `--position` controls which part of the image is kept:
 
 | `--position top-left` | `--position center` (default) | `--position bottom-right` |
 |---|---|---|
-| ![top-left](./doc/img/sample-bee-cover-topleft.jpg) | ![center](./doc/img/sample-bee-cover.jpg) | ![bottom-right](./doc/img/sample-bee-cover-bottomright.jpg) |
+| ![top-left](./docs/img/sample-bee-cover-topleft.jpg) | ![center](./docs/img/sample-bee-cover.jpg) | ![bottom-right](./docs/img/sample-bee-cover-bottomright.jpg) |
 
 Available positions: `center`, `top`, `right`, `bottom`, `left`, `top-left`, `top-right`, `bottom-left`, `bottom-right`.
 
@@ -196,13 +201,13 @@ truss photo.jpg -o out.png --width 300 --height 300 --fit contain --background F
 
 | Original | Crop (`--crop 100,50,400,300`) | Rotate (`--rotate 270`) | Background (`--background FF6B35FF`) |
 |---|---|---|---|
-| ![original](./doc/img/sample-bee.jpg) | ![cropped](./doc/img/sample-bee-cropped.jpg) | ![rotated](./doc/img/sample-bee-rotated.jpg) | ![background](./doc/img/sample-bee-bg.png) |
+| ![original](./docs/img/sample-bee.jpg) | ![cropped](./docs/img/sample-bee-cropped.jpg) | ![rotated](./docs/img/sample-bee-rotated.jpg) | ![background](./docs/img/sample-bee-bg.png) |
 
 #### Blur, sharpen & watermark
 
 | Original | Gaussian Blur (`--blur 5.0`) | Sharpen (`--sharpen 3.0`) | Watermark |
 |---|---|---|---|
-| ![original](./doc/img/sample-bee.jpg) | ![blurred](./doc/img/sample-bee-blurred.jpg) | ![sharpened](./doc/img/sample-bee-sharpened.jpg) | ![watermarked](./doc/img/sample-bee-watermarked.jpg) |
+| ![original](./docs/img/sample-bee.jpg) | ![blurred](./docs/img/sample-bee-blurred.jpg) | ![sharpened](./docs/img/sample-bee-sharpened.jpg) | ![watermarked](./docs/img/sample-bee-watermarked.jpg) |
 
 ```sh
 # Gaussian blur (sigma 0.1 - 100.0)
@@ -258,8 +263,8 @@ cat photo.png | truss - -o - --format jpeg > photo.jpg
 curl -s https://example.com/img.png | truss - -o - --format webp --width 800 | \
   aws s3 cp - s3://bucket/thumb.webp
 
-# Combine with other tools
-truss photo.jpg -o - --format png --width 400 | pngquant - -o optimized.png
+# Optimize after converting
+truss photo.jpg -o - --format webp --optimize auto | cat > optimized.webp
 ```
 
 #### SVG handling
@@ -307,6 +312,7 @@ See the [API Reference](docs/api-reference.md) for the full endpoint list and CD
 | Command | Description |
 |---------|-------------|
 | `convert` | Convert and transform an image file (can be omitted; see above) |
+| `optimize` | Optimize an image with format-aware auto/lossless/lossy modes (`truss optimize photo.jpg -o photo-optimized.jpg --mode auto`) |
 | `inspect` | Show metadata (format, dimensions, alpha) of an image |
 | `serve` | Start the HTTP image-transform server (implied when server flags are used at the top level) |
 | `validate` | Validate server configuration without starting the server (useful in CI/CD) |
@@ -323,8 +329,8 @@ See the [API Reference](docs/api-reference.md) for the full endpoint list and CD
 | [API Reference](docs/api-reference.md) | HTTP endpoints, request/response formats, CDN integration |
 | [Deployment Guide](docs/deployment.md) | Docker, prebuilt binaries, cloud storage (S3/GCS/Azure), production setup |
 | [Development Guide](docs/development.md) | Building from source, testing, benchmarks, WASM demo, contributing |
-| [Prometheus Metrics](doc/prometheus.md) | Metrics reference, bucket boundaries, example PromQL queries |
-| [OpenAPI Spec](doc/openapi.yaml) | Machine-readable API specification |
+| [Prometheus Metrics](docs/prometheus.md) | Metrics reference, bucket boundaries, example PromQL queries |
+| [OpenAPI Spec](docs/openapi.yaml) | Machine-readable API specification |
 
 ## Roadmap
 

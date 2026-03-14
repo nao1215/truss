@@ -46,6 +46,8 @@ truss is configured through environment variables and CLI flags. This page docum
 | `TRUSS_PRESETS_FILE` | Path to a JSON file defining named transform presets. The file is watched for changes every 5 seconds; valid updates are applied without restart, invalid files are ignored (previous presets are kept) |
 | `TRUSS_PRESETS` | Inline JSON defining named transform presets (ignored when `TRUSS_PRESETS_FILE` is set) |
 
+Preset objects accept the same fields as the HTTP `ImageTransformOptions` schema, including `optimize` and `targetQuality`.
+
 ## S3
 
 | Variable | Description |
@@ -86,7 +88,7 @@ The server exposes a `/metrics` endpoint in Prometheus text exposition format. B
 | `TRUSS_DISABLE_METRICS` | Disable the `/metrics` endpoint entirely (`true`/`1`; returns 404) |
 | `TRUSS_HEALTH_TOKEN` | Bearer token for `/health`; when set, requests must include `Authorization: Bearer <token>`. `/health/live` and `/health/ready` remain unauthenticated |
 
-For the full metrics reference, bucket boundaries, and example PromQL queries, see [../doc/prometheus.md](../doc/prometheus.md).
+For the full metrics reference, bucket boundaries, and example PromQL queries, see [prometheus.md](prometheus.md).
 
 ## Structured Access Logs
 

@@ -24,6 +24,9 @@ const elements = {
   qualityField: document.querySelector("#quality-field"),
   qualityRange: document.querySelector("#quality-range"),
   qualityNumber: document.querySelector("#quality-number"),
+  optimizeMode: document.querySelector("#optimize-mode"),
+  targetQualityField: document.querySelector("#target-quality-field"),
+  targetQuality: document.querySelector("#target-quality"),
   qualityNote: document.querySelector("#quality-note"),
   lockAspect: document.querySelector("#lock-aspect"),
   background: document.querySelector("#background"),
@@ -46,6 +49,7 @@ const elements = {
   transformButton: document.querySelector("#transform-button"),
   downloadLink: document.querySelector("#download-link"),
   downloadNote: document.querySelector("#download-note"),
+  sizeComparison: document.querySelector("#size-comparison"),
   statusLine: document.querySelector("#status-line"),
   warningList: document.querySelector("#warning-list"),
   errorBox: document.querySelector("#error-box"),
@@ -77,6 +81,7 @@ async function boot() {
   wireEvents();
   renderCapabilities();
   refreshFormatState();
+  refreshOptimizeState();
   refreshQualityState();
   refreshMetadataState();
   setStatus("WASM runtime is ready.");
@@ -114,8 +119,21 @@ function wireEvents() {
 
   elements.transformButton.addEventListener("click", runTransform);
   elements.format.addEventListener("change", () => {
+    refreshOptimizeState();
     refreshQualityState();
     refreshMetadataState();
+  });
+  elements.optimizeMode.addEventListener("change", () => {
+    refreshOptimizeState();
+    refreshQualityState();
+  });
+  elements.rotate.addEventListener("change", () => {
+    refreshOptimizeState();
+    refreshQualityState();
+  });
+  elements.crop.addEventListener("input", () => {
+    refreshOptimizeState();
+    refreshQualityState();
   });
 
   elements.width.addEventListener("input", () => {
@@ -153,6 +171,8 @@ function wireEvents() {
 
   elements.blurRange.addEventListener("input", () => {
     elements.blurNumber.value = elements.blurRange.value;
+    refreshOptimizeState();
+    refreshQualityState();
   });
   elements.blurNumber.addEventListener("input", () => {
     const v = parseFloat(elements.blurNumber.value);
@@ -161,10 +181,14 @@ function wireEvents() {
       elements.blurNumber.value = clamped;
       elements.blurRange.value = clamped;
     }
+    refreshOptimizeState();
+    refreshQualityState();
   });
 
   elements.sharpenRange.addEventListener("input", () => {
     elements.sharpenNumber.value = elements.sharpenRange.value;
+    refreshOptimizeState();
+    refreshQualityState();
   });
   elements.sharpenNumber.addEventListener("input", () => {
     const v = parseFloat(elements.sharpenNumber.value);
@@ -173,6 +197,8 @@ function wireEvents() {
       elements.sharpenNumber.value = clamped;
       elements.sharpenRange.value = clamped;
     }
+    refreshOptimizeState();
+    refreshQualityState();
   });
 
   elements.watermarkFile.addEventListener("change", async (event) => {
@@ -254,6 +280,7 @@ async function loadFile(file) {
   }
 
   refreshFormatState();
+  refreshOptimizeState();
   refreshMetadataState();
 
   if (response.artifact.mediaType === "svg" && !state.capabilities.svg) {
@@ -271,6 +298,7 @@ async function loadFile(file) {
 
 async function runTransform() {
   clearMessages();
+  elements.sizeComparison.textContent = "No size comparison yet.";
 
   if (!state.inputBytes || !state.inputArtifact) {
     showError("Choose an image before running the transform.");
@@ -323,6 +351,7 @@ async function runTransform() {
     renderArtifactMeta(elements.outputMeta, response.artifact);
     renderWarnings(response.warnings);
     updateDownloadLink(response, state.outputObjectUrl, hasWatermark);
+    renderSizeComparison(state.inputBytes.length, outputBytes.length);
     const suffix = hasWatermark ? " (with watermark)" : "";
     setStatus(
       response.warnings.length
@@ -331,6 +360,7 @@ async function runTransform() {
     );
   } catch (error) {
     const payload = parseWasmError(error);
+    elements.sizeComparison.textContent = "No size comparison yet.";
     showError(payload.message);
     setStatus("Transform failed.");
   } finally {
@@ -344,6 +374,7 @@ function collectOptions() {
   const outputFormat = elements.format.value;
   const boundedResize = width !== null && height !== null;
   const metadataMode = elements.metadataMode.value;
+  const optimize = currentOptimizeMode();
 
   return {
     format: outputFormat,
@@ -353,13 +384,15 @@ function collectOptions() {
     position: boundedResize ? emptyToNull(elements.position.value) : null,
     rotate: Number(elements.rotate.value),
     quality: qualityEnabled() ? Number(elements.qualityNumber.value) : null,
+    optimize,
+    targetQuality: targetQualityEnabled() ? emptyToNull(elements.targetQuality.value.trim()) : null,
     background: normalizeHex(elements.background.value),
     autoOrient: elements.autoOrient.checked,
     keepMetadata: metadataMode === "keep",
     preserveExif: metadataMode === "exif",
     crop: emptyToNull(elements.crop.value.trim()),
-    blur: (() => { const v = Math.max(0, parseFloat(elements.blurNumber.value) || 0); return v >= 0.1 ? v : null; })(),
-    sharpen: (() => { const v = Math.max(0, parseFloat(elements.sharpenNumber.value) || 0); return v >= 0.1 ? v : null; })(),
+    blur: parseSigma(elements.blurNumber.value),
+    sharpen: parseSigma(elements.sharpenNumber.value),
   };
 }
 
@@ -386,12 +419,16 @@ function refreshFormatState() {
     elements.format.value = "jpeg";
   }
 
+  refreshOptimizeState();
   refreshQualityState();
 }
 
 function refreshQualityState() {
   const format = elements.format.value;
-  const lossyWebpUnavailable = format === "webp" && !state.capabilities?.webpLossy;
+  const optimizeMode = currentOptimizeMode();
+  const lossyWebpUnavailable = wantsLossyOptimization()
+    && format === "webp"
+    && !state.capabilities?.webpLossy;
   const enabled = qualityEnabled();
 
   elements.qualityField.classList.toggle("is-unavailable", lossyWebpUnavailable);
@@ -402,11 +439,41 @@ function refreshQualityState() {
   if (lossyWebpUnavailable) {
     elements.qualityField.hidden = false;
     elements.qualityNote.textContent =
-      "This build keeps WebP output lossless. JPEG and AVIF still accept quality.";
+      "This build keeps WebP output lossless. JPEG and AVIF still support lossy optimization.";
+  } else if (optimizeMode === "lossless") {
+    elements.qualityNote.textContent =
+      "Lossless optimization ignores quality and keeps decoded pixels unchanged.";
+  } else if (optimizeMode === "auto" || optimizeMode === "lossy") {
+    elements.qualityNote.textContent =
+      "Quality acts as a cap while optimize searches for a smaller file that still meets the target.";
   } else {
     elements.qualityNote.textContent =
       "Quality applies to JPEG, AVIF, and WebP when lossy WebP is enabled.";
   }
+}
+
+function refreshOptimizeState() {
+  const supportsOptimization = formatSupportsOptimization(elements.format.value);
+  const autoOption = elements.optimizeMode.querySelector('option[value="auto"]');
+  const losslessOption = elements.optimizeMode.querySelector('option[value="lossless"]');
+  const lossyOption = elements.optimizeMode.querySelector('option[value="lossy"]');
+
+  if (autoOption) {
+    autoOption.disabled = !supportsOptimization;
+  }
+  if (losslessOption) {
+    losslessOption.disabled = !supportsLosslessOptimization(elements.format.value);
+  }
+  if (lossyOption) {
+    lossyOption.disabled = !supportsLossyOptimization(elements.format.value);
+  }
+
+  const normalizedMode = currentOptimizeMode();
+  if (elements.optimizeMode.value !== normalizedMode) {
+    elements.optimizeMode.value = normalizedMode;
+  }
+  elements.targetQualityField.hidden = !targetQualityEnabled();
+  elements.targetQuality.disabled = !targetQualityEnabled();
 }
 
 function refreshMetadataState() {
@@ -444,6 +511,10 @@ function renderCapabilities() {
       copy: state.capabilities.avif
         ? "Decode and encode available."
         : "Not available in this build.",
+    },
+    {
+      title: "Optimize",
+      copy: "Auto, lossless, and lossy modes use the shared Rust pipeline.",
     },
   ];
 
@@ -498,6 +569,14 @@ function updateDownloadLink(response, href, hasWatermark) {
   elements.downloadNote.textContent = filename;
 }
 
+function renderSizeComparison(inputBytes, outputBytes) {
+  const delta = outputBytes - inputBytes;
+  const percent = inputBytes > 0 ? (delta / inputBytes) * 100 : 0;
+  const trend = delta <= 0 ? "smaller" : "larger";
+  elements.sizeComparison.textContent =
+    `${formatBytes(inputBytes)} -> ${formatBytes(outputBytes)} (${percent.toFixed(1)}% ${trend})`;
+}
+
 const WATERMARK_ACCEPTED_TYPES = new Set([
   "image/png", "image/jpeg", "image/webp", "image/bmp", "image/x-ms-bmp", "image/x-windows-bmp",
 ]);
@@ -520,6 +599,8 @@ async function loadWatermark(file) {
   elements.watermarkPreviewRow.hidden = false;
   elements.errorBox.hidden = true;
   elements.errorBox.textContent = "";
+  refreshOptimizeState();
+  refreshQualityState();
   setStatus(`Watermark "${file.name}" loaded.`);
 }
 
@@ -529,6 +610,8 @@ function clearWatermark() {
   elements.watermarkPreviewRow.hidden = true;
   elements.watermarkPreview.removeAttribute("src");
   elements.watermarkFile.value = "";
+  refreshOptimizeState();
+  refreshQualityState();
   setStatus("Watermark removed.");
 }
 
@@ -545,6 +628,7 @@ function resetOutput() {
   elements.downloadLink.href = "#";
   elements.downloadLink.classList.add("disabled");
   elements.downloadNote.textContent = "Nothing has been transformed yet.";
+  elements.sizeComparison.textContent = "No size comparison yet.";
 }
 
 function clearMessages() {
@@ -646,13 +730,110 @@ function clampQuality(value) {
   return String(Math.min(100, Math.max(1, parsed)));
 }
 
-function qualityEnabled() {
-  const format = elements.format.value;
+function formatSupportsOptimization(format) {
+  return format === "jpeg" || format === "png" || format === "webp" || format === "avif";
+}
+
+function supportsLossyOptimization(format) {
   return (
     format === "jpeg" ||
     (format === "avif" && state.capabilities?.avif) ||
     (format === "webp" && state.capabilities?.webpLossy)
   );
+}
+
+function hasJpegLosslessTransforms() {
+  if (!state.inputArtifact) {
+    return false;
+  }
+
+  const width = parseInteger(elements.width.value);
+  const height = parseInteger(elements.height.value);
+  return (
+    (width !== null && state.inputArtifact.width !== null && width !== state.inputArtifact.width) ||
+    (height !== null && state.inputArtifact.height !== null && height !== state.inputArtifact.height) ||
+    Number(elements.rotate.value) !== 0 ||
+    emptyToNull(elements.crop.value.trim()) !== null ||
+    parseSigma(elements.blurNumber.value) !== null ||
+    parseSigma(elements.sharpenNumber.value) !== null ||
+    state.watermarkBytes !== null
+  );
+}
+
+function supportsLosslessOptimization(format) {
+  if (format === "png" || format === "webp") {
+    return true;
+  }
+  if (format === "jpeg") {
+    return !hasJpegLosslessTransforms();
+  }
+  return false;
+}
+
+function normalizeOptimizeMode(mode) {
+  const format = elements.format.value;
+  if (!formatSupportsOptimization(format)) {
+    return "none";
+  }
+
+  if (mode === "lossy") {
+    return supportsLossyOptimization(format) ? "lossy" : "auto";
+  }
+  if (mode === "lossless") {
+    return supportsLosslessOptimization(format) ? "lossless" : "auto";
+  }
+  if (mode === "auto") {
+    return "auto";
+  }
+  return "none";
+}
+
+function currentOptimizeMode() {
+  return normalizeOptimizeMode(elements.optimizeMode.value);
+}
+
+function parseSigma(value) {
+  const parsed = Math.max(0, parseFloat(value) || 0);
+  return parsed >= 0.1 ? parsed : null;
+}
+
+function qualityEnabled() {
+  const format = elements.format.value;
+  const optimizeMode = currentOptimizeMode();
+  return (
+    optimizeMode !== "lossless" &&
+    (
+      format === "jpeg" ||
+      (format === "avif" && state.capabilities?.avif) ||
+      (format === "webp" && state.capabilities?.webpLossy)
+    )
+  );
+}
+
+function wantsLossyOptimization() {
+  const mode = currentOptimizeMode();
+  if (mode === "lossy") {
+    return true;
+  }
+  if (mode !== "auto") {
+    return false;
+  }
+  const format = elements.format.value;
+  return format === "jpeg" || format === "webp" || format === "avif";
+}
+
+function targetQualityEnabled() {
+  return wantsLossyOptimization() && qualityEnabled();
+}
+
+function formatBytes(bytes) {
+  if (bytes < 1024) {
+    return `${bytes} B`;
+  }
+  if (bytes < 1024 * 1024) {
+    return `${(bytes / 1024).toFixed(1)} KB`;
+  }
+  return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
 }
 
 function parseWasmError(error) {

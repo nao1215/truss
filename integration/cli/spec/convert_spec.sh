@@ -53,6 +53,14 @@ Describe "Convert command"
     End
   End
 
+  Describe "Optimization"
+    It "optimizes PNG losslessly via the optimize subcommand"
+      When run command truss optimize "$SAMPLE_PNG" -o "${WORK_DIR}/optimized.png" --mode lossless
+      The status should eq 0
+      The path "${WORK_DIR}/optimized.png" should be file
+    End
+  End
+
   Describe "Implicit subcommand"
     It "converts without the 'convert' keyword (truss <INPUT> -o <OUTPUT>)"
       When run command truss "$SAMPLE_PNG" -o "${WORK_DIR}/implicit.jpg"

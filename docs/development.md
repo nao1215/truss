@@ -66,7 +66,7 @@ The build output is written to `web/dist/`.
 
 ## Benchmark
 
-Measured with `doc/img/logo.png` (1536 x 1024 PNG, 1.6 MB) on AMD Ryzen 7 5800U. Each operation was run 10 times; the table shows min / avg / max wall-clock time.
+Measured with `docs/img/logo.png` (1536 x 1024 PNG, 1.6 MB) on AMD Ryzen 7 5800U. Each operation was run 10 times; the table shows min / avg / max wall-clock time.
 
 ### Conversion Speed
 

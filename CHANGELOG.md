@@ -184,7 +184,7 @@
 ### Added
 
 - Prometheus `/metrics` endpoint with histograms (HTTP request duration, transform duration, storage duration) and error counters.
-- Prometheus metrics documentation (`doc/prometheus.md`).
+- Prometheus metrics documentation (`docs/prometheus.md`).
 - Dedicated 304 status counter for cache-validation traffic tracking.
 
 ### Changed

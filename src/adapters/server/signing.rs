@@ -160,7 +160,7 @@ pub fn bind_addr() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::TransformOptions;
+    use crate::{OptimizeMode, TargetQuality, TransformOptions};
 
     #[test]
     fn sign_public_url_rejects_invalid_base_url() {
@@ -286,5 +286,31 @@ mod tests {
         assert!(url.contains("watermarkPosition=southeast"));
         assert!(url.contains("watermarkOpacity=80"));
         assert!(url.contains("watermarkMargin=10"));
+    }
+
+    #[test]
+    fn sign_public_url_includes_optimize_params() {
+        let url = sign_public_url(
+            "https://cdn.example.com",
+            SignedUrlSource::Path {
+                path: "/img.png".to_string(),
+                version: None,
+            },
+            &TransformOptions {
+                format: Some(crate::MediaType::Jpeg),
+                optimize: OptimizeMode::Lossy,
+                target_quality: Some("ssim:0.98".parse::<TargetQuality>().unwrap()),
+                ..TransformOptions::default()
+            },
+            "key",
+            "secret",
+            0,
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert!(url.contains("optimize=lossy"));
+        assert!(url.contains("targetQuality=ssim%3A0.98"));
     }
 }

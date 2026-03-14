@@ -4,9 +4,10 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use super::{
-    ClapConvertArgs, CliError, Command, ConvertCommand, EXIT_INPUT, EXIT_IO, EXIT_RUNTIME,
-    EXIT_USAGE, HelpTopic, InputSource, OutputTarget, TransformFields, convert_error,
-    convert_usage, map_transform_error, read_input_bytes, runtime_error, validate_url,
+    ClapConvertArgs, ClapOptimizeArgs, CliError, Command, ConvertCommand, EXIT_INPUT, EXIT_IO,
+    EXIT_RUNTIME, EXIT_USAGE, HelpTopic, InputSource, OutputTarget, TransformFields, convert_error,
+    convert_usage, map_transform_error, optimize_error, optimize_usage, read_input_bytes,
+    runtime_error, validate_url,
 };
 
 // ---------------------------------------------------------------------------
@@ -75,6 +76,8 @@ pub(super) fn convert_from_clap(args: ClapConvertArgs) -> Result<Command, CliErr
         position: args.position,
         format: args.format,
         quality: args.quality,
+        optimize: args.optimize,
+        target_quality: args.target_quality,
         background: args.background,
         rotate: args.rotate,
         auto_orient: args.auto_orient,
@@ -97,6 +100,78 @@ pub(super) fn convert_from_clap(args: ClapConvertArgs) -> Result<Command, CliErr
         watermark_position,
         watermark_opacity,
         watermark_margin,
+    }))
+}
+
+pub(super) fn optimize_from_clap(args: ClapOptimizeArgs) -> Result<Command, CliError> {
+    if args.help {
+        return Ok(Command::Help(HelpTopic::Optimize));
+    }
+
+    let input = match (&args.url, &args.input) {
+        (Some(url), None) => {
+            validate_url(url, "--url")?;
+            InputSource::Url(url.clone())
+        }
+        (None, Some(value)) if value == "-" => InputSource::Stdin,
+        (None, Some(value)) => InputSource::Path(PathBuf::from(value)),
+        (None, None) => {
+            return Err(CliError {
+                exit_code: EXIT_USAGE,
+                message: "'optimize' requires an input file, URL, or -".to_string(),
+                usage: Some(optimize_usage().to_string()),
+                hint: Some("try 'truss optimize input.jpg -o output.jpg'".to_string()),
+            });
+        }
+        (Some(_), Some(_)) => {
+            return Err(optimize_error("'optimize' accepts exactly one input"));
+        }
+    };
+
+    let output = match args.output {
+        Some(ref value) if value == "-" => OutputTarget::Stdout,
+        Some(ref value) => OutputTarget::Path(PathBuf::from(value)),
+        None => {
+            return Err(CliError {
+                exit_code: EXIT_USAGE,
+                message: "'optimize' requires -o <output>".to_string(),
+                usage: Some(optimize_usage().to_string()),
+                hint: Some("try 'truss optimize input.jpg -o output.jpg'".to_string()),
+            });
+        }
+    };
+
+    let options = TransformFields {
+        width: None,
+        height: None,
+        fit: None,
+        position: None,
+        format: args.format,
+        quality: args.quality,
+        optimize: Some(args.mode.unwrap_or(crate::OptimizeMode::Auto)),
+        target_quality: args.target_quality,
+        background: None,
+        rotate: None,
+        auto_orient: args.auto_orient,
+        no_auto_orient: args.no_auto_orient,
+        strip_metadata: args.strip_metadata,
+        keep_metadata: args.keep_metadata,
+        preserve_exif: args.preserve_exif,
+        crop: None,
+        blur: None,
+        sharpen: None,
+    }
+    .into_options()
+    .map_err(map_transform_error)?;
+
+    Ok(Command::Optimize(ConvertCommand {
+        input,
+        output,
+        options,
+        watermark_path: None,
+        watermark_position: None,
+        watermark_opacity: None,
+        watermark_margin: None,
     }))
 }
 

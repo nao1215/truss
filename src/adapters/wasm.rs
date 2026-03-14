@@ -5,8 +5,9 @@
 //! reusing the shared transformation pipeline.
 
 use crate::{
-    Artifact, CropRegion, MediaType, Position, RawArtifact, Rgba8, Rotation, TransformError,
-    TransformOptions, TransformRequest, TransformResult, WatermarkInput, sniff_artifact, transform,
+    Artifact, CropRegion, MediaType, OptimizeMode, Position, RawArtifact, Rgba8, Rotation,
+    TargetQuality, TransformError, TransformOptions, TransformRequest, TransformResult,
+    WatermarkInput, sniff_artifact, transform,
 };
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
@@ -33,6 +34,10 @@ pub struct WasmTransformOptions {
     pub format: Option<String>,
     /// The requested lossy quality from 1 to 100.
     pub quality: Option<u8>,
+    /// Optimization mode (`none`, `auto`, `lossless`, or `lossy`).
+    pub optimize: Option<String>,
+    /// Perceptual target for lossy optimization (`ssim:0.98`, `psnr:42`).
+    pub target_quality: Option<String>,
     /// Optional background color as `RRGGBB` or `RRGGBBAA`.
     pub background: Option<String>,
     /// Optional clockwise rotation in degrees. Supported values are `0`, `90`, `180`, `270`.
@@ -193,6 +198,25 @@ fn parse_wasm_options(options: WasmTransformOptions) -> Result<TransformOptions,
         .as_deref()
         .map(|value| parse_media_type(value, "format"))
         .transpose()?;
+    let optimize = options
+        .optimize
+        .as_deref()
+        .map(|value| {
+            OptimizeMode::from_str(value).map_err(|reason| {
+                TransformError::InvalidOptions(format!("optimize is invalid: {reason}"))
+            })
+        })
+        .transpose()?
+        .unwrap_or_default();
+    let target_quality = options
+        .target_quality
+        .as_deref()
+        .map(|value| {
+            TargetQuality::from_str(value).map_err(|reason| {
+                TransformError::InvalidOptions(format!("targetQuality is invalid: {reason}"))
+            })
+        })
+        .transpose()?;
     let background = options
         .background
         .as_deref()
@@ -220,6 +244,8 @@ fn parse_wasm_options(options: WasmTransformOptions) -> Result<TransformOptions,
         position,
         format,
         quality: options.quality,
+        optimize,
+        target_quality,
         background,
         rotate: parse_rotation(options.rotate)?,
         auto_orient: options.auto_orient.unwrap_or(true),
@@ -710,6 +736,54 @@ mod tests {
 
         assert!(
             matches!(error, TransformError::InvalidOptions(ref msg) if msg.contains("crop")),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn parse_wasm_options_accepts_optimize_and_target_quality() {
+        let options = parse_wasm_options(WasmTransformOptions {
+            format: Some("jpeg".to_string()),
+            optimize: Some("lossy".to_string()),
+            target_quality: Some("ssim:0.98".to_string()),
+            ..WasmTransformOptions::default()
+        })
+        .expect("optimize fields should parse");
+
+        assert_eq!(options.optimize, OptimizeMode::Lossy);
+        assert_eq!(
+            options
+                .target_quality
+                .expect("target quality should exist")
+                .to_string(),
+            "ssim:0.98"
+        );
+    }
+
+    #[test]
+    fn parse_wasm_options_rejects_invalid_optimize() {
+        let error = parse_wasm_options(WasmTransformOptions {
+            optimize: Some("fast".to_string()),
+            ..WasmTransformOptions::default()
+        })
+        .expect_err("invalid optimize should fail");
+
+        assert!(
+            matches!(error, TransformError::InvalidOptions(ref msg) if msg.contains("optimize")),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn parse_wasm_options_rejects_invalid_target_quality() {
+        let error = parse_wasm_options(WasmTransformOptions {
+            target_quality: Some("ssim:abc".to_string()),
+            ..WasmTransformOptions::default()
+        })
+        .expect_err("invalid targetQuality should fail");
+
+        assert!(
+            matches!(error, TransformError::InvalidOptions(ref msg) if msg.contains("targetQuality")),
             "unexpected error: {error}"
         );
     }

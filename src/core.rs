@@ -8,7 +8,7 @@ use std::time::Duration;
 /// Maximum number of pixels in the output image (width × height).
 ///
 /// This limit prevents resize operations from producing excessively large
-/// output buffers. The value matches the API specification in `doc/openapi.yaml`.
+/// output buffers. The value matches the API specification in `docs/openapi.yaml`.
 ///
 /// ```
 /// assert_eq!(truss::MAX_OUTPUT_PIXELS, 67_108_864);
@@ -18,7 +18,7 @@ pub const MAX_OUTPUT_PIXELS: u64 = 67_108_864;
 /// Maximum number of decoded pixels allowed for an input image (width × height).
 ///
 /// This limit prevents decompression bombs from consuming unbounded memory.
-/// The value matches the API specification in `doc/openapi.yaml`.
+/// The value matches the API specification in `docs/openapi.yaml`.
 ///
 /// ```
 /// assert_eq!(truss::MAX_DECODED_PIXELS, 100_000_000);
@@ -268,6 +268,18 @@ impl MediaType {
         matches!(self, Self::Jpeg | Self::Webp | Self::Avif)
     }
 
+    /// Returns `true` if the format participates in the optimization pipeline.
+    #[must_use]
+    pub const fn supports_optimization(self) -> bool {
+        matches!(self, Self::Jpeg | Self::Png | Self::Webp | Self::Avif)
+    }
+
+    /// Returns `true` if the format supports lossy optimization controls.
+    #[must_use]
+    pub const fn supports_lossy_optimization(self) -> bool {
+        matches!(self, Self::Jpeg | Self::Webp | Self::Avif)
+    }
+
     /// Returns `true` if this is a raster (bitmap) format, `false` for vector formats.
     #[must_use]
     pub const fn is_raster(self) -> bool {
@@ -477,6 +489,135 @@ impl fmt::Display for CropRegion {
     }
 }
 
+/// Optimization policy applied near the final encoding stage.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum OptimizeMode {
+    /// Keep the current encoding behavior with no extra optimization work.
+    #[default]
+    None,
+    /// Pick the most appropriate optimization strategy for the target format.
+    Auto,
+    /// Only use lossless size-reduction techniques.
+    Lossless,
+    /// Allow controlled quality loss for smaller output files.
+    Lossy,
+}
+
+impl OptimizeMode {
+    /// Returns the canonical option name used by the API, CLI, and WASM adapter.
+    #[must_use]
+    pub const fn as_name(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Auto => "auto",
+            Self::Lossless => "lossless",
+            Self::Lossy => "lossy",
+        }
+    }
+}
+
+impl fmt::Display for OptimizeMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_name())
+    }
+}
+
+impl FromStr for OptimizeMode {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "none" => Ok(Self::None),
+            "auto" => Ok(Self::Auto),
+            "lossless" => Ok(Self::Lossless),
+            "lossy" => Ok(Self::Lossy),
+            _ => Err(format!("unsupported optimize mode `{value}`")),
+        }
+    }
+}
+
+/// Perceptual metric used for lossy optimization quality targeting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QualityMetric {
+    /// Structural similarity index.
+    Ssim,
+    /// Peak signal-to-noise ratio.
+    Psnr,
+}
+
+impl QualityMetric {
+    /// Returns the canonical metric name used in textual forms such as `ssim:0.98`.
+    #[must_use]
+    pub const fn as_name(self) -> &'static str {
+        match self {
+            Self::Ssim => "ssim",
+            Self::Psnr => "psnr",
+        }
+    }
+}
+
+impl fmt::Display for QualityMetric {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_name())
+    }
+}
+
+impl FromStr for QualityMetric {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "ssim" => Ok(Self::Ssim),
+            "psnr" => Ok(Self::Psnr),
+            _ => Err(format!("unsupported target quality metric `{value}`")),
+        }
+    }
+}
+
+/// A perceptual quality target used when binary-searching a lossy encode quality.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TargetQuality {
+    /// The requested quality metric.
+    pub metric: QualityMetric,
+    /// The threshold that the encoded output should meet or exceed.
+    pub value: f32,
+}
+
+impl fmt::Display for TargetQuality {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}:{}", self.metric.as_name(), self.value)
+    }
+}
+
+impl FromStr for TargetQuality {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let (metric, raw_value) = value.split_once(':').ok_or_else(|| {
+            "targetQuality must be <metric>:<value>, for example ssim:0.98".to_string()
+        })?;
+        let metric = QualityMetric::from_str(&metric.to_ascii_lowercase())?;
+        let value = raw_value
+            .parse::<f32>()
+            .map_err(|_| format!("target quality value must be a number, got `{raw_value}`"))?;
+
+        Ok(Self { metric, value })
+    }
+}
+
+pub(crate) fn default_lossy_target_quality(media_type: MediaType) -> Option<TargetQuality> {
+    let value = match media_type {
+        MediaType::Jpeg | MediaType::Webp => 0.985,
+        MediaType::Avif => 0.99,
+        _ => return None,
+    };
+
+    Some(TargetQuality {
+        metric: QualityMetric::Ssim,
+        value,
+    })
+}
+
 /// Raw transform options before defaulting and validation has completed.
 ///
 /// Use `TransformOptions::default()` as a starting point and override the fields
@@ -515,6 +656,10 @@ pub struct TransformOptions {
     pub format: Option<MediaType>,
     /// The requested lossy quality.
     pub quality: Option<u8>,
+    /// The requested optimization mode.
+    pub optimize: OptimizeMode,
+    /// Optional perceptual target used by lossy optimization.
+    pub target_quality: Option<TargetQuality>,
     /// The requested background color.
     pub background: Option<Rgba8>,
     /// The requested extra rotation.
@@ -560,6 +705,8 @@ impl Default for TransformOptions {
             position: None,
             format: None,
             quality: None,
+            optimize: OptimizeMode::None,
+            target_quality: None,
             background: None,
             rotate: Rotation::Deg0,
             auto_orient: true,
@@ -582,6 +729,7 @@ impl TransformOptions {
         validate_dimension("width", self.width)?;
         validate_dimension("height", self.height)?;
         validate_quality(self.quality)?;
+        validate_target_quality(self.target_quality)?;
         validate_blur(self.blur)?;
         validate_sharpen(self.sharpen)?;
         if let Some(crop) = self.crop
@@ -613,6 +761,21 @@ impl TransformOptions {
         }
 
         let format = self.format.unwrap_or(input_media_type);
+        let optimize = self.optimize;
+
+        if optimize != OptimizeMode::None && !format.supports_optimization() {
+            return Err(TransformError::InvalidOptions(format!(
+                "optimization is not supported for {} output",
+                format.as_name()
+            )));
+        }
+
+        if optimize == OptimizeMode::Lossy && !format.supports_lossy_optimization() {
+            return Err(TransformError::InvalidOptions(format!(
+                "lossy optimization requires jpeg, webp, or avif output, got {}",
+                format.as_name()
+            )));
+        }
 
         if self.preserve_exif && format == MediaType::Svg {
             return Err(TransformError::InvalidOptions(
@@ -623,6 +786,26 @@ impl TransformOptions {
         if self.quality.is_some() && !format.is_lossy() {
             return Err(TransformError::InvalidOptions(
                 "quality requires a lossy output format".to_string(),
+            ));
+        }
+
+        if self.quality.is_some() && optimize == OptimizeMode::Lossless {
+            return Err(TransformError::InvalidOptions(
+                "quality cannot be combined with optimize=lossless".to_string(),
+            ));
+        }
+
+        if self.target_quality.is_some()
+            && matches!(optimize, OptimizeMode::None | OptimizeMode::Lossless)
+        {
+            return Err(TransformError::InvalidOptions(
+                "targetQuality requires optimize=auto or optimize=lossy".to_string(),
+            ));
+        }
+
+        if self.target_quality.is_some() && !format.supports_lossy_optimization() {
+            return Err(TransformError::InvalidOptions(
+                "targetQuality requires jpeg, webp, or avif output".to_string(),
             ));
         }
 
@@ -639,10 +822,16 @@ impl TransformOptions {
             position: self.position.unwrap_or(Position::Center),
             format,
             quality: self.quality,
+            optimize,
+            target_quality: self.target_quality,
             background: self.background,
             rotate: self.rotate,
             auto_orient: self.auto_orient,
-            metadata_policy: normalize_metadata_policy(self.strip_metadata, self.preserve_exif),
+            metadata_policy: normalize_metadata_policy(
+                self.strip_metadata,
+                self.preserve_exif,
+                optimize,
+            ),
             blur: self.blur,
             sharpen: self.sharpen,
             crop: self.crop,
@@ -666,6 +855,10 @@ pub struct NormalizedTransformOptions {
     pub format: MediaType,
     /// The requested lossy quality.
     pub quality: Option<u8>,
+    /// The normalized optimization mode.
+    pub optimize: OptimizeMode,
+    /// Optional perceptual target used by lossy optimization.
+    pub target_quality: Option<TargetQuality>,
     /// The requested background color.
     pub background: Option<Rgba8>,
     /// The requested extra rotation.
@@ -941,6 +1134,8 @@ pub enum MetadataPolicy {
     StripAll,
     /// Keep metadata unchanged when possible.
     KeepAll,
+    /// Preserve ICC profiles while stripping EXIF and other metadata.
+    PreserveIcc,
     /// Preserve EXIF while allowing other metadata policies later.
     PreserveExif,
 }
@@ -1242,6 +1437,30 @@ fn validate_quality(value: Option<u8>) -> Result<(), TransformError> {
     Ok(())
 }
 
+fn validate_target_quality(value: Option<TargetQuality>) -> Result<(), TransformError> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+
+    if !value.value.is_finite() {
+        return Err(TransformError::InvalidOptions(
+            "targetQuality must be finite".to_string(),
+        ));
+    }
+
+    match value.metric {
+        QualityMetric::Ssim if !(0.0..=1.0).contains(&value.value) || value.value == 0.0 => {
+            Err(TransformError::InvalidOptions(
+                "ssim targetQuality must be greater than 0.0 and at most 1.0".to_string(),
+            ))
+        }
+        QualityMetric::Psnr if value.value <= 0.0 => Err(TransformError::InvalidOptions(
+            "psnr targetQuality must be greater than 0".to_string(),
+        )),
+        _ => Ok(()),
+    }
+}
+
 fn validate_blur(value: Option<f32>) -> Result<(), TransformError> {
     if let Some(sigma) = value
         && !(0.1..=100.0).contains(&sigma)
@@ -1282,9 +1501,15 @@ fn validate_watermark(wm: &WatermarkInput) -> Result<(), TransformError> {
     Ok(())
 }
 
-fn normalize_metadata_policy(strip_metadata: bool, preserve_exif: bool) -> MetadataPolicy {
+fn normalize_metadata_policy(
+    strip_metadata: bool,
+    preserve_exif: bool,
+    optimize: OptimizeMode,
+) -> MetadataPolicy {
     if preserve_exif {
         MetadataPolicy::PreserveExif
+    } else if strip_metadata && optimize == OptimizeMode::Lossy {
+        MetadataPolicy::PreserveIcc
     } else if strip_metadata {
         MetadataPolicy::StripAll
     } else {
@@ -1934,8 +2159,9 @@ fn read_u64_be(bytes: &[u8]) -> Result<u64, TransformError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Artifact, ArtifactMetadata, Fit, MediaType, MetadataPolicy, Position, RawArtifact, Rgba8,
-        Rotation, TransformError, TransformOptions, TransformRequest, sniff_artifact,
+        Artifact, ArtifactMetadata, Fit, MediaType, MetadataPolicy, OptimizeMode, Position,
+        QualityMetric, RawArtifact, Rgba8, Rotation, TargetQuality, TransformError,
+        TransformOptions, TransformRequest, sniff_artifact,
     };
     #[cfg(feature = "avif")]
     use image::codecs::avif::AvifEncoder;
@@ -2156,6 +2382,19 @@ mod tests {
     }
 
     #[test]
+    fn normalize_lossy_optimize_preserves_icc_by_default() {
+        let normalized = TransformOptions {
+            optimize: OptimizeMode::Lossy,
+            format: Some(MediaType::Jpeg),
+            ..TransformOptions::default()
+        }
+        .normalize(MediaType::Jpeg)
+        .expect("normalize lossy optimize metadata policy");
+
+        assert_eq!(normalized.metadata_policy, MetadataPolicy::PreserveIcc);
+    }
+
+    #[test]
     fn normalize_keeps_fit_none_when_resize_is_not_bounded() {
         let normalized = TransformOptions {
             width: Some(500),
@@ -2276,6 +2515,146 @@ mod tests {
                 "preserve_exif requires strip_metadata to be false".to_string()
             )
         );
+    }
+
+    #[test]
+    fn normalize_validates_optimize_and_target_quality_matrix() {
+        struct Case {
+            name: &'static str,
+            input_media_type: MediaType,
+            options: TransformOptions,
+            expected_error: Option<&'static str>,
+        }
+
+        let cases = [
+            Case {
+                name: "target quality requires optimize auto or lossy",
+                input_media_type: MediaType::Jpeg,
+                options: TransformOptions {
+                    format: Some(MediaType::Jpeg),
+                    target_quality: Some(TargetQuality {
+                        metric: QualityMetric::Ssim,
+                        value: 0.98,
+                    }),
+                    ..TransformOptions::default()
+                },
+                expected_error: Some("targetQuality requires optimize=auto or optimize=lossy"),
+            },
+            Case {
+                name: "target quality not allowed with lossless optimize",
+                input_media_type: MediaType::Webp,
+                options: TransformOptions {
+                    format: Some(MediaType::Webp),
+                    optimize: OptimizeMode::Lossless,
+                    target_quality: Some(TargetQuality {
+                        metric: QualityMetric::Ssim,
+                        value: 0.98,
+                    }),
+                    ..TransformOptions::default()
+                },
+                expected_error: Some("targetQuality requires optimize=auto or optimize=lossy"),
+            },
+            Case {
+                name: "target quality requires lossy optimizable output",
+                input_media_type: MediaType::Png,
+                options: TransformOptions {
+                    format: Some(MediaType::Png),
+                    optimize: OptimizeMode::Auto,
+                    target_quality: Some(TargetQuality {
+                        metric: QualityMetric::Ssim,
+                        value: 0.98,
+                    }),
+                    ..TransformOptions::default()
+                },
+                expected_error: Some("targetQuality requires jpeg, webp, or avif output"),
+            },
+            Case {
+                name: "quality cannot combine with lossless optimize",
+                input_media_type: MediaType::Jpeg,
+                options: TransformOptions {
+                    format: Some(MediaType::Jpeg),
+                    optimize: OptimizeMode::Lossless,
+                    quality: Some(80),
+                    ..TransformOptions::default()
+                },
+                expected_error: Some("quality cannot be combined with optimize=lossless"),
+            },
+            Case {
+                name: "lossy optimize requires lossy capable format",
+                input_media_type: MediaType::Png,
+                options: TransformOptions {
+                    format: Some(MediaType::Png),
+                    optimize: OptimizeMode::Lossy,
+                    ..TransformOptions::default()
+                },
+                expected_error: Some(
+                    "lossy optimization requires jpeg, webp, or avif output, got png",
+                ),
+            },
+            Case {
+                name: "optimize unsupported for svg output",
+                input_media_type: MediaType::Svg,
+                options: TransformOptions {
+                    format: Some(MediaType::Svg),
+                    optimize: OptimizeMode::Auto,
+                    ..TransformOptions::default()
+                },
+                expected_error: Some("optimization is not supported for svg output"),
+            },
+            Case {
+                name: "preserve exif unsupported for svg output",
+                input_media_type: MediaType::Svg,
+                options: TransformOptions {
+                    format: Some(MediaType::Svg),
+                    preserve_exif: true,
+                    strip_metadata: false,
+                    ..TransformOptions::default()
+                },
+                expected_error: Some("preserveExif is not supported with SVG output"),
+            },
+            Case {
+                name: "auto optimize accepts lossy target quality",
+                input_media_type: MediaType::Jpeg,
+                options: TransformOptions {
+                    format: Some(MediaType::Jpeg),
+                    optimize: OptimizeMode::Auto,
+                    target_quality: Some(TargetQuality {
+                        metric: QualityMetric::Ssim,
+                        value: 0.98,
+                    }),
+                    ..TransformOptions::default()
+                },
+                expected_error: None,
+            },
+            Case {
+                name: "lossless optimize accepts png without quality",
+                input_media_type: MediaType::Png,
+                options: TransformOptions {
+                    format: Some(MediaType::Png),
+                    optimize: OptimizeMode::Lossless,
+                    ..TransformOptions::default()
+                },
+                expected_error: None,
+            },
+        ];
+
+        for case in cases {
+            let result = case.options.normalize(case.input_media_type);
+            match case.expected_error {
+                Some(message) => {
+                    let error = result.expect_err(case.name);
+                    assert_eq!(
+                        error,
+                        TransformError::InvalidOptions(message.to_string()),
+                        "{}",
+                        case.name
+                    );
+                }
+                None => {
+                    result.expect(case.name);
+                }
+            }
+        }
     }
 
     #[test]

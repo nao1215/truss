@@ -43,8 +43,8 @@ use super::response::{
 use super::stderr_write;
 
 use crate::{
-    CropRegion, Fit, MediaType, Position, RawArtifact, Rgba8, Rotation, TransformOptions,
-    TransformRequest, WatermarkInput, sniff_artifact, transform,
+    CropRegion, Fit, MediaType, OptimizeMode, Position, RawArtifact, Rgba8, Rotation,
+    TargetQuality, TransformOptions, TransformRequest, WatermarkInput, sniff_artifact, transform,
 };
 use std::str::FromStr;
 
@@ -279,6 +279,8 @@ pub struct TransformOptionsPayload {
     pub position: Option<String>,
     pub format: Option<String>,
     pub quality: Option<u8>,
+    pub optimize: Option<String>,
+    pub target_quality: Option<String>,
     pub background: Option<String>,
     pub rotate: Option<u16>,
     pub auto_orient: Option<bool>,
@@ -300,6 +302,8 @@ impl TransformOptionsPayload {
             position: overrides.position.clone().or(self.position),
             format: overrides.format.clone().or(self.format),
             quality: overrides.quality.or(self.quality),
+            optimize: overrides.optimize.clone().or(self.optimize),
+            target_quality: overrides.target_quality.clone().or(self.target_quality),
             background: overrides.background.clone().or(self.background),
             rotate: overrides.rotate.or(self.rotate),
             auto_orient: overrides.auto_orient.or(self.auto_orient),
@@ -325,6 +329,17 @@ impl TransformOptionsPayload {
             )?,
             format: parse_optional_named(self.format.as_deref(), "format", MediaType::from_str)?,
             quality: self.quality,
+            optimize: parse_optional_named(
+                self.optimize.as_deref(),
+                "optimize",
+                OptimizeMode::from_str,
+            )?
+            .unwrap_or(defaults.optimize),
+            target_quality: parse_optional_named(
+                self.target_quality.as_deref(),
+                "targetQuality",
+                TargetQuality::from_str,
+            )?,
             background: parse_optional_named(
                 self.background.as_deref(),
                 "background",
@@ -1220,6 +1235,8 @@ pub(super) fn parse_public_get_request(
         position: query.get("position").cloned(),
         format: query.get("format").cloned(),
         quality: parse_optional_u8_query(query, "quality")?,
+        optimize: query.get("optimize").cloned(),
+        target_quality: query.get("targetQuality").cloned(),
         background: query.get("background").cloned(),
         rotate: query
             .get("rotate")
@@ -1388,6 +1405,10 @@ fn transform_source_bytes_inner(
         } else {
             false
         };
+
+    if options.format.is_none() {
+        options.format = Some(artifact.media_type);
+    }
 
     // Check input pixel count against the server-level limit before decode.
     // This runs before the cache lookup so that a policy change (lowering the

@@ -28,7 +28,7 @@ pub use codecs::transform;
 pub use core::{
     Artifact, ArtifactMetadata, CropRegion, Dimensions, Fit, MAX_DECODED_PIXELS, MAX_OUTPUT_PIXELS,
     MAX_WATERMARK_PIXELS, MediaType, MetadataKind, MetadataPolicy, NormalizedTransformOptions,
-    NormalizedTransformRequest, Position, RawArtifact, Rgba8, Rotation, TransformError,
-    TransformOptions, TransformRequest, TransformResult, TransformWarning, WatermarkInput,
-    resolve_metadata_flags, sniff_artifact,
+    NormalizedTransformRequest, OptimizeMode, Position, QualityMetric, RawArtifact, Rgba8,
+    Rotation, TargetQuality, TransformError, TransformOptions, TransformRequest, TransformResult,
+    TransformWarning, WatermarkInput, resolve_metadata_flags, sniff_artifact,
 };

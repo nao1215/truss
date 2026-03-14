@@ -138,7 +138,7 @@ jobs:
         run: pip install openapi-spec-validator
 
       - name: Validate OpenAPI spec
-        run: python -m openapi_spec_validator doc/openapi.yaml
+        run: python -m openapi_spec_validator docs/openapi.yaml
 
   # ── security audit ──────────────────────────────────────────────────
   security-audit:

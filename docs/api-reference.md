@@ -4,7 +4,7 @@ This page documents the HTTP API endpoints, request/response formats, and relate
 
 ## OpenAPI Specification
 
-- OpenAPI YAML: [../doc/openapi.yaml](../doc/openapi.yaml)
+- OpenAPI YAML: [openapi.yaml](openapi.yaml)
 - Swagger UI on GitHub Pages: https://nao1215.github.io/truss/swagger/
 
 ## Starting the Server
