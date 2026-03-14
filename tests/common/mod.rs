@@ -1,4 +1,5 @@
 #![allow(dead_code)]
+// Shared across multiple integration-test crates; each crate uses only a subset.
 
 use hmac::{Hmac, Mac};
 use image::codecs::png::PngEncoder;
@@ -9,9 +10,15 @@ use std::fs;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use truss::{ServerConfig, serve_once_with_config};
+use truss::{
+    CropRegion, Fit, MediaType, OptimizeMode, Position, Rgba8, Rotation, ServerConfig,
+    SignedUrlSource, SignedWatermarkParams, TargetQuality, TransformOptions,
+    serve_once_with_config, sign_public_url,
+};
+use url::Url;
 
 pub fn png_bytes() -> Vec<u8> {
     let image = RgbaImage::from_pixel(4, 3, Rgba([10, 20, 30, 255]));
@@ -337,7 +344,141 @@ pub fn send_raw_request(addr: SocketAddr, request: &str) -> Vec<u8> {
     response
 }
 
-pub fn sign_public_query(
+fn parse_bool_query(value: &str, name: &str) -> bool {
+    match value {
+        "true" => true,
+        "false" => false,
+        _ => panic!("invalid boolean value for `{name}`: {value}"),
+    }
+}
+
+fn parse_source(route: &str, query: &BTreeMap<String, String>) -> SignedUrlSource {
+    match route {
+        "/images/by-path" => SignedUrlSource::Path {
+            path: query
+                .get("path")
+                .cloned()
+                .expect("signed path requests must include `path`"),
+            version: query.get("version").cloned(),
+        },
+        "/images/by-url" => SignedUrlSource::Url {
+            url: query
+                .get("url")
+                .cloned()
+                .expect("signed URL requests must include `url`"),
+            version: query.get("version").cloned(),
+        },
+        _ => panic!("unsupported signed route: {route}"),
+    }
+}
+
+fn parse_transform_options(query: &BTreeMap<String, String>) -> TransformOptions {
+    TransformOptions {
+        width: query
+            .get("width")
+            .map(|value| value.parse().expect("parse signed width")),
+        height: query
+            .get("height")
+            .map(|value| value.parse().expect("parse signed height")),
+        fit: query
+            .get("fit")
+            .map(|value| Fit::from_str(value).expect("parse signed fit")),
+        position: query
+            .get("position")
+            .map(|value| Position::from_str(value).expect("parse signed position")),
+        format: query
+            .get("format")
+            .map(|value| MediaType::from_str(value).expect("parse signed format")),
+        quality: query
+            .get("quality")
+            .map(|value| value.parse().expect("parse signed quality")),
+        optimize: query
+            .get("optimize")
+            .map(|value| OptimizeMode::from_str(value).expect("parse signed optimize"))
+            .unwrap_or(OptimizeMode::None),
+        target_quality: query
+            .get("targetQuality")
+            .map(|value| TargetQuality::from_str(value).expect("parse signed target quality")),
+        background: query
+            .get("background")
+            .map(|value| Rgba8::from_hex(value).expect("parse signed background")),
+        rotate: query
+            .get("rotate")
+            .map(|value| Rotation::from_str(value).expect("parse signed rotation"))
+            .unwrap_or(Rotation::Deg0),
+        auto_orient: query
+            .get("autoOrient")
+            .map(|value| parse_bool_query(value, "autoOrient"))
+            .unwrap_or(true),
+        strip_metadata: query
+            .get("stripMetadata")
+            .map(|value| parse_bool_query(value, "stripMetadata"))
+            .unwrap_or(true),
+        preserve_exif: query
+            .get("preserveExif")
+            .map(|value| parse_bool_query(value, "preserveExif"))
+            .unwrap_or(false),
+        blur: query
+            .get("blur")
+            .map(|value| value.parse().expect("parse signed blur")),
+        sharpen: query
+            .get("sharpen")
+            .map(|value| value.parse().expect("parse signed sharpen")),
+        crop: query
+            .get("crop")
+            .map(|value| CropRegion::from_str(value).expect("parse signed crop")),
+        deadline: None,
+    }
+}
+
+fn parse_watermark(query: &BTreeMap<String, String>) -> Option<SignedWatermarkParams> {
+    query.get("watermarkUrl").map(|url| SignedWatermarkParams {
+        url: url.clone(),
+        position: query.get("watermarkPosition").cloned(),
+        opacity: query
+            .get("watermarkOpacity")
+            .map(|value| value.parse().expect("parse signed watermark opacity")),
+        margin: query
+            .get("watermarkMargin")
+            .map(|value| value.parse().expect("parse signed watermark margin")),
+    })
+}
+
+fn is_supported_signed_query_name(route: &str, name: &str) -> bool {
+    matches!(
+        name,
+        "keyId"
+            | "expires"
+            | "signature"
+            | "version"
+            | "width"
+            | "height"
+            | "fit"
+            | "position"
+            | "format"
+            | "quality"
+            | "optimize"
+            | "targetQuality"
+            | "background"
+            | "rotate"
+            | "autoOrient"
+            | "stripMetadata"
+            | "preserveExif"
+            | "crop"
+            | "blur"
+            | "sharpen"
+            | "watermarkUrl"
+            | "watermarkPosition"
+            | "watermarkOpacity"
+            | "watermarkMargin"
+            | "preset"
+    ) || matches!(
+        (route, name),
+        ("/images/by-path", "path") | ("/images/by-url", "url")
+    )
+}
+
+fn sign_public_query(
     method: &str,
     authority: &str,
     path: &str,
@@ -356,20 +497,88 @@ pub fn sign_public_query(
     hex::encode(mac.finalize().into_bytes())
 }
 
-pub fn signed_target(
-    path: &str,
+fn can_use_production_signer(method: &str, route: &str, query: &BTreeMap<String, String>) -> bool {
+    if method != "GET"
+        || !query
+            .keys()
+            .all(|name| is_supported_signed_query_name(route, name))
+    {
+        return false;
+    }
+
+    let has_supported_source = match route {
+        "/images/by-path" => query.contains_key("path"),
+        "/images/by-url" => query.contains_key("url"),
+        _ => false,
+    };
+    if !has_supported_source {
+        return false;
+    }
+
+    let has_orphaned_watermark_params = query.contains_key("watermarkPosition")
+        || query.contains_key("watermarkOpacity")
+        || query.contains_key("watermarkMargin");
+    !has_orphaned_watermark_params || query.contains_key("watermarkUrl")
+}
+
+pub fn signed_target_with_method(
+    method: &str,
+    route: &str,
     query: BTreeMap<String, String>,
     authority: &str,
     secret: &str,
 ) -> String {
-    let mut query = query;
-    let signature = sign_public_query("GET", authority, path, &query, secret);
-    query.insert("signature".to_string(), signature);
-    let mut serializer = url::form_urlencoded::Serializer::new(String::new());
-    for (name, value) in query {
-        serializer.append_pair(&name, &value);
+    if !can_use_production_signer(method, route, &query) {
+        let mut query = query;
+        query.insert(
+            "signature".to_string(),
+            sign_public_query(method, authority, route, &query, secret),
+        );
+        let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+        for (name, value) in query {
+            serializer.append_pair(&name, &value);
+        }
+        return format!("{route}?{}", serializer.finish());
     }
-    format!("{path}?{}", serializer.finish())
+
+    let key_id = query
+        .get("keyId")
+        .expect("signed requests must include `keyId`");
+    let expires = query
+        .get("expires")
+        .expect("signed requests must include `expires`")
+        .parse()
+        .expect("parse signed expires");
+    let options = parse_transform_options(&query);
+    let source = parse_source(route, &query);
+    let watermark = parse_watermark(&query);
+    let preset = query.get("preset").map(String::as_str);
+
+    let signed_url = sign_public_url(
+        &format!("http://{authority}"),
+        source,
+        &options,
+        key_id,
+        secret,
+        expires,
+        watermark.as_ref(),
+        preset,
+    )
+    .expect("generate signed target via production signer");
+    let parsed = Url::parse(&signed_url).expect("parse signed target");
+    match parsed.query() {
+        Some(query) => format!("{}?{query}", parsed.path()),
+        None => parsed.path().to_string(),
+    }
+}
+
+pub fn signed_target(
+    route: &str,
+    query: BTreeMap<String, String>,
+    authority: &str,
+    secret: &str,
+) -> String {
+    signed_target_with_method("GET", route, query, authority, secret)
 }
 
 pub fn send_signed_get(addr: SocketAddr, target: &str, authority: &str) -> (String, Vec<u8>) {

@@ -50,8 +50,8 @@ See the [Signed URL Specification](signed-url-spec.md) for canonicalization rule
 
 | Endpoint | Description |
 |----------|-------------|
-| `GET /images/by-path` | Fetch and transform an image from storage by path, authenticated via signed URL |
-| `GET /images/by-url` | Fetch and transform an image from a remote URL, authenticated via signed URL |
+| `GET, HEAD /images/by-path` | Fetch and transform an image from storage by path, authenticated via signed URL |
+| `GET, HEAD /images/by-url` | Fetch and transform an image from a remote URL, authenticated via signed URL |
 
 ### Private Endpoints (Bearer Token)
 
@@ -64,9 +64,9 @@ See the [Signed URL Specification](signed-url-spec.md) for canonicalization rule
 
 | Endpoint | Description |
 |----------|-------------|
-| `GET /health/live` | Liveness probe (always returns 200) |
-| `GET /health/ready` | Readiness probe (returns 503 when draining, disk full, or memory limit exceeded) |
-| `GET /metrics` | Prometheus metrics in text exposition format |
+| `GET, HEAD /health/live` | Liveness probe (always returns 200) |
+| `GET, HEAD /health/ready` | Readiness probe (returns 503 when draining, disk full, or memory limit exceeded) |
+| `GET, HEAD /metrics` | Prometheus metrics in text exposition format |
 
 ## Supported Formats
 
@@ -102,12 +102,12 @@ flowchart LR
 
 ### Public vs. Private Endpoints
 
-Only the public GET endpoints should be exposed through CloudFront:
+Only the public image endpoints should be exposed through CloudFront:
 
 | Endpoint | Visibility | CloudFront |
 |----------|-----------|------------|
-| `GET /images/by-path` | Public (signed URL) | Origin for CDN |
-| `GET /images/by-url` | Public (signed URL) | Origin for CDN |
+| `GET, HEAD /images/by-path` | Public (signed URL) | Origin for CDN |
+| `GET, HEAD /images/by-url` | Public (signed URL) | Origin for CDN |
 | `POST /images:transform` | Private (Bearer token) | Do not expose |
 | `POST /images` | Private (Bearer token) | Do not expose |
 

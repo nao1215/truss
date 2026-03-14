@@ -313,4 +313,31 @@ mod tests {
         assert!(url.contains("optimize=lossy"));
         assert!(url.contains("targetQuality=ssim%3A0.98"));
     }
+
+    #[test]
+    fn sign_public_url_matches_fixed_compatibility_vector() {
+        let url = sign_public_url(
+            "https://images.example.com",
+            SignedUrlSource::Path {
+                path: "image.png".to_string(),
+                version: None,
+            },
+            &TransformOptions {
+                width: Some(800),
+                format: Some(crate::MediaType::Webp),
+                ..TransformOptions::default()
+            },
+            "public-demo",
+            "secret-value",
+            1_900_000_000,
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            url,
+            "https://images.example.com/images/by-path?expires=1900000000&format=webp&keyId=public-demo&path=image.png&signature=8c3234125e0e20efeaae1e2afaa88a81d387c82cef0080780fddd31c5689199e&width=800"
+        );
+    }
 }

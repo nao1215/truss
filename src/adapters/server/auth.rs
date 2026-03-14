@@ -579,6 +579,19 @@ mod tests {
     }
 
     #[test]
+    fn test_signed_request_accepts_fixed_head_compatibility_vector() {
+        let mut config =
+            test_config(None).with_signed_url_credentials("public-demo", "secret-value");
+        config.public_base_url = Some("https://images.example.com".to_string());
+
+        let target = "/images/by-path?expires=1900000000&format=webp&keyId=public-demo&path=image.png&signature=29332b4813792a5982ed3071633a26407bd5335654f7a10e11729e75f545dc5a&width=800";
+        let request = test_request("HEAD", target, vec![("host", "images.example.com")]);
+        let query = parse_query_params(&request).expect("parse fixed head vector");
+
+        assert!(authorize_signed_request(&request, &query, &config).is_ok());
+    }
+
+    #[test]
     fn test_signed_request_wrong_signature() {
         let mut config = test_config(None).with_signed_url_credentials("k1", "secret");
         config.public_base_url = Some("https://example.com".to_string());
