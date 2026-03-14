@@ -3784,6 +3784,7 @@ mod tests {
         );
 
         assert_eq!(response.status, "503 Service Unavailable");
+        assert_eq!(response.content_type, Some("application/json"));
         let body: serde_json::Value =
             serde_json::from_slice(&response.body).expect("parse ready body");
         assert_eq!(body["status"], "fail");
