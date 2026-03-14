@@ -14,11 +14,12 @@
 
 Resize, crop, convert, optimize, blur, sharpen, and watermark images from the CLI, an HTTP server, or the browser -- written in Rust with signed-URL authentication and SSRF protection built in.
 
-[Try the WASM demo in your browser](https://nao1215.github.io/truss/) -- no install, no upload, runs 100 % client-side.
-
 [Install `@nao1215/truss-wasm` from npm](https://www.npmjs.com/package/@nao1215/truss-wasm) or start from the [Vite consumer example](./examples/vite-truss-wasm).
 
-![WASM demo screenshot](./docs/img/wasm-sample.png)
+
+[Try the WASM demo in your browser](https://nao1215.github.io/truss/) -- no install, no upload, runs 100 % client-side.
+
+![WASM demo screenshot](./docs/img/wasm-github-pages.png)
 
 ## Why truss?
 
