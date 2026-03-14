@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.10.4
+
+### Fixed
+
+- Align crate, package, OpenAPI, and changelog release metadata for the `v0.10.4` tag after bootstrapping the npm package and trusted publisher settings.
+
 ## v0.10.3
 
 ### Changed
