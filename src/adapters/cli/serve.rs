@@ -191,7 +191,37 @@ pub(super) fn resolve_server_config(command: ServeCommand) -> Result<ServerConfi
 mod tests {
     use super::*;
     use serial_test::serial;
+    use std::ffi::OsString;
     use std::io;
+
+    struct EnvVarGuard {
+        name: &'static str,
+        previous: Option<OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set_path(name: &'static str, value: &std::path::Path) -> Self {
+            let previous = std::env::var_os(name);
+            // SAFETY: test-only env mutation guarded by serial execution.
+            unsafe { std::env::set_var(name, value) };
+            Self { name, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(previous) => {
+                    // SAFETY: restoring the pre-test env var value during test teardown.
+                    unsafe { std::env::set_var(self.name, previous) };
+                }
+                None => {
+                    // SAFETY: removing the test-only env var during test teardown.
+                    unsafe { std::env::remove_var(self.name) };
+                }
+            }
+        }
+    }
 
     struct FailingWriter;
 
@@ -209,8 +239,7 @@ mod tests {
     #[serial]
     fn execute_serve_returns_runtime_error_for_invalid_bind_addr() {
         let storage_root = tempfile::tempdir().expect("create tempdir");
-        // SAFETY: test-only env mutation guarded by serial execution.
-        unsafe { std::env::set_var("TRUSS_STORAGE_ROOT", storage_root.path()) };
+        let _storage_root_guard = EnvVarGuard::set_path("TRUSS_STORAGE_ROOT", storage_root.path());
 
         let error = execute_serve(ServeCommand {
             bind_addr: Some("invalid-bind-addr".to_string()),
@@ -222,9 +251,6 @@ mod tests {
         })
         .expect_err("invalid bind address should fail");
 
-        // SAFETY: paired cleanup for the test-only env mutation above.
-        unsafe { std::env::remove_var("TRUSS_STORAGE_ROOT") };
-
         assert_eq!(error.exit_code, super::EXIT_RUNTIME);
         assert!(error.message.contains("failed to bind"));
     }
@@ -233,14 +259,10 @@ mod tests {
     #[serial]
     fn execute_validate_reports_writer_failures() {
         let storage_root = tempfile::tempdir().expect("create tempdir");
-        // SAFETY: test-only env mutation guarded by serial execution.
-        unsafe { std::env::set_var("TRUSS_STORAGE_ROOT", storage_root.path()) };
+        let _storage_root_guard = EnvVarGuard::set_path("TRUSS_STORAGE_ROOT", storage_root.path());
 
         let error =
             execute_validate(&mut FailingWriter).expect_err("writer failure should be reported");
-
-        // SAFETY: paired cleanup for the test-only env mutation above.
-        unsafe { std::env::remove_var("TRUSS_STORAGE_ROOT") };
 
         assert_eq!(error.exit_code, super::EXIT_RUNTIME);
         assert!(error.message.contains("failed to write stdout"));

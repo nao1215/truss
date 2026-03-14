@@ -498,6 +498,41 @@ mod tests {
     use std::time::Instant;
 
     #[cfg(unix)]
+    struct ShutdownSignalGuard {
+        previous_draining: *mut AtomicBool,
+        previous_write_fd: i32,
+        draining: *mut AtomicBool,
+        read_fd: i32,
+        write_fd: i32,
+    }
+
+    #[cfg(unix)]
+    impl Drop for ShutdownSignalGuard {
+        fn drop(&mut self) {
+            GLOBAL_DRAINING.store(self.previous_draining, Ordering::SeqCst);
+            SHUTDOWN_PIPE_WR.store(self.previous_write_fd, Ordering::SeqCst);
+            close_shutdown_pipe(self.read_fd, self.write_fd);
+            // SAFETY: `draining` was allocated with Box::into_raw in the test setup above.
+            unsafe { drop(Box::from_raw(self.draining)) };
+        }
+    }
+
+    #[cfg(unix)]
+    struct LogLevelGuard {
+        previous: *mut AtomicU8,
+        log_level: *mut AtomicU8,
+    }
+
+    #[cfg(unix)]
+    impl Drop for LogLevelGuard {
+        fn drop(&mut self) {
+            GLOBAL_LOG_LEVEL.store(self.previous, Ordering::SeqCst);
+            // SAFETY: `log_level` was allocated with Box::into_raw in the test setup above.
+            unsafe { drop(Box::from_raw(self.log_level)) };
+        }
+    }
+
+    #[cfg(unix)]
     #[test]
     fn wait_for_accept_or_shutdown_returns_when_pipe_is_ready() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind test listener");
@@ -527,16 +562,18 @@ mod tests {
         let draining = Box::into_raw(Box::new(AtomicBool::new(false)));
         let previous_draining = GLOBAL_DRAINING.swap(draining, Ordering::SeqCst);
         let previous_write_fd = SHUTDOWN_PIPE_WR.swap(write_fd, Ordering::SeqCst);
+        let _restore = ShutdownSignalGuard {
+            previous_draining,
+            previous_write_fd,
+            draining,
+            read_fd,
+            write_fd,
+        };
 
         signal_handler(libc::SIGTERM);
 
         assert!(unsafe { &*draining }.load(Ordering::SeqCst));
         assert!(poll_shutdown_pipe(read_fd));
-
-        GLOBAL_DRAINING.store(previous_draining, Ordering::SeqCst);
-        SHUTDOWN_PIPE_WR.store(previous_write_fd, Ordering::SeqCst);
-        close_shutdown_pipe(read_fd, write_fd);
-        unsafe { drop(Box::from_raw(draining)) };
     }
 
     #[cfg(unix)]
@@ -545,6 +582,10 @@ mod tests {
     fn sigusr1_handler_cycles_global_log_level() {
         let log_level = Box::into_raw(Box::new(AtomicU8::new(LogLevel::Info as u8)));
         let previous = GLOBAL_LOG_LEVEL.swap(log_level, Ordering::SeqCst);
+        let _restore = LogLevelGuard {
+            previous,
+            log_level,
+        };
 
         sigusr1_handler(libc::SIGUSR1);
 
@@ -552,8 +593,5 @@ mod tests {
             unsafe { &*log_level }.load(Ordering::SeqCst),
             LogLevel::Debug as u8
         );
-
-        GLOBAL_LOG_LEVEL.store(previous, Ordering::SeqCst);
-        unsafe { drop(Box::from_raw(log_level)) };
     }
 }
