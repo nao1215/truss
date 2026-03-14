@@ -1,5 +1,27 @@
 # Changelog
 
+## v0.9.0
+
+### Added
+
+- Format-aware image optimization across the CLI, HTTP API, signed URLs, presets, and WASM with `optimize=auto|lossless|lossy` plus perceptual `targetQuality` controls.
+- Optional Bearer token authentication for `/health` via `TRUSS_HEALTH_TOKEN`, while keeping `/health/live` and `/health/ready` unauthenticated for orchestrator probes (#73).
+- Readiness probe hysteresis via `TRUSS_HEALTH_HYSTERESIS_MARGIN` to reduce flapping near disk and memory thresholds (#72).
+- Additional fast coverage for lifecycle signal handling, public `HEAD` endpoints, and CLI runtime error paths.
+
+### Fixed
+
+- Gate AVIF/WebP native dependencies behind feature flags so the WASM build no longer imports unavailable C-backed components.
+- Skip serializing transformed image bytes into WASM response JSON to avoid OOM on large outputs.
+- Reject truncated JPEG input during lossless optimization.
+- Stabilize HEAD and optimization-related tests after the runtime-target optimization work.
+
+### Changed
+
+- Consolidate project documentation under `docs/` and expand CLI examples for piping, stdin/stdout usage, and optimization workflows.
+- Deduplicate cloud integration test helpers and parameterize HEAD request tests with `rstest`.
+- Update the OpenAPI and configuration docs to cover optimization controls, `/health` authentication, and readiness hysteresis behavior.
+
 ## v0.8.0
 
 ### Added

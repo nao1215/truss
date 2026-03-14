@@ -1,7 +1,13 @@
 mod common;
 
-use common::{send_raw_request, spawn_server, split_response, temp_dir};
+use common::{
+    png_bytes, send_raw_request, sign_public_query, spawn_fixture_server, spawn_server,
+    split_response, temp_dir,
+};
 use rstest::rstest;
+use std::collections::BTreeMap;
+use std::fs;
+use std::net::SocketAddr;
 use truss::ServerConfig;
 
 #[rstest]
@@ -31,4 +37,107 @@ fn head_request_returns_expected_status_with_empty_body(
         "expected {expected_status}, got: {header}"
     );
     assert!(body.is_empty(), "HEAD response body must be empty");
+}
+
+fn send_head_request(addr: SocketAddr, target: &str, host: &str) -> Vec<u8> {
+    send_raw_request(
+        addr,
+        &format!("HEAD {target} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n"),
+    )
+}
+
+fn signed_head_target(
+    path: &str,
+    query: BTreeMap<String, String>,
+    authority: &str,
+    secret: &str,
+) -> String {
+    let mut query = query;
+    let signature = sign_public_query("HEAD", authority, path, &query, secret);
+    query.insert("signature".to_string(), signature);
+    let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+    for (name, value) in query {
+        serializer.append_pair(&name, &value);
+    }
+    format!("{path}?{}", serializer.finish())
+}
+
+#[test]
+fn head_public_by_path_returns_headers_with_empty_body() {
+    let storage_root = temp_dir("head-public-by-path");
+    fs::write(storage_root.join("image.png"), png_bytes()).expect("write source fixture");
+    let (addr, handle) = spawn_server(
+        ServerConfig::new(storage_root, Some("secret".to_string()))
+            .with_signed_url_credentials("public-dev", "secret-value"),
+    );
+    let target = signed_head_target(
+        "/images/by-path",
+        BTreeMap::from([
+            ("path".to_string(), "/image.png".to_string()),
+            ("keyId".to_string(), "public-dev".to_string()),
+            ("expires".to_string(), "4102444800".to_string()),
+            ("format".to_string(), "jpeg".to_string()),
+        ]),
+        "cdn.example.com",
+        "secret-value",
+    );
+    let response = send_head_request(addr, &target, "cdn.example.com");
+
+    handle
+        .join()
+        .expect("join server thread")
+        .expect("serve one request");
+
+    let (header, content_type, body) = split_response(&response);
+    assert!(header.starts_with("HTTP/1.1 200 OK"), "{header}");
+    assert_eq!(content_type, "image/jpeg");
+    assert!(body.is_empty(), "HEAD response body must be empty");
+    assert!(header.contains("ETag: \"sha256-"), "{header}");
+    assert!(
+        header.contains("Cache-Control: public, max-age=3600, stale-while-revalidate=60"),
+        "{header}"
+    );
+}
+
+#[test]
+fn head_public_by_url_returns_headers_with_empty_body() {
+    let storage_root = temp_dir("head-public-by-url");
+    let (url, fixture) = spawn_fixture_server(vec![(
+        "200 OK".to_string(),
+        vec![("Content-Type".to_string(), "image/png".to_string())],
+        png_bytes(),
+    )]);
+    let (addr, handle) = spawn_server(
+        ServerConfig::new(storage_root, Some("secret".to_string()))
+            .with_signed_url_credentials("public-dev", "secret-value")
+            .with_insecure_url_sources(true),
+    );
+    let target = signed_head_target(
+        "/images/by-url",
+        BTreeMap::from([
+            ("url".to_string(), url),
+            ("keyId".to_string(), "public-dev".to_string()),
+            ("expires".to_string(), "4102444800".to_string()),
+            ("format".to_string(), "jpeg".to_string()),
+        ]),
+        "cdn.example.com",
+        "secret-value",
+    );
+    let response = send_head_request(addr, &target, "cdn.example.com");
+
+    handle
+        .join()
+        .expect("join server thread")
+        .expect("serve one request");
+    fixture.join().expect("join fixture server");
+
+    let (header, content_type, body) = split_response(&response);
+    assert!(header.starts_with("HTTP/1.1 200 OK"), "{header}");
+    assert_eq!(content_type, "image/jpeg");
+    assert!(body.is_empty(), "HEAD response body must be empty");
+    assert!(header.contains("ETag: \"sha256-"), "{header}");
+    assert!(
+        header.contains("Cache-Control: public, max-age=3600, stale-while-revalidate=60"),
+        "{header}"
+    );
 }

@@ -131,3 +131,66 @@ where
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Position, TransformOptions};
+    use std::io;
+
+    struct FailingWriter;
+
+    impl Write for FailingWriter {
+        fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+            Err(io::Error::other("writer failure"))
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn base_command() -> SignCommand {
+        SignCommand {
+            base_url: "https://cdn.example.com".to_string(),
+            source: SignedUrlSource::Path {
+                path: "/image.png".to_string(),
+                version: None,
+            },
+            key_id: "public-dev".to_string(),
+            secret: "secret-value".to_string(),
+            expires: 4_102_444_800,
+            options: TransformOptions::default(),
+            watermark_url: None,
+            watermark_position: None,
+            watermark_opacity: None,
+            watermark_margin: None,
+            preset: None,
+        }
+    }
+
+    #[test]
+    fn execute_sign_rejects_orphaned_watermark_options() {
+        let mut stdout = Vec::new();
+        let error = execute_sign(
+            SignCommand {
+                watermark_position: Some(Position::Center),
+                ..base_command()
+            },
+            &mut stdout,
+        )
+        .expect_err("watermark position without URL should fail");
+
+        assert_eq!(error.exit_code, super::EXIT_USAGE);
+        assert!(error.message.contains("require --watermark-url"));
+    }
+
+    #[test]
+    fn execute_sign_surfaces_writer_failures() {
+        let error = execute_sign(base_command(), &mut FailingWriter)
+            .expect_err("writer failure should be reported");
+
+        assert_eq!(error.exit_code, super::EXIT_RUNTIME);
+        assert!(error.message.contains("failed to write output"));
+    }
+}
