@@ -748,8 +748,7 @@ pub(super) fn handle_health_ready(config: &ServerConfig) -> HttpResponse {
         }))
         .expect("serialize readiness");
         body.push(b'\n');
-        // Draining is an operational error (RFC 7807 problem+json).
-        return HttpResponse::problem("503 Service Unavailable", body);
+        return HttpResponse::json("503 Service Unavailable", body);
     }
 
     let (checks, all_ok) = collect_resource_checks(config);

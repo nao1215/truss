@@ -129,6 +129,76 @@ paths:
           $ref: '#/components/responses/ServiceUnavailable'
         '508':
           $ref: '#/components/responses/LoopDetected'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+    head:
+      tags: [Transform]
+      summary: Inspect transformed image headers by storage path
+      description: |
+        Same contract as `GET /images/by-path`, but returns headers only and no body.
+      operationId: headTransformImageByPath
+      security:
+        - SignedUrlAuth: []
+      parameters:
+        - $ref: '#/components/parameters/SourcePath'
+        - $ref: '#/components/parameters/SourceVersion'
+        - $ref: '#/components/parameters/KeyId'
+        - $ref: '#/components/parameters/Expires'
+        - $ref: '#/components/parameters/Signature'
+        - $ref: '#/components/parameters/Width'
+        - $ref: '#/components/parameters/Height'
+        - $ref: '#/components/parameters/Fit'
+        - $ref: '#/components/parameters/Position'
+        - $ref: '#/components/parameters/Format'
+        - $ref: '#/components/parameters/Quality'
+        - $ref: '#/components/parameters/Optimize'
+        - $ref: '#/components/parameters/TargetQuality'
+        - $ref: '#/components/parameters/Background'
+        - $ref: '#/components/parameters/Rotate'
+        - $ref: '#/components/parameters/AutoOrient'
+        - $ref: '#/components/parameters/StripMetadata'
+        - $ref: '#/components/parameters/PreserveExif'
+        - $ref: '#/components/parameters/Crop'
+        - $ref: '#/components/parameters/Blur'
+        - $ref: '#/components/parameters/Sharpen'
+        - $ref: '#/components/parameters/WatermarkUrl'
+        - $ref: '#/components/parameters/WatermarkPosition'
+        - $ref: '#/components/parameters/WatermarkOpacity'
+        - $ref: '#/components/parameters/WatermarkMargin'
+        - $ref: '#/components/parameters/Preset'
+      responses:
+        '200':
+          $ref: '#/components/responses/ImageBinary'
+        '304':
+          $ref: '#/components/responses/NotModified'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '406':
+          $ref: '#/components/responses/NotAcceptable'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+        '502':
+          $ref: '#/components/responses/BadGateway'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '508':
+          $ref: '#/components/responses/LoopDetected'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
 
   /images/by-url:
     get:
@@ -214,6 +284,76 @@ paths:
           $ref: '#/components/responses/ServiceUnavailable'
         '508':
           $ref: '#/components/responses/LoopDetected'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+    head:
+      tags: [Transform]
+      summary: Inspect transformed image headers by remote URL
+      description: |
+        Same contract as `GET /images/by-url`, but returns headers only and no body.
+      operationId: headTransformImageByUrl
+      security:
+        - SignedUrlAuth: []
+      parameters:
+        - $ref: '#/components/parameters/SourceUrl'
+        - $ref: '#/components/parameters/SourceVersion'
+        - $ref: '#/components/parameters/KeyId'
+        - $ref: '#/components/parameters/Expires'
+        - $ref: '#/components/parameters/Signature'
+        - $ref: '#/components/parameters/Width'
+        - $ref: '#/components/parameters/Height'
+        - $ref: '#/components/parameters/Fit'
+        - $ref: '#/components/parameters/Position'
+        - $ref: '#/components/parameters/Format'
+        - $ref: '#/components/parameters/Quality'
+        - $ref: '#/components/parameters/Optimize'
+        - $ref: '#/components/parameters/TargetQuality'
+        - $ref: '#/components/parameters/Background'
+        - $ref: '#/components/parameters/Rotate'
+        - $ref: '#/components/parameters/AutoOrient'
+        - $ref: '#/components/parameters/StripMetadata'
+        - $ref: '#/components/parameters/PreserveExif'
+        - $ref: '#/components/parameters/Crop'
+        - $ref: '#/components/parameters/Blur'
+        - $ref: '#/components/parameters/Sharpen'
+        - $ref: '#/components/parameters/WatermarkUrl'
+        - $ref: '#/components/parameters/WatermarkPosition'
+        - $ref: '#/components/parameters/WatermarkOpacity'
+        - $ref: '#/components/parameters/WatermarkMargin'
+        - $ref: '#/components/parameters/Preset'
+      responses:
+        '200':
+          $ref: '#/components/responses/ImageBinary'
+        '304':
+          $ref: '#/components/responses/NotModified'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '406':
+          $ref: '#/components/responses/NotAcceptable'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+        '502':
+          $ref: '#/components/responses/BadGateway'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '508':
+          $ref: '#/components/responses/LoopDetected'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
 
   /images:transform:
     post:
@@ -281,6 +421,8 @@ paths:
           $ref: '#/components/responses/ServiceUnavailable'
         '508':
           $ref: '#/components/responses/LoopDetected'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
 
   /images:
     post:
@@ -328,6 +470,8 @@ paths:
           $ref: '#/components/responses/NotImplemented'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
 
   /health:
     get:
@@ -342,15 +486,9 @@ paths:
         because it is designed for dashboards and operators who need to see the
         full picture.
       operationId: getHealth
-      parameters:
-        - name: Authorization
-          in: header
-          required: false
-          description: >
-            Bearer token required when `TRUSS_HEALTH_TOKEN` is set.
-          schema:
-            type: string
-            example: 'Bearer my-secret-token'
+      security:
+        - {}
+        - BearerAuth: []
       responses:
         '200':
           description: Comprehensive health diagnostic
@@ -380,11 +518,29 @@ paths:
                     thresholdBytes: 536870912
                 maxInputPixels: 40000000
         '401':
-          description: Authentication required (when TRUSS_HEALTH_TOKEN is set)
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+    head:
+      tags: [Health]
+      summary: Inspect comprehensive health diagnostic headers
+      description: |
+        Same contract as `GET /health`, but returns headers only and no body.
+      operationId: headHealth
+      security:
+        - {}
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Comprehensive health diagnostic
           content:
-            application/problem+json:
+            application/json:
               schema:
-                $ref: '#/components/schemas/ProblemDetail'
+                $ref: '#/components/schemas/HealthDiagnosticResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
 
   /health/live:
     get:
@@ -407,6 +563,23 @@ paths:
                 status: ok
                 service: truss
                 version: 0.9.0
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+    head:
+      tags: [Health]
+      summary: Inspect liveness probe headers
+      description: |
+        Same contract as `GET /health/live`, but returns headers only and no body.
+      operationId: headLiveHealth
+      responses:
+        '200':
+          description: Process is alive
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LivenessResponse'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
 
   /health/ready:
     get:
@@ -508,6 +681,29 @@ paths:
                     checks:
                       - name: draining
                         status: fail
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+    head:
+      tags: [Health]
+      summary: Inspect readiness probe headers
+      description: |
+        Same contract as `GET /health/ready`, but returns headers only and no body.
+      operationId: headReadyHealth
+      responses:
+        '200':
+          description: Server is ready to accept traffic
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReadinessResponse'
+        '503':
+          description: Server is not ready to accept traffic
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReadinessResponse'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
 
   /metrics:
     get:
@@ -550,6 +746,32 @@ paths:
           $ref: '#/components/responses/NotFound'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+    head:
+      tags: [Observability]
+      summary: Inspect Prometheus metrics headers
+      description: |
+        Same contract as `GET /metrics`, but returns headers only and no body.
+      operationId: headMetrics
+      security:
+        - {}
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Prometheus text exposition format
+          content:
+            text/plain:
+              schema:
+                type: string
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
 
 components:
   securitySchemes:
@@ -559,8 +781,8 @@ components:
       name: signature
       description: |
         HMAC-SHA256 signed URL authentication.
-        Requires `keyId`, `expires`, and `signature` query parameters on public GET
-        endpoints.
+        Requires `keyId`, `expires`, and `signature` query parameters on public
+        image endpoints.
 
         The canonical form is:
         `METHOD\nAUTHORITY\nREQUEST_PATH\nCANONICAL_QUERY`
@@ -861,8 +1083,9 @@ components:
       description: |
         HTTP(S) URL of a watermark image to composite onto the output.
         Must be a raster format (PNG, JPEG, WebP, BMP, TIFF); SVG is not supported.
-        Subject to SSRF protection and a 10 MB size limit.
-        For multipart uploads the watermark file field also has a 10 MB cap.
+        Subject to SSRF protection and the remote watermark size limit
+        (`TRUSS_MAX_WATERMARK_BYTES`, default 10 MB).
+        For multipart uploads the `watermark` file field has a fixed 10 MB cap.
       schema:
         type: string
         format: uri
@@ -873,7 +1096,7 @@ components:
       required: false
       description: |
         Where to place the watermark on the output image.
-        Requires `watermarkUrl` to be set; ignored otherwise.
+        Requires `watermarkUrl` to be set; requests are rejected otherwise.
       schema:
         type: string
         enum: [center, top, right, bottom, left, top-left, top-right, bottom-left, bottom-right]
@@ -885,7 +1108,7 @@ components:
       required: false
       description: |
         Watermark opacity (1–100).
-        Requires `watermarkUrl` to be set; ignored otherwise.
+        Requires `watermarkUrl` to be set; requests are rejected otherwise.
       schema:
         type: integer
         minimum: 1
@@ -898,7 +1121,7 @@ components:
       required: false
       description: |
         Margin in pixels from the nearest edge.
-        Requires `watermarkUrl` to be set; ignored otherwise.
+        Requires `watermarkUrl` to be set; requests are rejected otherwise.
       schema:
         type: integer
         minimum: 0
@@ -1174,18 +1397,18 @@ components:
           type: string
           enum: [center, top, right, bottom, left, top-left, top-right, bottom-left, bottom-right]
           default: bottom-right
-          description: Where to place the watermark on the output image.
+          description: Where to place the watermark on the output image. Requires a `watermark` file field.
         watermark_opacity:
           type: integer
           minimum: 1
           maximum: 100
           default: 50
-          description: Watermark opacity (1–100).
+          description: Watermark opacity (1–100). Requires a `watermark` file field.
         watermark_margin:
           type: integer
           minimum: 0
           default: 10
-          description: Margin in pixels from the nearest edge.
+          description: Margin in pixels from the nearest edge. Requires a `watermark` file field.
     LivenessResponse:
       type: object
       description: Minimal liveness payload confirming the process is running.
@@ -1285,6 +1508,9 @@ components:
           format: int64
           minimum: 1
           description: Maximum concurrent transforms allowed (transformCapacity check only).
+        recovering:
+          type: boolean
+          description: Present and `true` while a hysteresis-tracked resource check remains in its recovery margin.
     ProblemDetail:
       type: object
       description: RFC 7807 Problem Details
@@ -1373,7 +1599,7 @@ components:
             type: string
             format: binary
     NotModified:
-      description: ETag matched the If-None-Match header (public GET only)
+      description: ETag matched the If-None-Match header (GET and HEAD)
       headers:
         ETag:
           schema:
@@ -1470,6 +1696,20 @@ components:
             $ref: '#/components/schemas/ProblemDetail'
     ServiceUnavailable:
       description: Server overloaded or required configuration missing
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetail'
+    TooManyRequests:
+      description: Request was rejected by the per-IP rate limiter
+      headers:
+        Retry-After:
+          description: Seconds to wait before retrying the request
+          schema:
+            type: integer
+        X-Request-Id:
+          schema:
+            type: string
       content:
         application/problem+json:
           schema:

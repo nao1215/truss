@@ -180,6 +180,8 @@ pub(super) fn is_trusted_proxy(trusted: &[TrustedProxy], ip: IpAddr) -> bool {
 
 /// Feature-flag-independent label for the active storage backend, used only
 /// by the metrics subsystem to tag duration histograms.
+///
+/// Some variants are only constructed when optional storage backends are enabled.
 #[derive(Debug, Clone, Copy)]
 #[allow(dead_code)]
 pub(super) enum StorageBackendLabel {
@@ -906,21 +908,9 @@ impl ServerConfig {
         self.log_at(LogLevel::Info, msg);
     }
 
-    /// Emits an error-level diagnostic message.
-    #[allow(dead_code)]
-    pub(super) fn log_error(&self, msg: &str) {
-        self.log_at(LogLevel::Error, msg);
-    }
-
     /// Emits a warning-level diagnostic message.
     pub(super) fn log_warn(&self, msg: &str) {
         self.log_at(LogLevel::Warn, msg);
-    }
-
-    /// Emits a debug-level diagnostic message.
-    #[allow(dead_code)]
-    pub(super) fn log_debug(&self, msg: &str) {
-        self.log_at(LogLevel::Debug, msg);
     }
 
     /// Returns a copy of the configuration with signed-URL verification credentials attached.
@@ -1063,8 +1053,8 @@ impl ServerConfig {
     ///   current directory and is canonicalized before use.
     /// - `TRUSS_BEARER_TOKEN`: private API Bearer token. When this value is missing, private
     ///   endpoints remain unavailable and return `503 Service Unavailable`.
-    /// - `TRUSS_PUBLIC_BASE_URL`: externally visible base URL reserved for future public endpoint
-    ///   signing. When set, it must parse as an absolute `http` or `https` URL.
+    /// - `TRUSS_PUBLIC_BASE_URL`: externally visible base URL for public signed URL verification.
+    ///   When set, it must parse as an absolute `http` or `https` URL.
     /// - `TRUSS_SIGNED_URL_KEY_ID`: key identifier accepted by public signed GET endpoints.
     /// - `TRUSS_SIGNED_URL_SECRET`: shared secret used to verify public signed GET signatures.
     /// - `TRUSS_ALLOW_INSECURE_URL_SOURCES`: when set to `1`, `true`, `yes`, or `on`, URL

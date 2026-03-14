@@ -6,6 +6,7 @@ This page documents the HTTP API endpoints, request/response formats, and relate
 
 - OpenAPI YAML: [openapi.yaml](openapi.yaml)
 - Swagger UI on GitHub Pages: https://nao1215.github.io/truss/swagger/
+- Signed URL specification: [signed-url-spec.md](signed-url-spec.md)
 
 ## Starting the Server
 
@@ -41,14 +42,16 @@ truss sign --base-url http://localhost:8080 \
 # => http://localhost:8080/images/by-path?path=photos/hero.jpg&width=800&format=webp&keyId=mykey&expires=1900000000&signature=...
 ```
 
+See the [Signed URL Specification](signed-url-spec.md) for canonicalization rules, compatibility policy, and SDK implementation guidance.
+
 ## Endpoints
 
 ### Public Endpoints (Signed URL)
 
 | Endpoint | Description |
 |----------|-------------|
-| `GET /images/by-path` | Fetch and transform an image from storage by path, authenticated via signed URL |
-| `GET /images/by-url` | Fetch and transform an image from a remote URL, authenticated via signed URL |
+| `GET, HEAD /images/by-path` | Fetch and transform an image from storage by path, authenticated via signed URL |
+| `GET, HEAD /images/by-url` | Fetch and transform an image from a remote URL, authenticated via signed URL |
 
 ### Private Endpoints (Bearer Token)
 
@@ -61,9 +64,10 @@ truss sign --base-url http://localhost:8080 \
 
 | Endpoint | Description |
 |----------|-------------|
-| `GET /health/live` | Liveness probe (always returns 200) |
-| `GET /health/ready` | Readiness probe (returns 503 when draining, disk full, or memory limit exceeded) |
-| `GET /metrics` | Prometheus metrics in text exposition format |
+| `GET, HEAD /health` | Aggregated health status with resource checks, uptime, and version |
+| `GET, HEAD /health/live` | Liveness probe (always returns 200) |
+| `GET, HEAD /health/ready` | Readiness probe (returns 503 when draining, disk full, or memory limit exceeded) |
+| `GET, HEAD /metrics` | Prometheus metrics in text exposition format |
 
 ## Supported Formats
 
@@ -99,12 +103,12 @@ flowchart LR
 
 ### Public vs. Private Endpoints
 
-Only the public GET endpoints should be exposed through CloudFront:
+Only the public image endpoints should be exposed through CloudFront:
 
 | Endpoint | Visibility | CloudFront |
 |----------|-----------|------------|
-| `GET /images/by-path` | Public (signed URL) | Origin for CDN |
-| `GET /images/by-url` | Public (signed URL) | Origin for CDN |
+| `GET, HEAD /images/by-path` | Public (signed URL) | Origin for CDN |
+| `GET, HEAD /images/by-url` | Public (signed URL) | Origin for CDN |
 | `POST /images:transform` | Private (Bearer token) | Do not expose |
 | `POST /images` | Private (Bearer token) | Do not expose |
 
@@ -114,9 +118,11 @@ CDN cache keys must vary by the signed-URL authentication inputs and any transfo
 
 - Authentication: `keyId`, `expires`, `signature`
 - Source: `path` or `url`, `version`
-- Transform: `width`, `height`, `fit`, `position`, `format`, `quality`, `background`, `rotate`, `autoOrient`, `stripMetadata`, `preserveExif`, `crop`, `blur`, `sharpen`, `preset`
+- Transform: `width`, `height`, `fit`, `position`, `format`, `quality`, `optimize`, `targetQuality`, `background`, `rotate`, `autoOrient`, `stripMetadata`, `preserveExif`, `crop`, `blur`, `sharpen`, `watermarkUrl`, `watermarkPosition`, `watermarkOpacity`, `watermarkMargin`, `preset`
 
 This ensures that a cached response for one signed URL is not served to requests with different or expired signatures, and different transform options produce separate cache entries.
+
+If you omit `format` and rely on `Accept` negotiation, your CDN cache key must also vary on the `Accept` header. If that is not practical, set `format` explicitly or enable `TRUSS_DISABLE_ACCEPT_NEGOTIATION=true`.
 
 ### `TRUSS_PUBLIC_BASE_URL`
 

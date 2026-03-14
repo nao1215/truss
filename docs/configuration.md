@@ -48,6 +48,8 @@ truss is configured through environment variables and CLI flags. This page docum
 
 Preset objects accept the same fields as the HTTP `ImageTransformOptions` schema, including `optimize` and `targetQuality`.
 
+For the canonical signature payload, query serialization rules, and compatibility policy for public signed URLs, see [signed-url-spec.md](signed-url-spec.md).
+
 ## S3
 
 | Variable | Description |

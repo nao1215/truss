@@ -121,8 +121,8 @@ On Kubernetes, set `terminationGracePeriodSeconds` >= drain + 20 (e.g. `35` for 
 
 | Endpoint | Purpose |
 |----------|---------|
-| `GET /health/live` | Liveness probe (always returns 200) |
-| `GET /health/ready` | Readiness probe (returns 503 when draining, disk full, or memory limit exceeded) |
+| `GET, HEAD /health/live` | Liveness probe (always returns 200) |
+| `GET, HEAD /health/ready` | Readiness probe (returns 503 when draining, disk full, or memory limit exceeded) |
 
 Configure health thresholds with:
 - `TRUSS_HEALTH_CACHE_MIN_FREE_BYTES` -- minimum free bytes on cache disk

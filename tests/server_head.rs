@@ -1,7 +1,7 @@
 mod common;
 
 use common::{
-    png_bytes, send_raw_request, sign_public_query, spawn_fixture_server, spawn_server,
+    png_bytes, send_raw_request, signed_target_with_method, spawn_fixture_server, spawn_server,
     split_response, temp_dir,
 };
 use rstest::rstest;
@@ -9,6 +9,8 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::net::SocketAddr;
 use truss::ServerConfig;
+
+const FIXED_HEAD_BY_PATH_TARGET: &str = "/images/by-path?expires=1900000000&format=webp&keyId=public-demo&path=image.png&signature=29332b4813792a5982ed3071633a26407bd5335654f7a10e11729e75f545dc5a&width=800";
 
 #[rstest]
 #[case::health_live("/health/live", 200)]
@@ -46,42 +48,15 @@ fn send_head_request(addr: SocketAddr, target: &str, host: &str) -> Vec<u8> {
     )
 }
 
-fn signed_head_target(
-    path: &str,
-    query: BTreeMap<String, String>,
-    authority: &str,
-    secret: &str,
-) -> String {
-    let mut query = query;
-    let signature = sign_public_query("HEAD", authority, path, &query, secret);
-    query.insert("signature".to_string(), signature);
-    let mut serializer = url::form_urlencoded::Serializer::new(String::new());
-    for (name, value) in query {
-        serializer.append_pair(&name, &value);
-    }
-    format!("{path}?{}", serializer.finish())
-}
-
 #[test]
 fn head_public_by_path_returns_headers_with_empty_body() {
     let storage_root = temp_dir("head-public-by-path");
     fs::write(storage_root.join("image.png"), png_bytes()).expect("write source fixture");
     let (addr, handle) = spawn_server(
         ServerConfig::new(storage_root, Some("secret".to_string()))
-            .with_signed_url_credentials("public-dev", "secret-value"),
+            .with_signed_url_credentials("public-demo", "secret-value"),
     );
-    let target = signed_head_target(
-        "/images/by-path",
-        BTreeMap::from([
-            ("path".to_string(), "/image.png".to_string()),
-            ("keyId".to_string(), "public-dev".to_string()),
-            ("expires".to_string(), "4102444800".to_string()),
-            ("format".to_string(), "jpeg".to_string()),
-        ]),
-        "cdn.example.com",
-        "secret-value",
-    );
-    let response = send_head_request(addr, &target, "cdn.example.com");
+    let response = send_head_request(addr, FIXED_HEAD_BY_PATH_TARGET, "images.example.com");
 
     handle
         .join()
@@ -90,7 +65,7 @@ fn head_public_by_path_returns_headers_with_empty_body() {
 
     let (header, content_type, body) = split_response(&response);
     assert!(header.starts_with("HTTP/1.1 200 OK"), "{header}");
-    assert_eq!(content_type, "image/jpeg");
+    assert_eq!(content_type, "image/webp");
     assert!(body.is_empty(), "HEAD response body must be empty");
     assert!(header.contains("ETag: \"sha256-"), "{header}");
     assert!(
@@ -112,7 +87,8 @@ fn head_public_by_url_returns_headers_with_empty_body() {
             .with_signed_url_credentials("public-dev", "secret-value")
             .with_insecure_url_sources(true),
     );
-    let target = signed_head_target(
+    let target = signed_target_with_method(
+        "HEAD",
         "/images/by-url",
         BTreeMap::from([
             ("url".to_string(), url),

@@ -50,7 +50,9 @@ pub use config::StorageBackend;
 pub use config::{DEFAULT_BIND_ADDR, DEFAULT_STORAGE_ROOT, LogHandler, LogLevel, ServerConfig};
 pub use handler::TransformOptionsPayload;
 pub use lifecycle::{serve, serve_once, serve_once_with_config, serve_with_config};
-pub use signing::{SignedUrlSource, SignedWatermarkParams, bind_addr, sign_public_url};
+pub use signing::{
+    SignedUrlSource, SignedWatermarkParams, bind_addr, sign_public_url, sign_public_url_with_method,
+};
 
 /// Writes a line to stderr using a raw file-descriptor/handle write, bypassing
 /// Rust's `std::io::Stderr` type whose internal `ReentrantLock` can interfere
@@ -3784,6 +3786,7 @@ mod tests {
         );
 
         assert_eq!(response.status, "503 Service Unavailable");
+        assert_eq!(response.content_type, Some("application/json"));
         let body: serde_json::Value =
             serde_json::from_slice(&response.body).expect("parse ready body");
         assert_eq!(body["status"], "fail");
