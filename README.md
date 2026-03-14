@@ -327,6 +327,7 @@ See the [API Reference](docs/api-reference.md) for the full endpoint list and CD
 |------|-------------|
 | [Configuration Reference](docs/configuration.md) | Environment variables, storage backends, logging, and all server settings |
 | [API Reference](docs/api-reference.md) | HTTP endpoints, request/response formats, CDN integration |
+| [Signed URL Specification](docs/signed-url-spec.md) | Canonicalization rules, compatibility policy, and SDK guidance for public signed URLs |
 | [Deployment Guide](docs/deployment.md) | Docker, prebuilt binaries, cloud storage (S3/GCS/Azure), production setup |
 | [Development Guide](docs/development.md) | Building from source, testing, benchmarks, WASM demo, contributing |
 | [Prometheus Metrics](docs/prometheus.md) | Metrics reference, bucket boundaries, example PromQL queries |

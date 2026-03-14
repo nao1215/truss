@@ -6,6 +6,7 @@ This page documents the HTTP API endpoints, request/response formats, and relate
 
 - OpenAPI YAML: [openapi.yaml](openapi.yaml)
 - Swagger UI on GitHub Pages: https://nao1215.github.io/truss/swagger/
+- Signed URL specification: [signed-url-spec.md](signed-url-spec.md)
 
 ## Starting the Server
 
@@ -40,6 +41,8 @@ truss sign --base-url http://localhost:8080 \
   --expires 1900000000 --width 800 --format webp  # Unix timestamp (2030-03-17)
 # => http://localhost:8080/images/by-path?path=photos/hero.jpg&width=800&format=webp&keyId=mykey&expires=1900000000&signature=...
 ```
+
+See the [Signed URL Specification](signed-url-spec.md) for canonicalization rules, compatibility policy, and SDK implementation guidance.
 
 ## Endpoints
 
@@ -114,9 +117,11 @@ CDN cache keys must vary by the signed-URL authentication inputs and any transfo
 
 - Authentication: `keyId`, `expires`, `signature`
 - Source: `path` or `url`, `version`
-- Transform: `width`, `height`, `fit`, `position`, `format`, `quality`, `background`, `rotate`, `autoOrient`, `stripMetadata`, `preserveExif`, `crop`, `blur`, `sharpen`, `preset`
+- Transform: `width`, `height`, `fit`, `position`, `format`, `quality`, `optimize`, `targetQuality`, `background`, `rotate`, `autoOrient`, `stripMetadata`, `preserveExif`, `crop`, `blur`, `sharpen`, `watermarkUrl`, `watermarkPosition`, `watermarkOpacity`, `watermarkMargin`, `preset`
 
 This ensures that a cached response for one signed URL is not served to requests with different or expired signatures, and different transform options produce separate cache entries.
+
+If you omit `format` and rely on `Accept` negotiation, your CDN cache key must also vary on the `Accept` header. If that is not practical, set `format` explicitly or enable `TRUSS_DISABLE_ACCEPT_NEGOTIATION=true`.
 
 ### `TRUSS_PUBLIC_BASE_URL`
 
