@@ -1,6 +1,6 @@
 {
   "name": "@nao1215/truss-wasm",
-  "version": "0.9.0",
+  "version": "0.10.0",
   "description": "Official bundler-ready Wasm package for truss image transforms.",
   "type": "module",
   "main": "./dist/truss.js",
