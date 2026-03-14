@@ -18,6 +18,9 @@
     "LICENSE"
   ],
   "sideEffects": false,
+  "trussWasmBuild": {
+    "wasmBindgenVersion": "0.2.114"
+  },
   "scripts": {
     "build": "node ../../scripts/build-wasm-package.mjs",
     "prepack": "npm run build",

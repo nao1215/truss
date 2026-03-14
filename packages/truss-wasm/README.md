@@ -76,10 +76,11 @@ rustup target add wasm32-unknown-unknown
 cargo install wasm-bindgen-cli --version 0.2.114
 
 cd packages/truss-wasm
+npm run build
 npm pack --dry-run
 ```
 
-That command generates the package contents into `packages/truss-wasm/dist/` and performs an npm packaging smoke check.
+`npm run build` writes the generated Wasm bindings into `packages/truss-wasm/dist/`. `npm pack` triggers the `prepack` script, which runs the same build automatically, and `--dry-run` performs a packaging smoke check without creating the tarball.
 
 ## License
 

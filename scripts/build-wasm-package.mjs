@@ -16,10 +16,18 @@ const cargoWasmPath = path.join(
   "truss.wasm",
 );
 const packageJsonPath = path.join(packageDir, "package.json");
-const packageVersion = JSON.parse(readFileSync(packageJsonPath, "utf8")).version;
+const packageJson = JSON.parse(readFileSync(packageJsonPath, "utf8"));
+const packageVersion = packageJson.version;
+const wasmBindgenVersion = packageJson.trussWasmBuild?.wasmBindgenVersion;
 const cargoVersionMatch = readFileSync(cargoManifestPath, "utf8").match(
   /^version = "([^"]+)"/m,
 );
+
+if (!wasmBindgenVersion) {
+  throw new Error(
+    `failed to read trussWasmBuild.wasmBindgenVersion from ${packageJsonPath}`,
+  );
+}
 
 if (!cargoVersionMatch) {
   throw new Error(`failed to read crate version from ${cargoManifestPath}`);
@@ -32,18 +40,49 @@ if (crateVersion !== packageVersion) {
   );
 }
 
-function run(command, args) {
-  execFileSync(command, args, {
-    cwd: rootDir,
-    stdio: "inherit",
-  });
+function run(command, args, options = {}) {
+  try {
+    return execFileSync(command, args, {
+      cwd: rootDir,
+      encoding: options.capture ? "utf8" : undefined,
+      stdio: options.capture ? "pipe" : "inherit",
+    });
+  } catch (error) {
+    // Some sandboxes return stdout together with an EPERM wrapper for captured child output.
+    if (options.capture && error?.status === 0 && typeof error.stdout === "string") {
+      return error.stdout;
+    }
+
+    throw error;
+  }
 }
 
+let detectedWasmBindgenVersion;
+
 try {
-  run("wasm-bindgen", ["--version"]);
-} catch {
+  const versionOutput = run("wasm-bindgen", ["--version"], { capture: true }).trim();
+  const versionMatch = versionOutput.match(/^wasm-bindgen\s+(.+)$/);
+
+  if (!versionMatch) {
+    throw new Error(
+      `failed to parse wasm-bindgen CLI version from output: ${JSON.stringify(versionOutput)}`,
+    );
+  }
+
+  detectedWasmBindgenVersion = versionMatch[1];
+} catch (error) {
+  if (error?.code !== "ENOENT") {
+    throw error;
+  }
+
   throw new Error(
-    "wasm-bindgen CLI is required. Install it with `cargo install wasm-bindgen-cli --version 0.2.114`.",
+    `wasm-bindgen CLI is required. Install it with \`cargo install wasm-bindgen-cli --version ${wasmBindgenVersion}\`.`,
+  );
+}
+
+if (detectedWasmBindgenVersion !== wasmBindgenVersion) {
+  throw new Error(
+    `incompatible wasm-bindgen CLI version ${detectedWasmBindgenVersion}; expected ${wasmBindgenVersion}. Install the matching CLI with \`cargo install wasm-bindgen-cli --version ${wasmBindgenVersion}\`.`,
   );
 }
 

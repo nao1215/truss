@@ -124,10 +124,17 @@ jobs:
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
 
+      - name: Read Wasm package config
+        id: wasm-package-config
+        run: |
+          version="$(node -p "require('./packages/truss-wasm/package.json').trussWasmBuild.wasmBindgenVersion")"
+          echo "wasm_bindgen_version=${version}" >> "$GITHUB_OUTPUT"
+
       - name: Install wasm-bindgen CLI
         run: |
-          if ! wasm-bindgen --version 2>/dev/null | grep -q '0.2.114'; then
-            cargo install wasm-bindgen-cli --version 0.2.114
+          version="${{ steps.wasm-package-config.outputs.wasm_bindgen_version }}"
+          if [ "$(wasm-bindgen --version 2>/dev/null || true)" != "wasm-bindgen ${version}" ]; then
+            cargo install wasm-bindgen-cli --version "${version}"
           fi
 
       - name: Pack npm Wasm package
