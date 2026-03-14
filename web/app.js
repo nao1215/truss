@@ -10,11 +10,9 @@ const elements = {
   fileInput: document.querySelector("#source-file"),
   inputPreview: document.querySelector("#input-preview"),
   inputPlaceholder: document.querySelector("#input-placeholder"),
-  inputMeta: document.querySelector("#input-meta"),
   outputPreview: document.querySelector("#output-preview"),
   outputPlaceholder: document.querySelector("#output-placeholder"),
-  outputMeta: document.querySelector("#output-meta"),
-  capabilityStrip: document.querySelector("#capability-strip"),
+  artifactComparison: document.querySelector("#artifact-comparison"),
   format: document.querySelector("#format"),
   width: document.querySelector("#width"),
   height: document.querySelector("#height"),
@@ -50,6 +48,9 @@ const elements = {
   downloadLink: document.querySelector("#download-link"),
   downloadNote: document.querySelector("#download-note"),
   sizeComparison: document.querySelector("#size-comparison"),
+  resultSizeStat: document.querySelector("#result-size-stat"),
+  resultDeltaStat: document.querySelector("#result-delta-stat"),
+  resultDurationStat: document.querySelector("#result-duration-stat"),
   statusLine: document.querySelector("#status-line"),
   warningList: document.querySelector("#warning-list"),
   errorBox: document.querySelector("#error-box"),
@@ -79,12 +80,13 @@ async function boot() {
   state.capabilities = JSON.parse(getCapabilitiesJson());
 
   wireEvents();
-  renderCapabilities();
   refreshFormatState();
   refreshOptimizeState();
   refreshQualityState();
   refreshMetadataState();
-  setStatus("WASM runtime is ready.");
+  renderArtifactComparison(null, null);
+  resetResultSummary();
+  setStatus("");
 }
 
 function wireEvents() {
@@ -254,6 +256,8 @@ function wireEvents() {
 
 async function loadFile(file) {
   clearMessages();
+  state.inputArtifact = null;
+  renderArtifactComparison(null, null);
   resetOutput();
 
   state.inputFile = file;
@@ -269,7 +273,7 @@ async function loadFile(file) {
   );
   state.inputArtifact = response.artifact;
 
-  renderArtifactMeta(elements.inputMeta, response.artifact);
+  renderArtifactComparison(response.artifact, null);
 
   if (response.artifact.width && response.artifact.height) {
     elements.width.value = response.artifact.width;
@@ -293,7 +297,7 @@ async function loadFile(file) {
     return;
   }
 
-  setStatus(`${file.name} loaded. Adjust options and run the transform.`);
+  setStatus("");
 }
 
 async function runTransform() {
@@ -320,6 +324,7 @@ async function runTransform() {
   setBusy(true);
   setStatus("Transforming in the browser.");
   await nextFrame();
+  const startedAt = performance.now();
 
   try {
     const hasWatermark = state.watermarkBytes !== null;
@@ -348,19 +353,16 @@ async function runTransform() {
     state.outputObjectUrl = URL.createObjectURL(outputBlob);
 
     showPreview(elements.outputPreview, elements.outputPlaceholder, state.outputObjectUrl);
-    renderArtifactMeta(elements.outputMeta, response.artifact);
+    renderArtifactComparison(state.inputArtifact, response.artifact);
     renderWarnings(response.warnings);
     updateDownloadLink(response, state.outputObjectUrl, hasWatermark);
     renderSizeComparison(state.inputBytes.length, outputBytes.length);
-    const suffix = hasWatermark ? " (with watermark)" : "";
-    setStatus(
-      response.warnings.length
-        ? `Transform finished with warnings${suffix}.`
-        : `Transform finished${suffix}.`,
-    );
+    renderResultSummary(state.inputBytes.length, outputBytes.length, performance.now() - startedAt);
+    setStatus("");
   } catch (error) {
     const payload = parseWasmError(error);
     elements.sizeComparison.textContent = "No size comparison yet.";
+    resetResultSummary();
     showError(payload.message);
     setStatus("Transform failed.");
   } finally {
@@ -490,54 +492,32 @@ function refreshMetadataState() {
   }
 }
 
-function renderCapabilities() {
-  const messages = [
-    {
-      title: "Runtime",
-      copy: "WASM build running in your browser.",
-    },
-    {
-      title: "SVG",
-      copy: state.capabilities.svg ? "Enabled in this build." : "Excluded from this build.",
-    },
-    {
-      title: "WebP quality",
-      copy: state.capabilities.webpLossy
-        ? "Lossy WebP is available."
-        : "WebP stays lossless here.",
-    },
-    {
-      title: "AVIF",
-      copy: state.capabilities.avif
-        ? "Decode and encode available."
-        : "Not available in this build.",
-    },
-    {
-      title: "Optimize",
-      copy: "Auto, lossless, and lossy modes use the shared Rust pipeline.",
-    },
-  ];
+function artifactSummary(artifact) {
+  if (!artifact) {
+    return {
+      format: "—",
+      dimensions: "—",
+      alpha: "—",
+      frames: "—",
+    };
+  }
 
-  elements.capabilityStrip.replaceChildren(
-    ...messages.map((item) => {
-      const pill = document.createElement("span");
-      pill.className = "capability-pill";
-      pill.innerHTML = `<strong>${item.title}</strong> ${item.copy}`;
-      return pill;
-    }),
-  );
+  return {
+    format: artifact.mediaType.toUpperCase(),
+    dimensions: artifact.width && artifact.height ? `${artifact.width} x ${artifact.height}` : "Unknown",
+    alpha: artifact.hasAlpha === null ? "Unknown" : artifact.hasAlpha ? "Yes" : "No",
+    frames: String(artifact.frameCount),
+  };
 }
 
-function renderArtifactMeta(container, artifact) {
-  const values = [
-    artifact.mediaType.toUpperCase(),
-    artifact.width && artifact.height ? `${artifact.width} × ${artifact.height}` : "Unknown",
-    artifact.hasAlpha === null ? "Unknown" : artifact.hasAlpha ? "Yes" : "No",
-    String(artifact.frameCount),
-  ];
+function renderArtifactComparison(beforeArtifact, afterArtifact) {
+  const values = {
+    before: artifactSummary(beforeArtifact),
+    after: artifactSummary(afterArtifact),
+  };
 
-  [...container.querySelectorAll("dd")].forEach((node, index) => {
-    node.textContent = values[index];
+  elements.artifactComparison.querySelectorAll("[data-field]").forEach((node) => {
+    node.textContent = values[node.dataset.side][node.dataset.field];
   });
 }
 
@@ -601,7 +581,7 @@ async function loadWatermark(file) {
   elements.errorBox.textContent = "";
   refreshOptimizeState();
   refreshQualityState();
-  setStatus(`Watermark "${file.name}" loaded.`);
+  setStatus("");
 }
 
 function clearWatermark() {
@@ -612,23 +592,18 @@ function clearWatermark() {
   elements.watermarkFile.value = "";
   refreshOptimizeState();
   refreshQualityState();
-  setStatus("Watermark removed.");
+  setStatus("");
 }
 
 function resetOutput() {
   releaseUrl("outputObjectUrl");
   hidePreview(elements.outputPreview, elements.outputPlaceholder, "Transform output will appear here.");
-  renderArtifactMeta(elements.outputMeta, {
-    mediaType: "—",
-    width: null,
-    height: null,
-    hasAlpha: null,
-    frameCount: "—",
-  });
+  renderArtifactComparison(state.inputArtifact, null);
   elements.downloadLink.href = "#";
   elements.downloadLink.classList.add("disabled");
   elements.downloadNote.textContent = "Nothing has been transformed yet.";
   elements.sizeComparison.textContent = "No size comparison yet.";
+  resetResultSummary();
 }
 
 function clearMessages() {
@@ -665,6 +640,7 @@ function setBusy(active) {
 
 function setStatus(message) {
   elements.statusLine.textContent = message;
+  elements.statusLine.hidden = !message;
 }
 
 function releaseUrl(key) {
@@ -728,6 +704,24 @@ function clampQuality(value) {
     return "82";
   }
   return String(Math.min(100, Math.max(1, parsed)));
+}
+
+function resetResultSummary() {
+  elements.resultSizeStat.textContent = "—";
+  elements.resultDeltaStat.textContent = "—";
+  elements.resultDeltaStat.dataset.trend = "flat";
+  elements.resultDurationStat.textContent = "—";
+}
+
+function renderResultSummary(inputBytes, outputBytes, durationMs) {
+  const delta = outputBytes - inputBytes;
+  const percent = inputBytes > 0 ? (delta / inputBytes) * 100 : 0;
+  const sign = delta > 0 ? "+" : "";
+
+  elements.resultSizeStat.textContent = formatBytes(outputBytes);
+  elements.resultDeltaStat.textContent = `${sign}${percent.toFixed(1)}%`;
+  elements.resultDeltaStat.dataset.trend = delta < 0 ? "down" : delta > 0 ? "up" : "flat";
+  elements.resultDurationStat.textContent = `${Math.max(1, Math.round(durationMs))} ms`;
 }
 
 function formatSupportsOptimization(format) {
