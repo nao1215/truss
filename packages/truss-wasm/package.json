@@ -1,0 +1,55 @@
+{
+  "name": "@nao1215/truss-wasm",
+  "version": "0.9.0",
+  "description": "Official bundler-ready Wasm package for truss image transforms.",
+  "type": "module",
+  "main": "./dist/truss.js",
+  "module": "./dist/truss.js",
+  "types": "./dist/truss.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/truss.d.ts",
+      "default": "./dist/truss.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "build": "node ../../scripts/build-wasm-package.mjs",
+    "prepack": "npm run build",
+    "pack:dry-run": "npm pack --dry-run"
+  },
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org/",
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+ssh://git@github.com/nao1215/truss.git",
+    "directory": "packages/truss-wasm"
+  },
+  "keywords": [
+    "truss",
+    "wasm",
+    "webassembly",
+    "image",
+    "browser",
+    "resize",
+    "avif",
+    "svg"
+  ],
+  "author": "Naohiro CHIKAMATSU <n.chika156@gmail.com>",
+  "license": "MIT",
+  "funding": {
+    "type": "github",
+    "url": "https://github.com/sponsors/nao1215"
+  },
+  "bugs": {
+    "url": "https://github.com/nao1215/truss/issues"
+  },
+  "homepage": "https://github.com/nao1215/truss/tree/main/packages/truss-wasm#readme"
+}

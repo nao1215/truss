@@ -14,6 +14,24 @@ If you need remote URL fetches, storage backends, signed URLs, or server-side en
 
 ## Build Modes
 
+### Official npm package build
+
+The repository now includes the source for the official npm package at [`packages/truss-wasm`](../packages/truss-wasm). That package is intended for publication as `@nao1215/truss-wasm`.
+
+Its official build uses:
+
+- `wasm`
+- `svg`
+- `avif`
+- `wasm-bindgen --target bundler`
+
+Implication:
+
+- bundler-based consumers can import the package directly
+- the package does not require an explicit `init()` call
+- AVIF decode/encode is enabled
+- WebP output stays lossless in the official package
+
 ### GitHub Pages demo build
 
 The demo on GitHub Pages is built with the `wasm` and `svg` features only:
@@ -72,13 +90,42 @@ Feature flags relevant to browser builds:
 | `avif` | Enables AVIF decode and encode |
 | `webp-lossy` | Enables quality-controlled lossy WebP output |
 
-`truss` does not currently ship an npm package. The intended distribution model is the `wasm-bindgen` output pair: generated JS loader plus `.wasm` binary.
+For bundler-based apps, the official package build is the recommended default. The raw `wasm-bindgen` output pair remains useful for static-page or custom hosting flows.
 
 The examples in this guide assume a static page that lives next to the generated `pkg/` directory, for example `web/dist/index.html` importing `./pkg/truss.js`. If your app serves the generated files from another asset root, adjust the import path and `wasm-bindgen --out-dir` accordingly.
 
+## npm Package Quick Start
+
+For bundler-based browser apps, use the official package:
+
+```ts
+import {
+  getCapabilitiesJson,
+  inspectImageJson,
+  transformImage,
+} from "@nao1215/truss-wasm";
+
+const inputBytes = new Uint8Array(await file.arrayBuffer());
+const capabilities = JSON.parse(getCapabilitiesJson());
+const inspected = JSON.parse(inspectImageJson(inputBytes, undefined));
+
+const result = transformImage(
+  inputBytes,
+  undefined,
+  JSON.stringify({
+    format: "jpeg",
+    width: 1200,
+    quality: 82,
+    autoOrient: true,
+  }),
+);
+```
+
+The official package is generated with `wasm-bindgen --target bundler`, so there is no explicit `init()` step.
+
 ## JavaScript Quick Start
 
-The generated package exports a default `init` function plus named helpers:
+For direct static hosting of the raw Wasm bindings, the generated package exports a default `init` function plus named helpers:
 
 ```js
 import init, {

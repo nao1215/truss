@@ -295,6 +295,32 @@ truss convert ./-input.png -o out.jpg
 
 truss also ships a browser-oriented WASM adapter for local, client-side image processing. The generated package exposes a small JS-facing API over the same Rust core used by the CLI and HTTP server.
 
+For bundler-based browser apps, the repository includes the source for the official npm package in [`packages/truss-wasm`](./packages/truss-wasm). It uses the fixed feature set `wasm,svg,avif`, so AVIF is available and WebP stays lossless in the package build.
+
+```js
+import {
+  getCapabilitiesJson,
+  inspectImageJson,
+  transformImage,
+} from "@nao1215/truss-wasm";
+
+const inputBytes = new Uint8Array(await file.arrayBuffer());
+const capabilities = JSON.parse(getCapabilitiesJson());
+const inspected = JSON.parse(inspectImageJson(inputBytes, undefined));
+
+const result = transformImage(
+  inputBytes,
+  undefined,
+  JSON.stringify({
+    format: "jpeg",
+    width: 1200,
+    quality: 80,
+  }),
+);
+```
+
+The official npm package is generated with `wasm-bindgen --target bundler`, so it does not require an explicit `init()` step.
+
 The example below assumes your page is served from a directory that also contains `pkg/truss.js`. When using `./scripts/build-wasm-demo.sh`, that means `web/dist/index.html` importing `./pkg/truss.js`.
 
 ```js
@@ -326,7 +352,7 @@ const outputBlob = new Blob([result.bytes], {
 });
 ```
 
-The GitHub Pages demo is intentionally built with `wasm,svg`. AVIF support and lossy WebP encoding are optional compile-time features, so browser builds can differ. Check capabilities at runtime and see [WASM Integration](docs/wasm.md) for build commands, import-path assumptions, API shapes, constraints, limits, and error handling.
+The GitHub Pages demo is intentionally built with `wasm,svg`. The official npm package uses `wasm,svg,avif`. Check capabilities at runtime and see [WASM Integration](docs/wasm.md) for package and raw-build usage, feature differences, import-path assumptions, API shapes, constraints, limits, and error handling.
 
 ### HTTP Server -- one curl to transform
 

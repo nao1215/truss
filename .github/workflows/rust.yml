@@ -7,6 +7,8 @@ on:
     paths:
       - "src/**"
       - "tests/**"
+      - "packages/**"
+      - "scripts/**"
       - "Cargo.toml"
       - "Cargo.lock"
       - ".github/workflows/rust.yml"
@@ -14,6 +16,8 @@ on:
     paths:
       - "src/**"
       - "tests/**"
+      - "packages/**"
+      - "scripts/**"
       - "Cargo.toml"
       - "Cargo.lock"
       - ".github/workflows/rust.yml"
@@ -99,6 +103,35 @@ jobs:
         run: cargo doc --no-deps
         env:
           RUSTDOCFLAGS: -D warnings
+
+  wasm-package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install wasm-bindgen CLI
+        run: |
+          if ! wasm-bindgen --version 2>/dev/null | grep -q '0.2.114'; then
+            cargo install wasm-bindgen-cli --version 0.2.114
+          fi
+
+      - name: Pack npm Wasm package
+        run: cd packages/truss-wasm && npm pack --dry-run
 
   # ── Cross-platform tests (PR and main) ──────────────────────────────
   test-cross-platform:
