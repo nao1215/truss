@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdirSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -105,8 +105,58 @@ run("cargo", [
 
 run("wasm-bindgen", [
   "--target",
-  "bundler",
+  "web",
+  "--out-name",
+  "truss_bg",
   "--out-dir",
   distDir,
   cargoWasmPath,
 ]);
+
+writeFileSync(
+  path.join(distDir, "truss.js"),
+  `/* @ts-self-types="./truss.d.ts" */
+
+import init, {
+  WasmTransformOutput,
+  getCapabilitiesJson,
+  inspectImageJson,
+  transformImage,
+  transformImageWithWatermark,
+} from "./truss_bg.js";
+
+await init(await resolveWasmInput());
+
+export {
+  WasmTransformOutput,
+  getCapabilitiesJson,
+  inspectImageJson,
+  transformImage,
+  transformImageWithWatermark,
+};
+
+async function resolveWasmInput() {
+  const wasmUrl = new URL("./truss_bg_bg.wasm", import.meta.url);
+
+  if (typeof process !== "undefined" && process.versions?.node) {
+    const nodeFsPromisesSpecifier = "node:fs/promises";
+    const { readFile } = await import(nodeFsPromisesSpecifier);
+    return readFile(wasmUrl);
+  }
+
+  return wasmUrl;
+}
+`,
+);
+
+writeFileSync(
+  path.join(distDir, "truss.d.ts"),
+  `export {
+  WasmTransformOutput,
+  getCapabilitiesJson,
+  inspectImageJson,
+  transformImage,
+  transformImageWithWatermark,
+} from "./truss_bg.js";
+`,
+);

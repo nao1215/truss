@@ -7,7 +7,7 @@ This package exposes the browser-facing Wasm adapter from `truss` as a prebuilt 
 ## What This Package Includes
 
 - official Wasm build generated from `truss`
-- bundler-oriented output from `wasm-bindgen --target bundler`
+- browser-oriented bindings wrapped for npm consumers
 - TypeScript definitions generated alongside the Wasm bindings
 - a fixed feature set for reproducible third-party integration
 
@@ -27,7 +27,7 @@ npm install @nao1215/truss-wasm
 
 ## Quick Start
 
-Unlike the raw `--target web` bindings, the bundler build does not require an explicit `init()` call.
+This package initializes the Wasm module at import time, so consumer code does not call `init()` explicitly.
 
 ```ts
 import {
@@ -56,6 +56,26 @@ const outputBlob = new Blob([result.bytes], {
   type: response.artifact.mimeType,
 });
 ```
+
+### Vite
+
+Vite needs top-level await support for the package wrapper. Use `vite-plugin-top-level-await`:
+
+```sh
+npm install @nao1215/truss-wasm
+npm install -D vite-plugin-top-level-await
+```
+
+```ts
+import { defineConfig } from "vite";
+import topLevelAwait from "vite-plugin-top-level-await";
+
+export default defineConfig({
+  plugins: [topLevelAwait()],
+});
+```
+
+For a runnable example, see `examples/vite-truss-wasm` in the repository.
 
 ## Exported API
 

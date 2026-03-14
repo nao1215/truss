@@ -118,6 +118,18 @@ wasm-package-build:
 wasm-package-pack:
     cd packages/truss-wasm && npm pack --dry-run
 
+# Install the local npm package tarball into a throwaway consumer and run one transform
+wasm-package-consumer-smoke:
+    node ./scripts/run-wasm-consumer-smoke.mjs
+
+# Install the local npm package tarball into a temporary Vite app and verify bundler build succeeds
+wasm-vite-example-smoke:
+    node ./scripts/run-wasm-vite-example-smoke.mjs
+
+# Install the checked-in Vite example dependencies, serve it, and verify runtime output in headless Chrome
+wasm-vite-example-runtime-smoke:
+    node ./scripts/run-wasm-vite-example-runtime-smoke.mjs
+
 # Check WASM feature slice compiles
 wasm-check:
     cargo check --no-default-features --features wasm --lib

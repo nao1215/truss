@@ -23,6 +23,7 @@
   },
   "scripts": {
     "build": "node ../../scripts/build-wasm-package.mjs",
+    "prepare": "npm run build",
     "prepack": "npm run build",
     "pack:dry-run": "npm pack --dry-run"
   },

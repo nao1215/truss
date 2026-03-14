@@ -15,6 +15,7 @@ Optional:
 - `cargo-audit` for security checks (`cargo install cargo-audit`)
 - `cargo-llvm-cov` + `llvm-tools-preview` for coverage (`just setup` installs these)
 - `wasm32-unknown-unknown` target and `wasm-bindgen-cli` for WASM builds
+- Node.js 22.x + npm for the official WASM package, consumer smoke test, and example app (`.nvmrc` matches CI)
 
 Run `just setup` to install the optional development tools.
 
@@ -59,6 +60,15 @@ just lint       # cargo clippy --all-targets -- -D warnings
 just fmt-check  # cargo fmt --all -- --check
 just doc        # RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
 just audit      # cargo audit
+```
+
+If your change touches the official npm package or browser-facing WASM integration, also run:
+
+```sh
+just wasm-package-pack            # Verify the npm tarball can be assembled
+just wasm-package-consumer-smoke  # Install the tarball into a throwaway app and run one transform
+just wasm-vite-example-smoke      # Build the Vite example against the local tarball
+just wasm-vite-example-runtime-smoke    # Verify the checked-in Vite example in headless Chrome
 ```
 
 ### 4. Run integration tests
@@ -129,6 +139,8 @@ integration/
     └── runbooks/*.yml
 
 docs/                        # Design documents, API specs, and guides
+examples/                    # Runnable consumer examples (for example Vite + @nao1215/truss-wasm)
+packages/truss-wasm/         # Official npm package published as @nao1215/truss-wasm
 ```
 
 ### Architecture overview
@@ -188,8 +200,15 @@ Run `just` with no arguments to see the full list. Key recipes:
 | `just ci` | All CI checks locally |
 | `just coverage` | Code coverage summary |
 | `just integration` | Docker-based CLI + API tests |
+| `just wasm-package-build` | Build the official npm package bindings |
+| `just wasm-package-pack` | Pack the npm package without publishing |
+| `just wasm-package-consumer-smoke` | Install the local tarball into a throwaway consumer and run one transform |
+| `just wasm-vite-example-smoke` | Build the Vite example against the local tarball |
+| `just wasm-vite-example-runtime-smoke` | Serve the checked-in Vite example and verify runtime output in headless Chrome |
 | `just serve` | Start dev server |
 | `just docker-build` | Build Docker image |
+
+For browser integration work, start from `examples/vite-truss-wasm/` to verify a real consumer can import `@nao1215/truss-wasm` with a modern bundler.
 
 ### 8. Exit codes
 
