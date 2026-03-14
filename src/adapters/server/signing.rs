@@ -93,6 +93,25 @@ pub fn sign_public_url(
     watermark: Option<&SignedWatermarkParams>,
     preset: Option<&str>,
 ) -> Result<String, String> {
+    sign_public_url_with_method(
+        "GET", base_url, source, options, key_id, secret, expires, watermark, preset,
+    )
+}
+
+/// Like [`sign_public_url`] but allows the caller to specify the HTTP method
+/// included in the canonical string (e.g. `"GET"` or `"HEAD"`).
+#[allow(clippy::too_many_arguments)]
+pub fn sign_public_url_with_method(
+    method: &str,
+    base_url: &str,
+    source: SignedUrlSource,
+    options: &TransformOptions,
+    key_id: &str,
+    secret: &str,
+    expires: u64,
+    watermark: Option<&SignedWatermarkParams>,
+    preset: Option<&str>,
+) -> Result<String, String> {
     let base_url = Url::parse(base_url).map_err(|error| format!("base URL is invalid: {error}"))?;
     match base_url.scheme() {
         "http" | "https" => {}
@@ -128,7 +147,8 @@ pub fn sign_public_url(
     query.insert("expires".to_string(), expires.to_string());
 
     let canonical = format!(
-        "GET\n{}\n{}\n{}",
+        "{}\n{}\n{}\n{}",
+        method.to_ascii_uppercase(),
         authority,
         endpoint.path(),
         canonical_query_without_signature(&query)

@@ -64,6 +64,7 @@ See the [Signed URL Specification](signed-url-spec.md) for canonicalization rule
 
 | Endpoint | Description |
 |----------|-------------|
+| `GET, HEAD /health` | Aggregated health status with resource checks, uptime, and version |
 | `GET, HEAD /health/live` | Liveness probe (always returns 200) |
 | `GET, HEAD /health/ready` | Readiness probe (returns 503 when draining, disk full, or memory limit exceeded) |
 | `GET, HEAD /metrics` | Prometheus metrics in text exposition format |

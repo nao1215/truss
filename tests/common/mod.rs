@@ -16,7 +16,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use truss::{
     CropRegion, Fit, MediaType, OptimizeMode, Position, Rgba8, Rotation, ServerConfig,
     SignedUrlSource, SignedWatermarkParams, TargetQuality, TransformOptions,
-    serve_once_with_config, sign_public_url,
+    serve_once_with_config, sign_public_url_with_method,
 };
 use url::Url;
 
@@ -498,7 +498,7 @@ fn sign_public_query(
 }
 
 fn can_use_production_signer(method: &str, route: &str, query: &BTreeMap<String, String>) -> bool {
-    if method != "GET"
+    if (method != "GET" && method != "HEAD")
         || !query
             .keys()
             .all(|name| is_supported_signed_query_name(route, name))
@@ -554,7 +554,8 @@ pub fn signed_target_with_method(
     let watermark = parse_watermark(&query);
     let preset = query.get("preset").map(String::as_str);
 
-    let signed_url = sign_public_url(
+    let signed_url = sign_public_url_with_method(
+        method,
         &format!("http://{authority}"),
         source,
         &options,

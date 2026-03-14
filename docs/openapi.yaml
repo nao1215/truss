@@ -1599,7 +1599,7 @@ components:
             type: string
             format: binary
     NotModified:
-      description: ETag matched the If-None-Match header (public GET only)
+      description: ETag matched the If-None-Match header (GET and HEAD)
       headers:
         ETag:
           schema:
