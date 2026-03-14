@@ -110,6 +110,14 @@ integration: integration-cli integration-api integration-s3
 wasm-build:
     ./scripts/build-wasm-demo.sh
 
+# Build official npm package bindings
+wasm-package-build:
+    node ./scripts/build-wasm-package.mjs
+
+# Pack official npm package without publishing
+wasm-package-pack:
+    cd packages/truss-wasm && npm pack --dry-run
+
 # Check WASM feature slice compiles
 wasm-check:
     cargo check --no-default-features --features wasm --lib

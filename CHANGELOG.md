@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.10.0
+
+### Added
+
+- Official `@nao1215/truss-wasm` npm package source for third-party browser integration with a fixed `wasm,svg,avif` feature set.
+- Release automation to pack the Wasm npm package, attach its tarball to GitHub Releases, and publish to npm when `NPM_TOKEN` is configured.
+
+### Changed
+
+- Expanded WASM documentation with npm package quick-start guidance, bundler-focused distribution details, build-mode differences, and local packaging instructions.
+- Clarified the supported browser build matrix so AVIF support and WebP lossless behavior are explicit in the official package flow.
+
 ## v0.9.0
 
 ### Added

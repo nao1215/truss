@@ -66,6 +66,21 @@ cargo install wasm-bindgen-cli --version 0.2.114
 
 The build output is written to `web/dist/`.
 
+## WASM npm Package
+
+The repository also contains an official npm package source in [`packages/truss-wasm`](../packages/truss-wasm). It uses a bundler-oriented build and currently ships the fixed feature set `wasm,svg,avif`.
+
+Release tags also build a `.tgz` artifact for this package and publish it to npm when `NPM_TOKEN` is configured in GitHub Actions.
+
+To build and smoke-check the package locally:
+
+```sh
+rustup target add wasm32-unknown-unknown
+# The wasm-bindgen-cli version must match the wasm-bindgen dependency in Cargo.toml.
+cargo install wasm-bindgen-cli --version 0.2.114
+just wasm-package-pack
+```
+
 ## Benchmark
 
 Measured with `docs/img/logo.png` (1536 x 1024 PNG, 1.6 MB) on AMD Ryzen 7 5800U. Each operation was run 10 times; the table shows min / avg / max wall-clock time.
