@@ -186,3 +186,63 @@ pub(super) fn resolve_server_config(command: ServeCommand) -> Result<ServerConfi
 
     Ok(config)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serial_test::serial;
+    use std::io;
+
+    struct FailingWriter;
+
+    impl Write for FailingWriter {
+        fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+            Err(io::Error::other("writer failure"))
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn execute_serve_returns_runtime_error_for_invalid_bind_addr() {
+        let storage_root = tempfile::tempdir().expect("create tempdir");
+        // SAFETY: test-only env mutation guarded by serial execution.
+        unsafe { std::env::set_var("TRUSS_STORAGE_ROOT", storage_root.path()) };
+
+        let error = execute_serve(ServeCommand {
+            bind_addr: Some("invalid-bind-addr".to_string()),
+            storage_root: Some(storage_root.path().to_path_buf()),
+            public_base_url: None,
+            signed_url_key_id: None,
+            signed_url_secret: None,
+            allow_insecure_url_sources: false,
+        })
+        .expect_err("invalid bind address should fail");
+
+        // SAFETY: paired cleanup for the test-only env mutation above.
+        unsafe { std::env::remove_var("TRUSS_STORAGE_ROOT") };
+
+        assert_eq!(error.exit_code, super::EXIT_RUNTIME);
+        assert!(error.message.contains("failed to bind"));
+    }
+
+    #[test]
+    #[serial]
+    fn execute_validate_reports_writer_failures() {
+        let storage_root = tempfile::tempdir().expect("create tempdir");
+        // SAFETY: test-only env mutation guarded by serial execution.
+        unsafe { std::env::set_var("TRUSS_STORAGE_ROOT", storage_root.path()) };
+
+        let error =
+            execute_validate(&mut FailingWriter).expect_err("writer failure should be reported");
+
+        // SAFETY: paired cleanup for the test-only env mutation above.
+        unsafe { std::env::remove_var("TRUSS_STORAGE_ROOT") };
+
+        assert_eq!(error.exit_code, super::EXIT_RUNTIME);
+        assert!(error.message.contains("failed to write stdout"));
+    }
+}

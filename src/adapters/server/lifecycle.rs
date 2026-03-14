@@ -482,3 +482,78 @@ pub(super) fn preset_watcher(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(unix)]
+    use serial_test::serial;
+
+    #[cfg(unix)]
+    use std::net::TcpListener;
+    #[cfg(unix)]
+    use std::sync::atomic::AtomicU8;
+    #[cfg(unix)]
+    use std::time::Instant;
+
+    #[cfg(unix)]
+    #[test]
+    fn wait_for_accept_or_shutdown_returns_when_pipe_is_ready() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test listener");
+        let (read_fd, write_fd) = create_shutdown_pipe().expect("create shutdown pipe");
+        let byte: u8 = 1;
+        let written = unsafe { libc::write(write_fd, (&byte as *const u8).cast(), 1) };
+        assert_eq!(written, 1, "write shutdown wakeup byte");
+
+        let draining = AtomicBool::new(false);
+        let start = Instant::now();
+        wait_for_accept_or_shutdown(&listener, read_fd, &draining);
+
+        assert!(
+            start.elapsed() < Duration::from_millis(200),
+            "wait_for_accept_or_shutdown should return immediately when the pipe is readable"
+        );
+        assert!(poll_shutdown_pipe(read_fd));
+
+        close_shutdown_pipe(read_fd, write_fd);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    fn signal_handler_sets_draining_and_wakes_shutdown_pipe() {
+        let (read_fd, write_fd) = create_shutdown_pipe().expect("create shutdown pipe");
+        let draining = Box::into_raw(Box::new(AtomicBool::new(false)));
+        let previous_draining = GLOBAL_DRAINING.swap(draining, Ordering::SeqCst);
+        let previous_write_fd = SHUTDOWN_PIPE_WR.swap(write_fd, Ordering::SeqCst);
+
+        signal_handler(libc::SIGTERM);
+
+        assert!(unsafe { &*draining }.load(Ordering::SeqCst));
+        assert!(poll_shutdown_pipe(read_fd));
+
+        GLOBAL_DRAINING.store(previous_draining, Ordering::SeqCst);
+        SHUTDOWN_PIPE_WR.store(previous_write_fd, Ordering::SeqCst);
+        close_shutdown_pipe(read_fd, write_fd);
+        unsafe { drop(Box::from_raw(draining)) };
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    fn sigusr1_handler_cycles_global_log_level() {
+        let log_level = Box::into_raw(Box::new(AtomicU8::new(LogLevel::Info as u8)));
+        let previous = GLOBAL_LOG_LEVEL.swap(log_level, Ordering::SeqCst);
+
+        sigusr1_handler(libc::SIGUSR1);
+
+        assert_eq!(
+            unsafe { &*log_level }.load(Ordering::SeqCst),
+            LogLevel::Debug as u8
+        );
+
+        GLOBAL_LOG_LEVEL.store(previous, Ordering::SeqCst);
+        unsafe { drop(Box::from_raw(log_level)) };
+    }
+}
