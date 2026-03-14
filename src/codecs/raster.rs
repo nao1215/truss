@@ -256,14 +256,15 @@ pub fn transform_raster(request: TransformRequest) -> Result<TransformResult, Tr
 
     // Lossy WebP uses libwebp which cannot inject EXIF/ICC, so metadata is silently
     // dropped even when keep-metadata was requested. Warn the caller.
-    if normalized.options.format == MediaType::Webp && encoded.used_lossy_webp {
-        if let Some(metadata) = retained_metadata.as_ref() {
-            if metadata.exif_metadata.is_some() {
-                warnings.push(TransformWarning::MetadataDropped(MetadataKind::Exif));
-            }
-            if metadata.icc_profile.is_some() {
-                warnings.push(TransformWarning::MetadataDropped(MetadataKind::Icc));
-            }
+    if normalized.options.format == MediaType::Webp
+        && encoded.used_lossy_webp
+        && let Some(metadata) = retained_metadata.as_ref()
+    {
+        if metadata.exif_metadata.is_some() {
+            warnings.push(TransformWarning::MetadataDropped(MetadataKind::Exif));
+        }
+        if metadata.icc_profile.is_some() {
+            warnings.push(TransformWarning::MetadataDropped(MetadataKind::Icc));
         }
     }
 
