@@ -80,6 +80,17 @@ h1 {
   cursor: pointer;
 }
 
+.picker:focus-within,
+.picker:focus-visible {
+  outline: 3px solid #b57600;
+  outline-offset: 4px;
+  box-shadow: 0 0 0 6px rgba(181, 118, 0, 0.18);
+}
+
+.picker input:focus-visible {
+  outline: none;
+}
+
 .hint {
   color: #5d5238;
   font-size: 0.92rem;

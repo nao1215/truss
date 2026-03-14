@@ -12,7 +12,7 @@ This example is intentionally small:
 ## Run
 
 ```sh
-cat ../../.nvmrc
+cat .nvmrc
 cd examples/vite-truss-wasm
 npm ci
 npm run dev
@@ -57,7 +57,7 @@ Then add the same plugin setup as [`vite.config.js`](./vite.config.js).
 
 ## Core Import
 
-```ts
+```js
 import {
   getCapabilitiesJson,
   inspectImageJson,

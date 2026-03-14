@@ -14,6 +14,7 @@ import { fileURLToPath } from "node:url";
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(scriptDir, "..");
+const npmCommand = process.platform === "win32" ? "npm.cmd" : "npm";
 const packageDir = path.join(rootDir, "packages", "truss-wasm");
 const exampleDir = path.join(rootDir, "examples", "vite-truss-wasm");
 const npmCacheDir =
@@ -32,7 +33,7 @@ mkdirSync(packDir, { recursive: true });
 mkdirSync(npmCacheDir, { recursive: true });
 
 try {
-  run("npm", ["pack", "--pack-destination", packDir], { cwd: packageDir });
+  run(npmCommand, ["pack", "--pack-destination", packDir], { cwd: packageDir });
   cpSync(exampleDir, tempExampleDir, { recursive: true });
 
   const examplePackageJsonPath = path.join(tempExampleDir, "package.json");
@@ -43,8 +44,8 @@ try {
     `${JSON.stringify(examplePackageJson, null, 2)}\n`,
   );
 
-  run("npm", ["install"], { cwd: tempExampleDir });
-  run("npm", ["run", "build"], { cwd: tempExampleDir });
+  run(npmCommand, ["install"], { cwd: tempExampleDir });
+  run(npmCommand, ["run", "build"], { cwd: tempExampleDir });
 
   const builtIndexPath = path.join(tempExampleDir, "dist", "index.html");
   if (!existsSync(builtIndexPath)) {
@@ -75,6 +76,7 @@ function run(command, args, options = {}) {
       ...process.env,
       NPM_CONFIG_CACHE: npmCacheDir,
     },
+    shell: process.platform === "win32" && command.endsWith(".cmd"),
     stdio: "inherit",
   });
 }

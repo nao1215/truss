@@ -1,14 +1,17 @@
 import { spawn, execFileSync } from "node:child_process";
+import { existsSync } from "node:fs";
 import { createRequire } from "node:module";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(scriptDir, "..");
 const exampleDir = path.join(rootDir, "examples", "vite-truss-wasm");
+const npmCommand = process.platform === "win32" ? "npm.cmd" : "npm";
 const npmCacheDir =
   process.env.NPM_CONFIG_CACHE ??
-  path.join(process.env.TMPDIR ?? "/tmp", "truss-wasm-vite-runtime-npm-cache");
+  path.join(process.env.TMPDIR ?? os.tmpdir(), "truss-wasm-vite-runtime-npm-cache");
 const chromeBin = process.env.TRUSS_CHROME_BIN ?? "google-chrome";
 const previewPort = 4173;
 const previewUrl = `http://127.0.0.1:${previewPort}`;
@@ -16,11 +19,11 @@ const previewUrl = `http://127.0.0.1:${previewPort}`;
 let previewProcess;
 
 try {
-  run("npm", ["ci"], { cwd: exampleDir });
-  run("npm", ["run", "build"], { cwd: exampleDir });
+  run(npmCommand, ["ci"], { cwd: exampleDir });
+  run(npmCommand, ["run", "build"], { cwd: exampleDir });
 
   previewProcess = spawn(
-    "npm",
+    npmCommand,
     ["run", "preview", "--", "--host", "127.0.0.1", "--port", String(previewPort)],
     {
       cwd: exampleDir,
@@ -28,6 +31,7 @@ try {
         ...process.env,
         NPM_CONFIG_CACHE: npmCacheDir,
       },
+      shell: process.platform === "win32",
       stdio: "inherit",
     },
   );
@@ -106,6 +110,7 @@ function run(command, args, options = {}) {
       ...process.env,
       NPM_CONFIG_CACHE: npmCacheDir,
     },
+    shell: process.platform === "win32" && command.endsWith(".cmd"),
     stdio: "inherit",
   });
 }
@@ -115,18 +120,23 @@ function resolveChromeExecutable(preferredCommand) {
     preferredCommand,
     "/usr/bin/google-chrome",
     "/usr/bin/google-chrome-stable",
+    "/usr/bin/chromium",
+    "/usr/bin/chromium-browser",
     "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
     "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
     "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
+    "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
+    "C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe",
   ];
 
   for (const candidate of candidates) {
+    const executable = resolveExecutableCandidate(candidate);
+    if (!executable) {
+      continue;
+    }
+
     try {
-      const resolved = execFileSync("bash", ["-lc", `command -v "${candidate}" || true`], {
-        encoding: "utf8",
-        stdio: ["ignore", "pipe", "ignore"],
-      }).trim();
-      const executable = resolved || candidate;
       execFileSync(executable, ["--version"], {
         stdio: ["ignore", "ignore", "ignore"],
       });
@@ -139,6 +149,31 @@ function resolveChromeExecutable(preferredCommand) {
   throw new Error(
     `headless browser is unavailable. Set TRUSS_CHROME_BIN to a Chrome-compatible executable.`,
   );
+}
+
+function resolveExecutableCandidate(candidate) {
+  if (path.isAbsolute(candidate)) {
+    return existsSync(candidate) ? candidate : null;
+  }
+
+  try {
+    if (process.platform === "win32") {
+      return execFileSync("where.exe", [candidate], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+      })
+        .split(/\r?\n/)
+        .find(Boolean)
+        ?.trim() ?? null;
+    }
+
+    return execFileSync("sh", ["-lc", `command -v ${candidate}`], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+  } catch {
+    return null;
+  }
 }
 
 async function waitForPreview(url) {

@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(scriptDir, "..");
+const npmCommand = process.platform === "win32" ? "npm.cmd" : "npm";
 const packageDir = path.join(rootDir, "packages", "truss-wasm");
 const packageJsonPath = path.join(packageDir, "package.json");
 const fixtureImagePath = path.join(rootDir, "integration", "fixtures", "1px.png");
@@ -27,7 +28,7 @@ mkdirSync(consumerDir, { recursive: true });
 mkdirSync(npmCacheDir, { recursive: true });
 
 try {
-  run("npm", ["pack", "--pack-destination", packDir], { cwd: packageDir });
+  run(npmCommand, ["pack", "--pack-destination", packDir], { cwd: packageDir });
 
   writeFileSync(
     path.join(consumerDir, "package.json"),
@@ -100,7 +101,7 @@ console.log(JSON.stringify({
 `,
   );
 
-  run("npm", ["install", "--no-save", tarballPath], { cwd: consumerDir });
+  run(npmCommand, ["install", "--no-save", tarballPath], { cwd: consumerDir });
   run("node", ["--no-warnings", "smoke.mjs", fixtureImagePath], {
     cwd: consumerDir,
   });
@@ -120,6 +121,7 @@ function run(command, args, options = {}) {
       ...process.env,
       NPM_CONFIG_CACHE: npmCacheDir,
     },
+    shell: process.platform === "win32" && command.endsWith(".cmd"),
     stdio: "inherit",
   });
 }

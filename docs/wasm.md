@@ -23,7 +23,8 @@ Its official build uses:
 - `wasm`
 - `svg`
 - `avif`
-- `wasm-bindgen --target bundler`
+- `wasm-bindgen --target web`
+- a small npm wrapper that initializes the Wasm module at import time
 
 Implication:
 
@@ -121,7 +122,7 @@ const result = transformImage(
 );
 ```
 
-The official package is generated with `wasm-bindgen --target bundler`, so there is no explicit `init()` step.
+The official package wraps the raw browser bindings and initializes the Wasm module at import time, so there is no explicit `init()` step.
 
 For Vite, add [`vite-plugin-top-level-await`](https://github.com/Menci/vite-plugin-top-level-await), as shown in [`examples/vite-truss-wasm/vite.config.js`](../examples/vite-truss-wasm/vite.config.js).
 
