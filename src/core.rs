@@ -605,6 +605,19 @@ impl FromStr for TargetQuality {
     }
 }
 
+pub(crate) fn default_lossy_target_quality(media_type: MediaType) -> Option<TargetQuality> {
+    let value = match media_type {
+        MediaType::Jpeg | MediaType::Webp => 0.985,
+        MediaType::Avif => 0.99,
+        _ => return None,
+    };
+
+    Some(TargetQuality {
+        metric: QualityMetric::Ssim,
+        value,
+    })
+}
+
 /// Raw transform options before defaulting and validation has completed.
 ///
 /// Use `TransformOptions::default()` as a starting point and override the fields
@@ -814,7 +827,11 @@ impl TransformOptions {
             background: self.background,
             rotate: self.rotate,
             auto_orient: self.auto_orient,
-            metadata_policy: normalize_metadata_policy(self.strip_metadata, self.preserve_exif),
+            metadata_policy: normalize_metadata_policy(
+                self.strip_metadata,
+                self.preserve_exif,
+                optimize,
+            ),
             blur: self.blur,
             sharpen: self.sharpen,
             crop: self.crop,
@@ -1117,6 +1134,8 @@ pub enum MetadataPolicy {
     StripAll,
     /// Keep metadata unchanged when possible.
     KeepAll,
+    /// Preserve ICC profiles while stripping EXIF and other metadata.
+    PreserveIcc,
     /// Preserve EXIF while allowing other metadata policies later.
     PreserveExif,
 }
@@ -1482,9 +1501,15 @@ fn validate_watermark(wm: &WatermarkInput) -> Result<(), TransformError> {
     Ok(())
 }
 
-fn normalize_metadata_policy(strip_metadata: bool, preserve_exif: bool) -> MetadataPolicy {
+fn normalize_metadata_policy(
+    strip_metadata: bool,
+    preserve_exif: bool,
+    optimize: OptimizeMode,
+) -> MetadataPolicy {
     if preserve_exif {
         MetadataPolicy::PreserveExif
+    } else if strip_metadata && optimize == OptimizeMode::Lossy {
+        MetadataPolicy::PreserveIcc
     } else if strip_metadata {
         MetadataPolicy::StripAll
     } else {
@@ -2354,6 +2379,19 @@ mod tests {
         .expect("normalize keep metadata");
 
         assert_eq!(normalized.metadata_policy, MetadataPolicy::KeepAll);
+    }
+
+    #[test]
+    fn normalize_lossy_optimize_preserves_icc_by_default() {
+        let normalized = TransformOptions {
+            optimize: OptimizeMode::Lossy,
+            format: Some(MediaType::Jpeg),
+            ..TransformOptions::default()
+        }
+        .normalize(MediaType::Jpeg)
+        .expect("normalize lossy optimize metadata policy");
+
+        assert_eq!(normalized.metadata_policy, MetadataPolicy::PreserveIcc);
     }
 
     #[test]

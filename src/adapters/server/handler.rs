@@ -1406,6 +1406,10 @@ fn transform_source_bytes_inner(
             false
         };
 
+    if options.format.is_none() {
+        options.format = Some(artifact.media_type);
+    }
+
     // Check input pixel count against the server-level limit before decode.
     // This runs before the cache lookup so that a policy change (lowering the
     // limit) takes effect immediately, even for previously-cached images.

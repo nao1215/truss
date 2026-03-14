@@ -2228,6 +2228,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn resolve_server_config_applies_serve_overrides() {
         let storage_root = temp_dir("serve-config");
         let expected_storage_root = storage_root.canonicalize().expect("canonicalize temp dir");

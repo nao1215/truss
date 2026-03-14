@@ -3,6 +3,7 @@ use crate::core::{
     MetadataKind, MetadataPolicy, NormalizedTransformOptions, NormalizedTransformRequest,
     OptimizeMode, Position, QualityMetric, Rotation, TargetQuality, TransformError,
     TransformRequest, TransformResult, TransformWarning, WatermarkInput,
+    default_lossy_target_quality,
 };
 use crate::{RawArtifact, Rgba8, sniff_artifact};
 use exif::{In, Reader, Tag, Value};
@@ -251,6 +252,7 @@ pub fn transform_raster(request: TransformRequest) -> Result<TransformResult, Tr
         normalized.options.format,
         &normalized.options,
         retained_metadata.as_ref(),
+        EncodeDeadline { start, deadline },
     )?;
     check_deadline_if_set!(start, deadline, "encode");
 
@@ -1190,6 +1192,7 @@ fn should_keep_jpeg_segment(marker: u8, payload: &[u8], metadata_policy: Metadat
         0xE0 | 0xEE => true,
         0xE1..=0xEF | 0xFE => match metadata_policy {
             MetadataPolicy::KeepAll => true,
+            MetadataPolicy::PreserveIcc => marker == 0xE2 && payload.starts_with(b"ICC_PROFILE\0"),
             MetadataPolicy::PreserveExif => marker == 0xE1 && payload.starts_with(b"Exif\0\0"),
             MetadataPolicy::StripAll => false,
         },
@@ -1202,22 +1205,40 @@ struct EncodedOutput {
     used_lossy_webp: bool,
 }
 
+#[derive(Clone, Copy)]
+struct EncodeDeadline {
+    start: Option<Instant>,
+    deadline: Option<Duration>,
+}
+
+impl EncodeDeadline {
+    fn check(self, stage: &'static str) -> Result<(), TransformError> {
+        if let (Some(start), Some(limit)) = (self.start, self.deadline) {
+            check_deadline(start.elapsed(), limit, stage)?;
+        }
+        Ok(())
+    }
+}
+
 fn encode_output(
     image: &DynamicImage,
     media_type: MediaType,
     options: &NormalizedTransformOptions,
     retained_metadata: Option<&RetainedMetadata>,
+    deadline: EncodeDeadline,
 ) -> Result<EncodedOutput, TransformError> {
     match options.optimize {
         OptimizeMode::None => {
             encode_baseline_output(image, media_type, options.quality, retained_metadata)
         }
-        OptimizeMode::Auto => encode_auto_output(image, media_type, options, retained_metadata),
+        OptimizeMode::Auto => {
+            encode_auto_output(image, media_type, options, retained_metadata, deadline)
+        }
         OptimizeMode::Lossless => {
-            encode_lossless_optimized_output(image, media_type, retained_metadata)
+            encode_lossless_optimized_output(image, media_type, retained_metadata, deadline)
         }
         OptimizeMode::Lossy => {
-            encode_lossy_optimized_output(image, media_type, options, retained_metadata)
+            encode_lossy_optimized_output(image, media_type, options, retained_metadata, deadline)
         }
     }
 }
@@ -1227,13 +1248,21 @@ fn encode_auto_output(
     media_type: MediaType,
     options: &NormalizedTransformOptions,
     retained_metadata: Option<&RetainedMetadata>,
+    deadline: EncodeDeadline,
 ) -> Result<EncodedOutput, TransformError> {
     let baseline = encode_baseline_output(image, media_type, options.quality, retained_metadata)?;
+    deadline.check("encode auto baseline")?;
 
     let optimized = match media_type {
-        MediaType::Png => encode_png_optimized(image, retained_metadata)?,
+        MediaType::Png => encode_png_optimized(image, retained_metadata, deadline)?,
         MediaType::Jpeg | MediaType::Webp | MediaType::Avif => {
-            match encode_lossy_optimized_output(image, media_type, options, retained_metadata) {
+            match encode_lossy_optimized_output(
+                image,
+                media_type,
+                options,
+                retained_metadata,
+                deadline,
+            ) {
                 Ok(output) => output,
                 Err(TransformError::CapabilityMissing(_)) if media_type == MediaType::Webp => {
                     return Ok(baseline);
@@ -1255,10 +1284,14 @@ fn encode_lossless_optimized_output(
     image: &DynamicImage,
     media_type: MediaType,
     retained_metadata: Option<&RetainedMetadata>,
+    deadline: EncodeDeadline,
 ) -> Result<EncodedOutput, TransformError> {
     match media_type {
-        MediaType::Png => encode_png_optimized(image, retained_metadata),
-        MediaType::Webp => encode_webp_lossless(image, retained_metadata),
+        MediaType::Png => encode_png_optimized(image, retained_metadata, deadline),
+        MediaType::Webp => {
+            deadline.check("encode lossless webp")?;
+            encode_webp_lossless(image, retained_metadata)
+        }
         MediaType::Jpeg => Err(TransformError::CapabilityMissing(
             "lossless JPEG optimization is only supported when no pixel transforms are applied"
                 .to_string(),
@@ -1278,10 +1311,11 @@ fn encode_lossy_optimized_output(
     media_type: MediaType,
     options: &NormalizedTransformOptions,
     retained_metadata: Option<&RetainedMetadata>,
+    deadline: EncodeDeadline,
 ) -> Result<EncodedOutput, TransformError> {
     let target = options.target_quality.or_else(|| {
         if options.quality.is_none() {
-            Some(default_target_quality(media_type))
+            default_lossy_target_quality(media_type)
         } else {
             None
         }
@@ -1289,12 +1323,26 @@ fn encode_lossy_optimized_output(
 
     let max_quality = options.quality.unwrap_or(100);
     if let Some(target) = target {
-        encode_lossy_with_target(image, media_type, target, max_quality, retained_metadata)
+        encode_lossy_with_target(
+            image,
+            media_type,
+            target,
+            max_quality,
+            retained_metadata,
+            deadline,
+        )
     } else {
         let quality = options
             .quality
             .unwrap_or_else(|| default_lossy_quality(media_type));
-        encode_lossy_with_quality(image, media_type, quality, retained_metadata, true)
+        encode_lossy_with_quality(
+            image,
+            media_type,
+            quality,
+            retained_metadata,
+            true,
+            deadline,
+        )
     }
 }
 
@@ -1307,23 +1355,13 @@ fn default_lossy_quality(media_type: MediaType) -> u8 {
     }
 }
 
-fn default_target_quality(media_type: MediaType) -> TargetQuality {
-    let value = match media_type {
-        MediaType::Avif => 0.99,
-        _ => 0.985,
-    };
-    TargetQuality {
-        metric: QualityMetric::Ssim,
-        value,
-    }
-}
-
 fn encode_lossy_with_target(
     image: &DynamicImage,
     media_type: MediaType,
     target: TargetQuality,
     max_quality: u8,
     retained_metadata: Option<&RetainedMetadata>,
+    deadline: EncodeDeadline,
 ) -> Result<EncodedOutput, TransformError> {
     let mut low = 1u8;
     let mut high = max_quality.max(1);
@@ -1331,8 +1369,12 @@ fn encode_lossy_with_target(
 
     while low <= high {
         let mid = low + (high - low) / 2;
-        let candidate = encode_lossy_with_quality(image, media_type, mid, retained_metadata, true)?;
-        let score = measure_quality_metric(image, &candidate.bytes, media_type, target.metric)?;
+        let candidate =
+            encode_lossy_with_quality(image, media_type, mid, retained_metadata, true, deadline)?;
+        deadline.check("encode lossy optimization candidate")?;
+        let score =
+            measure_quality_metric(image, &candidate.bytes, media_type, target.metric, deadline)?;
+        deadline.check("measure lossy optimization quality")?;
 
         if score >= target.value {
             best = Some(candidate);
@@ -1354,6 +1396,7 @@ fn encode_lossy_with_target(
             max_quality.max(1),
             retained_metadata,
             true,
+            deadline,
         )
     }
 }
@@ -1363,11 +1406,13 @@ fn measure_quality_metric(
     encoded_bytes: &[u8],
     media_type: MediaType,
     metric: QualityMetric,
+    deadline: EncodeDeadline,
 ) -> Result<f32, TransformError> {
     let decoded = decode_encoded_output(encoded_bytes, media_type)?;
+    deadline.check("decode lossy optimization candidate")?;
     match metric {
-        QualityMetric::Ssim => compute_ssim(reference, &decoded),
-        QualityMetric::Psnr => compute_psnr(reference, &decoded),
+        QualityMetric::Ssim => compute_ssim(reference, &decoded, deadline),
+        QualityMetric::Psnr => compute_psnr(reference, &decoded, deadline),
     }
 }
 
@@ -1379,7 +1424,11 @@ fn decode_encoded_output(
     decode_input(&artifact)
 }
 
-fn compute_psnr(reference: &DynamicImage, candidate: &DynamicImage) -> Result<f32, TransformError> {
+fn compute_psnr(
+    reference: &DynamicImage,
+    candidate: &DynamicImage,
+    deadline: EncodeDeadline,
+) -> Result<f32, TransformError> {
     let lhs = reference.to_rgba8();
     let rhs = candidate.to_rgba8();
     if lhs.dimensions() != rhs.dimensions() {
@@ -1389,10 +1438,13 @@ fn compute_psnr(reference: &DynamicImage, candidate: &DynamicImage) -> Result<f3
     }
 
     let mut squared_error = 0f64;
-    for (left, right) in lhs.pixels().zip(rhs.pixels()) {
+    for (index, (left, right)) in lhs.pixels().zip(rhs.pixels()).enumerate() {
         for (a, b) in left.0.iter().zip(right.0.iter()) {
             let delta = f64::from(*a) - f64::from(*b);
             squared_error += delta * delta;
+        }
+        if index.is_multiple_of(16_384) {
+            deadline.check("measure lossy optimization psnr")?;
         }
     }
 
@@ -1405,7 +1457,11 @@ fn compute_psnr(reference: &DynamicImage, candidate: &DynamicImage) -> Result<f3
     Ok((10.0 * ((255.0f64 * 255.0) / mse).log10()) as f32)
 }
 
-fn compute_ssim(reference: &DynamicImage, candidate: &DynamicImage) -> Result<f32, TransformError> {
+fn compute_ssim(
+    reference: &DynamicImage,
+    candidate: &DynamicImage,
+    deadline: EncodeDeadline,
+) -> Result<f32, TransformError> {
     let lhs = reference.to_luma8();
     let rhs = candidate.to_luma8();
     if lhs.dimensions() != rhs.dimensions() {
@@ -1421,9 +1477,12 @@ fn compute_ssim(reference: &DynamicImage, candidate: &DynamicImage) -> Result<f3
 
     let mut mean_x = 0f64;
     let mut mean_y = 0f64;
-    for (left, right) in lhs.pixels().zip(rhs.pixels()) {
+    for (index, (left, right)) in lhs.pixels().zip(rhs.pixels()).enumerate() {
         mean_x += f64::from(left.0[0]);
         mean_y += f64::from(right.0[0]);
+        if index.is_multiple_of(16_384) {
+            deadline.check("measure lossy optimization ssim mean")?;
+        }
     }
     mean_x /= sample_count;
     mean_y /= sample_count;
@@ -1431,12 +1490,15 @@ fn compute_ssim(reference: &DynamicImage, candidate: &DynamicImage) -> Result<f3
     let mut variance_x = 0f64;
     let mut variance_y = 0f64;
     let mut covariance = 0f64;
-    for (left, right) in lhs.pixels().zip(rhs.pixels()) {
+    for (index, (left, right)) in lhs.pixels().zip(rhs.pixels()).enumerate() {
         let x = f64::from(left.0[0]) - mean_x;
         let y = f64::from(right.0[0]) - mean_y;
         variance_x += x * x;
         variance_y += y * y;
         covariance += x * y;
+        if index.is_multiple_of(16_384) {
+            deadline.check("measure lossy optimization ssim variance")?;
+        }
     }
     variance_x /= sample_count;
     variance_y /= sample_count;
@@ -1505,6 +1567,7 @@ fn encode_baseline_output(
 fn encode_png_optimized(
     image: &DynamicImage,
     retained_metadata: Option<&RetainedMetadata>,
+    deadline: EncodeDeadline,
 ) -> Result<EncodedOutput, TransformError> {
     let strategies = [
         (PngCompressionType::Best, PngFilterType::Adaptive),
@@ -1520,8 +1583,10 @@ fn encode_png_optimized(
         PngCompressionType::Default,
         PngFilterType::Adaptive,
     )?;
+    deadline.check("encode png optimization baseline")?;
     for (compression, filter) in strategies {
         let candidate = encode_png(image, retained_metadata, compression, filter)?;
+        deadline.check("encode png optimization candidate")?;
         if candidate.len() < best.len() {
             best = candidate;
         }
@@ -1539,25 +1604,43 @@ fn encode_lossy_with_quality(
     quality: u8,
     retained_metadata: Option<&RetainedMetadata>,
     optimized: bool,
+    deadline: EncodeDeadline,
 ) -> Result<EncodedOutput, TransformError> {
     match media_type {
-        MediaType::Jpeg => Ok(EncodedOutput {
-            bytes: encode_jpeg(image, quality, retained_metadata)?,
-            used_lossy_webp: false,
-        }),
-        MediaType::Webp => Ok(EncodedOutput {
-            bytes: encode_webp_lossy_bytes(image, quality)?,
-            used_lossy_webp: true,
-        }),
-        MediaType::Avif => Ok(EncodedOutput {
-            bytes: encode_avif(
+        MediaType::Jpeg => {
+            let bytes = encode_jpeg(image, quality, retained_metadata)?;
+            deadline.check("encode lossy jpeg")?;
+            Ok(EncodedOutput {
+                bytes,
+                used_lossy_webp: false,
+            })
+        }
+        MediaType::Webp => {
+            if optimized && retained_metadata.is_some_and(|metadata| !metadata.is_empty()) {
+                return Err(TransformError::CapabilityMissing(
+                    "lossy WebP optimization cannot preserve metadata".to_string(),
+                ));
+            }
+            let bytes = encode_webp_lossy_bytes(image, quality)?;
+            deadline.check("encode lossy webp")?;
+            Ok(EncodedOutput {
+                bytes,
+                used_lossy_webp: true,
+            })
+        }
+        MediaType::Avif => {
+            let bytes = encode_avif(
                 image,
                 quality,
                 if optimized { 2 } else { 4 },
                 retained_metadata,
-            )?,
-            used_lossy_webp: false,
-        }),
+            )?;
+            deadline.check("encode lossy avif")?;
+            Ok(EncodedOutput {
+                bytes,
+                used_lossy_webp: false,
+            })
+        }
         _ => Err(TransformError::InvalidOptions(format!(
             "lossy optimization is not supported for {} output",
             media_type.as_name()
@@ -1953,6 +2036,13 @@ impl RetainedMetadata {
         self
     }
 
+    fn retain_icc_only(mut self) -> Self {
+        self.exif_metadata = None;
+        self.xmp_metadata = None;
+        self.iptc_metadata = None;
+        self
+    }
+
     /// Retains metadata that can be preserved for the given output format.
     ///
     /// - JPEG: EXIF, ICC, XMP (APP1 injection), IPTC (APP13 injection)
@@ -1999,6 +2089,7 @@ fn extract_retained_metadata(
 
     let metadata = match metadata_policy {
         MetadataPolicy::StripAll => return Ok((None, warnings)),
+        MetadataPolicy::PreserveIcc => metadata.retain_icc_only(),
         MetadataPolicy::PreserveExif => metadata.retain_exif_only(),
         MetadataPolicy::KeepAll => {
             // Emit warnings for metadata that will be dropped for this output format.
@@ -2616,6 +2707,32 @@ mod tests {
     }
 
     #[test]
+    fn transform_raster_lossy_jpeg_optimization_preserves_icc_by_default() {
+        let artifact = jpeg_artifact_with_metadata(4, 2, Some(1), Some(b"demo-icc-profile"));
+        let result = transform_raster(TransformRequest::new(
+            artifact,
+            TransformOptions {
+                format: Some(MediaType::Jpeg),
+                optimize: OptimizeMode::Lossy,
+                ..TransformOptions::default()
+            },
+        ))
+        .expect("lossy jpeg optimize should preserve icc");
+
+        let mut decoder =
+            JpegDecoder::new(Cursor::new(&result.artifact.bytes)).expect("decode jpeg");
+
+        assert_eq!(decoder.exif_metadata().expect("read jpeg exif"), None);
+        assert_eq!(
+            decoder
+                .icc_profile()
+                .expect("read jpeg icc")
+                .expect("retained icc"),
+            b"demo-icc-profile".to_vec()
+        );
+    }
+
+    #[test]
     fn lossless_jpeg_optimization_rejects_truncated_scan_data() {
         let mut bytes = jpeg_artifact_with_metadata(4, 2, Some(1), Some(b"demo-icc-profile")).bytes;
         bytes.truncate(bytes.len() - 2);
@@ -2626,6 +2743,28 @@ mod tests {
         assert_eq!(
             error,
             TransformError::InvalidInput("input is not a valid JPEG bitstream".to_string())
+        );
+    }
+
+    #[cfg(feature = "webp-lossy")]
+    #[test]
+    fn transform_raster_lossy_webp_optimization_rejects_metadata_retention() {
+        let artifact = jpeg_artifact_with_metadata(4, 2, None, Some(b"demo-icc-profile"));
+        let error = transform_raster(TransformRequest::new(
+            artifact,
+            TransformOptions {
+                format: Some(MediaType::Webp),
+                optimize: OptimizeMode::Lossy,
+                ..TransformOptions::default()
+            },
+        ))
+        .expect_err("lossy webp optimize should reject metadata retention");
+
+        assert_eq!(
+            error,
+            TransformError::CapabilityMissing(
+                "lossy WebP optimization cannot preserve metadata".to_string()
+            )
         );
     }
 
@@ -2776,12 +2915,12 @@ mod tests {
             artifact,
             TransformOptions {
                 format: Some(MediaType::Webp),
-                optimize: OptimizeMode::Lossy,
                 strip_metadata: false,
+                quality: Some(80),
                 ..TransformOptions::default()
             },
         ))
-        .expect("lossy webp optimize should succeed");
+        .expect("lossy webp quality encode should succeed");
 
         assert!(
             result

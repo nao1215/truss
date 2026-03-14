@@ -737,9 +737,13 @@ components:
       description: |
         Perceptual target used by lossy optimization, for example `ssim:0.98`
         or `psnr:42`. Requires `optimize=auto` or `optimize=lossy`.
+        SSIM must be in `(0,1]`; PSNR must be greater than `0`.
       schema:
-        type: string
-        pattern: '^(ssim|psnr):[0-9]+(\.[0-9]+)?$'
+        oneOf:
+          - type: string
+            pattern: '^ssim:(?:0\.[0-9]*[1-9][0-9]*|1(?:\.0+)?)$'
+          - type: string
+            pattern: '^psnr:(?:0\.[0-9]*[1-9][0-9]*|[1-9][0-9]*(?:\.[0-9]+)?)$'
       example: ssim:0.98
     Background:
       name: background
@@ -1023,11 +1027,15 @@ components:
           default: none
           description: Optimization mode for the final encoding stage.
         targetQuality:
-          type: string
-          pattern: '^(ssim|psnr):[0-9]+(\.[0-9]+)?$'
           description: >-
             Perceptual target used by lossy optimization, for example
-            `ssim:0.98` or `psnr:42`. Requires `optimize=auto` or `optimize=lossy`.
+            `ssim:0.98` or `psnr:42`. SSIM must be in `(0,1]`; PSNR must be
+            greater than `0`. Requires `optimize=auto` or `optimize=lossy`.
+          oneOf:
+            - type: string
+              pattern: '^ssim:(?:0\.[0-9]*[1-9][0-9]*|1(?:\.0+)?)$'
+            - type: string
+              pattern: '^psnr:(?:0\.[0-9]*[1-9][0-9]*|[1-9][0-9]*(?:\.[0-9]+)?)$'
         background:
           type: string
           pattern: '^[0-9A-Fa-f]{6}([0-9A-Fa-f]{2})?$'

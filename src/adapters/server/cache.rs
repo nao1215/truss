@@ -42,6 +42,7 @@ use super::negotiate::{
     if_none_match_matches,
 };
 use super::response::HttpResponse;
+use crate::core::default_lossy_target_quality;
 use crate::{Fit, Position, Rotation, TransformOptions};
 
 pub(super) const DEFAULT_CACHE_TTL_SECONDS: u64 = 3600;
@@ -553,6 +554,15 @@ pub(super) fn compute_cache_key(
     if let Some(target_quality) = options.target_quality {
         let buf = target_quality.to_string();
         push_param(&mut canonical, "targetQuality", &buf);
+    } else if matches!(
+        options.optimize,
+        crate::OptimizeMode::Auto | crate::OptimizeMode::Lossy
+    ) && options.quality.is_none()
+        && let Some(format) = options.format
+        && let Some(target_quality) = default_lossy_target_quality(format)
+    {
+        let buf = target_quality.to_string();
+        push_param(&mut canonical, "targetQuality", &buf);
     }
     if options.rotate != Rotation::Deg0 {
         let buf = options.rotate.as_degrees().to_string();
@@ -718,6 +728,7 @@ mod tests {
     #[test]
     fn cache_key_differs_by_target_quality() {
         let a = TransformOptions {
+            format: Some(MediaType::Jpeg),
             optimize: crate::OptimizeMode::Lossy,
             target_quality: Some(crate::TargetQuality {
                 metric: crate::QualityMetric::Ssim,
@@ -726,6 +737,7 @@ mod tests {
             ..TransformOptions::default()
         };
         let b = TransformOptions {
+            format: Some(MediaType::Jpeg),
             optimize: crate::OptimizeMode::Lossy,
             target_quality: Some(crate::TargetQuality {
                 metric: crate::QualityMetric::Ssim,
@@ -737,6 +749,26 @@ mod tests {
         assert_ne!(
             compute_cache_key("img.png", &a, None, None),
             compute_cache_key("img.png", &b, None, None)
+        );
+    }
+
+    #[test]
+    fn cache_key_matches_explicit_default_target_quality() {
+        let implicit = TransformOptions {
+            format: Some(MediaType::Jpeg),
+            optimize: crate::OptimizeMode::Lossy,
+            ..TransformOptions::default()
+        };
+        let explicit = TransformOptions {
+            format: Some(MediaType::Jpeg),
+            optimize: crate::OptimizeMode::Lossy,
+            target_quality: default_lossy_target_quality(MediaType::Jpeg),
+            ..TransformOptions::default()
+        };
+
+        assert_eq!(
+            compute_cache_key("img.png", &implicit, None, None),
+            compute_cache_key("img.png", &explicit, None, None)
         );
     }
 

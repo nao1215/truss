@@ -71,6 +71,13 @@ fn find_header_terminator(buf: &[u8]) -> Option<usize> {
 }
 
 fn read_fixture_request(stream: &mut TcpStream) {
+    stream
+        .set_nonblocking(false)
+        .expect("configure fixture stream blocking mode");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("configure fixture stream timeout");
+
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     let mut buffer = Vec::new();
     let mut chunk = [0_u8; 1024];

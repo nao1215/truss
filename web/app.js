@@ -127,6 +127,14 @@ function wireEvents() {
     refreshOptimizeState();
     refreshQualityState();
   });
+  elements.rotate.addEventListener("change", () => {
+    refreshOptimizeState();
+    refreshQualityState();
+  });
+  elements.crop.addEventListener("input", () => {
+    refreshOptimizeState();
+    refreshQualityState();
+  });
 
   elements.width.addEventListener("input", () => {
     if (elements.lockAspect.checked && state.aspectRatio && !state.updatingAspect) {
@@ -163,6 +171,8 @@ function wireEvents() {
 
   elements.blurRange.addEventListener("input", () => {
     elements.blurNumber.value = elements.blurRange.value;
+    refreshOptimizeState();
+    refreshQualityState();
   });
   elements.blurNumber.addEventListener("input", () => {
     const v = parseFloat(elements.blurNumber.value);
@@ -171,10 +181,14 @@ function wireEvents() {
       elements.blurNumber.value = clamped;
       elements.blurRange.value = clamped;
     }
+    refreshOptimizeState();
+    refreshQualityState();
   });
 
   elements.sharpenRange.addEventListener("input", () => {
     elements.sharpenNumber.value = elements.sharpenRange.value;
+    refreshOptimizeState();
+    refreshQualityState();
   });
   elements.sharpenNumber.addEventListener("input", () => {
     const v = parseFloat(elements.sharpenNumber.value);
@@ -183,6 +197,8 @@ function wireEvents() {
       elements.sharpenNumber.value = clamped;
       elements.sharpenRange.value = clamped;
     }
+    refreshOptimizeState();
+    refreshQualityState();
   });
 
   elements.watermarkFile.addEventListener("change", async (event) => {
@@ -358,6 +374,7 @@ function collectOptions() {
   const outputFormat = elements.format.value;
   const boundedResize = width !== null && height !== null;
   const metadataMode = elements.metadataMode.value;
+  const optimize = currentOptimizeMode();
 
   return {
     format: outputFormat,
@@ -367,15 +384,15 @@ function collectOptions() {
     position: boundedResize ? emptyToNull(elements.position.value) : null,
     rotate: Number(elements.rotate.value),
     quality: qualityEnabled() ? Number(elements.qualityNumber.value) : null,
-    optimize: elements.optimizeMode.value,
+    optimize,
     targetQuality: targetQualityEnabled() ? emptyToNull(elements.targetQuality.value.trim()) : null,
     background: normalizeHex(elements.background.value),
     autoOrient: elements.autoOrient.checked,
     keepMetadata: metadataMode === "keep",
     preserveExif: metadataMode === "exif",
     crop: emptyToNull(elements.crop.value.trim()),
-    blur: (() => { const v = Math.max(0, parseFloat(elements.blurNumber.value) || 0); return v >= 0.1 ? v : null; })(),
-    sharpen: (() => { const v = Math.max(0, parseFloat(elements.sharpenNumber.value) || 0); return v >= 0.1 ? v : null; })(),
+    blur: parseSigma(elements.blurNumber.value),
+    sharpen: parseSigma(elements.sharpenNumber.value),
   };
 }
 
@@ -408,6 +425,7 @@ function refreshFormatState() {
 
 function refreshQualityState() {
   const format = elements.format.value;
+  const optimizeMode = currentOptimizeMode();
   const lossyWebpUnavailable = wantsLossyOptimization()
     && format === "webp"
     && !state.capabilities?.webpLossy;
@@ -422,10 +440,10 @@ function refreshQualityState() {
     elements.qualityField.hidden = false;
     elements.qualityNote.textContent =
       "This build keeps WebP output lossless. JPEG and AVIF still support lossy optimization.";
-  } else if (elements.optimizeMode.value === "lossless") {
+  } else if (optimizeMode === "lossless") {
     elements.qualityNote.textContent =
       "Lossless optimization ignores quality and keeps decoded pixels unchanged.";
-  } else if (elements.optimizeMode.value === "auto" || elements.optimizeMode.value === "lossy") {
+  } else if (optimizeMode === "auto" || optimizeMode === "lossy") {
     elements.qualityNote.textContent =
       "Quality acts as a cap while optimize searches for a smaller file that still meets the target.";
   } else {
@@ -435,6 +453,25 @@ function refreshQualityState() {
 }
 
 function refreshOptimizeState() {
+  const supportsOptimization = formatSupportsOptimization(elements.format.value);
+  const autoOption = elements.optimizeMode.querySelector('option[value="auto"]');
+  const losslessOption = elements.optimizeMode.querySelector('option[value="lossless"]');
+  const lossyOption = elements.optimizeMode.querySelector('option[value="lossy"]');
+
+  if (autoOption) {
+    autoOption.disabled = !supportsOptimization;
+  }
+  if (losslessOption) {
+    losslessOption.disabled = !supportsLosslessOptimization(elements.format.value);
+  }
+  if (lossyOption) {
+    lossyOption.disabled = !supportsLossyOptimization(elements.format.value);
+  }
+
+  const normalizedMode = currentOptimizeMode();
+  if (elements.optimizeMode.value !== normalizedMode) {
+    elements.optimizeMode.value = normalizedMode;
+  }
   elements.targetQualityField.hidden = !targetQualityEnabled();
   elements.targetQuality.disabled = !targetQualityEnabled();
 }
@@ -562,6 +599,8 @@ async function loadWatermark(file) {
   elements.watermarkPreviewRow.hidden = false;
   elements.errorBox.hidden = true;
   elements.errorBox.textContent = "";
+  refreshOptimizeState();
+  refreshQualityState();
   setStatus(`Watermark "${file.name}" loaded.`);
 }
 
@@ -571,6 +610,8 @@ function clearWatermark() {
   elements.watermarkPreviewRow.hidden = true;
   elements.watermarkPreview.removeAttribute("src");
   elements.watermarkFile.value = "";
+  refreshOptimizeState();
+  refreshQualityState();
   setStatus("Watermark removed.");
 }
 
@@ -689,10 +730,78 @@ function clampQuality(value) {
   return String(Math.min(100, Math.max(1, parsed)));
 }
 
+function formatSupportsOptimization(format) {
+  return format === "jpeg" || format === "png" || format === "webp" || format === "avif";
+}
+
+function supportsLossyOptimization(format) {
+  return (
+    format === "jpeg" ||
+    (format === "avif" && state.capabilities?.avif) ||
+    (format === "webp" && state.capabilities?.webpLossy)
+  );
+}
+
+function hasJpegLosslessTransforms() {
+  if (!state.inputArtifact) {
+    return false;
+  }
+
+  const width = parseInteger(elements.width.value);
+  const height = parseInteger(elements.height.value);
+  return (
+    (width !== null && state.inputArtifact.width !== null && width !== state.inputArtifact.width) ||
+    (height !== null && state.inputArtifact.height !== null && height !== state.inputArtifact.height) ||
+    Number(elements.rotate.value) !== 0 ||
+    emptyToNull(elements.crop.value.trim()) !== null ||
+    parseSigma(elements.blurNumber.value) !== null ||
+    parseSigma(elements.sharpenNumber.value) !== null ||
+    state.watermarkBytes !== null
+  );
+}
+
+function supportsLosslessOptimization(format) {
+  if (format === "png" || format === "webp") {
+    return true;
+  }
+  if (format === "jpeg") {
+    return !hasJpegLosslessTransforms();
+  }
+  return false;
+}
+
+function normalizeOptimizeMode(mode) {
+  const format = elements.format.value;
+  if (!formatSupportsOptimization(format)) {
+    return "none";
+  }
+
+  if (mode === "lossy") {
+    return supportsLossyOptimization(format) ? "lossy" : "auto";
+  }
+  if (mode === "lossless") {
+    return supportsLosslessOptimization(format) ? "lossless" : "auto";
+  }
+  if (mode === "auto") {
+    return "auto";
+  }
+  return "none";
+}
+
+function currentOptimizeMode() {
+  return normalizeOptimizeMode(elements.optimizeMode.value);
+}
+
+function parseSigma(value) {
+  const parsed = Math.max(0, parseFloat(value) || 0);
+  return parsed >= 0.1 ? parsed : null;
+}
+
 function qualityEnabled() {
   const format = elements.format.value;
+  const optimizeMode = currentOptimizeMode();
   return (
-    elements.optimizeMode.value !== "lossless" &&
+    optimizeMode !== "lossless" &&
     (
       format === "jpeg" ||
       (format === "avif" && state.capabilities?.avif) ||
@@ -702,7 +811,7 @@ function qualityEnabled() {
 }
 
 function wantsLossyOptimization() {
-  const mode = elements.optimizeMode.value;
+  const mode = currentOptimizeMode();
   if (mode === "lossy") {
     return true;
   }
