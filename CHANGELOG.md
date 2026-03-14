@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.10.3
+
+### Changed
+
+- Switch npm package publishing in GitHub Actions from `NPM_TOKEN`-based authentication to npm trusted publishing with GitHub OIDC.
+
+### Fixed
+
+- Align crate, package, OpenAPI, and changelog release metadata for the `v0.10.3` tag.
+
 ## v0.10.2
 
 ### Fixed

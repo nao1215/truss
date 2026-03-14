@@ -229,13 +229,12 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-    env:
-      HAS_NPM_TOKEN: ${{ secrets.NPM_TOKEN != '' }}
+      id-token: write
     steps:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
           registry-url: https://registry.npmjs.org/
 
       - name: Download npm Wasm package artifact
@@ -245,10 +244,7 @@ jobs:
           path: npm-release
 
       - name: Publish npm Wasm package
-        if: env.HAS_NPM_TOKEN == 'true'
         run: npm publish --access public ./npm-release/*.tgz
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
   # ── 3. Build & push container image ─────────────────────────────────
   publish-container:

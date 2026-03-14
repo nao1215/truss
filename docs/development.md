@@ -70,7 +70,7 @@ The build output is written to `web/dist/`.
 
 The repository also contains an official npm package source in [`packages/truss-wasm`](../packages/truss-wasm). It uses a bundler-oriented build and currently ships the fixed feature set `wasm,svg,avif`.
 
-Release tags also build a `.tgz` artifact for this package and publish it to npm when `NPM_TOKEN` is configured in GitHub Actions.
+Release tags also build a `.tgz` artifact for this package and publish it to npm via trusted publishing when the package is configured on npmjs.com for the `release.yml` workflow.
 
 To build and smoke-check the package locally:
 
