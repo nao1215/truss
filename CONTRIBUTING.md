@@ -67,6 +67,7 @@ If your change touches the official npm package or browser-facing WASM integrati
 ```sh
 just wasm-package-pack            # Verify the npm tarball can be assembled
 just wasm-package-consumer-smoke  # Install the tarball into a throwaway app and run one transform
+just wasm-vite-example-smoke      # Build the Vite example against the local tarball
 ```
 
 ### 4. Run integration tests
@@ -201,6 +202,7 @@ Run `just` with no arguments to see the full list. Key recipes:
 | `just wasm-package-build` | Build the official npm package bindings |
 | `just wasm-package-pack` | Pack the npm package without publishing |
 | `just wasm-package-consumer-smoke` | Install the local tarball into a throwaway consumer and run one transform |
+| `just wasm-vite-example-smoke` | Build the Vite example against the local tarball |
 | `just serve` | Start dev server |
 | `just docker-build` | Build Docker image |
 

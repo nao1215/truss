@@ -57,6 +57,27 @@ const outputBlob = new Blob([result.bytes], {
 });
 ```
 
+### Vite
+
+Vite needs community Wasm handling for the `wasm-bindgen --target bundler` output. Use `vite-plugin-wasm` together with `vite-plugin-top-level-await`:
+
+```sh
+npm install @nao1215/truss-wasm
+npm install -D vite-plugin-wasm vite-plugin-top-level-await
+```
+
+```ts
+import { defineConfig } from "vite";
+import topLevelAwait from "vite-plugin-top-level-await";
+import wasm from "vite-plugin-wasm";
+
+export default defineConfig({
+  plugins: [wasm(), topLevelAwait()],
+});
+```
+
+For a runnable example, see `examples/vite-truss-wasm` in the repository.
+
 ## Exported API
 
 This package exports the generated Wasm bindings directly:

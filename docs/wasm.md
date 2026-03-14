@@ -123,12 +123,20 @@ const result = transformImage(
 
 The official package is generated with `wasm-bindgen --target bundler`, so there is no explicit `init()` step.
 
+For Vite, add [`vite-plugin-wasm`](https://github.com/Menci/vite-plugin-wasm) and [`vite-plugin-top-level-await`](https://github.com/Menci/vite-plugin-top-level-await), as shown in [`examples/vite-truss-wasm/vite.config.js`](../examples/vite-truss-wasm/vite.config.js).
+
 For a runnable browser consumer example, see [`examples/vite-truss-wasm`](../examples/vite-truss-wasm).
 
 For a local install-and-transform smoke check that exercises the packed npm artifact from a throwaway consumer, run:
 
 ```sh
 node ./scripts/run-wasm-consumer-smoke.mjs
+```
+
+To verify that the Vite example still bundles correctly against the current repository checkout, run:
+
+```sh
+node ./scripts/run-wasm-vite-example-smoke.mjs
 ```
 
 ## JavaScript Quick Start

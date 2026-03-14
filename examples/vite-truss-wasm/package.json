@@ -8,9 +8,11 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@nao1215/truss-wasm": "^0.10.4"
+    "@nao1215/truss-wasm": "0.10.4"
   },
   "devDependencies": {
-    "vite": "^7.1.7"
+    "vite": "^7.1.7",
+    "vite-plugin-top-level-await": "^1.6.0",
+    "vite-plugin-wasm": "^3.5.0"
   }
 }

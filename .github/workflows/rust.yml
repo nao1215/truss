@@ -147,6 +147,9 @@ jobs:
       - name: Run Wasm consumer smoke test
         run: node ./scripts/run-wasm-consumer-smoke.mjs
 
+      - name: Run Vite Wasm example smoke test
+        run: node ./scripts/run-wasm-vite-example-smoke.mjs
+
   # ── Cross-platform tests (PR and main) ──────────────────────────────
   test-cross-platform:
     strategy:

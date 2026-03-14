@@ -45,11 +45,24 @@ try {
   writeFileSync(
     path.join(consumerDir, "smoke.mjs"),
     `import fs from "node:fs";
-import { inspectImageJson, transformImage } from "@nao1215/truss-wasm";
+import {
+  getCapabilitiesJson,
+  inspectImageJson,
+  transformImage,
+} from "@nao1215/truss-wasm";
 
 const inputPath = process.argv[2];
 const inputBytes = new Uint8Array(fs.readFileSync(inputPath));
-const inspected = JSON.parse(inspectImageJson(inputBytes, "png"));
+const capabilities = JSON.parse(getCapabilitiesJson());
+const inspected = JSON.parse(inspectImageJson(inputBytes, undefined));
+
+if (
+  typeof capabilities.svg !== "boolean" ||
+  typeof capabilities.webpLossy !== "boolean" ||
+  typeof capabilities.avif !== "boolean"
+) {
+  throw new Error(\`unexpected capabilities payload: \${JSON.stringify(capabilities)}\`);
+}
 
 if (inspected.artifact.mediaType !== "png" || inspected.artifact.width !== 1 || inspected.artifact.height !== 1) {
   throw new Error(\`unexpected inspection payload: \${JSON.stringify(inspected)}\`);
@@ -57,7 +70,7 @@ if (inspected.artifact.mediaType !== "png" || inspected.artifact.width !== 1 || 
 
 const result = transformImage(
   inputBytes,
-  "png",
+  undefined,
   JSON.stringify({
     format: "jpeg",
     width: 4,
@@ -79,6 +92,7 @@ if (!(result.bytes instanceof Uint8Array) || result.bytes.length === 0) {
 }
 
 console.log(JSON.stringify({
+  capabilities,
   inspected: inspected.artifact,
   output: response.artifact,
   outputBytes: result.bytes.length

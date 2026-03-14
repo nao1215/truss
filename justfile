@@ -122,6 +122,10 @@ wasm-package-pack:
 wasm-package-consumer-smoke:
     node ./scripts/run-wasm-consumer-smoke.mjs
 
+# Install the local npm package tarball into a temporary Vite app and verify bundler build succeeds
+wasm-vite-example-smoke:
+    node ./scripts/run-wasm-vite-example-smoke.mjs
+
 # Check WASM feature slice compiles
 wasm-check:
     cargo check --no-default-features --features wasm --lib
