@@ -5,6 +5,8 @@
 [![API Integration](https://github.com/nao1215/truss/actions/workflows/integration.yml/badge.svg)](https://github.com/nao1215/truss/actions/workflows/integration.yml)
 [![Crates.io](https://img.shields.io/crates/v/truss-image)](https://crates.io/crates/truss-image)
 [![Crates.io Downloads](https://img.shields.io/crates/d/truss-image)](https://crates.io/crates/truss-image)
+[![npm](https://img.shields.io/npm/v/%40nao1215%2Ftruss-wasm)](https://www.npmjs.com/package/@nao1215/truss-wasm)
+[![npm Downloads](https://img.shields.io/npm/dm/%40nao1215%2Ftruss-wasm)](https://www.npmjs.com/package/@nao1215/truss-wasm)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-stable-orange)](https://www.rust-lang.org/)
 
@@ -13,6 +15,8 @@
 Resize, crop, convert, optimize, blur, sharpen, and watermark images from the CLI, an HTTP server, or the browser -- written in Rust with signed-URL authentication and SSRF protection built in.
 
 [Try the WASM demo in your browser](https://nao1215.github.io/truss/) -- no install, no upload, runs 100 % client-side.
+
+[Install `@nao1215/truss-wasm` from npm](https://www.npmjs.com/package/@nao1215/truss-wasm) or start from the [Vite consumer example](./examples/vite-truss-wasm).
 
 ![WASM demo screenshot](./docs/img/wasm-sample.png)
 
@@ -297,6 +301,12 @@ truss also ships a browser-oriented WASM adapter for local, client-side image pr
 
 For bundler-based browser apps, the repository includes the source for the official npm package in [`packages/truss-wasm`](./packages/truss-wasm). It uses the fixed feature set `wasm,svg,avif`, so AVIF is available and WebP stays lossless in the package build.
 
+```sh
+npm install @nao1215/truss-wasm
+```
+
+If you want a minimal consumer you can run immediately, see [`examples/vite-truss-wasm`](./examples/vite-truss-wasm).
+
 ```js
 import {
   getCapabilitiesJson,
@@ -320,6 +330,8 @@ const result = transformImage(
 ```
 
 The official npm package is generated with `wasm-bindgen --target bundler`, so it does not require an explicit `init()` step.
+
+For maintainers, `node ./scripts/run-wasm-consumer-smoke.mjs` packs the local npm artifact, installs it into a throwaway consumer, and runs one real transform through the published JS surface.
 
 The example below assumes your page is served from a directory that also contains `pkg/truss.js`. When using `./scripts/build-wasm-demo.sh`, that means `web/dist/index.html` importing `./pkg/truss.js`.
 

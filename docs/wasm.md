@@ -123,6 +123,14 @@ const result = transformImage(
 
 The official package is generated with `wasm-bindgen --target bundler`, so there is no explicit `init()` step.
 
+For a runnable browser consumer example, see [`examples/vite-truss-wasm`](../examples/vite-truss-wasm).
+
+For a local install-and-transform smoke check that exercises the packed npm artifact from a throwaway consumer, run:
+
+```sh
+node ./scripts/run-wasm-consumer-smoke.mjs
+```
+
 ## JavaScript Quick Start
 
 For direct static hosting of the raw Wasm bindings, the generated package exports a default `init` function plus named helpers:

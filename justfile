@@ -118,6 +118,10 @@ wasm-package-build:
 wasm-package-pack:
     cd packages/truss-wasm && npm pack --dry-run
 
+# Install the local npm package tarball into a throwaway consumer and run one transform
+wasm-package-consumer-smoke:
+    node ./scripts/run-wasm-consumer-smoke.mjs
+
 # Check WASM feature slice compiles
 wasm-check:
     cargo check --no-default-features --features wasm --lib

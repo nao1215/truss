@@ -79,6 +79,7 @@ rustup target add wasm32-unknown-unknown
 # The wasm-bindgen-cli version must match the wasm-bindgen dependency in Cargo.toml.
 cargo install wasm-bindgen-cli --version 0.2.114
 just wasm-package-pack
+just wasm-package-consumer-smoke
 ```
 
 ## Benchmark

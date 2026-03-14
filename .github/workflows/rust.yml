@@ -7,8 +7,10 @@ on:
     paths:
       - "src/**"
       - "tests/**"
+      - "examples/**"
       - "packages/**"
       - "scripts/**"
+      - "justfile"
       - "Cargo.toml"
       - "Cargo.lock"
       - ".github/workflows/rust.yml"
@@ -16,8 +18,10 @@ on:
     paths:
       - "src/**"
       - "tests/**"
+      - "examples/**"
       - "packages/**"
       - "scripts/**"
+      - "justfile"
       - "Cargo.toml"
       - "Cargo.lock"
       - ".github/workflows/rust.yml"
@@ -139,6 +143,9 @@ jobs:
 
       - name: Pack npm Wasm package
         run: cd packages/truss-wasm && npm pack --dry-run
+
+      - name: Run Wasm consumer smoke test
+        run: node ./scripts/run-wasm-consumer-smoke.mjs
 
   # ── Cross-platform tests (PR and main) ──────────────────────────────
   test-cross-platform:
