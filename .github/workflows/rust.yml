@@ -133,11 +133,13 @@ jobs:
 
       - name: Read Wasm package config
         id: wasm-package-config
+        shell: bash
         run: |
           version="$(node -p "require('./packages/truss-wasm/package.json').trussWasmBuild.wasmBindgenVersion")"
           echo "wasm_bindgen_version=${version}" >> "$GITHUB_OUTPUT"
 
       - name: Install wasm-bindgen CLI
+        shell: bash
         run: |
           version="${{ steps.wasm-package-config.outputs.wasm_bindgen_version }}"
           if [ "$(wasm-bindgen --version 2>/dev/null || true)" != "wasm-bindgen ${version}" ]; then
