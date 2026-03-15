@@ -2052,22 +2052,33 @@ mod tests {
     // each test saves/restores the variables it touches.
     // -----------------------------------------------------------------------
 
-    #[cfg(feature = "s3")]
+    /// Mutex that serializes every test touching process-global env vars
+    /// (`ServerConfig::from_env()` reads many `TRUSS_*` variables).
+    /// All env-mutating tests must acquire this — `#[serial]` alone is not
+    /// sufficient because it only serializes within its own group.
     static FROM_ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    #[cfg(feature = "s3")]
-    const S3_ENV_VARS: &[&str] = &[
+    /// All environment variables that any `from_env` test may read or write.
+    /// Every variable listed here is saved before the test and restored after,
+    /// preventing cross-test pollution.
+    const ENV_VARS: &[&str] = &[
         "TRUSS_STORAGE_ROOT",
         "TRUSS_STORAGE_BACKEND",
+        #[cfg(feature = "s3")]
         "TRUSS_S3_BUCKET",
+        #[cfg(feature = "gcs")]
+        "TRUSS_GCS_BUCKET",
+        #[cfg(feature = "azure")]
+        "TRUSS_AZURE_CONTAINER",
+        "TRUSS_STORAGE_TIMEOUT_SECS",
+        "TRUSS_MAX_CONCURRENT_TRANSFORMS",
     ];
 
     /// Save current values, run `f`, then restore originals regardless of
     /// panics. Holds `FROM_ENV_MUTEX` for the duration.
-    #[cfg(feature = "s3")]
-    fn with_s3_env<F: FnOnce()>(vars: &[(&str, Option<&str>)], f: F) {
+    fn with_env<F: FnOnce()>(vars: &[(&str, Option<&str>)], f: F) {
         let _guard = FROM_ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-        let saved: Vec<(&str, Option<String>)> = S3_ENV_VARS
+        let saved: Vec<(&str, Option<String>)> = ENV_VARS
             .iter()
             .map(|k| (*k, std::env::var(k).ok()))
             .collect();
@@ -2089,6 +2100,12 @@ mod tests {
         if let Err(payload) = result {
             std::panic::resume_unwind(payload);
         }
+    }
+
+    /// Convenience alias for S3-specific tests.
+    #[cfg(feature = "s3")]
+    fn with_s3_env<F: FnOnce()>(vars: &[(&str, Option<&str>)], f: F) {
+        with_env(vars, f);
     }
 
     #[test]
@@ -2579,231 +2596,253 @@ mod tests {
     }
 
     #[test]
-    #[serial]
     #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
     fn test_storage_timeout_default() {
-        unsafe {
-            std::env::remove_var("TRUSS_STORAGE_TIMEOUT_SECS");
-        }
-        let config = ServerConfig::from_env().unwrap();
-        assert_eq!(config.storage_timeout_secs, 30);
+        with_env(
+            &[
+                ("TRUSS_STORAGE_TIMEOUT_SECS", None),
+                ("TRUSS_STORAGE_BACKEND", None),
+            ],
+            || {
+                let config = ServerConfig::from_env().unwrap();
+                assert_eq!(config.storage_timeout_secs, 30);
+            },
+        );
     }
 
     #[test]
-    #[serial]
     #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
     fn test_storage_timeout_custom() {
-        unsafe {
-            std::env::set_var("TRUSS_STORAGE_TIMEOUT_SECS", "60");
-        }
-        let config = ServerConfig::from_env().unwrap();
-        assert_eq!(config.storage_timeout_secs, 60);
-        unsafe {
-            std::env::remove_var("TRUSS_STORAGE_TIMEOUT_SECS");
-        }
+        with_env(
+            &[
+                ("TRUSS_STORAGE_TIMEOUT_SECS", Some("60")),
+                ("TRUSS_STORAGE_BACKEND", None),
+            ],
+            || {
+                let config = ServerConfig::from_env().unwrap();
+                assert_eq!(config.storage_timeout_secs, 60);
+            },
+        );
     }
 
     #[test]
-    #[serial]
     #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
     fn test_storage_timeout_min_boundary() {
-        unsafe {
-            std::env::set_var("TRUSS_STORAGE_TIMEOUT_SECS", "1");
-        }
-        let config = ServerConfig::from_env().unwrap();
-        assert_eq!(config.storage_timeout_secs, 1);
-        unsafe {
-            std::env::remove_var("TRUSS_STORAGE_TIMEOUT_SECS");
-        }
+        with_env(
+            &[
+                ("TRUSS_STORAGE_TIMEOUT_SECS", Some("1")),
+                ("TRUSS_STORAGE_BACKEND", None),
+            ],
+            || {
+                let config = ServerConfig::from_env().unwrap();
+                assert_eq!(config.storage_timeout_secs, 1);
+            },
+        );
     }
 
     #[test]
-    #[serial]
     #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
     fn test_storage_timeout_max_boundary() {
-        unsafe {
-            std::env::set_var("TRUSS_STORAGE_TIMEOUT_SECS", "300");
-        }
-        let config = ServerConfig::from_env().unwrap();
-        assert_eq!(config.storage_timeout_secs, 300);
-        unsafe {
-            std::env::remove_var("TRUSS_STORAGE_TIMEOUT_SECS");
-        }
+        with_env(
+            &[
+                ("TRUSS_STORAGE_TIMEOUT_SECS", Some("300")),
+                ("TRUSS_STORAGE_BACKEND", None),
+            ],
+            || {
+                let config = ServerConfig::from_env().unwrap();
+                assert_eq!(config.storage_timeout_secs, 300);
+            },
+        );
     }
 
     #[test]
-    #[serial]
     #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
     fn test_storage_timeout_empty_string_uses_default() {
-        unsafe {
-            std::env::set_var("TRUSS_STORAGE_TIMEOUT_SECS", "");
-        }
-        let config = ServerConfig::from_env().unwrap();
-        assert_eq!(config.storage_timeout_secs, 30);
-        unsafe {
-            std::env::remove_var("TRUSS_STORAGE_TIMEOUT_SECS");
-        }
+        with_env(
+            &[
+                ("TRUSS_STORAGE_TIMEOUT_SECS", Some("")),
+                ("TRUSS_STORAGE_BACKEND", None),
+            ],
+            || {
+                let config = ServerConfig::from_env().unwrap();
+                assert_eq!(config.storage_timeout_secs, 30);
+            },
+        );
     }
 
     #[test]
-    #[serial]
     #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
     fn test_storage_timeout_zero_rejected() {
-        unsafe {
-            std::env::set_var("TRUSS_STORAGE_TIMEOUT_SECS", "0");
-        }
-        let err = ServerConfig::from_env().unwrap_err();
-        assert!(
-            err.to_string().contains("between 1 and 300"),
-            "error should mention valid range: {err}"
+        with_env(
+            &[
+                ("TRUSS_STORAGE_TIMEOUT_SECS", Some("0")),
+                ("TRUSS_STORAGE_BACKEND", None),
+            ],
+            || {
+                let err = ServerConfig::from_env().unwrap_err();
+                assert!(
+                    err.to_string().contains("between 1 and 300"),
+                    "error should mention valid range: {err}"
+                );
+            },
         );
-        unsafe {
-            std::env::remove_var("TRUSS_STORAGE_TIMEOUT_SECS");
-        }
     }
 
     #[test]
-    #[serial]
     #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
     fn test_storage_timeout_over_max_rejected() {
-        unsafe {
-            std::env::set_var("TRUSS_STORAGE_TIMEOUT_SECS", "301");
-        }
-        let err = ServerConfig::from_env().unwrap_err();
-        assert!(
-            err.to_string().contains("between 1 and 300"),
-            "error should mention valid range: {err}"
+        with_env(
+            &[
+                ("TRUSS_STORAGE_TIMEOUT_SECS", Some("301")),
+                ("TRUSS_STORAGE_BACKEND", None),
+            ],
+            || {
+                let err = ServerConfig::from_env().unwrap_err();
+                assert!(
+                    err.to_string().contains("between 1 and 300"),
+                    "error should mention valid range: {err}"
+                );
+            },
         );
-        unsafe {
-            std::env::remove_var("TRUSS_STORAGE_TIMEOUT_SECS");
-        }
     }
 
     #[test]
-    #[serial]
     #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
     fn test_storage_timeout_non_numeric_rejected() {
-        unsafe {
-            std::env::set_var("TRUSS_STORAGE_TIMEOUT_SECS", "abc");
-        }
-        let err = ServerConfig::from_env().unwrap_err();
-        assert!(
-            err.to_string().contains("positive integer"),
-            "error should mention positive integer: {err}"
+        with_env(
+            &[
+                ("TRUSS_STORAGE_TIMEOUT_SECS", Some("abc")),
+                ("TRUSS_STORAGE_BACKEND", None),
+            ],
+            || {
+                let err = ServerConfig::from_env().unwrap_err();
+                assert!(
+                    err.to_string().contains("positive integer"),
+                    "error should mention positive integer: {err}"
+                );
+            },
         );
-        unsafe {
-            std::env::remove_var("TRUSS_STORAGE_TIMEOUT_SECS");
-        }
     }
 
     #[test]
-    #[serial]
     fn test_max_concurrent_transforms_default() {
-        unsafe {
-            std::env::remove_var("TRUSS_MAX_CONCURRENT_TRANSFORMS");
-        }
-        let config = ServerConfig::from_env().unwrap();
-        assert_eq!(config.max_concurrent_transforms, 64);
+        with_env(
+            &[
+                ("TRUSS_MAX_CONCURRENT_TRANSFORMS", None),
+                ("TRUSS_STORAGE_BACKEND", None),
+            ],
+            || {
+                let config = ServerConfig::from_env().unwrap();
+                assert_eq!(config.max_concurrent_transforms, 64);
+            },
+        );
     }
 
     #[test]
-    #[serial]
     fn test_max_concurrent_transforms_custom() {
-        unsafe {
-            std::env::set_var("TRUSS_MAX_CONCURRENT_TRANSFORMS", "128");
-        }
-        let config = ServerConfig::from_env().unwrap();
-        assert_eq!(config.max_concurrent_transforms, 128);
-        unsafe {
-            std::env::remove_var("TRUSS_MAX_CONCURRENT_TRANSFORMS");
-        }
+        with_env(
+            &[
+                ("TRUSS_MAX_CONCURRENT_TRANSFORMS", Some("128")),
+                ("TRUSS_STORAGE_BACKEND", None),
+            ],
+            || {
+                let config = ServerConfig::from_env().unwrap();
+                assert_eq!(config.max_concurrent_transforms, 128);
+            },
+        );
     }
 
     #[test]
-    #[serial]
     fn test_max_concurrent_transforms_min_boundary() {
-        unsafe {
-            std::env::set_var("TRUSS_MAX_CONCURRENT_TRANSFORMS", "1");
-        }
-        let config = ServerConfig::from_env().unwrap();
-        assert_eq!(config.max_concurrent_transforms, 1);
-        unsafe {
-            std::env::remove_var("TRUSS_MAX_CONCURRENT_TRANSFORMS");
-        }
+        with_env(
+            &[
+                ("TRUSS_MAX_CONCURRENT_TRANSFORMS", Some("1")),
+                ("TRUSS_STORAGE_BACKEND", None),
+            ],
+            || {
+                let config = ServerConfig::from_env().unwrap();
+                assert_eq!(config.max_concurrent_transforms, 1);
+            },
+        );
     }
 
     #[test]
-    #[serial]
     fn test_max_concurrent_transforms_max_boundary() {
-        unsafe {
-            std::env::set_var("TRUSS_MAX_CONCURRENT_TRANSFORMS", "1024");
-        }
-        let config = ServerConfig::from_env().unwrap();
-        assert_eq!(config.max_concurrent_transforms, 1024);
-        unsafe {
-            std::env::remove_var("TRUSS_MAX_CONCURRENT_TRANSFORMS");
-        }
+        with_env(
+            &[
+                ("TRUSS_MAX_CONCURRENT_TRANSFORMS", Some("1024")),
+                ("TRUSS_STORAGE_BACKEND", None),
+            ],
+            || {
+                let config = ServerConfig::from_env().unwrap();
+                assert_eq!(config.max_concurrent_transforms, 1024);
+            },
+        );
     }
 
     #[test]
-    #[serial]
     fn test_max_concurrent_transforms_empty_uses_default() {
-        unsafe {
-            std::env::set_var("TRUSS_MAX_CONCURRENT_TRANSFORMS", "");
-        }
-        let config = ServerConfig::from_env().unwrap();
-        assert_eq!(config.max_concurrent_transforms, 64);
-        unsafe {
-            std::env::remove_var("TRUSS_MAX_CONCURRENT_TRANSFORMS");
-        }
+        with_env(
+            &[
+                ("TRUSS_MAX_CONCURRENT_TRANSFORMS", Some("")),
+                ("TRUSS_STORAGE_BACKEND", None),
+            ],
+            || {
+                let config = ServerConfig::from_env().unwrap();
+                assert_eq!(config.max_concurrent_transforms, 64);
+            },
+        );
     }
 
     #[test]
-    #[serial]
     fn test_max_concurrent_transforms_zero_rejected() {
-        unsafe {
-            std::env::set_var("TRUSS_MAX_CONCURRENT_TRANSFORMS", "0");
-        }
-        let err = ServerConfig::from_env().unwrap_err();
-        assert!(
-            err.to_string().contains("between 1 and 1024"),
-            "error should mention valid range: {err}"
+        with_env(
+            &[
+                ("TRUSS_MAX_CONCURRENT_TRANSFORMS", Some("0")),
+                ("TRUSS_STORAGE_BACKEND", None),
+            ],
+            || {
+                let err = ServerConfig::from_env().unwrap_err();
+                assert!(
+                    err.to_string().contains("between 1 and 1024"),
+                    "error should mention valid range: {err}"
+                );
+            },
         );
-        unsafe {
-            std::env::remove_var("TRUSS_MAX_CONCURRENT_TRANSFORMS");
-        }
     }
 
     #[test]
-    #[serial]
     fn test_max_concurrent_transforms_over_max_rejected() {
-        unsafe {
-            std::env::set_var("TRUSS_MAX_CONCURRENT_TRANSFORMS", "1025");
-        }
-        let err = ServerConfig::from_env().unwrap_err();
-        assert!(
-            err.to_string().contains("between 1 and 1024"),
-            "error should mention valid range: {err}"
+        with_env(
+            &[
+                ("TRUSS_MAX_CONCURRENT_TRANSFORMS", Some("1025")),
+                ("TRUSS_STORAGE_BACKEND", None),
+            ],
+            || {
+                let err = ServerConfig::from_env().unwrap_err();
+                assert!(
+                    err.to_string().contains("between 1 and 1024"),
+                    "error should mention valid range: {err}"
+                );
+            },
         );
-        unsafe {
-            std::env::remove_var("TRUSS_MAX_CONCURRENT_TRANSFORMS");
-        }
     }
 
     #[test]
-    #[serial]
     fn test_max_concurrent_transforms_non_numeric_rejected() {
-        unsafe {
-            std::env::set_var("TRUSS_MAX_CONCURRENT_TRANSFORMS", "abc");
-        }
-        let err = ServerConfig::from_env().unwrap_err();
-        assert!(
-            err.to_string().contains("positive integer"),
-            "error should mention positive integer: {err}"
+        with_env(
+            &[
+                ("TRUSS_MAX_CONCURRENT_TRANSFORMS", Some("abc")),
+                ("TRUSS_STORAGE_BACKEND", None),
+            ],
+            || {
+                let err = ServerConfig::from_env().unwrap_err();
+                assert!(
+                    err.to_string().contains("positive integer"),
+                    "error should mention positive integer: {err}"
+                );
+            },
         );
-        unsafe {
-            std::env::remove_var("TRUSS_MAX_CONCURRENT_TRANSFORMS");
-        }
     }
 
     #[test]
