@@ -86,7 +86,7 @@ export interface TransformQuery {
   optimize?: OptimizeMode | undefined;
   /** Adaptive quality target metric. */
   targetQuality?: TargetQuality | undefined;
-  /** Background colour (CSS hex, e.g. `"#ff0000"`) for transparent-to-opaque conversions. */
+  /** Background colour as 6- or 8-digit hex without `#` (e.g. `"ff0000"`, `"ff000080"`). */
   background?: string | undefined;
   /** Rotation in 90-degree increments. */
   rotate?: QuarterTurn | undefined;
@@ -112,7 +112,7 @@ export interface SignedWatermarkParams {
   url: string;
   /** Watermark anchor position (default: `"bottom-right"`). */
   position?: Position | undefined;
-  /** Watermark opacity (0–1, default: 1). */
+  /** Watermark opacity as an integer percentage (1–100, default: 100). */
   opacity?: number | undefined;
   /** Margin in pixels from the anchor edge. */
   margin?: number | undefined;
