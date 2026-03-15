@@ -88,7 +88,7 @@ It also rejects request-invariant invalid combinations before signing, including
 
 ## Maintainer Note
 
-The first npm release for a new package must be done manually so the package name is registered on npm. After that, trusted publishing can be enabled for automated releases.
+This package now publishes via npm trusted publishing on tagged GitHub releases.
 
 ## License
 

@@ -224,8 +224,6 @@ jobs:
           name: npm-package-truss-wasm
           path: packages/truss-wasm/*.tgz
 
-  # The signer package stays manual for its first release, so tagged builds only
-  # produce the .tgz artifact here until npm registration is complete.
   build-url-signer-package:
     needs: verify
     runs-on: ubuntu-latest
@@ -265,6 +263,28 @@ jobs:
         with:
           name: npm-package-truss-url-signer
           path: packages/truss-url-signer/*.tgz
+
+  publish-url-signer-package:
+    needs: build-url-signer-package
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org/
+
+      - name: Download npm TypeScript URL signer package artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: npm-package-truss-url-signer
+          path: npm-release
+
+      - name: Publish npm TypeScript URL signer package
+        run: npm publish --access public ./npm-release/*.tgz
 
   publish-wasm-package:
     needs: build-wasm-package
@@ -384,7 +404,7 @@ jobs:
   # ── 4. Create GitHub Release ────────────────────────────────────────
   create-release:
     runs-on: ubuntu-latest
-    needs: [publish-container, build-binaries, build-wasm-package, publish-wasm-package, build-url-signer-package]
+    needs: [publish-container, build-binaries, build-wasm-package, publish-wasm-package, build-url-signer-package, publish-url-signer-package]
     permissions:
       contents: write
     steps:
