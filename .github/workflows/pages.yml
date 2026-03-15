@@ -40,6 +40,17 @@ jobs:
             cargo install wasm-bindgen-cli --version 0.2.114
           fi
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+
+      - name: Lint web frontend (syntax check)
+        run: npx --yes acorn --ecma2022 --module --silent web/app.js
+
+      - name: Validate web frontend structure
+        run: node scripts/check-web-frontend.mjs
+
       - name: Build Pages artifact
         run: ./scripts/build-wasm-demo.sh
 

@@ -1,7 +1,7 @@
 import { type NextRequest, NextResponse } from "next/server";
 import { signPublicUrl } from "@nao1215/truss-url-signer";
 import type { OutputFormat, FitMode } from "@nao1215/truss-url-signer";
-import { trussConfig } from "@/lib/truss";
+import { trussConfig, stableExpires } from "@/lib/truss";
 
 const ALLOWED_FORMATS = new Set([
   "jpeg",
@@ -69,21 +69,38 @@ export function GET(request: NextRequest) {
     return NextResponse.json({ error: "invalid quality" }, { status: 400 });
   }
 
+  // Validate cross-field constraints that signPublicUrl enforces:
+  // fit/position require both width AND height.
+  if (fit && (width === undefined || height === undefined)) {
+    return NextResponse.json(
+      { error: "fit requires both width and height" },
+      { status: 400 },
+    );
+  }
+
   const config = trussConfig();
-  const url = signPublicUrl({
-    baseUrl: config.publicBaseUrl,
-    source: { kind: "path", path },
-    transforms: {
-      width,
-      height,
-      format: format as OutputFormat | undefined,
-      quality,
-      fit: fit as FitMode | undefined,
-    },
-    keyId: config.keyId,
-    secret: config.secret,
-    expires: Math.floor(Date.now() / 1000) + config.ttlSeconds,
-  });
+  let url: string;
+  try {
+    url = signPublicUrl({
+      baseUrl: config.publicBaseUrl,
+      source: { kind: "path", path },
+      transforms: {
+        width,
+        height,
+        format: format as OutputFormat | undefined,
+        quality,
+        fit: fit as FitMode | undefined,
+      },
+      keyId: config.keyId,
+      secret: config.secret,
+      expires: stableExpires(config.ttlSeconds),
+    });
+  } catch (err) {
+    if (err instanceof TypeError) {
+      return NextResponse.json({ error: err.message }, { status: 400 });
+    }
+    throw err;
+  }
 
   return NextResponse.json({ url });
 }

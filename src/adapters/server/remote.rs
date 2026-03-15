@@ -408,6 +408,16 @@ pub(super) fn validate_remote_url(
         ));
     };
 
+    // Always block cloud metadata endpoints, even when insecure sources are
+    // allowed.  This matches the unconditional check in
+    // `validate_backend_endpoint_url` and the guarantee stated in the module
+    // doc-comment.
+    if is_cloud_metadata_host(url) {
+        return Err(forbidden_response(
+            "remote URL points to a cloud metadata service",
+        ));
+    }
+
     if !config.allow_insecure_url_sources && port != 80 && port != 443 {
         return Err(forbidden_response(
             "remote URL port is not allowed by the current server policy",
@@ -533,21 +543,15 @@ pub(super) fn validate_backend_endpoint_url(
         }
     }
 
-    if let Some(host) = parsed.host_str() {
-        // Always block cloud metadata services, even in insecure mode.
-        let is_metadata = host == "169.254.169.254"
-            || host == "metadata.google.internal"
-            || parsed.host()
-                == Some(url::Host::Ipv6(std::net::Ipv6Addr::new(
-                    0xfd00, 0x0ec2, 0, 0, 0, 0, 0, 0x0254,
-                )));
-        if is_metadata {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("{env_var_name} must not point to a cloud metadata service"),
-            ));
-        }
+    // Always block cloud metadata services, even in insecure mode.
+    if is_cloud_metadata_host(&parsed) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{env_var_name} must not point to a cloud metadata service"),
+        ));
+    }
 
+    if let Some(host) = parsed.host_str() {
         if !allow_insecure {
             let port = parsed.port_or_known_default().unwrap_or(80);
             let addr_str = format!("{host}:{port}");
@@ -570,6 +574,36 @@ pub(super) fn validate_backend_endpoint_url(
     }
 
     Ok(())
+}
+
+/// Returns `true` when the URL targets a well-known cloud metadata service.
+///
+/// Checked hostnames:
+/// - `169.254.169.254` (AWS / Azure / most clouds)
+/// - `metadata.google.internal` (GCP)
+/// - `[fd00:ec2::254]` (AWS IMDSv2 IPv6)
+fn is_cloud_metadata_host(url: &Url) -> bool {
+    // Explicit checks cover AWS/Azure (169.254.169.254), GCP
+    // (metadata.google.internal), and AWS IMDSv2 IPv6.  Other providers
+    // (DigitalOcean, Oracle, etc.) also use 169.254.169.254 and are
+    // therefore caught here.  Alibaba's 100.100.100.200 falls in the
+    // CGNAT range (100.64.0.0/10) and is rejected by `is_disallowed_ipv4`.
+    match url.host_str() {
+        Some("169.254.169.254") | Some("metadata.google.internal") => true,
+        _ => match url.host() {
+            // AWS IMDSv2 IPv6 literal
+            Some(url::Host::Ipv6(addr))
+                if addr == std::net::Ipv6Addr::new(0xfd00, 0x0ec2, 0, 0, 0, 0, 0, 0x0254) =>
+            {
+                true
+            }
+            // IPv4-mapped IPv6 (e.g. ::ffff:169.254.169.254)
+            Some(url::Host::Ipv6(addr)) => {
+                addr.to_ipv4_mapped() == Some(std::net::Ipv4Addr::new(169, 254, 169, 254))
+            }
+            _ => false,
+        },
+    }
 }
 
 pub(super) fn is_disallowed_remote_ip(ip: IpAddr) -> bool {
@@ -714,6 +748,44 @@ mod redirect_tests {
                 "port 80 should be allowed in strict mode"
             );
         }
+    }
+
+    #[test]
+    fn validate_remote_url_blocks_metadata_even_when_insecure() {
+        let mut config = ServerConfig::new(std::env::temp_dir(), None);
+        config.allow_insecure_url_sources = true;
+
+        // AWS metadata endpoint
+        let url = Url::parse("http://169.254.169.254/latest/meta-data").unwrap();
+        let err = validate_remote_url(&url, &config).unwrap_err();
+        assert!(
+            String::from_utf8_lossy(&err.body).contains("cloud metadata"),
+            "should block AWS metadata"
+        );
+
+        // GCP metadata endpoint
+        let url = Url::parse("http://metadata.google.internal/computeMetadata").unwrap();
+        let err = validate_remote_url(&url, &config).unwrap_err();
+        assert!(
+            String::from_utf8_lossy(&err.body).contains("cloud metadata"),
+            "should block GCP metadata"
+        );
+
+        // AWS IMDSv2 IPv6 endpoint
+        let url = Url::parse("http://[fd00:ec2::254]/latest/meta-data").unwrap();
+        let err = validate_remote_url(&url, &config).unwrap_err();
+        assert!(
+            String::from_utf8_lossy(&err.body).contains("cloud metadata"),
+            "should block AWS IMDSv2 IPv6 metadata"
+        );
+
+        // IPv4-mapped IPv6 bypass attempt (::ffff:169.254.169.254)
+        let url = Url::parse("http://[::ffff:169.254.169.254]/latest/meta-data").unwrap();
+        let err = validate_remote_url(&url, &config).unwrap_err();
+        assert!(
+            String::from_utf8_lossy(&err.body).contains("cloud metadata"),
+            "should block IPv4-mapped metadata address"
+        );
     }
 
     /// Helper to construct an `http::Response<ureq::Body>` for tests that only

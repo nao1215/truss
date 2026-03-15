@@ -1,6 +1,6 @@
 import { signPublicUrl } from "@nao1215/truss-url-signer";
 import type { OutputFormat, FitMode } from "@nao1215/truss-url-signer";
-import { trussConfig } from "@/lib/truss";
+import { trussConfig, stableExpires } from "@/lib/truss";
 
 interface TrussImageProps
   extends Omit<
@@ -44,7 +44,7 @@ export function TrussImage({
     transforms: { width, height, format, quality, fit },
     keyId: config.keyId,
     secret: config.secret,
-    expires: Math.floor(Date.now() / 1000) + config.ttlSeconds,
+    expires: stableExpires(config.ttlSeconds),
   });
 
   return (
