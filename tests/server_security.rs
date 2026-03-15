@@ -275,11 +275,17 @@ fn path_traversal_with_dotdot_in_middle_is_rejected() {
 }
 
 #[test]
-fn path_traversal_to_dotgit_is_rejected() {
-    // From imagor: filestorage protects .git directories
+fn dotgit_access_does_not_leak_raw_file_content() {
+    // From imagor: filestorage protects .git directories.
+    // truss does not have a path-policy deny-list for dotfiles, so the
+    // request reaches the image codec which rejects it as a non-image (415).
+    // We verify that:
+    //   1. The status is exactly 415 (unsupported media type).
+    //   2. The response body does NOT contain the raw file content.
     let storage_root = temp_dir("path-traversal-git");
     fs::create_dir_all(storage_root.join(".git/logs")).expect("create .git dir");
-    fs::write(storage_root.join(".git/logs/HEAD"), b"fake git log").expect("write git log");
+    let secret_content = b"ref: refs/heads/main\n";
+    fs::write(storage_root.join(".git/logs/HEAD"), secret_content).expect("write git log");
     let (addr, handle) = spawn_server(ServerConfig::new(storage_root, Some("secret".to_string())));
 
     let response = send_transform_request(
@@ -292,12 +298,16 @@ fn path_traversal_to_dotgit_is_rejected() {
         .expect("join server thread")
         .expect("serve one request");
 
-    let (header, _, _) = split_response(&response);
-    // Should fail because .git/logs/HEAD is not a valid image
-    // The important thing is it doesn't return the raw file content
+    let (header, content_type, body) = split_response(&response);
     assert!(
-        !header.starts_with("HTTP/1.1 200"),
-        ".git file access should not succeed, got: {header}"
+        header.starts_with("HTTP/1.1 415"),
+        ".git file should be rejected as non-image (415), got: {header}"
+    );
+    assert_eq!(content_type, "application/problem+json");
+    // The raw file content must never appear in the response body.
+    assert!(
+        !body.windows(secret_content.len()).any(|w| w == secret_content),
+        "response must not leak raw .git file content"
     );
 }
 

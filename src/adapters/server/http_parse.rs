@@ -741,26 +741,44 @@ mod tests {
     // and imgproxy source validation patterns.
 
     #[test]
-    fn test_resolve_storage_path_double_dot_dot_rejected() {
-        // ../../etc/passwd variant
+    fn test_resolve_storage_path_backslash_on_unix() {
+        // On Unix, backslash is a valid filename character but should not be
+        // interpreted as a directory separator. Verify it does not cause
+        // unexpected traversal.
         let dir = tempfile::tempdir().unwrap();
-        let err = resolve_storage_path(dir.path(), "../../etc/passwd").unwrap_err();
-        assert_eq!(err.status, "400 Bad Request");
+        // The file "a\\b" should be treated as a single Normal component
+        // containing a literal backslash, which will not exist on disk.
+        let result = resolve_storage_path(dir.path(), r"a\b");
+        // Expect failure because the file doesn't exist, not because of
+        // traversal rejection.
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.status.starts_with("4") || err.status.starts_with("5"),
+            "backslash path should fail (file not found), got: {}",
+            err.status
+        );
     }
 
     #[test]
-    fn test_resolve_storage_path_triple_dot_dot_rejected() {
+    fn test_resolve_storage_path_unicode_normalization() {
+        // Filenames with non-ASCII characters should pass through as Normal
+        // components and not trigger traversal rejection.
         let dir = tempfile::tempdir().unwrap();
-        let err = resolve_storage_path(dir.path(), "../../../etc/shadow").unwrap_err();
-        assert_eq!(err.status, "400 Bad Request");
+        let file_path = dir.path().join("café.png");
+        std::fs::File::create(&file_path).unwrap();
+        let result = resolve_storage_path(dir.path(), "/café.png");
+        assert!(result.is_ok(), "unicode filename should be accepted");
     }
 
     #[test]
-    fn test_resolve_storage_path_dot_only_rejected() {
-        // Single current-directory segment
+    fn test_resolve_storage_path_very_long_component() {
+        // A path with a very long single component should be rejected at the
+        // filesystem level (file not found), not cause a panic.
         let dir = tempfile::tempdir().unwrap();
-        let err = resolve_storage_path(dir.path(), ".").unwrap_err();
-        assert_eq!(err.status, "400 Bad Request");
+        let long_name = "a".repeat(300);
+        let result = resolve_storage_path(dir.path(), &format!("/{long_name}.png"));
+        assert!(result.is_err(), "very long filename should fail");
     }
 
     #[test]

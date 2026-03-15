@@ -44,16 +44,15 @@ fn corrupted_remote_image_returns_error() {
     fixture.join().expect("join fixture server");
 
     let (header, content_type, _) = split_response(&response);
-    // truss returns 415 when it cannot identify the image format from magic bytes
     assert!(
-        header.starts_with("HTTP/1.1 4") || header.starts_with("HTTP/1.1 502"),
-        "corrupted image should return error, got: {header}"
+        header.starts_with("HTTP/1.1 415"),
+        "corrupted remote image should return 415 Unsupported Media Type, got: {header}"
     );
     assert_eq!(content_type, "application/problem+json");
 }
 
 #[test]
-fn corrupted_local_image_returns_error() {
+fn corrupted_local_image_returns_415() {
     let storage_root = temp_dir("corrupted-local");
     fs::write(
         storage_root.join("bad.png"),
@@ -73,10 +72,9 @@ fn corrupted_local_image_returns_error() {
         .expect("serve one request");
 
     let (header, content_type, _) = split_response(&response);
-    // truss returns 415 when it cannot identify the image format from magic bytes
     assert!(
-        header.starts_with("HTTP/1.1 4"),
-        "corrupted local image should return 4xx, got: {header}"
+        header.starts_with("HTTP/1.1 415"),
+        "corrupted local image should return 415 Unsupported Media Type, got: {header}"
     );
     assert_eq!(content_type, "application/problem+json");
 }
@@ -99,10 +97,9 @@ fn empty_file_returns_error() {
         .expect("serve one request");
 
     let (header, content_type, _) = split_response(&response);
-    // truss returns 415 when file is empty (cannot sniff format)
     assert!(
-        header.starts_with("HTTP/1.1 4"),
-        "empty file should return 4xx, got: {header}"
+        header.starts_with("HTTP/1.1 415"),
+        "empty file should return 415 Unsupported Media Type, got: {header}"
     );
     assert_eq!(content_type, "application/problem+json");
 }
