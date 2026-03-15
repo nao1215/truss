@@ -45,6 +45,10 @@ audit:
 # Run all CI checks locally (test + lint + fmt + doc + audit)
 ci: test lint fmt-check doc audit
 
+# Run criterion benchmarks (use `just bench -- <filter>` to run a subset)
+bench *ARGS:
+    cargo bench --bench transform -- {{ARGS}}
+
 # ---------------------------------------------------------------------------
 # Build
 # ---------------------------------------------------------------------------
