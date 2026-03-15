@@ -75,7 +75,7 @@ strip = true
 aws-smithy-runtime-api = "1"
 aws-smithy-types = "1"
 bytes = "1"
-criterion = { version = "0.5", features = ["html_reports"] }
+criterion = { version = "0.8", features = ["html_reports"] }
 http = "1"
 rustls = { version = "0.23", features = ["ring"] }
 rstest = "0.26.1"
