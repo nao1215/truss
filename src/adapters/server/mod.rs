@@ -2080,6 +2080,12 @@ mod tests {
     /// panics. Holds `FROM_ENV_MUTEX` for the duration.
     fn with_env<F: FnOnce()>(vars: &[(&str, Option<&str>)], f: F) {
         let _guard = FROM_ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        for &(key, _) in vars {
+            debug_assert!(
+                ENV_VARS.contains(&key),
+                "with_env: variable '{key}' is not in ENV_VARS and won't be restored",
+            );
+        }
         let saved: Vec<(&str, Option<String>)> = ENV_VARS
             .iter()
             .map(|k| (*k, std::env::var(k).ok()))

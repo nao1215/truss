@@ -153,8 +153,23 @@ async function runIntegrationTests(standaloneDir) {
     }
   } finally {
     server.kill("SIGTERM");
-    // Give it a moment to clean up.
-    await new Promise((r) => setTimeout(r, 500));
+    await Promise.race([
+      new Promise((resolve) => server.once("exit", resolve)),
+      new Promise((resolve) => setTimeout(resolve, 2_000)),
+    ]);
+    if (server.exitCode === null) {
+      server.kill("SIGKILL");
+    }
+  }
+}
+
+async function fetchWithTimeout(url, timeoutMs = 5_000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -166,10 +181,10 @@ async function waitForServer(baseUrl, proc, timeoutMs) {
       throw new Error(`Server exited with code ${proc.exitCode}`);
     }
     try {
-      const res = await fetch(`${baseUrl}/api/truss?path=test.jpg`);
+      const res = await fetchWithTimeout(`${baseUrl}/api/truss?path=test.jpg`, 2_000);
       if (res.ok || res.status === 400) return;
     } catch {
-      // Connection refused — server not ready yet.
+      // Connection refused or timeout — server not ready yet.
     }
     await new Promise((r) => setTimeout(r, 200));
   }
@@ -182,7 +197,7 @@ function* testCases(baseUrl) {
   yield {
     name: "valid path returns signed URL",
     fn: async () => {
-      const res = await fetch(api("path=photos/hero.jpg&width=800&format=webp"));
+      const res = await fetchWithTimeout(api("path=photos/hero.jpg&width=800&format=webp"));
       assertStatus(res, 200);
       const body = await res.json();
       assert(typeof body.url === "string", "response should contain url string");
@@ -195,8 +210,8 @@ function* testCases(baseUrl) {
     name: "same parameters produce same signed URL (cache-stable expires)",
     fn: async () => {
       const query = "path=photos/hero.jpg&width=400&format=jpeg";
-      const res1 = await fetch(api(query));
-      const res2 = await fetch(api(query));
+      const res1 = await fetchWithTimeout(api(query));
+      const res2 = await fetchWithTimeout(api(query));
       assertStatus(res1, 200);
       assertStatus(res2, 200);
       const body1 = await res1.json();
@@ -215,7 +230,7 @@ function* testCases(baseUrl) {
   yield {
     name: "missing path returns 400",
     fn: async () => {
-      const res = await fetch(api("width=100"));
+      const res = await fetchWithTimeout(api("width=100"));
       assertStatus(res, 400);
       const body = await res.json();
       assert(body.error === "path is required", `expected "path is required", got "${body.error}"`);
@@ -225,7 +240,7 @@ function* testCases(baseUrl) {
   yield {
     name: "path traversal returns 400",
     fn: async () => {
-      const res = await fetch(api("path=../etc/passwd"));
+      const res = await fetchWithTimeout(api("path=../etc/passwd"));
       assertStatus(res, 400);
       const body = await res.json();
       assert(body.error === "invalid path", `expected "invalid path", got "${body.error}"`);
@@ -235,7 +250,7 @@ function* testCases(baseUrl) {
   yield {
     name: "invalid format returns 400",
     fn: async () => {
-      const res = await fetch(api("path=test.jpg&format=gif"));
+      const res = await fetchWithTimeout(api("path=test.jpg&format=gif"));
       assertStatus(res, 400);
     },
   };
@@ -243,7 +258,7 @@ function* testCases(baseUrl) {
   yield {
     name: "invalid width returns 400",
     fn: async () => {
-      const res = await fetch(api("path=test.jpg&width=0"));
+      const res = await fetchWithTimeout(api("path=test.jpg&width=0"));
       assertStatus(res, 400);
     },
   };
@@ -251,7 +266,7 @@ function* testCases(baseUrl) {
   yield {
     name: "width exceeding max returns 400",
     fn: async () => {
-      const res = await fetch(api("path=test.jpg&width=9999"));
+      const res = await fetchWithTimeout(api("path=test.jpg&width=9999"));
       assertStatus(res, 400);
     },
   };
@@ -259,7 +274,7 @@ function* testCases(baseUrl) {
   yield {
     name: "fit without both dimensions returns 400",
     fn: async () => {
-      const res = await fetch(api("path=test.jpg&fit=cover&width=100"));
+      const res = await fetchWithTimeout(api("path=test.jpg&fit=cover&width=100"));
       assertStatus(res, 400);
       const body = await res.json();
       assert(
@@ -272,7 +287,7 @@ function* testCases(baseUrl) {
   yield {
     name: "fit with both dimensions succeeds",
     fn: async () => {
-      const res = await fetch(api("path=test.jpg&fit=cover&width=100&height=100"));
+      const res = await fetchWithTimeout(api("path=test.jpg&fit=cover&width=100&height=100"));
       assertStatus(res, 200);
     },
   };
@@ -280,7 +295,7 @@ function* testCases(baseUrl) {
   yield {
     name: "invalid quality returns 400",
     fn: async () => {
-      const res = await fetch(api("path=test.jpg&quality=0"));
+      const res = await fetchWithTimeout(api("path=test.jpg&quality=0"));
       assertStatus(res, 400);
     },
   };
@@ -292,7 +307,7 @@ function* testCases(baseUrl) {
   yield {
     name: "signer-level TypeError (quality + png) returns 400 not 500",
     fn: async () => {
-      const res = await fetch(api("path=test.jpg&format=png&quality=80"));
+      const res = await fetchWithTimeout(api("path=test.jpg&format=png&quality=80"));
       assertStatus(res, 400);
       const body = await res.json();
       assert(

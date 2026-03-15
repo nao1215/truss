@@ -590,12 +590,19 @@ fn is_cloud_metadata_host(url: &Url) -> bool {
     // CGNAT range (100.64.0.0/10) and is rejected by `is_disallowed_ipv4`.
     match url.host_str() {
         Some("169.254.169.254") | Some("metadata.google.internal") => true,
-        _ => {
-            url.host()
-                == Some(url::Host::Ipv6(std::net::Ipv6Addr::new(
-                    0xfd00, 0x0ec2, 0, 0, 0, 0, 0, 0x0254,
-                )))
-        }
+        _ => match url.host() {
+            // AWS IMDSv2 IPv6 literal
+            Some(url::Host::Ipv6(addr))
+                if addr == std::net::Ipv6Addr::new(0xfd00, 0x0ec2, 0, 0, 0, 0, 0, 0x0254) =>
+            {
+                true
+            }
+            // IPv4-mapped IPv6 (e.g. ::ffff:169.254.169.254)
+            Some(url::Host::Ipv6(addr)) => {
+                addr.to_ipv4_mapped() == Some(std::net::Ipv4Addr::new(169, 254, 169, 254))
+            }
+            _ => false,
+        },
     }
 }
 
@@ -770,6 +777,14 @@ mod redirect_tests {
         assert!(
             String::from_utf8_lossy(&err.body).contains("cloud metadata"),
             "should block AWS IMDSv2 IPv6 metadata"
+        );
+
+        // IPv4-mapped IPv6 bypass attempt (::ffff:169.254.169.254)
+        let url = Url::parse("http://[::ffff:169.254.169.254]/latest/meta-data").unwrap();
+        let err = validate_remote_url(&url, &config).unwrap_err();
+        assert!(
+            String::from_utf8_lossy(&err.body).contains("cloud metadata"),
+            "should block IPv4-mapped metadata address"
         );
     }
 
