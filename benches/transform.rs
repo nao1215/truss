@@ -28,17 +28,21 @@ fn bench_format_conversion(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("format_conversion");
     for (label, target_format, quality) in targets {
-        group.bench_with_input(BenchmarkId::new(*label, "640x427"), &jpeg_bytes, |b, data| {
-            b.iter(|| {
-                let input = make_artifact(data.clone(), Some(MediaType::Jpeg));
-                let opts = TransformOptions {
-                    format: Some(*target_format),
-                    quality: *quality,
-                    ..TransformOptions::default()
-                };
-                let _ = transform(TransformRequest::new(input, opts)).unwrap();
-            });
-        });
+        group.bench_with_input(
+            BenchmarkId::new(*label, "640x427"),
+            &jpeg_bytes,
+            |b, data| {
+                b.iter(|| {
+                    let input = make_artifact(data.clone(), Some(MediaType::Jpeg));
+                    let opts = TransformOptions {
+                        format: Some(*target_format),
+                        quality: *quality,
+                        ..TransformOptions::default()
+                    };
+                    let _ = transform(TransformRequest::new(input, opts)).unwrap();
+                });
+            },
+        );
     }
     group.finish();
 }
