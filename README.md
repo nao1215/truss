@@ -93,6 +93,8 @@ brew install nao1215/tap/truss
 cargo install truss-image
 ```
 
+Need S3, GCS, or Azure storage backend support at install time? See the [Deployment Guide](docs/deployment.md#installing-with-storage-backend-support).
+
 Prebuilt binaries are available on the [GitHub Releases](https://github.com/nao1215/truss/releases) page. See [Deployment Guide](docs/deployment.md) for details on all targets and Docker images.
 
 ## Quick Start
