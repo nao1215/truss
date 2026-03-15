@@ -11,7 +11,7 @@ Server-side image transformation with [truss](https://github.com/nao1215/truss) 
 
 ## Architecture
 
-```
+```text
 Browser ──GET──▶ Next.js (Server Component)
                    │  signPublicUrl() at render time
                    ▼
@@ -64,7 +64,7 @@ npm run dev
 | `TRUSS_KEY_SECRET` | Signing secret (must match `TRUSS_SIGNING_KEYS` on the server) | — |
 | `TRUSS_URL_TTL_SECONDS` | Signed URL lifetime in seconds | `3600` |
 
-> **Security note:** These are server-side only variables. Never prefix them with `NEXT_PUBLIC_`.
+> **Security note:** These are server-side-only variables. Never prefix them with `NEXT_PUBLIC_`.
 
 ## `<TrussImage>` Component
 
@@ -102,7 +102,7 @@ All standard `<img>` attributes (`loading`, `className`, etc.) are also accepted
 
 For cases where you need signed URLs on the client (e.g., dynamic galleries):
 
-```
+```http
 GET /api/truss?path=sample.jpg&width=400&format=webp
 ```
 

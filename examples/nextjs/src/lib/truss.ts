@@ -13,6 +13,20 @@ export function trussConfig() {
     publicBaseUrl,
     keyId,
     secret,
-    ttlSeconds: Number(process.env.TRUSS_URL_TTL_SECONDS ?? "3600"),
+    ttlSeconds: parseTtl(process.env.TRUSS_URL_TTL_SECONDS),
   };
+}
+
+const DEFAULT_TTL = 3600;
+const MAX_TTL = 86400;
+
+function parseTtl(value: string | undefined): number {
+  if (!value) return DEFAULT_TTL;
+  const n = Number(value);
+  if (!Number.isInteger(n) || n < 1 || n > MAX_TTL) {
+    throw new Error(
+      `TRUSS_URL_TTL_SECONDS must be an integer between 1 and ${MAX_TTL}, got: ${value}`,
+    );
+  }
+  return n;
 }

@@ -65,16 +65,16 @@ try {
     },
   });
 
-  const builtDir = path.join(tempExampleDir, ".next");
-  if (!existsSync(builtDir)) {
-    throw new Error(`next build did not produce ${builtDir}`);
+  const standaloneDir = path.join(tempExampleDir, ".next", "standalone");
+  if (!existsSync(standaloneDir)) {
+    throw new Error(`next build did not produce ${standaloneDir}`);
   }
 
   console.log(
     JSON.stringify({
       example: "nextjs",
       mode: "local-tarball",
-      output: builtDir,
+      output: standaloneDir,
       packageUnderTest: tarballName,
     }),
   );

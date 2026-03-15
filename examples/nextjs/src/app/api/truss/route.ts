@@ -13,6 +13,7 @@ const ALLOWED_FORMATS = new Set([
   "svg",
 ]);
 const ALLOWED_FITS = new Set(["contain", "cover", "fill", "inside"]);
+const MAX_DIMENSION = 8192;
 // Only allow word characters, forward slashes, hyphens, and dots (as extensions).
 // Reject path traversal sequences.
 const PATH_PATTERN = /^[\w][\w/\-]*(?:\.[\w]+)*$/;
@@ -49,10 +50,16 @@ export function GET(request: NextRequest) {
     ? Number(params.get("quality"))
     : undefined;
 
-  if (width !== undefined && (!Number.isInteger(width) || width < 1)) {
+  if (
+    width !== undefined &&
+    (!Number.isInteger(width) || width < 1 || width > MAX_DIMENSION)
+  ) {
     return NextResponse.json({ error: "invalid width" }, { status: 400 });
   }
-  if (height !== undefined && (!Number.isInteger(height) || height < 1)) {
+  if (
+    height !== undefined &&
+    (!Number.isInteger(height) || height < 1 || height > MAX_DIMENSION)
+  ) {
     return NextResponse.json({ error: "invalid height" }, { status: 400 });
   }
   if (
