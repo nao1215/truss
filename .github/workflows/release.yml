@@ -309,6 +309,7 @@ jobs:
         run: npm publish --access public ./npm-release/*.tgz
 
   publish-homebrew-formula:
+    if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v') && !contains(github.ref_name, '-') && !contains(github.ref_name, '+')
     needs: create-release
     runs-on: ubuntu-latest
     permissions:
@@ -392,6 +393,7 @@ jobs:
           path: homebrew-tap/truss.rb
 
   verify-homebrew-install:
+    if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v') && !contains(github.ref_name, '-') && !contains(github.ref_name, '+')
     needs: [create-release, publish-homebrew-formula]
     runs-on: macos-latest
     permissions:
