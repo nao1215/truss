@@ -2104,7 +2104,11 @@ mod tests {
         }
     }
 
-    /// Convenience alias for S3-specific tests.
+    /// Semantic alias for [`with_env`] used by S3-specific tests.
+    ///
+    /// Behaviour is identical to `with_env` — this wrapper exists only so
+    /// that S3 test call-sites read naturally (e.g. `with_s3_env(&[...])`)
+    /// and can be found with a targeted search.
     #[cfg(feature = "s3")]
     fn with_s3_env<F: FnOnce()>(vars: &[(&str, Option<&str>)], f: F) {
         with_env(vars, f);

@@ -583,6 +583,11 @@ pub(super) fn validate_backend_endpoint_url(
 /// - `metadata.google.internal` (GCP)
 /// - `[fd00:ec2::254]` (AWS IMDSv2 IPv6)
 fn is_cloud_metadata_host(url: &Url) -> bool {
+    // Explicit checks cover AWS/Azure (169.254.169.254), GCP
+    // (metadata.google.internal), and AWS IMDSv2 IPv6.  Other providers
+    // (DigitalOcean, Oracle, etc.) also use 169.254.169.254 and are
+    // therefore caught here.  Alibaba's 100.100.100.200 falls in the
+    // CGNAT range (100.64.0.0/10) and is rejected by `is_disallowed_ipv4`.
     match url.host_str() {
         Some("169.254.169.254") | Some("metadata.google.internal") => true,
         _ => {

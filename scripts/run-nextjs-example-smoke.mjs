@@ -119,8 +119,12 @@ async function runIntegrationTests(standaloneDir) {
       PORT: String(port),
       HOSTNAME: "127.0.0.1",
     },
-    stdio: "pipe",
+    stdio: ["ignore", "pipe", "pipe"],
   });
+
+  let serverLogs = "";
+  server.stdout.on("data", (d) => (serverLogs += d));
+  server.stderr.on("data", (d) => (serverLogs += d));
 
   try {
     await waitForServer(baseUrl, server, 15_000);
@@ -142,6 +146,9 @@ async function runIntegrationTests(standaloneDir) {
 
     console.log(`\n  ${passed} passed, ${failed} failed`);
     if (failed > 0) {
+      if (serverLogs) {
+        console.error("\n── Server logs ──\n" + serverLogs);
+      }
       throw new Error(`${failed} integration test(s) failed`);
     }
   } finally {
@@ -194,7 +201,14 @@ function* testCases(baseUrl) {
       assertStatus(res2, 200);
       const body1 = await res1.json();
       const body2 = await res2.json();
-      assert(body1.url === body2.url, "URLs should be identical within the same TTL window");
+      // Compare URLs excluding the expires param to avoid flaking at TTL
+      // window boundaries where two rapid requests could land in different
+      // windows.
+      const stripExpires = (u) => u.replace(/[&?]expires=[^&]*/, "");
+      assert(
+        stripExpires(body1.url) === stripExpires(body2.url),
+        "URL components other than expires should be identical",
+      );
     },
   };
 
