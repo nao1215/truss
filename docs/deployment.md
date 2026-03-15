@@ -6,6 +6,14 @@ This page covers Docker setup, prebuilt binaries, cloud storage backends, and pr
 
 Download a prebuilt binary from the [GitHub Releases](https://github.com/nao1215/truss/releases) page. Archives and SHA256 checksums are published for each release.
 
+### Homebrew
+
+Homebrew installs are published to [`nao1215/tap`](https://github.com/nao1215/homebrew-tap):
+
+```sh
+brew install nao1215/tap/truss
+```
+
 | Target | Archive |
 |--------|---------|
 | Linux x86_64 | `truss-v*-x86_64-unknown-linux-gnu.tar.gz` |

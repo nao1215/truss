@@ -1,5 +1,20 @@
 # Changelog
 
+## v0.11.1
+
+### Added
+
+- Publish `truss` Homebrew formulas from tagged releases to `nao1215/homebrew-tap` and verify installation on macOS.
+
+### Changed
+
+- Publish `@nao1215/truss-url-signer` from tagged releases via npm trusted publishing.
+- Add README and deployment guide install paths for Homebrew and clarify the release prerequisites for the tap automation.
+
+### Fixed
+
+- Align crate, npm package, OpenAPI, example lockfile, and changelog release metadata for the `v0.11.1` release.
+
 ## v0.11.0
 
 ### Added

@@ -224,8 +224,6 @@ jobs:
           name: npm-package-truss-wasm
           path: packages/truss-wasm/*.tgz
 
-  # The signer package stays manual for its first release, so tagged builds only
-  # produce the .tgz artifact here until npm registration is complete.
   build-url-signer-package:
     needs: verify
     runs-on: ubuntu-latest
@@ -266,6 +264,28 @@ jobs:
           name: npm-package-truss-url-signer
           path: packages/truss-url-signer/*.tgz
 
+  publish-url-signer-package:
+    needs: build-url-signer-package
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org/
+
+      - name: Download npm TypeScript URL signer package artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: npm-package-truss-url-signer
+          path: npm-release
+
+      - name: Publish npm TypeScript URL signer package
+        run: npm publish --access public ./npm-release/*.tgz
+
   publish-wasm-package:
     needs: build-wasm-package
     runs-on: ubuntu-latest
@@ -287,6 +307,112 @@ jobs:
 
       - name: Publish npm Wasm package
         run: npm publish --access public ./npm-release/*.tgz
+
+  publish-homebrew-formula:
+    if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v') && !contains(github.ref_name, '-') && !contains(github.ref_name, '+')
+    needs: create-release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      HOMEBREW_TAP_TOKEN_CONFIGURED: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN != '' }}
+    steps:
+      - name: Ensure Homebrew tap token is configured
+        if: env.HOMEBREW_TAP_TOKEN_CONFIGURED != 'true'
+        run: |
+          echo "::error title=Missing Homebrew tap token::Configure HOMEBREW_TAP_GITHUB_TOKEN to update nao1215/homebrew-tap."
+          exit 1
+
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Download macOS Intel binary artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: binary-x86_64-apple-darwin
+          path: homebrew-assets/x86_64-apple-darwin
+
+      - name: Download macOS Apple Silicon binary artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: binary-aarch64-apple-darwin
+          path: homebrew-assets/aarch64-apple-darwin
+
+      - name: Download Linux x86_64 binary artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: binary-x86_64-unknown-linux-gnu
+          path: homebrew-assets/x86_64-unknown-linux-gnu
+
+      - name: Download Linux aarch64 binary artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: binary-aarch64-unknown-linux-gnu
+          path: homebrew-assets/aarch64-unknown-linux-gnu
+
+      - name: Render Homebrew formula
+        run: |
+          node ./scripts/render-homebrew-formula.mjs \
+            "${GITHUB_REF_NAME}" \
+            homebrew-assets/x86_64-apple-darwin/*.sha256 \
+            homebrew-assets/aarch64-apple-darwin/*.sha256 \
+            homebrew-assets/x86_64-unknown-linux-gnu/*.sha256 \
+            homebrew-assets/aarch64-unknown-linux-gnu/*.sha256 \
+            > truss.rb
+
+      - name: Syntax-check Homebrew formula
+        run: ruby -c truss.rb
+
+      - name: Checkout Homebrew tap
+        uses: actions/checkout@v6
+        with:
+          repository: nao1215/homebrew-tap
+          path: homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+
+      - name: Update Homebrew formula
+        run: mv truss.rb homebrew-tap/truss.rb
+
+      - name: Commit and push Homebrew formula
+        run: |
+          cd homebrew-tap
+          if [ -z "$(git status --short -- truss.rb)" ]; then
+            echo "No Homebrew formula changes to publish."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add truss.rb
+          git commit -m "Update truss formula for ${GITHUB_REF_NAME}"
+          git push
+
+      - name: Upload Homebrew formula artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: homebrew-formula-truss
+          path: homebrew-tap/truss.rb
+
+  verify-homebrew-install:
+    if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v') && !contains(github.ref_name, '-') && !contains(github.ref_name, '+')
+    needs: [create-release, publish-homebrew-formula]
+    runs-on: macos-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Download Homebrew formula artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: homebrew-formula-truss
+          path: homebrew-formula
+
+      - name: Install truss from Homebrew formula
+        run: brew install --formula ./homebrew-formula/truss.rb
+
+      - name: Verify installed truss version
+        run: truss --version
+
+      - name: Run Homebrew formula test
+        run: brew test truss
 
   # ── 3. Build & push container image ─────────────────────────────────
   publish-container:
@@ -384,7 +510,7 @@ jobs:
   # ── 4. Create GitHub Release ────────────────────────────────────────
   create-release:
     runs-on: ubuntu-latest
-    needs: [publish-container, build-binaries, build-wasm-package, publish-wasm-package, build-url-signer-package]
+    needs: [publish-container, build-binaries, build-wasm-package, publish-wasm-package, build-url-signer-package, publish-url-signer-package]
     permissions:
       contents: write
     steps:

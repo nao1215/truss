@@ -5,8 +5,6 @@
 [![API Integration](https://github.com/nao1215/truss/actions/workflows/integration.yml/badge.svg)](https://github.com/nao1215/truss/actions/workflows/integration.yml)
 [![Crates.io](https://img.shields.io/crates/v/truss-image)](https://crates.io/crates/truss-image)
 [![Crates.io Downloads](https://img.shields.io/crates/d/truss-image)](https://crates.io/crates/truss-image)
-[![npm](https://img.shields.io/npm/v/%40nao1215%2Ftruss-wasm)](https://www.npmjs.com/package/@nao1215/truss-wasm)
-[![npm Downloads](https://img.shields.io/npm/dm/%40nao1215%2Ftruss-wasm)](https://www.npmjs.com/package/@nao1215/truss-wasm)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-stable-orange)](https://www.rust-lang.org/)
 
@@ -83,9 +81,19 @@ CLI reads local files or fetches remote URLs directly. The HTTP server resolves 
 
 ## Installation
 
+### Homebrew
+
+```sh
+brew install nao1215/tap/truss
+```
+
+### Cargo
+
 ```sh
 cargo install truss-image
 ```
+
+Need S3, GCS, or Azure storage backend support at install time? See the [Deployment Guide](docs/deployment.md#installing-with-storage-backend-support).
 
 Prebuilt binaries are available on the [GitHub Releases](https://github.com/nao1215/truss/releases) page. See [Deployment Guide](docs/deployment.md) for details on all targets and Docker images.
 
