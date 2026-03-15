@@ -56,6 +56,41 @@ for (const { attr, value } of dataAttrs) {
   }
 }
 
+// ── 3b. Check option[value="..."] selectors ──────────────────────────
+// app.js queries specific <option> elements by value (e.g. option[value="svg"])
+const optionValuePattern = /option\[value=["'`]([\w-]+)["'`]\]/g;
+const optionValues = new Set();
+for (const match of appJs.matchAll(optionValuePattern)) {
+  optionValues.add(match[1]);
+}
+for (const val of optionValues) {
+  const pattern = new RegExp(`<option[^>]+value=["']${val}["']`);
+  if (pattern.test(indexHtml)) {
+    passed++;
+  } else {
+    console.error(`  ✗ option[value="${val}"] used in app.js but missing from index.html`);
+    failed++;
+  }
+}
+
+// ── 3c. Check generic attribute selectors (e.g. [data-field]) ────────
+// app.js uses querySelectorAll("[data-field]") to iterate all elements
+// with a data-field attribute — verify index.html actually has them.
+const genericAttrPattern = /querySelectorAll\(\s*["'`]\[(data-[\w-]+)\]["'`]\s*\)/g;
+const genericAttrs = new Set();
+for (const match of appJs.matchAll(genericAttrPattern)) {
+  genericAttrs.add(match[1]);
+}
+for (const attr of genericAttrs) {
+  const pattern = new RegExp(`${attr}=`);
+  if (pattern.test(indexHtml)) {
+    passed++;
+  } else {
+    console.error(`  ✗ [${attr}] selector used in app.js but no elements with ${attr} in index.html`);
+    failed++;
+  }
+}
+
 // ── 4. Verify critical structural elements ────────────────────────────
 const criticalIds = [
   "dropzone",           // drag-and-drop target

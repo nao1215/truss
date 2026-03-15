@@ -270,6 +270,23 @@ function* testCases(baseUrl) {
       assertStatus(res, 400);
     },
   };
+
+  // This exercises the try-catch in route.ts that converts signPublicUrl()
+  // TypeError into a 400.  PNG is a lossless format so quality is rejected
+  // by the signer's transform matrix validation, not by our route-level
+  // checks — ensuring the catch path works and doesn't leak a 500.
+  yield {
+    name: "signer-level TypeError (quality + png) returns 400 not 500",
+    fn: async () => {
+      const res = await fetch(api("path=test.jpg&format=png&quality=80"));
+      assertStatus(res, 400);
+      const body = await res.json();
+      assert(
+        body.error.includes("lossy"),
+        `expected signer error about lossy format, got "${body.error}"`,
+      );
+    },
+  };
 }
 
 function assertStatus(res, expected) {
