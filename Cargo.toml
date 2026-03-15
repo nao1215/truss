@@ -2,12 +2,14 @@
 name = "truss-image"
 version = "0.11.2"
 edition = "2024"
+rust-version = "1.87"
+authors = ["CHIKAMATSU Naohiro <n.chika156@gmail.com>"]
 description = "Image toolkit with a shared Rust core across the CLI, HTTP server, and WASM demo."
 license = "MIT"
 readme = "README.md"
 repository = "https://github.com/nao1215/truss"
 homepage = "https://nao1215.github.io/truss/"
-keywords = ["image", "image-processing", "resize", "thumbnail", "webp"]
+keywords = ["image", "image-processing", "webp", "avif", "image-server"]
 categories = ["command-line-utilities", "multimedia::images", "web-programming::http-server"]
 
 [features]
@@ -73,8 +75,13 @@ strip = true
 aws-smithy-runtime-api = "1"
 aws-smithy-types = "1"
 bytes = "1"
+criterion = { version = "0.5", features = ["html_reports"] }
 http = "1"
 rustls = { version = "0.23", features = ["ring"] }
 rstest = "0.26.1"
 serial_test = "3"
 tempfile = "3"
+
+[[bench]]
+name = "transform"
+harness = false

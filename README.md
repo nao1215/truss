@@ -27,6 +27,24 @@ Resize, crop, convert, optimize, blur, sharpen, and watermark images from the CL
 - Cross-platform -- Linux, macOS, Windows.
 - Tested contracts -- CLI behavior is locked by [ShellSpec](https://github.com/shellspec/shellspec), HTTP API by [runn](https://github.com/k1LoW/runn).
 
+## Performance
+
+Measured with [criterion](https://github.com/bheisler/criterion.rs) on a single core. Input: 640 × 427 JPEG (80 KB). Run `just bench` to reproduce.
+
+| Operation | Time |
+|-----------|-----:|
+| JPEG → PNG | 8.2 µs |
+| JPEG → WebP (q 80) | 37 µs |
+| JPEG → AVIF (q 80) | 242 µs |
+| Resize 100 × 100 (cover) | 317 µs |
+| Resize 800 × 600 (cover) | 11.4 ms |
+| Resize 1920 × 1080 (cover) | 68 ms |
+| Blur (σ 5.0) | 6.8 µs |
+| Sharpen (σ 3.0) | 5.9 µs |
+| SVG sanitize (passthrough) | 386 ns |
+| SVG → PNG 1024 w rasterize | 649 µs |
+| Format detection (`sniff`) | 18 ns |
+
 ## Comparison
 
 Feature comparison with [imgproxy](https://github.com/imgproxy/imgproxy) and [imagor](https://github.com/cshum/imagor) as of March 2026.
