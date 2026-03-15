@@ -14,7 +14,7 @@
   },
   "dependencies": {
     "@nao1215/truss-url-signer": "file:../../packages/truss-url-signer",
-    "next": "^15.3.0",
+    "next": "^16.1.6",
     "react": "^19.1.0",
     "react-dom": "^19.1.0"
   },
