@@ -91,6 +91,47 @@ for (const attr of genericAttrs) {
   }
 }
 
+// ── 3d. Verify data-field / data-side value pairs ────────────────────
+// renderArtifactComparison() indexes into values[side][field], so every
+// element with data-field must also have data-side, and the values must
+// match the keys returned by artifactSummary().
+const EXPECTED_FIELDS = new Set(["format", "dimensions", "alpha", "frames"]);
+const EXPECTED_SIDES = new Set(["before", "after"]);
+
+// Extract all <span data-field="..." data-side="..."> from index.html
+const dataFieldElementPattern = /<[^>]+data-field=["']([\w-]+)["'][^>]*data-side=["']([\w-]+)["'][^>]*>/g;
+const dataFieldElementPatternRev = /<[^>]+data-side=["']([\w-]+)["'][^>]*data-field=["']([\w-]+)["'][^>]*>/g;
+
+const foundPairs = new Set();
+for (const match of indexHtml.matchAll(dataFieldElementPattern)) {
+  foundPairs.add(`${match[2]}:${match[1]}`); // side:field
+}
+for (const match of indexHtml.matchAll(dataFieldElementPatternRev)) {
+  foundPairs.add(`${match[1]}:${match[2]}`); // side:field
+}
+
+for (const field of EXPECTED_FIELDS) {
+  for (const side of EXPECTED_SIDES) {
+    const key = `${side}:${field}`;
+    if (foundPairs.has(key)) {
+      passed++;
+    } else {
+      console.error(`  ✗ missing data-field="${field}" data-side="${side}" element in index.html`);
+      failed++;
+    }
+  }
+}
+
+// Also check that no data-field element is missing its data-side attribute
+const dataFieldOnlyPattern = /<[^>]+data-field=["']([\w-]+)["'][^>]*>/g;
+for (const match of indexHtml.matchAll(dataFieldOnlyPattern)) {
+  const tag = match[0];
+  if (!tag.includes("data-side")) {
+    console.error(`  ✗ element with data-field="${match[1]}" is missing data-side attribute`);
+    failed++;
+  }
+}
+
 // ── 4. Verify critical structural elements ────────────────────────────
 const criticalIds = [
   "dropzone",           // drag-and-drop target
