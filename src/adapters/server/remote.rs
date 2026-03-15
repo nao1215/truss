@@ -931,6 +931,179 @@ mod redirect_tests {
         assert!(is_disallowed_ipv6(teredo));
     }
 
+    // ── Additional IP deny-list edge cases ─────────────────────────────
+    // Ported from imgproxy security/source_test.go and imagor httploader tests.
+
+    #[test]
+    fn disallowed_ipv4_blocks_cgnat_boundary() {
+        // CGNAT range: 100.64.0.0/10 (100.64.0.0 – 100.127.255.255)
+        assert!(is_disallowed_ipv4(Ipv4Addr::new(100, 64, 0, 0))); // lower bound
+        assert!(is_disallowed_ipv4(Ipv4Addr::new(100, 100, 100, 200))); // Alibaba metadata
+        assert!(!is_disallowed_ipv4(Ipv4Addr::new(100, 63, 255, 255))); // just below
+        assert!(!is_disallowed_ipv4(Ipv4Addr::new(100, 128, 0, 0))); // just above
+    }
+
+    #[test]
+    fn disallowed_ipv4_blocks_test_net_198() {
+        // 198.18.0.0/15 (benchmarking)
+        assert!(is_disallowed_ipv4(Ipv4Addr::new(198, 18, 0, 0)));
+        assert!(is_disallowed_ipv4(Ipv4Addr::new(198, 19, 255, 255)));
+        assert!(!is_disallowed_ipv4(Ipv4Addr::new(198, 17, 255, 255)));
+        assert!(!is_disallowed_ipv4(Ipv4Addr::new(198, 20, 0, 0)));
+    }
+
+    #[test]
+    fn disallowed_ipv4_blocks_broadcast() {
+        assert!(is_disallowed_ipv4(Ipv4Addr::new(255, 255, 255, 255)));
+    }
+
+    #[test]
+    fn disallowed_ipv4_blocks_unspecified() {
+        assert!(is_disallowed_ipv4(Ipv4Addr::new(0, 0, 0, 0)));
+    }
+
+    #[test]
+    fn disallowed_ipv4_blocks_multicast() {
+        // 224.0.0.0/4
+        assert!(is_disallowed_ipv4(Ipv4Addr::new(224, 0, 0, 1)));
+        assert!(is_disallowed_ipv4(Ipv4Addr::new(239, 255, 255, 255)));
+    }
+
+    #[test]
+    fn disallowed_ipv4_blocks_documentation_ranges() {
+        // TEST-NET-1: 192.0.2.0/24
+        assert!(is_disallowed_ipv4(Ipv4Addr::new(192, 0, 2, 1)));
+        // TEST-NET-2: 198.51.100.0/24
+        assert!(is_disallowed_ipv4(Ipv4Addr::new(198, 51, 100, 1)));
+        // TEST-NET-3: 203.0.113.0/24
+        assert!(is_disallowed_ipv4(Ipv4Addr::new(203, 0, 113, 1)));
+    }
+
+    #[test]
+    fn disallowed_ipv4_private_boundary_cases() {
+        // 10.0.0.0/8 boundaries
+        assert!(is_disallowed_ipv4(Ipv4Addr::new(10, 0, 0, 0)));
+        assert!(is_disallowed_ipv4(Ipv4Addr::new(10, 255, 255, 255)));
+        assert!(!is_disallowed_ipv4(Ipv4Addr::new(11, 0, 0, 0)));
+
+        // 172.16.0.0/12 boundaries
+        assert!(is_disallowed_ipv4(Ipv4Addr::new(172, 16, 0, 0)));
+        assert!(is_disallowed_ipv4(Ipv4Addr::new(172, 31, 255, 255)));
+        assert!(!is_disallowed_ipv4(Ipv4Addr::new(172, 32, 0, 0)));
+
+        // 192.168.0.0/16 boundaries
+        assert!(is_disallowed_ipv4(Ipv4Addr::new(192, 168, 0, 0)));
+        assert!(is_disallowed_ipv4(Ipv4Addr::new(192, 168, 255, 255)));
+        assert!(!is_disallowed_ipv4(Ipv4Addr::new(192, 169, 0, 0)));
+    }
+
+    #[test]
+    fn disallowed_ipv6_blocks_unspecified() {
+        assert!(is_disallowed_ipv6(Ipv6Addr::UNSPECIFIED));
+    }
+
+    #[test]
+    fn disallowed_ipv6_blocks_multicast() {
+        let multicast = Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 1);
+        assert!(is_disallowed_ipv6(multicast));
+    }
+
+    #[test]
+    fn disallowed_ipv6_blocks_link_local() {
+        let link_local = Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1);
+        assert!(is_disallowed_ipv6(link_local));
+    }
+
+    #[test]
+    fn disallowed_ipv6_blocks_ipv4_mapped_private_ranges() {
+        // ::ffff:10.0.0.1
+        let mapped_10 = Ipv6Addr::new(0, 0, 0, 0, 0, 0xffff, 0x0a00, 0x0001);
+        assert!(is_disallowed_ipv6(mapped_10));
+
+        // ::ffff:172.16.0.1
+        let mapped_172 = Ipv6Addr::new(0, 0, 0, 0, 0, 0xffff, 0xac10, 0x0001);
+        assert!(is_disallowed_ipv6(mapped_172));
+
+        // ::ffff:192.168.1.1
+        let mapped_192 = Ipv6Addr::new(0, 0, 0, 0, 0, 0xffff, 0xc0a8, 0x0101);
+        assert!(is_disallowed_ipv6(mapped_192));
+    }
+
+    #[test]
+    fn disallowed_ipv6_blocks_ipv4_mapped_cgnat() {
+        // ::ffff:100.64.0.1
+        let mapped_cgnat = Ipv6Addr::new(0, 0, 0, 0, 0, 0xffff, 0x6440, 0x0001);
+        assert!(is_disallowed_ipv6(mapped_cgnat));
+    }
+
+    #[test]
+    fn disallowed_ipv6_allows_global_unicast() {
+        let global = Ipv6Addr::new(0x2607, 0xf8b0, 0x4004, 0x800, 0, 0, 0, 0x200e);
+        assert!(!is_disallowed_ipv6(global));
+    }
+
+    #[test]
+    fn disallowed_ipv6_blocks_6to4_cgnat() {
+        // 2002:6440:0001:: encodes 100.64.0.1 (CGNAT) via 6to4
+        let addr = Ipv6Addr::new(0x2002, 0x6440, 0x0001, 0, 0, 0, 0, 0);
+        assert!(is_disallowed_ipv6(addr));
+    }
+
+    #[test]
+    fn disallowed_ipv6_blocks_ipv4_compatible_link_local() {
+        // ::169.254.1.1 (deprecated IPv4-compatible address encoding link-local)
+        let compat = Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0xa9fe, 0x0101);
+        assert!(is_disallowed_ipv6(compat));
+    }
+
+    // ── Cloud metadata edge cases ────────────────────────────────────────
+
+    #[test]
+    fn cloud_metadata_gcp_with_path_is_blocked() {
+        let url = Url::parse("http://metadata.google.internal/computeMetadata/v1/project/project-id").unwrap();
+        assert!(is_cloud_metadata_host(&url));
+    }
+
+    #[test]
+    fn cloud_metadata_aws_with_various_paths_is_blocked() {
+        let url = Url::parse("http://169.254.169.254/latest/api/token").unwrap();
+        assert!(is_cloud_metadata_host(&url));
+        let url = Url::parse("http://169.254.169.254/latest/user-data").unwrap();
+        assert!(is_cloud_metadata_host(&url));
+    }
+
+    #[test]
+    fn cloud_metadata_non_metadata_ip_is_allowed() {
+        let url = Url::parse("http://169.254.169.253/something").unwrap();
+        assert!(!is_cloud_metadata_host(&url));
+    }
+
+    // ── Content-Encoding edge cases ──────────────────────────────────────
+
+    #[test]
+    fn validate_content_encoding_accepts_multiple_known_encodings() {
+        let response = build_response(
+            ureq::http::Response::builder().header("Content-Encoding", "gzip, identity"),
+        );
+        assert!(validate_remote_content_encoding(&response).is_ok());
+    }
+
+    #[test]
+    fn validate_content_encoding_rejects_mixed_with_unknown() {
+        let response = build_response(
+            ureq::http::Response::builder().header("Content-Encoding", "gzip, compress"),
+        );
+        assert!(validate_remote_content_encoding(&response).is_err());
+    }
+
+    #[test]
+    fn validate_content_encoding_handles_whitespace() {
+        let response = build_response(
+            ureq::http::Response::builder().header("Content-Encoding", "  gzip , br  "),
+        );
+        assert!(validate_remote_content_encoding(&response).is_ok());
+    }
+
     // ── max_remote_redirects config enforcement ─────────────────────────
 
     #[test]

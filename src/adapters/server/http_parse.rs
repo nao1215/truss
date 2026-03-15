@@ -736,6 +736,72 @@ mod tests {
         assert!(err.status.starts_with("4") || err.status.starts_with("5"));
     }
 
+    // ── Additional path traversal tests ─────────────────────────────
+    // Ported from imagor filestorage/filestorage_test.go path traversal
+    // and imgproxy source validation patterns.
+
+    #[test]
+    fn test_resolve_storage_path_double_dot_dot_rejected() {
+        // ../../etc/passwd variant
+        let dir = tempfile::tempdir().unwrap();
+        let err = resolve_storage_path(dir.path(), "../../etc/passwd").unwrap_err();
+        assert_eq!(err.status, "400 Bad Request");
+    }
+
+    #[test]
+    fn test_resolve_storage_path_triple_dot_dot_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = resolve_storage_path(dir.path(), "../../../etc/shadow").unwrap_err();
+        assert_eq!(err.status, "400 Bad Request");
+    }
+
+    #[test]
+    fn test_resolve_storage_path_dot_only_rejected() {
+        // Single current-directory segment
+        let dir = tempfile::tempdir().unwrap();
+        let err = resolve_storage_path(dir.path(), ".").unwrap_err();
+        assert_eq!(err.status, "400 Bad Request");
+    }
+
+    #[test]
+    fn test_resolve_storage_path_null_byte_in_path() {
+        // Null byte injection attempt
+        let dir = tempfile::tempdir().unwrap();
+        let err = resolve_storage_path(dir.path(), "/image\x00.png").unwrap_err();
+        // Should fail during canonicalize or component parsing
+        assert!(
+            err.status.starts_with("4") || err.status.starts_with("5"),
+            "null byte in path should be rejected, got: {}",
+            err.status
+        );
+    }
+
+    #[test]
+    fn test_resolve_storage_path_deeply_nested_traversal_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("a/b/c")).unwrap();
+        let err =
+            resolve_storage_path(dir.path(), "/a/b/c/../../../../etc/passwd").unwrap_err();
+        assert_eq!(err.status, "400 Bad Request");
+    }
+
+    #[test]
+    fn test_resolve_storage_path_trailing_dot_dot_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = resolve_storage_path(dir.path(), "/images/..").unwrap_err();
+        assert_eq!(err.status, "400 Bad Request");
+    }
+
+    #[test]
+    fn test_resolve_storage_path_multiple_slashes_normalized() {
+        // Multiple slashes should be normalized, not cause traversal
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("image.png");
+        std::fs::File::create(&file_path).unwrap();
+        let result = resolve_storage_path(dir.path(), "///image.png");
+        assert!(result.is_ok(), "multiple leading slashes should be trimmed");
+    }
+
     // ── content_type_matches ───────────────────────────────────────
 
     #[test]
