@@ -15,7 +15,7 @@ Optional:
 - `cargo-audit` for security checks (`cargo install cargo-audit`)
 - `cargo-llvm-cov` + `llvm-tools-preview` for coverage (`just setup` installs these)
 - `wasm32-unknown-unknown` target and `wasm-bindgen-cli` for WASM builds
-- Node.js 22.x + npm for the official WASM package, consumer smoke test, and example app (`.nvmrc` matches CI)
+- Node.js 22.x + npm for the official npm packages, consumer smoke tests, and example app (`.nvmrc` matches CI)
 
 Run `just setup` to install the optional development tools.
 
@@ -62,9 +62,12 @@ just doc        # RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
 just audit      # cargo audit
 ```
 
-If your change touches the official npm package or browser-facing WASM integration, also run:
+If your change touches an official npm package or browser-facing integration, also run:
 
 ```sh
+just url-signer-package-typecheck   # Compile-check the package TypeScript definitions
+just url-signer-package-test       # Run the Node.js package unit tests
+just url-signer-package-pack       # Verify the URL signer tarball can be assembled
 just wasm-package-pack            # Verify the npm tarball can be assembled
 just wasm-package-consumer-smoke  # Install the tarball into a throwaway app and run one transform
 just wasm-vite-example-smoke      # Build the Vite example against the local tarball
@@ -141,6 +144,7 @@ integration/
 docs/                        # Design documents, API specs, and guides
 examples/                    # Runnable consumer examples (for example Vite + @nao1215/truss-wasm)
 packages/truss-wasm/         # Official npm package published as @nao1215/truss-wasm
+packages/truss-url-signer/   # Official npm package published as @nao1215/truss-url-signer
 ```
 
 ### Architecture overview
@@ -200,6 +204,9 @@ Run `just` with no arguments to see the full list. Key recipes:
 | `just ci` | All CI checks locally |
 | `just coverage` | Code coverage summary |
 | `just integration` | Docker-based CLI + API tests |
+| `just url-signer-package-typecheck` | Compile-check the TypeScript URL signer package definitions |
+| `just url-signer-package-test` | Run the TypeScript URL signer package tests |
+| `just url-signer-package-pack` | Pack the TypeScript URL signer package without publishing |
 | `just wasm-package-build` | Build the official npm package bindings |
 | `just wasm-package-pack` | Pack the npm package without publishing |
 | `just wasm-package-consumer-smoke` | Install the local tarball into a throwaway consumer and run one transform |

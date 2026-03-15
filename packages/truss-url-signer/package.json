@@ -1,0 +1,59 @@
+{
+  "name": "@nao1215/truss-url-signer",
+  "version": "0.11.0",
+  "description": "Official Node.js/TypeScript signer for truss public image URLs.",
+  "type": "module",
+  "main": "./index.js",
+  "types": "./index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "default": "./index.js"
+    }
+  },
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "README.md",
+    "LICENSE"
+  ],
+  "sideEffects": false,
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "test": "node --test ./test/*.test.mjs",
+    "typecheck": "npm exec --yes --package typescript@5.9.2 -- tsc --noEmit -p tsconfig.json",
+    "check:version": "node ../../scripts/check-package-version.mjs .",
+    "prepack": "npm run check:version",
+    "pack:dry-run": "npm pack --dry-run"
+  },
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org/",
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+ssh://git@github.com/nao1215/truss.git",
+    "directory": "packages/truss-url-signer"
+  },
+  "keywords": [
+    "truss",
+    "signed-url",
+    "hmac",
+    "typescript",
+    "node",
+    "cdn",
+    "image"
+  ],
+  "author": "Naohiro CHIKAMATSU <n.chika156@gmail.com>",
+  "license": "MIT",
+  "funding": {
+    "type": "github",
+    "url": "https://github.com/sponsors/nao1215"
+  },
+  "bugs": {
+    "url": "https://github.com/nao1215/truss/issues"
+  },
+  "homepage": "https://github.com/nao1215/truss/tree/main/packages/truss-url-signer#readme"
+}

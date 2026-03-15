@@ -103,6 +103,22 @@ integration-s3-clean:
 integration: integration-cli integration-api integration-s3
 
 # ---------------------------------------------------------------------------
+# JavaScript Packages
+# ---------------------------------------------------------------------------
+
+# Run the official TypeScript URL signer package tests
+url-signer-package-typecheck:
+    cd packages/truss-url-signer && npm run typecheck
+
+# Run the official TypeScript URL signer package tests
+url-signer-package-test:
+    cd packages/truss-url-signer && npm test
+
+# Pack the TypeScript URL signer package without publishing
+url-signer-package-pack:
+    cd packages/truss-url-signer && npm pack --dry-run
+
+# ---------------------------------------------------------------------------
 # WASM
 # ---------------------------------------------------------------------------
 
