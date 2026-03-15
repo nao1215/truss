@@ -371,21 +371,18 @@ jobs:
           token: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
 
       - name: Update Homebrew formula
-        run: |
-          mkdir -p homebrew-tap/Formula
-          mv truss.rb homebrew-tap/Formula/truss.rb
+        run: mv truss.rb homebrew-tap/truss.rb
 
       - name: Commit and push Homebrew formula
         run: |
           cd homebrew-tap
-          if [ -z "$(git status --short -- Formula/truss.rb)" ]; then
+          if [ -z "$(git status --short -- truss.rb)" ]; then
             echo "No Homebrew formula changes to publish."
             exit 0
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add Formula/truss.rb
-          git rm --ignore-unmatch truss.rb 2>/dev/null || true
+          git add truss.rb
           git commit -m "Update truss formula for ${GITHUB_REF_NAME}"
           git push
 
@@ -393,7 +390,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: homebrew-formula-truss
-          path: homebrew-tap/Formula/truss.rb
+          path: homebrew-tap/truss.rb
 
   verify-homebrew-install:
     if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v') && !contains(github.ref_name, '-') && !contains(github.ref_name, '+')
