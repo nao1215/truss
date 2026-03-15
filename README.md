@@ -10,102 +10,42 @@
 
 ![logo](./docs/img/logo-small.png)
 
-Resize, crop, convert, optimize, blur, sharpen, and watermark images from the CLI, an HTTP server, or the browser -- written in Rust with signed-URL authentication and SSRF protection built in.
+truss is an image transformation tool with a shared Rust core for a CLI, an HTTP server, and a browser/WASM build.
 
-[Install `@nao1215/truss-wasm` from npm](https://www.npmjs.com/package/@nao1215/truss-wasm), sign public URLs from Node.js with [`@nao1215/truss-url-signer`](./packages/truss-url-signer), or start from the [Vite consumer example](./examples/vite-truss-wasm).
+Use the CLI for local files and shell pipelines, run the server behind a CDN or reverse proxy, process files in the browser with [`@nao1215/truss-wasm`](https://www.npmjs.com/package/@nao1215/truss-wasm), or sign public URLs from Node.js with [`@nao1215/truss-url-signer`](./packages/truss-url-signer).
 
-
-[Try the WASM demo in your browser](https://nao1215.github.io/truss/) -- no install, no upload, runs 100 % client-side.
+[Try the WASM demo in your browser](https://nao1215.github.io/truss/) - no install, no upload, runs 100 % client-side.
 
 ![WASM demo screenshot](./docs/img/wasm-github-pages.png)
 
+## Start Here
+
+| If you want to... | Start with | Read next |
+|-------------------|------------|-----------|
+| Convert local files from the shell | `brew install nao1215/tap/truss` or `cargo install truss-image`, then `truss photo.png -o photo.jpg` | [CLI](#cli), [Commands](#commands) |
+| Run an HTTP image server | `TRUSS_BEARER_TOKEN=changeme truss serve --bind 0.0.0.0:8080 --storage-root ./images` | [HTTP Server](#http-server), [API Reference](docs/api-reference.md), [Deployment Guide](docs/deployment.md) |
+| Process files in a browser app | `npm install @nao1215/truss-wasm` | [WASM](#wasm), [WASM Integration](docs/wasm.md) |
+| Generate signed public URLs from Node.js | `npm install @nao1215/truss-url-signer` | [TypeScript URL Signing](#typescript-url-signing), [Signed URL Specification](docs/signed-url-spec.md) |
+
 ## Why truss?
 
-- One binary, three interfaces -- the same Rust core powers the CLI, an HTTP image-transform server, and a WASM browser demo.
-- Security by default -- signed URLs, SSRF protections, and SVG sanitization are built in.
-- Broad format support -- JPEG, PNG, WebP, AVIF, BMP, and SVG; retains EXIF, ICC, and XMP metadata where possible.
-- Cross-platform -- Linux, macOS, Windows.
-- Tested contracts -- CLI behavior is locked by [ShellSpec](https://github.com/shellspec/shellspec), HTTP API by [runn](https://github.com/k1LoW/runn).
-
-## Performance
-
-Measured with [criterion](https://github.com/bheisler/criterion.rs) on a single core. Input: 640 × 427 JPEG (80 KB). Run `just bench` to reproduce.
-
-| Operation | Time |
-|-----------|-----:|
-| JPEG → PNG | 8.2 µs |
-| JPEG → WebP (q 80) | 37 µs |
-| JPEG → AVIF (q 80) | 242 µs |
-| Resize 100 × 100 (cover) | 317 µs |
-| Resize 800 × 600 (cover) | 11.4 ms |
-| Resize 1920 × 1080 (cover) | 68 ms |
-| Blur (σ 5.0) | 6.8 µs |
-| Sharpen (σ 3.0) | 5.9 µs |
-| SVG sanitize (passthrough) | 386 ns |
-| SVG → PNG 1024 w rasterize | 649 µs |
-| Format detection (`sniff`) | 18 ns |
-
-## Comparison
-
-Feature comparison with [imgproxy](https://github.com/imgproxy/imgproxy) and [imagor](https://github.com/cshum/imagor) as of March 2026.
-
-| Feature | truss | imgproxy | imagor |
-|---------|:-----:|:--------:|:------:|
-| Language | Rust | Go | Go |
-| Runtime dependencies | None | libvips (C) | libvips (C) |
-| CLI | Yes | No | No |
-| WASM browser demo | Yes | No | No |
-| Signed URLs | Yes | Yes | Yes |
-| JPEG / PNG / WebP / AVIF | Yes | Yes | Yes |
-| JPEG XL (JXL) | No | Input only | Yes |
-| TIFF | Yes | Yes | Yes |
-| GIF animation processing | No (out of scope) | Yes | Yes |
-| SVG sanitization | Yes | Yes | No |
-| Smart crop | No | Yes | Yes |
-| Sharpen filter | Yes | Yes | Yes |
-| Crop / Trim / Padding | Yes | Yes | Yes |
-| S3  | Yes | Yes | Yes |
-| GCS | Yes | Yes | Yes |
-| Azure Blob Storage | Yes | Yes | No |
-| Watermark | Yes | Yes | Yes |
-| Prometheus metrics | Yes | Yes | Yes |
-| License | MIT | Apache 2.0 | Apache 2.0 |
-
-## Architecture
-
-```mermaid
-flowchart TB
-    CLI["CLI<br/>(truss convert)"] --> Core
-    Server["HTTP Server<br/>(truss serve)"] --> Core
-    WASM["WASM<br/>(browser)"] --> Core
-
-    subgraph Core["Shared Rust core"]
-        direction LR
-        Sniff["Detect format"] --> Transform["Crop / resize / blur / sharpen / watermark"]
-        Transform --> Encode["Encode output"]
-    end
-
-    Server --> Storage
-
-    subgraph Storage["Storage backends"]
-        FS["Local filesystem"]
-        S3["S3"]
-        GCS["GCS"]
-        Azure["Azure Blob"]
-    end
-```
-
-CLI reads local files or fetches remote URLs directly. The HTTP server resolves images from storage backends or client uploads. The WASM build processes files selected in the browser.
+- One Rust core across the CLI, the HTTP server, and the browser/WASM build.
+- Signed URLs, SSRF protections, and SVG sanitization are built in.
+- Supports JPEG, PNG, WebP, AVIF, BMP, TIFF, and SVG.
+- Runs on Linux, macOS, and Windows.
+- CLI behavior is covered by [ShellSpec](https://github.com/shellspec/shellspec), and the HTTP API by [runn](https://github.com/k1LoW/runn).
 
 ## Installation
 
-### Homebrew
+### CLI
+
+#### Homebrew
 
 ```sh
 brew install nao1215/tap/truss
 ```
 
-### Cargo
+#### Cargo
 
 ```sh
 cargo install truss-image
@@ -113,7 +53,27 @@ cargo install truss-image
 
 Need S3, GCS, or Azure storage backend support at install time? See the [Deployment Guide](docs/deployment.md#installing-with-storage-backend-support).
 
-Prebuilt binaries are available on the [GitHub Releases](https://github.com/nao1215/truss/releases) page. See [Deployment Guide](docs/deployment.md) for details on all targets and Docker images.
+Prebuilt binaries are available on the [GitHub Releases](https://github.com/nao1215/truss/releases) page. See [Deployment Guide](docs/deployment.md) for all targets and Docker images.
+
+### JavaScript Packages
+
+Install only the package you need:
+
+```sh
+# Browser/WASM package
+npm install @nao1215/truss-wasm
+
+# Node.js URL signer
+npm install @nao1215/truss-url-signer
+```
+
+Package source and package-specific READMEs live in [`packages/truss-wasm`](./packages/truss-wasm) and [`packages/truss-url-signer`](./packages/truss-url-signer).
+
+### Container Image
+
+```sh
+docker pull ghcr.io/nao1215/truss:latest
+```
 
 ## Quick Start
 
@@ -145,7 +105,7 @@ truss inspect photo.jpg
 
 truss supports **JPEG, PNG, WebP, AVIF, BMP, TIFF, and SVG**. The output format is inferred from the file extension, or you can specify it explicitly with `--format`.
 
-| Format | File size (640 × 427) | Notes |
+| Format | File size (640 x 427) | Notes |
 |--------|----------------------:|-------|
 | JPEG (original) | 80 KB | Lossy, widely supported |
 | WebP (`--quality 80`) | 38 KB | ~52 % smaller than JPEG |
@@ -153,10 +113,10 @@ truss supports **JPEG, PNG, WebP, AVIF, BMP, TIFF, and SVG**. The output format 
 | PNG | 480 KB | Lossless |
 
 ```sh
-# JPEG → WebP (smaller file, same visual quality)
+# JPEG -> WebP (smaller file, same visual quality)
 truss photo.jpg -o photo.webp --quality 80
 
-# JPEG → AVIF (best compression)
+# JPEG -> AVIF (best compression)
 truss photo.jpg -o photo.avif --quality 50
 
 # Explicit format override (ignore extension)
@@ -182,7 +142,7 @@ Specify `--width` and/or `--height` to resize. When both are given, `--fit` cont
 | `fill` | Stretch to exact dimensions (ignores aspect ratio). |
 | `inside` | Like `contain`, but never upscales a smaller image. |
 
-| Original (640 × 427) | contain 300 × 300 | cover 300 × 300 | fill 300 × 300 | inside 300 × 300 |
+| Original (640 x 427) | contain 300 x 300 | cover 300 x 300 | fill 300 x 300 | inside 300 x 300 |
 |---|---|---|---|---|
 | ![original](./docs/img/sample-bee.jpg) | ![contain](./docs/img/sample-bee-contain.jpg) | ![cover](./docs/img/sample-bee-cover.jpg) | ![fill](./docs/img/sample-bee-fill.jpg) | ![inside](./docs/img/sample-bee-inside.jpg) |
 
@@ -322,6 +282,82 @@ truss convert input.png --output=-output.jpg
 truss convert ./-input.png -o out.jpg
 ```
 
+### HTTP Server
+
+Start the server from an installed binary or a local build:
+
+```sh
+TRUSS_BEARER_TOKEN=changeme truss serve --bind 0.0.0.0:8080 --storage-root ./images
+```
+
+Or run the published container image:
+
+```sh
+docker run -p 8080:8080 \
+  -e TRUSS_BIND_ADDR=0.0.0.0:8080 \
+  -e TRUSS_BEARER_TOKEN=changeme \
+  -e TRUSS_STORAGE_ROOT=/data \
+  -v "$(pwd)/images:/data:ro" \
+  ghcr.io/nao1215/truss:latest
+```
+
+Resize a local image to 400 px wide WebP in one request:
+
+```sh
+curl -X POST http://localhost:8080/images \
+  -H "Authorization: Bearer changeme" \
+  -F "file=@photo.jpg" \
+  -F 'options={"format":"webp","width":400}' \
+  -o thumb.webp
+```
+
+If you also want public signed URLs, start the server with signing keys and generate URLs with `truss sign`:
+
+```sh
+TRUSS_BEARER_TOKEN=changeme \
+TRUSS_SIGNING_KEYS='{"mykey":"s3cret"}' \
+truss serve --bind 0.0.0.0:8080 --storage-root ./images
+
+truss sign --base-url http://localhost:8080 \
+  --path photos/hero.jpg \
+  --key-id mykey \
+  --secret s3cret \
+  --expires 1900000000 \
+  --width 800 \
+  --format webp
+```
+
+Use `truss validate` to check server configuration without starting the process. See the [API Reference](docs/api-reference.md) for endpoint details and the [Deployment Guide](docs/deployment.md) for Docker, storage backends, and production setup.
+
+### TypeScript URL Signing
+
+Node.js only. The signer uses `node:crypto` and should stay on the server side; do not ship the signing secret to browsers or Edge/browser runtimes.
+
+```sh
+npm install @nao1215/truss-url-signer
+```
+
+```ts
+import { signPublicUrl } from "@nao1215/truss-url-signer";
+
+const signedUrl = signPublicUrl({
+  baseUrl: "https://images.example.com",
+  source: {
+    kind: "path",
+    path: "hero.jpg",
+  },
+  transforms: {
+    width: 1200,
+    format: "webp",
+  },
+  keyId: "public-demo",
+  secret: process.env.TRUSS_SIGNING_SECRET ?? "",
+  expires: Math.floor(Date.now() / 1000) + 300,
+});
+```
+
+See [`packages/truss-url-signer`](./packages/truss-url-signer) for the full API and examples for both `/images/by-path` and `/images/by-url`.
+
 ### WASM
 
 truss also ships a browser-oriented WASM adapter for local, client-side image processing. The generated package exposes a small JS-facing API over the same Rust core used by the CLI and HTTP server.
@@ -397,51 +433,6 @@ const outputBlob = new Blob([result.bytes], {
 
 The GitHub Pages demo is intentionally built with `wasm,svg`. The official npm package uses `wasm,svg,avif`. Check capabilities at runtime and see [WASM Integration](docs/wasm.md) for package and raw-build usage, feature differences, import-path assumptions, API shapes, constraints, limits, and error handling.
 
-### HTTP Server -- one curl to transform
-
-```sh
-# Start the server
-TRUSS_BEARER_TOKEN=changeme truss serve --bind 0.0.0.0:8080 --storage-root ./images
-
-# Resize a local image to 400 px wide WebP in one request
-curl -X POST http://localhost:8080/images \
-  -H "Authorization: Bearer changeme" \
-  -F "file=@photo.jpg" \
-  -F 'options={"format":"webp","width":400}' \
-  -o thumb.webp
-```
-
-See the [API Reference](docs/api-reference.md) for the full endpoint list and CDN integration guide.
-
-### TypeScript URL Signing
-
-Node.js only. The signer uses `node:crypto` and should stay on the server side; do not ship the signing secret to browsers or Edge/browser runtimes.
-
-```sh
-npm install @nao1215/truss-url-signer
-```
-
-```ts
-import { signPublicUrl } from "@nao1215/truss-url-signer";
-
-const signedUrl = signPublicUrl({
-  baseUrl: "https://images.example.com",
-  source: {
-    kind: "path",
-    path: "hero.jpg",
-  },
-  transforms: {
-    width: 1200,
-    format: "webp",
-  },
-  keyId: "public-demo",
-  secret: process.env.TRUSS_SIGNING_SECRET ?? "",
-  expires: Math.floor(Date.now() / 1000) + 300,
-});
-```
-
-See [`packages/truss-url-signer`](./packages/truss-url-signer) for the full API and examples for both `/images/by-path` and `/images/by-url`.
-
 ## Commands
 
 | Command | Description |
@@ -453,8 +444,13 @@ See [`packages/truss-url-signer`](./packages/truss-url-signer) for the full API 
 | `validate` | Validate server configuration without starting the server (useful in CI/CD) |
 | `sign` | Generate a signed public URL for the server |
 | `completions` | Generate shell completion scripts |
-| `version` | Print version information |
-| `help` | Show help for a command (e.g. `truss help convert`) |
+| `help` | Show help for a command (for example `truss help convert`) |
+
+Top-level shortcuts:
+
+- `truss <INPUT> -o <OUTPUT> [OPTIONS]` is implicit `convert`
+- `truss --bind <ADDR> [OPTIONS]` is implicit `serve`
+- `truss --version` prints version information
 
 ## Documentation
 
@@ -467,7 +463,78 @@ See [`packages/truss-url-signer`](./packages/truss-url-signer) for the full API 
 | [Development Guide](docs/development.md) | Building from source, testing, benchmarks, WASM demo, contributing |
 | [WASM Integration](docs/wasm.md) | Browser build flags, JS API contract, runtime capabilities, limits, and caveats |
 | [Prometheus Metrics](docs/prometheus.md) | Metrics reference, bucket boundaries, example PromQL queries |
+| [Pipeline Order](docs/pipeline.md) | Transform stage order and SVG-specific constraints |
 | [OpenAPI Spec](docs/openapi.yaml) | Machine-readable API specification |
+
+## Architecture
+
+```mermaid
+flowchart TB
+    CLI["CLI<br/>(truss convert)"] --> Core
+    Server["HTTP Server<br/>(truss serve)"] --> Core
+    WASM["WASM<br/>(browser)"] --> Core
+
+    subgraph Core["Shared Rust core"]
+        direction LR
+        Sniff["Detect format"] --> Transform["Crop / resize / blur / sharpen / watermark"]
+        Transform --> Encode["Encode output"]
+    end
+
+    Server --> Storage
+
+    subgraph Storage["Storage backends"]
+        FS["Local filesystem"]
+        S3["S3"]
+        GCS["GCS"]
+        Azure["Azure Blob"]
+    end
+```
+
+CLI reads local files or fetches remote URLs directly. The HTTP server resolves images from storage backends or client uploads. The WASM build processes files selected in the browser.
+
+## Performance
+
+Benchmarks are defined in [`benches/transform.rs`](./benches/transform.rs). The numbers below were measured with [criterion](https://github.com/bheisler/criterion.rs) on a single core using the sample image in this repository. Use them as a local reference and run `just bench` on your hardware to compare.
+
+| Operation | Time |
+|-----------|-----:|
+| JPEG -> PNG | 8.2 us |
+| JPEG -> WebP (q 80) | 37 us |
+| JPEG -> AVIF (q 80) | 242 us |
+| Resize 100 x 100 (cover) | 317 us |
+| Resize 800 x 600 (cover) | 11.4 ms |
+| Resize 1920 x 1080 (cover) | 68 ms |
+| Blur (sigma 5.0) | 6.8 us |
+| Sharpen (sigma 3.0) | 5.9 us |
+| SVG sanitize (passthrough) | 386 ns |
+| SVG -> PNG 1024 w rasterize | 649 us |
+| Format detection (`sniff`) | 18 ns |
+
+## Comparison
+
+Feature comparison with [imgproxy](https://github.com/imgproxy/imgproxy) and [imagor](https://github.com/cshum/imagor) as of March 2026. Check upstream documentation if you need to confirm a specific feature before migrating or standardizing on a tool.
+
+| Feature | truss | imgproxy | imagor |
+|---------|:-----:|:--------:|:------:|
+| Language | Rust | Go | Go |
+| Runtime dependencies | None | libvips (C) | libvips (C) |
+| CLI | Yes | No | No |
+| WASM browser demo | Yes | No | No |
+| Signed URLs | Yes | Yes | Yes |
+| JPEG / PNG / WebP / AVIF | Yes | Yes | Yes |
+| JPEG XL (JXL) | No | Input only | Yes |
+| TIFF | Yes | Yes | Yes |
+| GIF animation processing | No (out of scope) | Yes | Yes |
+| SVG sanitization | Yes | Yes | No |
+| Smart crop | No | Yes | Yes |
+| Sharpen filter | Yes | Yes | Yes |
+| Crop / Trim / Padding | Yes | Yes | Yes |
+| S3 | Yes | Yes | Yes |
+| GCS | Yes | Yes | Yes |
+| Azure Blob Storage | Yes | Yes | No |
+| Watermark | Yes | Yes | Yes |
+| Prometheus metrics | Yes | Yes | Yes |
+| License | MIT | Apache 2.0 | Apache 2.0 |
 
 ## Roadmap
 
