@@ -792,8 +792,7 @@ mod tests {
     fn test_resolve_storage_path_deeply_nested_traversal_rejected() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("a/b/c")).unwrap();
-        let err =
-            resolve_storage_path(dir.path(), "/a/b/c/../../../../etc/passwd").unwrap_err();
+        let err = resolve_storage_path(dir.path(), "/a/b/c/../../../../etc/passwd").unwrap_err();
         assert_eq!(err.status, "400 Bad Request");
     }
 

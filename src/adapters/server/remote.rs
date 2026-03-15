@@ -1060,7 +1060,9 @@ mod redirect_tests {
 
     #[test]
     fn cloud_metadata_gcp_with_path_is_blocked() {
-        let url = Url::parse("http://metadata.google.internal/computeMetadata/v1/project/project-id").unwrap();
+        let url =
+            Url::parse("http://metadata.google.internal/computeMetadata/v1/project/project-id")
+                .unwrap();
         assert!(is_cloud_metadata_host(&url));
     }
 

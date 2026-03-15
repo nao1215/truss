@@ -32,9 +32,8 @@ fn corrupted_remote_image_returns_error() {
     let (addr, handle) = spawn_server(
         ServerConfig::new(storage_root, Some("secret".to_string())).with_insecure_url_sources(true),
     );
-    let body = format!(
-        r#"{{"source":{{"kind":"url","url":"{url}"}},"options":{{"format":"jpeg"}}}}"#
-    );
+    let body =
+        format!(r#"{{"source":{{"kind":"url","url":"{url}"}},"options":{{"format":"jpeg"}}}}"#);
     let response = send_transform_request(addr, &body, Some("secret"));
 
     handle
@@ -157,9 +156,7 @@ fn remote_content_length_exceeding_limit_returns_413() {
             .expect("set blocking");
         let (mut stream, _) = fixture_listener.accept().expect("accept");
         // Read the request
-        stream
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .ok();
+        stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
         let mut buf = [0u8; 4096];
         let _ = stream.read(&mut buf);
 
@@ -217,9 +214,8 @@ fn unsupported_deflate_encoding_returns_502() {
     let (addr, handle) = spawn_server(
         ServerConfig::new(storage_root, Some("secret".to_string())).with_insecure_url_sources(true),
     );
-    let body = format!(
-        r#"{{"source":{{"kind":"url","url":"{url}"}},"options":{{"format":"jpeg"}}}}"#
-    );
+    let body =
+        format!(r#"{{"source":{{"kind":"url","url":"{url}"}},"options":{{"format":"jpeg"}}}}"#);
     let response = send_transform_request(addr, &body, Some("secret"));
 
     handle
@@ -251,9 +247,8 @@ fn unsupported_zstd_encoding_returns_502() {
     let (addr, handle) = spawn_server(
         ServerConfig::new(storage_root, Some("secret".to_string())).with_insecure_url_sources(true),
     );
-    let body = format!(
-        r#"{{"source":{{"kind":"url","url":"{url}"}},"options":{{"format":"jpeg"}}}}"#
-    );
+    let body =
+        format!(r#"{{"source":{{"kind":"url","url":"{url}"}},"options":{{"format":"jpeg"}}}}"#);
     let response = send_transform_request(addr, &body, Some("secret"));
 
     handle
@@ -385,10 +380,7 @@ fn etag_same_for_identical_request() {
         .expect("second ETag")
         .to_string();
 
-    assert_eq!(
-        etag1, etag2,
-        "same request should produce the same ETag"
-    );
+    assert_eq!(etag1, etag2, "same request should produce the same ETag");
 }
 
 // ---------------------------------------------------------------------------
@@ -433,10 +425,7 @@ fn etag_mismatch_returns_200_with_body() {
         "ETag mismatch should return 200, got: {header}"
     );
     assert_eq!(content_type, "image/jpeg");
-    assert!(
-        !body.is_empty(),
-        "200 response should have a body"
-    );
+    assert!(!body.is_empty(), "200 response should have a body");
 }
 
 // ---------------------------------------------------------------------------

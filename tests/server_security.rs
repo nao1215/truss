@@ -7,8 +7,7 @@
 mod common;
 
 use common::{
-    png_bytes, send_transform_request, spawn_fixture_server, spawn_server, split_response,
-    temp_dir,
+    png_bytes, send_transform_request, spawn_fixture_server, spawn_server, split_response, temp_dir,
 };
 use std::fs;
 use truss::ServerConfig;
@@ -34,9 +33,8 @@ fn ssrf_redirect_to_metadata_endpoint_is_blocked() {
     let (addr, handle) = spawn_server(
         ServerConfig::new(storage_root, Some("secret".to_string())).with_insecure_url_sources(true),
     );
-    let body = format!(
-        r#"{{"source":{{"kind":"url","url":"{url}"}},"options":{{"format":"jpeg"}}}}"#
-    );
+    let body =
+        format!(r#"{{"source":{{"kind":"url","url":"{url}"}},"options":{{"format":"jpeg"}}}}"#);
     let response = send_transform_request(addr, &body, Some("secret"));
 
     handle
@@ -180,11 +178,9 @@ fn ssrf_private_ip_ranges_blocked_in_strict_mode() {
 
     for (url, description) in blocked_urls {
         let storage = temp_dir(&format!("ssrf-priv-{}", description.replace('/', "-")));
-        let (addr, handle) =
-            spawn_server(ServerConfig::new(storage, Some("secret".to_string())));
-        let body = format!(
-            r#"{{"source":{{"kind":"url","url":"{url}"}},"options":{{"format":"jpeg"}}}}"#
-        );
+        let (addr, handle) = spawn_server(ServerConfig::new(storage, Some("secret".to_string())));
+        let body =
+            format!(r#"{{"source":{{"kind":"url","url":"{url}"}},"options":{{"format":"jpeg"}}}}"#);
         let response = send_transform_request(addr, &body, Some("secret"));
         handle
             .join()
@@ -202,8 +198,7 @@ fn ssrf_private_ip_ranges_blocked_in_strict_mode() {
 #[test]
 fn ssrf_non_standard_port_blocked_in_strict_mode() {
     let storage_root = temp_dir("ssrf-port-strict");
-    let (addr, handle) =
-        spawn_server(ServerConfig::new(storage_root, Some("secret".to_string())));
+    let (addr, handle) = spawn_server(ServerConfig::new(storage_root, Some("secret".to_string())));
     let response = send_transform_request(
         addr,
         r#"{"source":{"kind":"url","url":"http://example.com:8080/image.png"},"options":{"format":"jpeg"}}"#,
@@ -306,7 +301,9 @@ fn dotgit_access_does_not_leak_raw_file_content() {
     assert_eq!(content_type, "application/problem+json");
     // The raw file content must never appear in the response body.
     assert!(
-        !body.windows(secret_content.len()).any(|w| w == secret_content),
+        !body
+            .windows(secret_content.len())
+            .any(|w| w == secret_content),
         "response must not leak raw .git file content"
     );
 }
@@ -327,9 +324,8 @@ fn remote_upstream_4xx_returns_502() {
     let (addr, handle) = spawn_server(
         ServerConfig::new(storage_root, Some("secret".to_string())).with_insecure_url_sources(true),
     );
-    let body = format!(
-        r#"{{"source":{{"kind":"url","url":"{url}"}},"options":{{"format":"jpeg"}}}}"#
-    );
+    let body =
+        format!(r#"{{"source":{{"kind":"url","url":"{url}"}},"options":{{"format":"jpeg"}}}}"#);
     let response = send_transform_request(addr, &body, Some("secret"));
 
     handle
@@ -360,9 +356,8 @@ fn remote_upstream_5xx_returns_502() {
     let (addr, handle) = spawn_server(
         ServerConfig::new(storage_root, Some("secret".to_string())).with_insecure_url_sources(true),
     );
-    let body = format!(
-        r#"{{"source":{{"kind":"url","url":"{url}"}},"options":{{"format":"jpeg"}}}}"#
-    );
+    let body =
+        format!(r#"{{"source":{{"kind":"url","url":"{url}"}},"options":{{"format":"jpeg"}}}}"#);
     let response = send_transform_request(addr, &body, Some("secret"));
 
     handle
@@ -392,9 +387,8 @@ fn remote_upstream_403_returns_502() {
     let (addr, handle) = spawn_server(
         ServerConfig::new(storage_root, Some("secret".to_string())).with_insecure_url_sources(true),
     );
-    let body = format!(
-        r#"{{"source":{{"kind":"url","url":"{url}"}},"options":{{"format":"jpeg"}}}}"#
-    );
+    let body =
+        format!(r#"{{"source":{{"kind":"url","url":"{url}"}},"options":{{"format":"jpeg"}}}}"#);
     let response = send_transform_request(addr, &body, Some("secret"));
 
     handle
