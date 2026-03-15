@@ -1,5 +1,19 @@
 # Changelog
 
+## v0.11.2
+
+### Added
+
+- Publish a production-oriented Next.js example that signs public truss URLs with `@nao1215/truss-url-signer`.
+
+### Changed
+
+- Verify Homebrew installs against `nao1215/tap/truss` during tagged releases and keep the formula layout aligned with `nao1215/homebrew-tap`.
+
+### Fixed
+
+- Align crate, npm package, OpenAPI, example lockfile, and changelog release metadata for the `v0.11.2` release.
+
 ## v0.11.1
 
 ### Added
