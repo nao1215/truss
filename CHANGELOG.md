@@ -1,5 +1,23 @@
 # Changelog
 
+## v0.11.3
+
+### Added
+
+- Port security and edge-case tests:
+  - SSRF: redirect chain to metadata endpoint, scheme rejection (ftp/file/data), userinfo rejection, private IP/port blocking in strict mode.
+  - Path traversal: E2E coverage for `../../etc/passwd`, mid-path dotdot, `.git` file content leak prevention.
+  - Remote errors: upstream 4xx/5xx/403 mapped to 502, Content-Length exceeding limit returns 413, unsupported Content-Encoding (deflate, zstd) returns 502.
+  - Image edge cases: corrupted/empty/truncated images return 415, ETag stability and divergence across processing options, ETag mismatch returns 200.
+  - IP deny-list boundary tests: CGNAT, TEST-NET 198.18/15, broadcast, multicast, documentation ranges, IPv6 mapped/compatible/6to4/Teredo variants.
+  - Path resolution: null byte injection, backslash literal on Unix, unicode filenames, very long components, multiple leading slashes, trailing dotdot.
+  - Content-Encoding: multiple known encodings, mixed with unknown, whitespace handling.
+  - Cloud metadata: GCP/AWS path variants, non-metadata IP allowed.
+
+### Fixed
+
+- Align crate, npm package, OpenAPI, example lockfile, and changelog release metadata for the `v0.11.3` release.
+
 ## v0.11.2
 
 ### Added
