@@ -399,20 +399,14 @@ jobs:
     permissions:
       contents: read
     steps:
-      - name: Download Homebrew formula artifact
-        uses: actions/download-artifact@v8
-        with:
-          name: homebrew-formula-truss
-          path: homebrew-formula
-
-      - name: Install truss from Homebrew formula
-        run: brew install --formula ./homebrew-formula/truss.rb
+      - name: Install truss from Homebrew tap
+        run: brew install nao1215/tap/truss
 
       - name: Verify installed truss version
         run: truss --version
 
       - name: Run Homebrew formula test
-        run: brew test truss
+        run: brew test nao1215/tap/truss
 
   # ── 3. Build & push container image ─────────────────────────────────
   publish-container:
