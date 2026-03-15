@@ -146,6 +146,18 @@ jobs:
             cargo install wasm-bindgen-cli --version "${version}"
           fi
 
+      - name: Verify TypeScript URL signer package version metadata
+        run: cd packages/truss-url-signer && npm run check:version
+
+      - name: Compile-check TypeScript URL signer package definitions
+        run: cd packages/truss-url-signer && npm run typecheck
+
+      - name: Test TypeScript URL signer package
+        run: cd packages/truss-url-signer && npm test
+
+      - name: Pack TypeScript URL signer package
+        run: cd packages/truss-url-signer && npm pack --dry-run
+
       - name: Pack npm Wasm package
         run: cd packages/truss-wasm && npm pack --dry-run
 

@@ -66,13 +66,20 @@ cargo install wasm-bindgen-cli --version 0.2.114
 
 The build output is written to `web/dist/`.
 
-## WASM npm Package
+## npm Packages
 
-The repository also contains an official npm package source in [`packages/truss-wasm`](../packages/truss-wasm). It uses a bundler-oriented build and currently ships the fixed feature set `wasm,svg,avif`.
+The repository contains two official npm package sources:
 
-Release tags also build a `.tgz` artifact for this package and publish it to npm via trusted publishing when the package is configured on npmjs.com for the `release.yml` workflow.
+- [`packages/truss-wasm`](../packages/truss-wasm) for browser-side image transforms
+- [`packages/truss-url-signer`](../packages/truss-url-signer) for Node.js / TypeScript signed-URL generation
 
-To build and smoke-check the package locally:
+Release tags build `.tgz` artifacts for both packages. The WASM package already publishes via trusted publishing. New npm packages should be released manually once first so npm registers the package name before automation is enabled.
+
+### WASM package
+
+The WASM package uses a bundler-oriented build and currently ships the fixed feature set `wasm,svg,avif`.
+
+To build and smoke-check it locally:
 
 ```sh
 cat .nvmrc  # Node.js version used in CI
@@ -83,6 +90,19 @@ just wasm-package-pack
 just wasm-package-consumer-smoke
 just wasm-vite-example-smoke
 just wasm-vite-example-runtime-smoke
+```
+
+### TypeScript URL signer package
+
+The URL signer package is a pure ESM package with no runtime dependencies beyond Node.js.
+
+To validate it locally:
+
+```sh
+cat .nvmrc  # Node.js version used in CI
+just url-signer-package-typecheck
+just url-signer-package-test
+just url-signer-package-pack
 ```
 
 ## Benchmark

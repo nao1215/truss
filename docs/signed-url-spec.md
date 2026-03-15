@@ -179,7 +179,16 @@ curl -o image.webp 'https://images.example.com/images/by-path?...&signature=...'
 
 ### For SDK Implementers
 
-The equivalent signing flow in TypeScript is:
+For Node.js / TypeScript applications, you can use the official package:
+
+```sh
+npm install @nao1215/truss-url-signer
+```
+
+See [`packages/truss-url-signer`](../packages/truss-url-signer) for the package README and API reference.
+The official signer validates the same request-invariant option matrix as the Rust server for public URL inputs such as `fit`, `position`, `quality`, `targetQuality`, watermark opacity, and crop syntax.
+
+If you are implementing the signer yourself in another language, the equivalent flow in TypeScript is:
 
 ```ts
 import { createHmac } from "node:crypto";

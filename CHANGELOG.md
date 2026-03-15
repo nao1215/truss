@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.11.0
+
+### Added
+
+- Official `@nao1215/truss-url-signer` npm package source and release artifact flow for Node.js / TypeScript public signed URLs.
+- Type definition compile checks plus Rust/Node compatibility coverage for `HEAD` signing, presets, and watermark parameters.
+
+### Fixed
+
+- Validate signed URL transform and watermark options in the TypeScript signer so it rejects server-invalid values before signing.
+- Align crate, npm package, OpenAPI, and changelog release metadata for the `v0.11.0` release.
+
 ## v0.10.4
 
 ### Fixed

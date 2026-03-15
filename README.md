@@ -14,7 +14,7 @@
 
 Resize, crop, convert, optimize, blur, sharpen, and watermark images from the CLI, an HTTP server, or the browser -- written in Rust with signed-URL authentication and SSRF protection built in.
 
-[Install `@nao1215/truss-wasm` from npm](https://www.npmjs.com/package/@nao1215/truss-wasm) or start from the [Vite consumer example](./examples/vite-truss-wasm).
+[Install `@nao1215/truss-wasm` from npm](https://www.npmjs.com/package/@nao1215/truss-wasm), sign public URLs from Node.js with [`@nao1215/truss-url-signer`](./packages/truss-url-signer), or start from the [Vite consumer example](./examples/vite-truss-wasm).
 
 
 [Try the WASM demo in your browser](https://nao1215.github.io/truss/) -- no install, no upload, runs 100 % client-side.
@@ -386,6 +386,35 @@ curl -X POST http://localhost:8080/images \
 ```
 
 See the [API Reference](docs/api-reference.md) for the full endpoint list and CDN integration guide.
+
+### TypeScript URL Signing
+
+Node.js only. The signer uses `node:crypto` and should stay on the server side; do not ship the signing secret to browsers or Edge/browser runtimes.
+
+```sh
+npm install @nao1215/truss-url-signer
+```
+
+```ts
+import { signPublicUrl } from "@nao1215/truss-url-signer";
+
+const signedUrl = signPublicUrl({
+  baseUrl: "https://images.example.com",
+  source: {
+    kind: "path",
+    path: "hero.jpg",
+  },
+  transforms: {
+    width: 1200,
+    format: "webp",
+  },
+  keyId: "public-demo",
+  secret: process.env.TRUSS_SIGNING_SECRET ?? "",
+  expires: Math.floor(Date.now() / 1000) + 300,
+});
+```
+
+See [`packages/truss-url-signer`](./packages/truss-url-signer) for the full API and examples for both `/images/by-path` and `/images/by-url`.
 
 ## Commands
 
