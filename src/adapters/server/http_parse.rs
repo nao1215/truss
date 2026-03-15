@@ -741,23 +741,17 @@ mod tests {
     // and imgproxy source validation patterns.
 
     #[test]
-    fn test_resolve_storage_path_backslash_on_unix() {
-        // On Unix, backslash is a valid filename character but should not be
-        // interpreted as a directory separator. Verify it does not cause
-        // unexpected traversal.
+    #[cfg(unix)]
+    fn test_resolve_storage_path_backslash_is_literal_on_unix() {
+        // On Unix, backslash is a valid filename character, not a directory
+        // separator.  Create a file whose name literally contains a backslash
+        // and verify resolve_storage_path accepts it.
         let dir = tempfile::tempdir().unwrap();
-        // The file "a\\b" should be treated as a single Normal component
-        // containing a literal backslash, which will not exist on disk.
-        let result = resolve_storage_path(dir.path(), r"a\b");
-        // Expect failure because the file doesn't exist, not because of
-        // traversal rejection.
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(
-            err.status.starts_with("4") || err.status.starts_with("5"),
-            "backslash path should fail (file not found), got: {}",
-            err.status
-        );
+        let file_path = dir.path().join(r"a\b");
+        std::fs::File::create(&file_path).unwrap();
+
+        let resolved = resolve_storage_path(dir.path(), r"a\b").unwrap();
+        assert_eq!(resolved, file_path.canonicalize().unwrap());
     }
 
     #[test]
