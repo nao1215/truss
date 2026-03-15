@@ -1,7 +1,7 @@
 import { type NextRequest, NextResponse } from "next/server";
 import { signPublicUrl } from "@nao1215/truss-url-signer";
 import type { OutputFormat, FitMode } from "@nao1215/truss-url-signer";
-import { trussConfig } from "@/lib/truss";
+import { trussConfig, stableExpires } from "@/lib/truss";
 
 const ALLOWED_FORMATS = new Set([
   "jpeg",
@@ -82,7 +82,7 @@ export function GET(request: NextRequest) {
     },
     keyId: config.keyId,
     secret: config.secret,
-    expires: Math.floor(Date.now() / 1000) + config.ttlSeconds,
+    expires: stableExpires(config.ttlSeconds),
   });
 
   return NextResponse.json({ url });

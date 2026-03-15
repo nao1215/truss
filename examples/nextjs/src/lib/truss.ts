@@ -9,12 +9,20 @@ export function trussConfig() {
     );
   }
 
-  return {
-    publicBaseUrl,
-    keyId,
-    secret,
-    ttlSeconds: parseTtl(process.env.TRUSS_URL_TTL_SECONDS),
-  };
+  const ttlSeconds = parseTtl(process.env.TRUSS_URL_TTL_SECONDS);
+  return { publicBaseUrl, keyId, secret, ttlSeconds };
+}
+
+/**
+ * Compute a stable `expires` timestamp that only changes once per TTL window.
+ * All URLs generated within the same window share the same expiry, which lets
+ * browsers and CDNs reuse cached responses instead of treating every render as
+ * a cache-busting unique URL.
+ */
+export function stableExpires(ttlSeconds: number): number {
+  const nowSec = Math.floor(Date.now() / 1000);
+  const window = Math.ceil(nowSec / ttlSeconds) * ttlSeconds;
+  return window + ttlSeconds;
 }
 
 const DEFAULT_TTL = 3600;
