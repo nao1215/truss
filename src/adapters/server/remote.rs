@@ -552,7 +552,6 @@ pub(super) fn validate_backend_endpoint_url(
     }
 
     if let Some(host) = parsed.host_str() {
-
         if !allow_insecure {
             let port = parsed.port_or_known_default().unwrap_or(80);
             let addr_str = format!("{host}:{port}");
