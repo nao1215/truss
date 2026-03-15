@@ -74,6 +74,7 @@ The repository contains two official npm package sources:
 - [`packages/truss-url-signer`](../packages/truss-url-signer) for Node.js / TypeScript signed-URL generation
 
 Release tags build `.tgz` artifacts for both packages. Both official npm packages now publish via trusted publishing on tagged releases.
+Release tags also update the Homebrew tap formula in `nao1215/homebrew-tap`; configure `HOMEBREW_TAP_GITHUB_TOKEN` before enabling that workflow path.
 
 ### WASM package
 

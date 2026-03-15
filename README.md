@@ -81,6 +81,14 @@ CLI reads local files or fetches remote URLs directly. The HTTP server resolves 
 
 ## Installation
 
+### Homebrew
+
+```sh
+brew install nao1215/tap/truss
+```
+
+### Cargo
+
 ```sh
 cargo install truss-image
 ```
