@@ -224,6 +224,8 @@ jobs:
           name: npm-package-truss-wasm
           path: packages/truss-wasm/*.tgz
 
+  # The signer package stays manual for its first release, so tagged builds only
+  # produce the .tgz artifact here until npm registration is complete.
   build-url-signer-package:
     needs: verify
     runs-on: ubuntu-latest

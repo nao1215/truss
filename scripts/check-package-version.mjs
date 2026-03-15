@@ -14,8 +14,9 @@ const packageDir = path.resolve(process.cwd(), packageDirArg);
 const cargoManifestPath = path.join(rootDir, "Cargo.toml");
 const packageJsonPath = path.join(packageDir, "package.json");
 const packageJson = JSON.parse(readFileSync(packageJsonPath, "utf8"));
-const cargoVersionMatch = readFileSync(cargoManifestPath, "utf8").match(
-  /^version = "([^"]+)"/m,
+const cargoToml = readFileSync(cargoManifestPath, "utf8");
+const cargoVersionMatch = cargoToml.match(
+  /^\[package\][\s\S]*?^version\s*=\s*"([^"]+)"/m,
 );
 
 if (!cargoVersionMatch) {

@@ -141,6 +141,18 @@ test("rejects invalid base URLs and expires values", () => {
       }),
     /expires/,
   );
+
+  assert.throws(
+    () =>
+      signPublicUrl({
+        baseUrl: "https://images.example.com",
+        source: { kind: "path", path: "image.png" },
+        keyId: "public-demo",
+        secret: "secret-value",
+        expires: 0,
+      }),
+    />= 1/,
+  );
 });
 
 test("rejects invalid source and watermark URLs", () => {
@@ -227,6 +239,36 @@ test("rejects transform combinations that truss would reject", () => {
       pattern: /targetQuality requires jpeg, webp, or avif output/,
     },
     {
+      options: {
+        transforms: {
+          format: "jpeg",
+          optimize: "lossy",
+          targetQuality: "SSIM:0.98",
+        },
+      },
+      pattern: /unsupported target quality metric/,
+    },
+    {
+      options: {
+        transforms: {
+          format: "jpeg",
+          optimize: "lossy",
+          targetQuality: "ssim:1e-1",
+        },
+      },
+      pattern: /target quality value must be a number/,
+    },
+    {
+      options: {
+        transforms: {
+          format: "jpeg",
+          optimize: "lossy",
+          targetQuality: "psnr:01",
+        },
+      },
+      pattern: /target quality value must be a number/,
+    },
+    {
       options: { transforms: { format: "svg", optimize: "auto" } },
       pattern: /optimization is not supported for svg output/,
     },
@@ -265,4 +307,17 @@ test("rejects transform combinations that truss would reject", () => {
   for (const { options, pattern } of cases) {
     assert.throws(() => signPublicUrl({ ...baseOptions, ...options }), pattern);
   }
+});
+
+test("accepts the inclusive upper blur boundary", () => {
+  assert.doesNotThrow(() =>
+    signPublicUrl({
+      baseUrl: "https://images.example.com",
+      source: { kind: "path", path: "image.png" },
+      transforms: { blur: 100.0 },
+      keyId: "public-demo",
+      secret: "secret-value",
+      expires: 1900000000,
+    }),
+  );
 });

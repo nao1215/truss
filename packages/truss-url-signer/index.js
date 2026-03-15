@@ -18,6 +18,7 @@ const LOSSY_FORMATS = new Set(["jpeg", "webp", "avif"]);
 const OPTIMIZABLE_FORMATS = new Set(["jpeg", "png", "webp", "avif"]);
 const QUARTER_TURNS = new Set([0, 90, 180, 270]);
 const HEX_COLOR_PATTERN = /^[0-9A-Fa-f]{6}([0-9A-Fa-f]{2})?$/;
+const TARGET_QUALITY_VALUE_PATTERN = /^(?:0(?:\.[0-9]+)?|[1-9][0-9]*(?:\.[0-9]+)?)$/;
 
 export function signPublicUrl(options) {
   if (!isObject(options)) {
@@ -165,14 +166,14 @@ function normalizeMethod(method) {
 
 function normalizeExpires(expires) {
   if (typeof expires === "bigint") {
-    if (expires < 0n) {
-      throw new TypeError("expires must be a non-negative integer");
+    if (expires < 1n) {
+      throw new TypeError("expires must be a safe integer >= 1 or bigint >= 1");
     }
     return expires.toString();
   }
 
-  if (!Number.isSafeInteger(expires) || expires < 0) {
-    throw new TypeError("expires must be a non-negative safe integer or bigint");
+  if (!Number.isSafeInteger(expires) || expires < 1) {
+    throw new TypeError("expires must be a safe integer >= 1 or bigint >= 1");
   }
 
   return String(expires);
@@ -608,14 +609,16 @@ function normalizeOptionalTargetQuality(value) {
     );
   }
 
-  const metricName = metric.toLowerCase();
-  if (metricName !== "ssim" && metricName !== "psnr") {
+  if (metric !== "ssim" && metric !== "psnr") {
     throw new TypeError(`unsupported target quality metric \`${metric}\``);
   }
   if (rawValue.length === 0) {
     throw new TypeError("target quality value must be a number, got ``");
   }
   if (rawValue.trim() !== rawValue) {
+    throw new TypeError(`target quality value must be a number, got \`${rawValue}\``);
+  }
+  if (!TARGET_QUALITY_VALUE_PATTERN.test(rawValue)) {
     throw new TypeError(`target quality value must be a number, got \`${rawValue}\``);
   }
 
@@ -627,10 +630,10 @@ function normalizeOptionalTargetQuality(value) {
     throw new TypeError("targetQuality must be finite");
   }
 
-  if (metricName === "ssim" && (parsed <= 0.0 || parsed > 1.0)) {
+  if (metric === "ssim" && (parsed <= 0.0 || parsed > 1.0)) {
     throw new TypeError("ssim targetQuality must be greater than 0.0 and at most 1.0");
   }
-  if (metricName === "psnr" && parsed <= 0.0) {
+  if (metric === "psnr" && parsed <= 0.0) {
     throw new TypeError("psnr targetQuality must be greater than 0");
   }
 

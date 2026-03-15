@@ -6,6 +6,7 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::process::Command;
 use std::process::Output;
+use std::time::Duration;
 use truss::{
     Fit, MediaType, OptimizeMode, Position, RawArtifact, Rgba8, Rotation, ServerConfig,
     SignedUrlSource, SignedWatermarkParams, TargetQuality, TransformOptions,
@@ -66,6 +67,12 @@ fn send_get_request(url: &str) -> Vec<u8> {
         None => url.path().to_string(),
     };
     let mut stream = TcpStream::connect(host.as_str()).expect("connect to test server");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("set read timeout for test server response");
+    stream
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .expect("set write timeout for test server request");
     let request = format!("GET {target} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
     stream.write_all(request.as_bytes()).expect("write request");
     stream.flush().expect("flush request");

@@ -73,7 +73,7 @@ The repository contains two official npm package sources:
 - [`packages/truss-wasm`](../packages/truss-wasm) for browser-side image transforms
 - [`packages/truss-url-signer`](../packages/truss-url-signer) for Node.js / TypeScript signed-URL generation
 
-Release tags build `.tgz` artifacts for both packages. The WASM package already publishes via trusted publishing. New npm packages should be released manually once first so npm registers the package name before automation is enabled.
+Release tags build `.tgz` artifacts for both packages. The WASM package already publishes via trusted publishing. New npm packages should first be released manually so npm registers the package name before automation is enabled.
 
 ### WASM package
 
