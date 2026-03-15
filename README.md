@@ -5,8 +5,6 @@
 [![API Integration](https://github.com/nao1215/truss/actions/workflows/integration.yml/badge.svg)](https://github.com/nao1215/truss/actions/workflows/integration.yml)
 [![Crates.io](https://img.shields.io/crates/v/truss-image)](https://crates.io/crates/truss-image)
 [![Crates.io Downloads](https://img.shields.io/crates/d/truss-image)](https://crates.io/crates/truss-image)
-[![npm](https://img.shields.io/npm/v/%40nao1215%2Ftruss-wasm)](https://www.npmjs.com/package/@nao1215/truss-wasm)
-[![npm Downloads](https://img.shields.io/npm/dm/%40nao1215%2Ftruss-wasm)](https://www.npmjs.com/package/@nao1215/truss-wasm)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-stable-orange)](https://www.rust-lang.org/)
 
