@@ -40,6 +40,9 @@ jobs:
             cargo install wasm-bindgen-cli --version 0.2.114
           fi
 
+      - name: Lint web frontend (syntax check)
+        run: npx --yes acorn --ecma2022 --module --silent web/app.js
+
       - name: Build Pages artifact
         run: ./scripts/build-wasm-demo.sh
 
