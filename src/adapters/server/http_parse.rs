@@ -736,6 +736,83 @@ mod tests {
         assert!(err.status.starts_with("4") || err.status.starts_with("5"));
     }
 
+    // ── Additional path traversal tests ─────────────────────────────
+    // Ported from imagor filestorage/filestorage_test.go path traversal
+    // and imgproxy source validation patterns.
+
+    #[test]
+    #[cfg(unix)]
+    fn test_resolve_storage_path_backslash_is_literal_on_unix() {
+        // On Unix, backslash is a valid filename character, not a directory
+        // separator.  Create a file whose name literally contains a backslash
+        // and verify resolve_storage_path accepts it.
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join(r"a\b");
+        std::fs::File::create(&file_path).unwrap();
+
+        let resolved = resolve_storage_path(dir.path(), r"a\b").unwrap();
+        assert_eq!(resolved, file_path.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn test_resolve_storage_path_unicode_normalization() {
+        // Filenames with non-ASCII characters should pass through as Normal
+        // components and not trigger traversal rejection.
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("café.png");
+        std::fs::File::create(&file_path).unwrap();
+        let result = resolve_storage_path(dir.path(), "/café.png");
+        assert!(result.is_ok(), "unicode filename should be accepted");
+    }
+
+    #[test]
+    fn test_resolve_storage_path_very_long_component() {
+        // A path with a very long single component should be rejected at the
+        // filesystem level (file not found), not cause a panic.
+        let dir = tempfile::tempdir().unwrap();
+        let long_name = "a".repeat(300);
+        let result = resolve_storage_path(dir.path(), &format!("/{long_name}.png"));
+        assert!(result.is_err(), "very long filename should fail");
+    }
+
+    #[test]
+    fn test_resolve_storage_path_null_byte_in_path() {
+        // Null byte injection attempt
+        let dir = tempfile::tempdir().unwrap();
+        let err = resolve_storage_path(dir.path(), "/image\x00.png").unwrap_err();
+        // Should fail during canonicalize or component parsing
+        assert!(
+            err.status.starts_with("4") || err.status.starts_with("5"),
+            "null byte in path should be rejected, got: {}",
+            err.status
+        );
+    }
+
+    #[test]
+    fn test_resolve_storage_path_deeply_nested_traversal_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("a/b/c")).unwrap();
+        let err = resolve_storage_path(dir.path(), "/a/b/c/../../../../etc/passwd").unwrap_err();
+        assert_eq!(err.status, "400 Bad Request");
+    }
+
+    #[test]
+    fn test_resolve_storage_path_trailing_dot_dot_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = resolve_storage_path(dir.path(), "/images/..").unwrap_err();
+        assert_eq!(err.status, "400 Bad Request");
+    }
+
+    #[test]
+    fn test_resolve_storage_path_multiple_slashes_normalized() {
+        // Multiple slashes should be normalized, not cause traversal
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("image.png");
+        std::fs::File::create(&file_path).unwrap();
+        let result = resolve_storage_path(dir.path(), "///image.png");
+        assert!(result.is_ok(), "multiple leading slashes should be trimmed");
+    }
+
     // ── content_type_matches ───────────────────────────────────────
 
     #[test]
