@@ -98,8 +98,6 @@ pub(crate) fn stderr_write(msg: &str) {
 #[cfg(test)]
 #[allow(unused_imports)] // Some imports are only used by feature-gated tests (e.g. s3).
 mod tests {
-    use serial_test::serial;
-
     use super::config::DEFAULT_MAX_CONCURRENT_TRANSFORMS;
     use super::config::{
         DEFAULT_PUBLIC_MAX_AGE_SECONDS, DEFAULT_PUBLIC_STALE_WHILE_REVALIDATE_SECONDS,
@@ -1014,26 +1012,25 @@ mod tests {
     }
 
     #[test]
-    #[serial]
     fn parse_presets_from_env_parses_json() {
-        unsafe {
-            env::set_var(
-                "TRUSS_PRESETS",
-                r#"{"thumb":{"width":100,"height":100,"fit":"cover"}}"#,
-            );
-            env::remove_var("TRUSS_PRESETS_FILE");
-        }
-        let (presets, file_path) = parse_presets_from_env().unwrap();
-        unsafe {
-            env::remove_var("TRUSS_PRESETS");
-        }
-
-        assert!(file_path.is_none());
-        assert_eq!(presets.len(), 1);
-        let thumb = presets.get("thumb").unwrap();
-        assert_eq!(thumb.width, Some(100));
-        assert_eq!(thumb.height, Some(100));
-        assert_eq!(thumb.fit.as_deref(), Some("cover"));
+        with_env(
+            &[
+                (
+                    "TRUSS_PRESETS",
+                    Some(r#"{"thumb":{"width":100,"height":100,"fit":"cover"}}"#),
+                ),
+                ("TRUSS_PRESETS_FILE", None),
+            ],
+            || {
+                let (presets, file_path) = parse_presets_from_env().unwrap();
+                assert!(file_path.is_none());
+                assert_eq!(presets.len(), 1);
+                let thumb = presets.get("thumb").unwrap();
+                assert_eq!(thumb.width, Some(100));
+                assert_eq!(thumb.height, Some(100));
+                assert_eq!(thumb.fit.as_deref(), Some("cover"));
+            },
+        );
     }
 
     #[test]
@@ -2072,6 +2069,11 @@ mod tests {
         "TRUSS_AZURE_CONTAINER",
         "TRUSS_STORAGE_TIMEOUT_SECS",
         "TRUSS_MAX_CONCURRENT_TRANSFORMS",
+        "TRUSS_TRANSFORM_DEADLINE_SECS",
+        "TRUSS_MAX_INPUT_PIXELS",
+        "TRUSS_MAX_UPLOAD_BYTES",
+        "TRUSS_PRESETS",
+        "TRUSS_PRESETS_FILE",
     ];
 
     /// Save current values, run `f`, then restore originals regardless of
@@ -2846,131 +2848,142 @@ mod tests {
     }
 
     #[test]
-    #[serial]
     fn test_transform_deadline_default() {
-        unsafe {
-            std::env::remove_var("TRUSS_TRANSFORM_DEADLINE_SECS");
-        }
-        let config = ServerConfig::from_env().unwrap();
-        assert_eq!(config.transform_deadline_secs, 30);
+        with_env(
+            &[
+                ("TRUSS_TRANSFORM_DEADLINE_SECS", None),
+                ("TRUSS_STORAGE_BACKEND", None),
+            ],
+            || {
+                let config = ServerConfig::from_env().unwrap();
+                assert_eq!(config.transform_deadline_secs, 30);
+            },
+        );
     }
 
     #[test]
-    #[serial]
     fn test_transform_deadline_custom() {
-        unsafe {
-            std::env::set_var("TRUSS_TRANSFORM_DEADLINE_SECS", "60");
-        }
-        let config = ServerConfig::from_env().unwrap();
-        assert_eq!(config.transform_deadline_secs, 60);
-        unsafe {
-            std::env::remove_var("TRUSS_TRANSFORM_DEADLINE_SECS");
-        }
+        with_env(
+            &[
+                ("TRUSS_TRANSFORM_DEADLINE_SECS", Some("60")),
+                ("TRUSS_STORAGE_BACKEND", None),
+            ],
+            || {
+                let config = ServerConfig::from_env().unwrap();
+                assert_eq!(config.transform_deadline_secs, 60);
+            },
+        );
     }
 
     #[test]
-    #[serial]
     fn test_transform_deadline_min_boundary() {
-        unsafe {
-            std::env::set_var("TRUSS_TRANSFORM_DEADLINE_SECS", "1");
-        }
-        let config = ServerConfig::from_env().unwrap();
-        assert_eq!(config.transform_deadline_secs, 1);
-        unsafe {
-            std::env::remove_var("TRUSS_TRANSFORM_DEADLINE_SECS");
-        }
+        with_env(
+            &[
+                ("TRUSS_TRANSFORM_DEADLINE_SECS", Some("1")),
+                ("TRUSS_STORAGE_BACKEND", None),
+            ],
+            || {
+                let config = ServerConfig::from_env().unwrap();
+                assert_eq!(config.transform_deadline_secs, 1);
+            },
+        );
     }
 
     #[test]
-    #[serial]
     fn test_transform_deadline_max_boundary() {
-        unsafe {
-            std::env::set_var("TRUSS_TRANSFORM_DEADLINE_SECS", "300");
-        }
-        let config = ServerConfig::from_env().unwrap();
-        assert_eq!(config.transform_deadline_secs, 300);
-        unsafe {
-            std::env::remove_var("TRUSS_TRANSFORM_DEADLINE_SECS");
-        }
+        with_env(
+            &[
+                ("TRUSS_TRANSFORM_DEADLINE_SECS", Some("300")),
+                ("TRUSS_STORAGE_BACKEND", None),
+            ],
+            || {
+                let config = ServerConfig::from_env().unwrap();
+                assert_eq!(config.transform_deadline_secs, 300);
+            },
+        );
     }
 
     #[test]
-    #[serial]
     fn test_transform_deadline_empty_uses_default() {
-        unsafe {
-            std::env::set_var("TRUSS_TRANSFORM_DEADLINE_SECS", "");
-        }
-        let config = ServerConfig::from_env().unwrap();
-        assert_eq!(config.transform_deadline_secs, 30);
-        unsafe {
-            std::env::remove_var("TRUSS_TRANSFORM_DEADLINE_SECS");
-        }
+        with_env(
+            &[
+                ("TRUSS_TRANSFORM_DEADLINE_SECS", Some("")),
+                ("TRUSS_STORAGE_BACKEND", None),
+            ],
+            || {
+                let config = ServerConfig::from_env().unwrap();
+                assert_eq!(config.transform_deadline_secs, 30);
+            },
+        );
     }
 
     #[test]
-    #[serial]
     fn test_transform_deadline_zero_rejected() {
-        unsafe {
-            std::env::set_var("TRUSS_TRANSFORM_DEADLINE_SECS", "0");
-        }
-        let err = ServerConfig::from_env().unwrap_err();
-        assert!(
-            err.to_string().contains("between 1 and 300"),
-            "error should mention valid range: {err}"
+        with_env(
+            &[
+                ("TRUSS_TRANSFORM_DEADLINE_SECS", Some("0")),
+                ("TRUSS_STORAGE_BACKEND", None),
+            ],
+            || {
+                let err = ServerConfig::from_env().unwrap_err();
+                assert!(
+                    err.to_string().contains("between 1 and 300"),
+                    "error should mention valid range: {err}"
+                );
+            },
         );
-        unsafe {
-            std::env::remove_var("TRUSS_TRANSFORM_DEADLINE_SECS");
-        }
     }
 
     #[test]
-    #[serial]
     fn test_transform_deadline_over_max_rejected() {
-        unsafe {
-            std::env::set_var("TRUSS_TRANSFORM_DEADLINE_SECS", "301");
-        }
-        let err = ServerConfig::from_env().unwrap_err();
-        assert!(
-            err.to_string().contains("between 1 and 300"),
-            "error should mention valid range: {err}"
+        with_env(
+            &[
+                ("TRUSS_TRANSFORM_DEADLINE_SECS", Some("301")),
+                ("TRUSS_STORAGE_BACKEND", None),
+            ],
+            || {
+                let err = ServerConfig::from_env().unwrap_err();
+                assert!(
+                    err.to_string().contains("between 1 and 300"),
+                    "error should mention valid range: {err}"
+                );
+            },
         );
-        unsafe {
-            std::env::remove_var("TRUSS_TRANSFORM_DEADLINE_SECS");
-        }
     }
 
     #[test]
-    #[serial]
     fn test_transform_deadline_non_numeric_rejected() {
-        unsafe {
-            std::env::set_var("TRUSS_TRANSFORM_DEADLINE_SECS", "abc");
-        }
-        let err = ServerConfig::from_env().unwrap_err();
-        assert!(
-            err.to_string().contains("positive integer"),
-            "error should mention positive integer: {err}"
+        with_env(
+            &[
+                ("TRUSS_TRANSFORM_DEADLINE_SECS", Some("abc")),
+                ("TRUSS_STORAGE_BACKEND", None),
+            ],
+            || {
+                let err = ServerConfig::from_env().unwrap_err();
+                assert!(
+                    err.to_string().contains("positive integer"),
+                    "error should mention positive integer: {err}"
+                );
+            },
         );
-        unsafe {
-            std::env::remove_var("TRUSS_TRANSFORM_DEADLINE_SECS");
-        }
     }
 
     #[test]
-    #[serial]
     #[cfg(feature = "azure")]
     fn test_azure_container_env_var_required() {
-        unsafe {
-            std::env::set_var("TRUSS_STORAGE_BACKEND", "azure");
-            std::env::remove_var("TRUSS_AZURE_CONTAINER");
-        }
-        let err = ServerConfig::from_env().unwrap_err();
-        assert!(
-            err.to_string().contains("TRUSS_AZURE_CONTAINER"),
-            "error should mention TRUSS_AZURE_CONTAINER: {err}"
+        with_env(
+            &[
+                ("TRUSS_STORAGE_BACKEND", Some("azure")),
+                ("TRUSS_AZURE_CONTAINER", None),
+            ],
+            || {
+                let err = ServerConfig::from_env().unwrap_err();
+                assert!(
+                    err.to_string().contains("TRUSS_AZURE_CONTAINER"),
+                    "error should mention TRUSS_AZURE_CONTAINER: {err}"
+                );
+            },
         );
-        unsafe {
-            std::env::remove_var("TRUSS_STORAGE_BACKEND");
-        }
     }
 
     #[test]
@@ -3418,153 +3431,171 @@ mod tests {
     }
 
     #[test]
-    #[serial]
     fn test_max_input_pixels_default() {
-        unsafe {
-            std::env::remove_var("TRUSS_MAX_INPUT_PIXELS");
-        }
-        let config = ServerConfig::from_env().unwrap();
-        assert_eq!(config.max_input_pixels, 40_000_000);
+        with_env(
+            &[
+                ("TRUSS_MAX_INPUT_PIXELS", None),
+                ("TRUSS_STORAGE_BACKEND", None),
+            ],
+            || {
+                let config = ServerConfig::from_env().unwrap();
+                assert_eq!(config.max_input_pixels, 40_000_000);
+            },
+        );
     }
 
     #[test]
-    #[serial]
     fn test_max_input_pixels_custom() {
-        unsafe {
-            std::env::set_var("TRUSS_MAX_INPUT_PIXELS", "10000000");
-        }
-        let config = ServerConfig::from_env().unwrap();
-        assert_eq!(config.max_input_pixels, 10_000_000);
-        unsafe {
-            std::env::remove_var("TRUSS_MAX_INPUT_PIXELS");
-        }
+        with_env(
+            &[
+                ("TRUSS_MAX_INPUT_PIXELS", Some("10000000")),
+                ("TRUSS_STORAGE_BACKEND", None),
+            ],
+            || {
+                let config = ServerConfig::from_env().unwrap();
+                assert_eq!(config.max_input_pixels, 10_000_000);
+            },
+        );
     }
 
     #[test]
-    #[serial]
     fn test_max_input_pixels_min_boundary() {
-        unsafe {
-            std::env::set_var("TRUSS_MAX_INPUT_PIXELS", "1");
-        }
-        let config = ServerConfig::from_env().unwrap();
-        assert_eq!(config.max_input_pixels, 1);
-        unsafe {
-            std::env::remove_var("TRUSS_MAX_INPUT_PIXELS");
-        }
+        with_env(
+            &[
+                ("TRUSS_MAX_INPUT_PIXELS", Some("1")),
+                ("TRUSS_STORAGE_BACKEND", None),
+            ],
+            || {
+                let config = ServerConfig::from_env().unwrap();
+                assert_eq!(config.max_input_pixels, 1);
+            },
+        );
     }
 
     #[test]
-    #[serial]
     fn test_max_input_pixels_max_boundary() {
-        unsafe {
-            std::env::set_var("TRUSS_MAX_INPUT_PIXELS", "100000000");
-        }
-        let config = ServerConfig::from_env().unwrap();
-        assert_eq!(config.max_input_pixels, 100_000_000);
-        unsafe {
-            std::env::remove_var("TRUSS_MAX_INPUT_PIXELS");
-        }
+        with_env(
+            &[
+                ("TRUSS_MAX_INPUT_PIXELS", Some("100000000")),
+                ("TRUSS_STORAGE_BACKEND", None),
+            ],
+            || {
+                let config = ServerConfig::from_env().unwrap();
+                assert_eq!(config.max_input_pixels, 100_000_000);
+            },
+        );
     }
 
     #[test]
-    #[serial]
     fn test_max_input_pixels_empty_uses_default() {
-        unsafe {
-            std::env::set_var("TRUSS_MAX_INPUT_PIXELS", "");
-        }
-        let config = ServerConfig::from_env().unwrap();
-        assert_eq!(config.max_input_pixels, 40_000_000);
-        unsafe {
-            std::env::remove_var("TRUSS_MAX_INPUT_PIXELS");
-        }
+        with_env(
+            &[
+                ("TRUSS_MAX_INPUT_PIXELS", Some("")),
+                ("TRUSS_STORAGE_BACKEND", None),
+            ],
+            || {
+                let config = ServerConfig::from_env().unwrap();
+                assert_eq!(config.max_input_pixels, 40_000_000);
+            },
+        );
     }
 
     #[test]
-    #[serial]
     fn test_max_input_pixels_zero_rejected() {
-        unsafe {
-            std::env::set_var("TRUSS_MAX_INPUT_PIXELS", "0");
-        }
-        let err = ServerConfig::from_env().unwrap_err();
-        assert!(err.to_string().contains("TRUSS_MAX_INPUT_PIXELS"));
-        unsafe {
-            std::env::remove_var("TRUSS_MAX_INPUT_PIXELS");
-        }
+        with_env(
+            &[
+                ("TRUSS_MAX_INPUT_PIXELS", Some("0")),
+                ("TRUSS_STORAGE_BACKEND", None),
+            ],
+            || {
+                let err = ServerConfig::from_env().unwrap_err();
+                assert!(err.to_string().contains("TRUSS_MAX_INPUT_PIXELS"));
+            },
+        );
     }
 
     #[test]
-    #[serial]
     fn test_max_input_pixels_over_max_rejected() {
-        unsafe {
-            std::env::set_var("TRUSS_MAX_INPUT_PIXELS", "100000001");
-        }
-        let err = ServerConfig::from_env().unwrap_err();
-        assert!(err.to_string().contains("TRUSS_MAX_INPUT_PIXELS"));
-        unsafe {
-            std::env::remove_var("TRUSS_MAX_INPUT_PIXELS");
-        }
+        with_env(
+            &[
+                ("TRUSS_MAX_INPUT_PIXELS", Some("100000001")),
+                ("TRUSS_STORAGE_BACKEND", None),
+            ],
+            || {
+                let err = ServerConfig::from_env().unwrap_err();
+                assert!(err.to_string().contains("TRUSS_MAX_INPUT_PIXELS"));
+            },
+        );
     }
 
     #[test]
-    #[serial]
     fn test_max_input_pixels_non_numeric_rejected() {
-        unsafe {
-            std::env::set_var("TRUSS_MAX_INPUT_PIXELS", "abc");
-        }
-        let err = ServerConfig::from_env().unwrap_err();
-        assert!(err.to_string().contains("TRUSS_MAX_INPUT_PIXELS"));
-        unsafe {
-            std::env::remove_var("TRUSS_MAX_INPUT_PIXELS");
-        }
+        with_env(
+            &[
+                ("TRUSS_MAX_INPUT_PIXELS", Some("abc")),
+                ("TRUSS_STORAGE_BACKEND", None),
+            ],
+            || {
+                let err = ServerConfig::from_env().unwrap_err();
+                assert!(err.to_string().contains("TRUSS_MAX_INPUT_PIXELS"));
+            },
+        );
     }
 
     #[test]
-    #[serial]
     fn test_max_upload_bytes_default() {
-        unsafe {
-            std::env::remove_var("TRUSS_MAX_UPLOAD_BYTES");
-        }
-        let config = ServerConfig::from_env().unwrap();
-        assert_eq!(config.max_upload_bytes, 100 * 1024 * 1024);
+        with_env(
+            &[
+                ("TRUSS_MAX_UPLOAD_BYTES", None),
+                ("TRUSS_STORAGE_BACKEND", None),
+            ],
+            || {
+                let config = ServerConfig::from_env().unwrap();
+                assert_eq!(config.max_upload_bytes, 100 * 1024 * 1024);
+            },
+        );
     }
 
     #[test]
-    #[serial]
     fn test_max_upload_bytes_custom() {
-        unsafe {
-            std::env::set_var("TRUSS_MAX_UPLOAD_BYTES", "5242880");
-        }
-        let config = ServerConfig::from_env().unwrap();
-        assert_eq!(config.max_upload_bytes, 5 * 1024 * 1024);
-        unsafe {
-            std::env::remove_var("TRUSS_MAX_UPLOAD_BYTES");
-        }
+        with_env(
+            &[
+                ("TRUSS_MAX_UPLOAD_BYTES", Some("5242880")),
+                ("TRUSS_STORAGE_BACKEND", None),
+            ],
+            || {
+                let config = ServerConfig::from_env().unwrap();
+                assert_eq!(config.max_upload_bytes, 5 * 1024 * 1024);
+            },
+        );
     }
 
     #[test]
-    #[serial]
     fn test_max_upload_bytes_zero_rejected() {
-        unsafe {
-            std::env::set_var("TRUSS_MAX_UPLOAD_BYTES", "0");
-        }
-        let err = ServerConfig::from_env().unwrap_err();
-        assert!(err.to_string().contains("TRUSS_MAX_UPLOAD_BYTES"));
-        unsafe {
-            std::env::remove_var("TRUSS_MAX_UPLOAD_BYTES");
-        }
+        with_env(
+            &[
+                ("TRUSS_MAX_UPLOAD_BYTES", Some("0")),
+                ("TRUSS_STORAGE_BACKEND", None),
+            ],
+            || {
+                let err = ServerConfig::from_env().unwrap_err();
+                assert!(err.to_string().contains("TRUSS_MAX_UPLOAD_BYTES"));
+            },
+        );
     }
 
     #[test]
-    #[serial]
     fn test_max_upload_bytes_non_numeric_rejected() {
-        unsafe {
-            std::env::set_var("TRUSS_MAX_UPLOAD_BYTES", "abc");
-        }
-        let err = ServerConfig::from_env().unwrap_err();
-        assert!(err.to_string().contains("TRUSS_MAX_UPLOAD_BYTES"));
-        unsafe {
-            std::env::remove_var("TRUSS_MAX_UPLOAD_BYTES");
-        }
+        with_env(
+            &[
+                ("TRUSS_MAX_UPLOAD_BYTES", Some("abc")),
+                ("TRUSS_STORAGE_BACKEND", None),
+            ],
+            || {
+                let err = ServerConfig::from_env().unwrap_err();
+                assert!(err.to_string().contains("TRUSS_MAX_UPLOAD_BYTES"));
+            },
+        );
     }
 
     #[test]
