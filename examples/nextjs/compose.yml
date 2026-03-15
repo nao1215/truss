@@ -1,0 +1,23 @@
+services:
+  truss:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      TRUSS_BEARER_TOKEN: changeme
+      TRUSS_STORAGE_ROOT: /data
+      TRUSS_BIND_ADDR: "0.0.0.0:8080"
+      TRUSS_SIGNING_KEYS: '{"dev-key":"dev-secret-change-in-production"}'
+      TRUSS_PUBLIC_BASE_URL: "http://localhost:8080"
+    volumes:
+      - ../../images:/data:ro
+    healthcheck:
+      test: ["CMD-SHELL", "printf 'GET /health/live HTTP/1.1\\r\\nHost: localhost\\r\\n\\r\\n' | nc localhost 8080 | head -1 | grep -q '200 OK'"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    read_only: true
+    security_opt:
+      - no-new-privileges:true

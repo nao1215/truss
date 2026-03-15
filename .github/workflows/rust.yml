@@ -171,6 +171,22 @@ jobs:
         if: runner.os == 'Linux'
         run: node ./scripts/run-wasm-vite-example-runtime-smoke.mjs
 
+  # ── Next.js example smoke test ─────────────────────────────────────
+  nextjs-example:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Run Next.js example smoke test
+        run: node ./scripts/run-nextjs-example-smoke.mjs
+
   # ── Cross-platform tests (PR and main) ──────────────────────────────
   test-cross-platform:
     strategy:
