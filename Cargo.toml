@@ -1,6 +1,6 @@
 [package]
 name = "truss-image"
-version = "0.11.3"
+version = "0.11.4"
 edition = "2024"
 rust-version = "1.92"
 authors = ["CHIKAMATSU Naohiro <n.chika156@gmail.com>"]
