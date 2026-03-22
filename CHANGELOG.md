@@ -2,10 +2,15 @@
 
 ## v0.11.4
 
+### Changed
+
+- Bump MSRV from 1.87 to 1.92.
+
 ### Fixed
 
 - Update `aws-lc-sys` 0.38.0 → 0.39.0 to fix CRL Distribution Point scope check logic error and X.509 Name Constraints bypass via wildcard/unicode CN (high severity).
 - Update `rustls-webpki` 0.103.9 → 0.103.10 to fix certificate revocation enforcement bug (medium severity).
+- Ignore RUSTSEC-2026-0049 for `rustls-webpki` 0.101.7 (transitive dep via AWS SDK's `rustls` 0.21; upstream has not migrated yet).
 
 ## v0.11.3
 
