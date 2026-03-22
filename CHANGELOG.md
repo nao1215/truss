@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.11.4
+
+### Fixed
+
+- Update `aws-lc-sys` 0.38.0 → 0.39.0 to fix CRL Distribution Point scope check logic error and X.509 Name Constraints bypass via wildcard/unicode CN (high severity).
+- Update `rustls-webpki` 0.103.9 → 0.103.10 to fix certificate revocation enforcement bug (medium severity).
+
 ## v0.11.3
 
 ### Added
