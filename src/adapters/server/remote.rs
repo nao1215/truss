@@ -551,25 +551,25 @@ pub(super) fn validate_backend_endpoint_url(
         ));
     }
 
-    if let Some(host) = parsed.host_str() {
-        if !allow_insecure {
-            let port = parsed.port_or_known_default().unwrap_or(80);
-            let addr_str = format!("{host}:{port}");
-            let addrs: Vec<_> = addr_str
-                .to_socket_addrs()
-                .map_err(|e| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        format!("{env_var_name} could not be resolved: {e}"),
-                    )
-                })?
-                .collect();
-            if addrs.iter().any(|a| is_disallowed_remote_ip(a.ip())) {
-                return Err(io::Error::new(
+    if let Some(host) = parsed.host_str()
+        && !allow_insecure
+    {
+        let port = parsed.port_or_known_default().unwrap_or(80);
+        let addr_str = format!("{host}:{port}");
+        let addrs: Vec<_> = addr_str
+            .to_socket_addrs()
+            .map_err(|e| {
+                io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    format!("{env_var_name} must not point to a private or loopback address"),
-                ));
-            }
+                    format!("{env_var_name} could not be resolved: {e}"),
+                )
+            })?
+            .collect();
+        if addrs.iter().any(|a| is_disallowed_remote_ip(a.ip())) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{env_var_name} must not point to a private or loopback address"),
+            ));
         }
     }
 

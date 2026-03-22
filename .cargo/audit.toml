@@ -1,0 +1,6 @@
+[advisories]
+# rustls-webpki v0.101.7 is pulled in by aws-smithy-http-client via rustls 0.21.
+# The upstream AWS SDK has not yet migrated this dependency path to rustls 0.23.
+# The vulnerability (CRL distribution point matching) requires a compromised CA
+# to exploit, so the practical risk is low.
+ignore = ["RUSTSEC-2026-0049"]

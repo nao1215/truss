@@ -2,7 +2,7 @@
 name = "truss-image"
 version = "0.11.3"
 edition = "2024"
-rust-version = "1.87"
+rust-version = "1.92"
 authors = ["CHIKAMATSU Naohiro <n.chika156@gmail.com>"]
 description = "Image toolkit with a shared Rust core across the CLI, HTTP server, and WASM demo."
 license = "MIT"
