@@ -1,6 +1,6 @@
 services:
   azurite:
-    image: mcr.microsoft.com/azure-storage/azurite:latest
+    image: mcr.microsoft.com/azure-storage/azurite:3.35.0
     command: ["azurite-blob", "--blobHost", "0.0.0.0", "--blobPort", "10000", "--skipApiVersionCheck"]
     # Azurite exposes Blob service on port 10000
     healthcheck:
@@ -47,7 +47,7 @@ services:
     # nginx listens on port 80
 
   runn:
-    image: ghcr.io/k1low/runn:latest
+    image: ghcr.io/k1low/runn:v1.9.2
     depends_on:
       - nginx
       - truss
