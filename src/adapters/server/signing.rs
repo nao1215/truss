@@ -1,5 +1,5 @@
 /// Signed URL generation and bind address resolution.
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 use url::Url;
 

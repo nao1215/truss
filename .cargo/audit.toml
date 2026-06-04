@@ -1,6 +1,15 @@
 [advisories]
-# rustls-webpki v0.101.7 is pulled in by aws-smithy-http-client via rustls 0.21.
-# The upstream AWS SDK has not yet migrated this dependency path to rustls 0.23.
-# The vulnerability (CRL distribution point matching) requires a compromised CA
-# to exploit, so the practical risk is low.
-ignore = ["RUSTSEC-2026-0049"]
+# rustls-webpki v0.101.7 is pulled in by aws-smithy-http-client via the legacy
+# hyper-rustls 0.24 / rustls 0.21 path. The upstream AWS SDK has not yet migrated
+# this dependency path to rustls 0.23, so this transitive version cannot be removed
+# from the lockfile yet. All of these advisories sit behind certificate signature
+# verification and require a compromised/misissuing CA to exploit (name-constraint
+# bypass) or the app to parse attacker-controlled CRLs (CRL panic), which truss does
+# not do through this path. Practical risk is therefore low.
+# The modern rustls 0.23 path uses the patched rustls-webpki 0.103.13.
+ignore = [
+    "RUSTSEC-2026-0049",
+    "RUSTSEC-2026-0098",
+    "RUSTSEC-2026-0099",
+    "RUSTSEC-2026-0104",
+]

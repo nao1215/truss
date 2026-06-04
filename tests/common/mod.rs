@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 // Shared across multiple integration-test crates; each crate uses only a subset.
 
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use image::codecs::png::PngEncoder;
 use image::{ColorType, ImageEncoder, Rgba, RgbaImage};
 use sha2::Sha256;
