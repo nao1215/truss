@@ -1,6 +1,9 @@
 services:
   s3mock:
-    image: adobe/s3mock:latest
+    # Pinned: s3mock 5.0.0 changed GET /<bucket> to return an HTTP error instead
+    # of 200, which breaks the readiness probe in setup-fixtures.sh. Stay on 4.x
+    # until that probe is migrated to the 5.x behavior. Do not float to :latest.
+    image: adobe/s3mock:4.11.0
     environment:
       initialBuckets: truss-test
     # s3mock exposes HTTP on 9090 by default
@@ -51,7 +54,7 @@ services:
     # nginx listens on port 80
 
   runn:
-    image: ghcr.io/k1low/runn:latest
+    image: ghcr.io/k1low/runn:v1.9.2
     depends_on:
       - nginx
       - truss
