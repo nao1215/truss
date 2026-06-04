@@ -1,5 +1,20 @@
 # Changelog
 
+## v0.11.5
+
+### Changed
+
+- Batch dependency updates (consolidated from Dependabot PRs):
+  - Rust: `hmac` 0.12 → 0.13 and `sha2` 0.10 → 0.11 (RustCrypto `digest` 0.11); `rav1d-safe` 0.3 → 0.5; `azure_storage_blob` 0.9 → 0.10 with `azure_core` 0.32 → 0.33; `tokio` 1.50 → 1.52, `uuid` 1.22 → 1.23, `aws-sdk-s3` 1.127 → 1.129, `google-cloud-storage` 1.9 → 1.10, `google-cloud-auth` 1.7 → 1.8, `libc` 0.2.183 → 0.2.186, `rand` 0.9.2 → 0.9.4.
+  - Examples: `typescript` 5.9 → 6.0 (Next.js), `puppeteer-core` 24 → 25. `vite` kept on the 7.x line (7.3.5); Vite 8 drops the wasm-bindgen `new URL(..., import.meta.url)` asset reference and breaks the WASM example, so the upgrade is deferred.
+  - GitHub Actions: `actions/configure-pages` 5 → 6, `actions/upload-pages-artifact` 4 → 5, `actions/deploy-pages` 4 → 5, `softprops/action-gh-release` 2 → 3.
+- Pin integration-test container images to fixed versions (`adobe/s3mock` 4.11.0, `fsouza/fake-gcs-server` 1.54.0, `azurite` 3.35.0, `runn` v1.9.2) to avoid breakage from floating `:latest` tags. s3mock 5.0.0 changed `GET /<bucket>` to return an HTTP error instead of 200, which broke the s3 readiness probe.
+
+### Fixed
+
+- Update `rustls-webpki` 0.103.10 → 0.103.13 to patch RUSTSEC-2026-0098/0099/0104 (name-constraint bypass and CRL-parsing panic) on the modern rustls 0.23 path.
+- Ignore RUSTSEC-2026-0098/0099/0104 for the transitive `rustls-webpki` 0.101.7 (legacy AWS SDK `rustls` 0.21 path; upstream has not migrated yet — same rationale as RUSTSEC-2026-0049).
+
 ## v0.11.4
 
 ### Changed
