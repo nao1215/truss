@@ -7,7 +7,7 @@ use super::response::{
 };
 use super::signing::{HmacSha256, SignedUrlSource};
 use crate::{Rgba8, Rotation, TransformOptions};
-use hmac::Mac;
+use hmac::{KeyInit, Mac};
 use std::collections::BTreeMap;
 use subtle::ConstantTimeEq;
 use url::Url;

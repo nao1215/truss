@@ -139,7 +139,7 @@ mod tests {
         Artifact, ArtifactMetadata, Fit, MediaType, OptimizeMode, RawArtifact, TransformOptions,
         sniff_artifact,
     };
-    use hmac::{Hmac, Mac};
+    use hmac::{Hmac, KeyInit, Mac};
     use image::codecs::png::PngEncoder;
     use image::{ColorType, ImageEncoder, Rgba, RgbaImage};
     use sha2::Sha256;
