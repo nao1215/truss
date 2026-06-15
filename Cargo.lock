@@ -2014,9 +2014,9 @@ dependencies = [
 
 [[package]]
 name = "google-cloud-storage"
-version = "1.11.0"
+version = "1.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c4cf4d4e84fd3238cd5f5179b0a8e424c7ccc8106423a9fad627ae27ebc2b7b4"
+checksum = "13a36095882d064b087d3171c1780505ff851a4292e04bd0d5cc6564d0a6d585"
 dependencies = [
  "async-trait",
  "base64",
@@ -2408,7 +2408,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.5.10",
+ "socket2 0.6.3",
  "tokio",
  "tower-service",
  "tracing",
@@ -3468,7 +3468,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls 0.23.40",
- "socket2 0.5.10",
+ "socket2 0.6.3",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -3506,7 +3506,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.5.10",
+ "socket2 0.6.3",
  "tracing",
  "windows-sys 0.60.2",
 ]
