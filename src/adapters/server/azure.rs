@@ -188,8 +188,7 @@ pub(super) fn read_azure_source_bytes(
 
             let resp = client.download(None).await.map_err(map_azure_error)?;
 
-            use azure_storage_blob::models::BlobClientDownloadResultHeaders;
-            let content_length = resp.content_length().ok().flatten();
+            let content_length = resp.properties.content_length;
             if let Some(len) = content_length
                 && len > MAX_SOURCE_BYTES
             {
@@ -198,7 +197,7 @@ pub(super) fn read_azure_source_bytes(
                 ));
             }
 
-            let (_, _, body) = resp.deconstruct();
+            let body = resp.body;
 
             use futures::StreamExt;
             let capacity = if let Some(len) = content_length {
