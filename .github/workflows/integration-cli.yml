@@ -4,7 +4,7 @@ on:
     branches: [main]
     paths:
       - "src/**"
-      - "integration/cli/**"
+      - "e2e/**"
       - "integration/fixtures/**"
       - "Cargo.toml"
       - "Cargo.lock"
@@ -12,7 +12,7 @@ on:
   pull_request:
     paths:
       - "src/**"
-      - "integration/cli/**"
+      - "e2e/**"
       - "integration/fixtures/**"
       - "Cargo.toml"
       - "Cargo.lock"
@@ -22,6 +22,9 @@ concurrency:
   group: integration-cli-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -30,6 +33,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -37,18 +42,12 @@ jobs:
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
 
-      - name: Build truss
-        run: cargo build --release --locked
+      - name: Install atago
+        uses: nao1215/setup-atago@e4b6719aea547a68e6c15252222babab7f492a88 # v0.1.1
+        with:
+          version: v0.2.0
 
-      - name: Install truss to PATH
-        run: sudo cp target/release/truss /usr/local/bin/truss
-
-      - name: Install ShellSpec
-        run: |
-          curl -fsSL https://raw.githubusercontent.com/shellspec/shellspec/master/install.sh | sh -s -- --yes
-          echo "${HOME}/.local/lib/shellspec" >> "$GITHUB_PATH"
-
-      - name: Run ShellSpec CLI tests
-        env:
-          FIXTURES_DIR: ${{ github.workspace }}/integration/fixtures
-        run: shellspec --chdir integration/cli
+      # e2e/run.sh builds truss (cargo build --release --locked) and runs the
+      # atago specs in e2e/atago against the freshly built binary.
+      - name: Run atago CLI tests
+        run: ./e2e/run.sh

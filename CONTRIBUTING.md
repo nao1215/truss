@@ -79,12 +79,12 @@ just wasm-vite-example-runtime-smoke    # Verify the checked-in Vite example in 
 Integration tests use Docker and are separate from `cargo test`:
 
 ```sh
-just integration-cli   # CLI tests with ShellSpec
+just integration-cli   # CLI tests with atago (local, no Docker)
 just integration-api   # API server tests with runn
 just integration       # Both
 ```
 
-- **CLI tests** (`integration/cli/`): Written in [ShellSpec](https://github.com/shellspec/shellspec). These specs also serve as user-facing CLI documentation.
+- **CLI tests** (`e2e/atago/`): Written as plain-YAML [atago](https://github.com/nao1215/atago) specs, run by `e2e/run.sh` against a freshly built binary. These specs also serve as user-facing CLI documentation.
 - **API tests** (`integration/api/`): Written as [runn](https://github.com/k1LoW/runn) runbooks. These runbooks also serve as API documentation.
 - **Test fixtures**: Shared images in `integration/fixtures/`.
 
@@ -132,11 +132,12 @@ src/
     ├── raster.rs            # JPEG, PNG, WebP, AVIF, BMP codec
     └── svg.rs               # SVG sanitization and rasterization
 
+e2e/
+├── run.sh                   # CLI e2e bootstrap (builds truss, runs atago)
+└── atago/*.atago.yaml       # atago CLI specs
+
 integration/
 ├── fixtures/                # Shared test images
-├── cli/                     # ShellSpec CLI specs
-│   ├── Dockerfile
-│   └── spec/*.sh
 └── api/                     # runn API runbooks
     ├── compose.yml
     └── runbooks/*.yml

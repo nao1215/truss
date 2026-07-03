@@ -1,0 +1,57 @@
+# Migrated from ShellSpec integration/cli/spec/sign_spec.sh.
+# The sign command generates HMAC-signed public URLs for the truss HTTP
+# server. These URLs allow clients to request specific transformations
+# without needing direct API access.
+#
+#   truss sign --base-url <URL> --path <PATH> \
+#     --key-id <ID> --secret <SECRET> --expires <UNIX_SECS> [OPTIONS]
+#
+# Run with: e2e/run.sh
+version: "1"
+
+suite:
+  name: truss sign
+
+scenarios:
+  - name: shows help with --help
+    steps:
+      - run:
+          command: truss sign --help
+      - assert:
+          exit_code: 0
+          stdout:
+            contains:
+              - "truss sign"
+              - "--base-url"
+
+  - name: exits 1 with usage and hint when no arguments are given
+    steps:
+      - run:
+          command: truss sign
+      - assert:
+          exit_code: 1
+          stderr:
+            contains:
+              - "error:"
+              - "usage:"
+              - "hint:"
+
+  - name: produces a signed HTTPS URL with all required arguments
+    steps:
+      - run:
+          command: truss sign --base-url "https://cdn.example.com" --path "/photos/hero.jpg" --key-id "testkey" --secret "testsecret" --expires 1700000000
+      - assert:
+          exit_code: 0
+          stdout:
+            contains: "https://"
+
+  - name: includes transform options in the signed URL
+    steps:
+      - run:
+          command: truss sign --base-url "https://cdn.example.com" --path "/photos/hero.jpg" --key-id "testkey" --secret "testsecret" --expires 1700000000 --width 640 --format webp
+      - assert:
+          exit_code: 0
+          stdout:
+            contains:
+              - "https://"
+              - "640"

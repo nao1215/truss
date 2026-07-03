@@ -1,0 +1,160 @@
+# Migrated from ShellSpec integration/cli/spec/help_spec.sh.
+# The help system provides discoverability for every command. Running truss
+# without arguments, with --help/-h, or with the "help" subcommand prints
+# usage information and exits successfully. Run with: e2e/run.sh
+version: "1"
+
+suite:
+  name: truss help system
+
+scenarios:
+  - name: shows help when invoked with no arguments
+    steps:
+      - run:
+          command: truss
+      - assert:
+          exit_code: 0
+          stdout:
+            contains:
+              - "an image transformation tool"
+              - "COMMANDS"
+
+  - name: shows help with --help flag
+    steps:
+      - run:
+          command: truss --help
+      - assert:
+          exit_code: 0
+          stdout:
+            contains:
+              - "COMMANDS"
+              - "convert"
+              - "inspect"
+              - "serve"
+              - "sign"
+
+  - name: shows help with -h flag
+    steps:
+      - run:
+          command: truss -h
+      - assert:
+          exit_code: 0
+          stdout:
+            contains: "USAGE:"
+
+  - name: shows help with the help subcommand
+    steps:
+      - run:
+          command: truss help
+      - assert:
+          exit_code: 0
+          stdout:
+            contains: "COMMANDS"
+
+  - name: shows convert help with usage and options
+    steps:
+      - run:
+          command: truss help convert
+      - assert:
+          exit_code: 0
+          stdout:
+            contains:
+              - "truss convert"
+              - "--output"
+              - "--width"
+              - "--format"
+              - "EXAMPLES"
+
+  - name: shows inspect help with usage
+    steps:
+      - run:
+          command: truss help inspect
+      - assert:
+          exit_code: 0
+          stdout:
+            contains:
+              - "truss inspect"
+              - "JSON"
+
+  - name: shows serve help with bind and environment variables
+    steps:
+      - run:
+          command: truss help serve
+      - assert:
+          exit_code: 0
+          stdout:
+            contains:
+              - "truss serve"
+              - "--bind"
+              - "ENVIRONMENT VARIABLES"
+              - "TRUSS_BIND_ADDR"
+
+  - name: shows sign help with required options
+    steps:
+      - run:
+          command: truss help sign
+      - assert:
+          exit_code: 0
+          stdout:
+            contains:
+              - "truss sign"
+              - "--base-url"
+              - "--key-id"
+              - "--secret"
+              - "--expires"
+
+  - name: shows convert help with convert --help
+    steps:
+      - run:
+          command: truss convert --help
+      - assert:
+          exit_code: 0
+          stdout:
+            contains:
+              - "truss convert"
+              - "OPTIONS"
+
+  - name: shows inspect help with inspect --help
+    steps:
+      - run:
+          command: truss inspect --help
+      - assert:
+          exit_code: 0
+          stdout:
+            contains: "truss inspect"
+
+  - name: shows serve help with serve --help
+    steps:
+      - run:
+          command: truss serve --help
+      - assert:
+          exit_code: 0
+          stdout:
+            contains: "truss serve"
+
+  - name: shows sign help with sign --help
+    steps:
+      - run:
+          command: truss sign --help
+      - assert:
+          exit_code: 0
+          stdout:
+            contains: "truss sign"
+
+  - name: suggests the closest match for a typo (converrt -> convert)
+    steps:
+      - run:
+          command: truss converrt
+      - assert:
+          exit_code: 1
+          stderr:
+            contains: "convert"
+
+  - name: exits 1 when the command is unknown
+    steps:
+      - run:
+          command: truss notacommand
+      - assert:
+          exit_code: 1
+          stderr:
+            contains: "error:"

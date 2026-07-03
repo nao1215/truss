@@ -1,0 +1,114 @@
+# Migrated from ShellSpec integration/cli/spec/bmp_spec.sh.
+# BMP input detection, inspection, conversion to/from other formats, and
+# resizing. The ShellSpec is_png/is_jpeg/is_bmp magic-byte helpers become
+# atago's `image` assertion, which decodes the file for real.
+# Run with: e2e/run.sh
+version: "1"
+
+suite:
+  name: truss bmp support
+
+scenarios:
+  - name: detects BMP format and dimensions (4x3)
+    steps:
+      - run:
+          shell: true
+          command: truss inspect "$FIXTURES_DIR/sample.bmp"
+      - assert:
+          exit_code: 0
+          stdout:
+            json:
+              path: $.format
+              equals: bmp
+      - assert:
+          stdout:
+            json:
+              path: $.width
+              equals: 4
+      - assert:
+          stdout:
+            json:
+              path: $.height
+              equals: 3
+
+  - name: converts BMP to a valid PNG
+    steps:
+      - run:
+          shell: true
+          command: truss convert "$FIXTURES_DIR/sample.bmp" -o out.png
+      - assert:
+          exit_code: 0
+          image:
+            path: out.png
+            format: png
+
+  - name: converts BMP to a valid JPEG
+    steps:
+      - run:
+          shell: true
+          command: truss convert "$FIXTURES_DIR/sample.bmp" -o out.jpg
+      - assert:
+          exit_code: 0
+          image:
+            path: out.jpg
+            format: jpeg
+
+  - name: converts PNG to a valid BMP
+    steps:
+      - run:
+          shell: true
+          command: truss convert "$FIXTURES_DIR/sample.png" -o out.bmp
+      - assert:
+          exit_code: 0
+          image:
+            path: out.bmp
+            format: bmp
+
+  - name: converts JPEG to BMP with an explicit --format
+    steps:
+      - run:
+          shell: true
+          command: truss convert "$FIXTURES_DIR/sample.jpg" -o out.bmp --format bmp
+      - assert:
+          exit_code: 0
+          image:
+            path: out.bmp
+            format: bmp
+
+  - name: resizes BMP to a target width of 2
+    steps:
+      - run:
+          shell: true
+          command: truss convert "$FIXTURES_DIR/sample.bmp" -o w2.png --width 2
+      - assert:
+          exit_code: 0
+          image:
+            path: w2.png
+            format: png
+            width: 2
+
+  - name: round-trips PNG to BMP and back to PNG
+    steps:
+      - run:
+          shell: true
+          command: truss convert "$FIXTURES_DIR/sample.png" -o step1.bmp
+      - assert:
+          exit_code: 0
+      - run:
+          command: truss convert step1.bmp -o step2.png
+      - assert:
+          exit_code: 0
+          image:
+            path: step2.png
+            format: png
+
+  - name: converts BMP without the convert keyword (implicit subcommand)
+    steps:
+      - run:
+          shell: true
+          command: truss "$FIXTURES_DIR/sample.bmp" -o implicit.png
+      - assert:
+          exit_code: 0
+          image:
+            path: implicit.png
+            format: png

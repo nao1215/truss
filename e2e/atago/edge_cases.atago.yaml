@@ -1,0 +1,269 @@
+# Migrated from ShellSpec integration/cli/spec/edge_cases_spec.sh.
+# Real-world image processing must handle broken, unusual, and adversarial
+# inputs gracefully: dimension extremes, transparency, EXIF rotation, CMYK,
+# truncated/corrupted files, and non-image data.
+#
+# Fixture overview (integration/fixtures, via $FIXTURES_DIR):
+#   1px.png             1x1 minimum-dimension PNG
+#   large.png           10000x1 extremely wide PNG
+#   tall.png            1x10000 extremely tall PNG
+#   transparent.png     4x4 fully transparent PNG (all alpha=0)
+#   semitransparent.png 8x8 with partial alpha
+#   exif-rotated.jpg    JPEG with EXIF Orientation=6 (90 degrees CW)
+#   cmyk.jpg            CMYK color space JPEG
+#   truncated.jpg       JPEG truncated mid-stream (~60% of data)
+#   corrupt-header.jpg  JPEG with zeroed header bytes
+#   invalid-chunk.png   PNG with invalid chunk type and bad CRC
+#   zero-bytes.bin      Empty file (0 bytes)
+#   random-noise.bin    256 bytes of random data
+#
+# Run with: e2e/run.sh
+version: "1"
+
+suite:
+  name: truss edge cases
+
+scenarios:
+  - name: inspects a 1x1 PNG
+    steps:
+      - run:
+          shell: true
+          command: truss inspect "$FIXTURES_DIR/1px.png"
+      - assert:
+          exit_code: 0
+          stdout:
+            json:
+              path: $.width
+              equals: 1
+      - assert:
+          stdout:
+            json:
+              path: $.height
+              equals: 1
+
+  - name: converts a 1x1 PNG to JPEG
+    steps:
+      - run:
+          shell: true
+          command: truss convert "$FIXTURES_DIR/1px.png" -o 1px.jpg
+      - assert:
+          exit_code: 0
+          image:
+            path: 1px.jpg
+            format: jpeg
+
+  - name: inspects a 10000x1 PNG
+    steps:
+      - run:
+          shell: true
+          command: truss inspect "$FIXTURES_DIR/large.png"
+      - assert:
+          exit_code: 0
+          stdout:
+            json:
+              path: $.width
+              equals: 10000
+      - assert:
+          stdout:
+            json:
+              path: $.height
+              equals: 1
+
+  - name: converts a 10000x1 PNG to JPEG
+    steps:
+      - run:
+          shell: true
+          command: truss convert "$FIXTURES_DIR/large.png" -o large.jpg
+      - assert:
+          exit_code: 0
+          image:
+            path: large.jpg
+            format: jpeg
+
+  - name: inspects a 1x10000 PNG
+    steps:
+      - run:
+          shell: true
+          command: truss inspect "$FIXTURES_DIR/tall.png"
+      - assert:
+          exit_code: 0
+          stdout:
+            json:
+              path: $.width
+              equals: 1
+      - assert:
+          stdout:
+            json:
+              path: $.height
+              equals: 10000
+
+  - name: converts a 1x10000 PNG to JPEG
+    steps:
+      - run:
+          shell: true
+          command: truss convert "$FIXTURES_DIR/tall.png" -o tall.jpg
+      - assert:
+          exit_code: 0
+          image:
+            path: tall.jpg
+            format: jpeg
+
+  - name: inspects a fully transparent PNG (hasAlpha true)
+    steps:
+      - run:
+          shell: true
+          command: truss inspect "$FIXTURES_DIR/transparent.png"
+      - assert:
+          exit_code: 0
+          stdout:
+            json:
+              path: $.hasAlpha
+              equals: true
+
+  - name: converts a fully transparent PNG to JPEG without error
+    steps:
+      # JPEG does not support alpha — truss should composite over a background.
+      - run:
+          shell: true
+          command: truss convert "$FIXTURES_DIR/transparent.png" -o transparent.jpg
+      - assert:
+          exit_code: 0
+          image:
+            path: transparent.jpg
+            format: jpeg
+
+  - name: converts a semi-transparent PNG to JPEG
+    steps:
+      - run:
+          shell: true
+          command: truss convert "$FIXTURES_DIR/semitransparent.png" -o semi.jpg
+      - assert:
+          exit_code: 0
+          image:
+            path: semi.jpg
+            format: jpeg
+
+  - name: inspects an EXIF-rotated JPEG
+    steps:
+      - run:
+          shell: true
+          command: truss inspect "$FIXTURES_DIR/exif-rotated.jpg"
+      - assert:
+          exit_code: 0
+          stdout:
+            json:
+              path: $.format
+              equals: jpeg
+
+  - name: converts an EXIF-rotated JPEG to PNG
+    steps:
+      - run:
+          shell: true
+          command: truss convert "$FIXTURES_DIR/exif-rotated.jpg" -o exif.png
+      - assert:
+          exit_code: 0
+          image:
+            path: exif.png
+            format: png
+
+  - name: inspects a CMYK JPEG
+    steps:
+      - run:
+          shell: true
+          command: truss inspect "$FIXTURES_DIR/cmyk.jpg"
+      - assert:
+          exit_code: 0
+          stdout:
+            json:
+              path: $.format
+              equals: jpeg
+
+  - name: converts a CMYK JPEG to PNG
+    steps:
+      - run:
+          shell: true
+          command: truss convert "$FIXTURES_DIR/cmyk.jpg" -o cmyk.png
+      - assert:
+          exit_code: 0
+          image:
+            path: cmyk.png
+            format: png
+
+  - name: inspect may succeed on a truncated JPEG (header intact)
+    steps:
+      # The JPEG header is valid so inspect can read dimensions, but the
+      # image data is incomplete.
+      - run:
+          shell: true
+          command: truss inspect "$FIXTURES_DIR/truncated.jpg"
+      - assert:
+          exit_code: 0
+          stdout:
+            contains: '"format"'
+
+  - name: convert fails on a truncated JPEG (exit 4, transform/decode error)
+    steps:
+      - run:
+          shell: true
+          command: truss convert "$FIXTURES_DIR/truncated.jpg" -o trunc.png
+      - assert:
+          exit_code: 4
+          stderr:
+            contains: "error:"
+
+  - name: inspects a corrupt-header JPEG (graceful handling)
+    steps:
+      # The corruption is mild enough that the decoder still works.
+      - run:
+          shell: true
+          command: truss inspect "$FIXTURES_DIR/corrupt-header.jpg"
+      - assert:
+          exit_code: 0
+          stdout:
+            contains: '"format"'
+
+  - name: converts a corrupt-header JPEG
+    steps:
+      - run:
+          shell: true
+          command: truss convert "$FIXTURES_DIR/corrupt-header.jpg" -o corrupt.png
+      - assert:
+          exit_code: 0
+
+  - name: inspects a PNG with an invalid chunk (tolerant decoder)
+    steps:
+      - run:
+          shell: true
+          command: truss inspect "$FIXTURES_DIR/invalid-chunk.png"
+      - assert:
+          exit_code: 0
+          stdout:
+            contains: '"format"'
+
+  - name: converts a PNG with an invalid chunk
+    steps:
+      - run:
+          shell: true
+          command: truss convert "$FIXTURES_DIR/invalid-chunk.png" -o badchunk.jpg
+      - assert:
+          exit_code: 0
+
+  - name: rejects an empty file (exit 3, unsupported format)
+    steps:
+      - run:
+          shell: true
+          command: truss inspect "$FIXTURES_DIR/zero-bytes.bin"
+      - assert:
+          exit_code: 3
+          stderr:
+            contains: "error:"
+
+  - name: rejects random binary data (exit 3, unsupported format)
+    steps:
+      - run:
+          shell: true
+          command: truss inspect "$FIXTURES_DIR/random-noise.bin"
+      - assert:
+          exit_code: 3
+          stderr:
+            contains: "error:"

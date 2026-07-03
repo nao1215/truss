@@ -1,0 +1,76 @@
+# Migrated from ShellSpec integration/cli/spec/security_spec.sh.
+# SVG files can contain embedded scripts (XSS), XML entity expansion attacks
+# (billion laughs), and external resource references (SSRF). truss must
+# neutralize these threats when converting SVG to raster.
+#
+# Fixtures (integration/fixtures, via $FIXTURES_DIR):
+#   svg-entity-bomb.svg    XML entity expansion (<!ENTITY> nesting)
+#   svg-script.svg         <script>, onclick, onload attributes
+#   svg-external-ref.svg   External xlink:href references
+#   svg-minimal.svg        Smallest valid SVG (1x1, no content)
+#
+# Run with: e2e/run.sh
+version: "1"
+
+suite:
+  name: truss svg security
+
+scenarios:
+  - name: rejects SVG with entity expansion (does not hang or OOM)
+    steps:
+      # The entity bomb SVG uses nested <!ENTITY> declarations. truss should
+      # reject it rather than expanding entities.
+      - run:
+          shell: true
+          command: truss convert "$FIXTURES_DIR/svg-entity-bomb.svg" -o bomb.png --format png
+      - assert:
+          exit_code: { not: 0 }
+          stderr:
+            contains: "error:"
+
+  - name: converts SVG with embedded scripts to raster without error
+    steps:
+      # Scripts are irrelevant in raster output — the SVG sanitizer strips
+      # them during parsing, and the rasterizer never executes JS.
+      - run:
+          shell: true
+          command: truss convert "$FIXTURES_DIR/svg-script.svg" -o noscript.png --format png
+      - assert:
+          exit_code: 0
+          image:
+            path: noscript.png
+            format: png
+
+  - name: converts SVG with external refs (refs are not fetched)
+    steps:
+      # External xlink:href URLs must NOT be fetched during conversion. The
+      # converter should either strip them or ignore them.
+      - run:
+          shell: true
+          command: truss convert "$FIXTURES_DIR/svg-external-ref.svg" -o noextref.png --format png
+      - assert:
+          exit_code: 0
+          image:
+            path: noextref.png
+            format: png
+
+  - name: inspects a minimal SVG
+    steps:
+      - run:
+          shell: true
+          command: truss inspect "$FIXTURES_DIR/svg-minimal.svg"
+      - assert:
+          exit_code: 0
+          stdout:
+            contains: '"svg"'
+
+  - name: converts a minimal SVG to PNG
+    steps:
+      - run:
+          shell: true
+          command: truss convert "$FIXTURES_DIR/svg-minimal.svg" -o minimal.png --format png
+      - assert:
+          exit_code: 0
+          image:
+            path: minimal.png
+            format: png

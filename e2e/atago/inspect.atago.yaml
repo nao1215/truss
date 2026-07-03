@@ -1,0 +1,92 @@
+# Migrated from ShellSpec integration/cli/spec/inspect_spec.sh.
+# The inspect command prints JSON metadata about an image: format, MIME type,
+# dimensions, alpha channel presence, and animation status.
+#
+#   truss inspect <FILE>
+#   truss inspect -        (read from stdin)
+#
+# The ShellSpec substring checks on the JSON text become atago `json` path
+# assertions where the value matters. Run with: e2e/run.sh
+version: "1"
+
+suite:
+  name: truss inspect
+
+scenarios:
+  - name: prints JSON metadata for a PNG file
+    steps:
+      - run:
+          shell: true
+          command: truss inspect "$FIXTURES_DIR/sample.png"
+      - assert:
+          exit_code: 0
+          stdout:
+            contains:
+              - '"format"'
+              - '"width"'
+              - '"height"'
+
+  - name: reports the correct format and dimensions (png, 4x3)
+    steps:
+      - run:
+          shell: true
+          command: truss inspect "$FIXTURES_DIR/sample.png"
+      - assert:
+          exit_code: 0
+          stdout:
+            json:
+              path: $.format
+              equals: png
+      - assert:
+          stdout:
+            json:
+              path: $.width
+              equals: 4
+      - assert:
+          stdout:
+            json:
+              path: $.height
+              equals: 3
+
+  - name: reports alpha channel presence
+    steps:
+      - run:
+          shell: true
+          command: truss inspect "$FIXTURES_DIR/sample.png"
+      - assert:
+          exit_code: 0
+          stdout:
+            contains: '"hasAlpha"'
+
+  - name: reads from stdin when given -
+    steps:
+      - run:
+          shell: true
+          command: cat "$FIXTURES_DIR/sample.png" | truss inspect -
+      - assert:
+          exit_code: 0
+          stdout:
+            contains:
+              - '"format"'
+              - '"width"'
+
+  - name: exits 1 with usage and hint when no input is given
+    steps:
+      - run:
+          command: truss inspect
+      - assert:
+          exit_code: 1
+          stderr:
+            contains:
+              - "error:"
+              - "usage:"
+              - "hint:"
+
+  - name: exits 2 when the file does not exist
+    steps:
+      - run:
+          command: truss inspect /nonexistent/file.png
+      - assert:
+          exit_code: 2
+          stderr:
+            contains: "error:"

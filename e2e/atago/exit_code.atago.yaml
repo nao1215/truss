@@ -1,0 +1,140 @@
+# Migrated from ShellSpec integration/cli/spec/exit_code_spec.sh.
+# truss uses structured exit codes so that scripts and CI pipelines can
+# distinguish between different failure modes:
+#
+#   0  Success
+#   1  Usage error (bad arguments, missing required flags)
+#   2  I/O error (file not found, permission denied, network failure)
+#   3  Input error (unsupported format, corrupt file)
+#   4  Transform error (encode failure, size limit exceeded, deadline)
+#
+# Run with: e2e/run.sh
+version: "1"
+
+suite:
+  name: truss exit codes
+
+scenarios:
+  - name: "exit 0: help"
+    steps:
+      - run:
+          command: truss --help
+      - assert:
+          exit_code: 0
+          stdout:
+            contains: "USAGE"
+
+  - name: "exit 0: successful conversion"
+    steps:
+      - run:
+          shell: true
+          command: truss convert "$FIXTURES_DIR/sample.png" -o ok.jpg
+      - assert:
+          exit_code: 0
+
+  - name: "exit 0: successful inspection"
+    steps:
+      - run:
+          shell: true
+          command: truss inspect "$FIXTURES_DIR/sample.png"
+      - assert:
+          exit_code: 0
+          stdout:
+            contains: '"format"'
+
+  - name: "exit 1: convert is missing --output"
+    steps:
+      - run:
+          shell: true
+          command: truss convert "$FIXTURES_DIR/sample.png"
+      - assert:
+          exit_code: 1
+          stderr:
+            contains: "error:"
+
+  - name: "exit 1: unknown command"
+    steps:
+      - run:
+          command: truss notacommand
+      - assert:
+          exit_code: 1
+          stderr:
+            contains: "error:"
+
+  - name: "exit 1: inspect has no input"
+    steps:
+      - run:
+          command: truss inspect
+      - assert:
+          exit_code: 1
+          stderr:
+            contains: "error:"
+
+  - name: "exit 1: sign has no arguments"
+    steps:
+      - run:
+          command: truss sign
+      - assert:
+          exit_code: 1
+          stderr:
+            contains: "error:"
+
+  - name: "exit 2: inspect input file does not exist"
+    steps:
+      - run:
+          command: truss inspect /no/such/file.png
+      - assert:
+          exit_code: 2
+          stderr:
+            contains: "error:"
+
+  - name: "exit 2: convert input file does not exist"
+    steps:
+      - run:
+          command: truss convert /no/such/file.png -o out.jpg
+      - assert:
+          exit_code: 2
+          stderr:
+            contains: "error:"
+
+  - name: "exit 3: corrupt image data"
+    steps:
+      - fixture:
+          file: corrupt.dat
+          content: "this is not an image"
+      - run:
+          command: truss inspect corrupt.dat
+      - assert:
+          exit_code: 3
+          stderr:
+            contains: "error:"
+
+  - name: "exit 3: empty file (zero bytes)"
+    steps:
+      - run:
+          shell: true
+          command: truss inspect "$FIXTURES_DIR/zero-bytes.bin"
+      - assert:
+          exit_code: 3
+          stderr:
+            contains: "error:"
+
+  - name: "exit 3: random binary data"
+    steps:
+      - run:
+          shell: true
+          command: truss inspect "$FIXTURES_DIR/random-noise.bin"
+      - assert:
+          exit_code: 3
+          stderr:
+            contains: "error:"
+
+  - name: "exit 4: converting a truncated JPEG"
+    steps:
+      - run:
+          shell: true
+          command: truss convert "$FIXTURES_DIR/truncated.jpg" -o trunc.png
+      - assert:
+          exit_code: 4
+          stderr:
+            contains: "error:"

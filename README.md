@@ -33,7 +33,7 @@ Use the CLI for local files and shell pipelines, run the server behind a CDN or 
 - Signed URLs, SSRF protections, and SVG sanitization are built in.
 - Supports JPEG, PNG, WebP, AVIF, BMP, TIFF, and SVG.
 - Runs on Linux, macOS, and Windows.
-- CLI behavior is covered by [ShellSpec](https://github.com/shellspec/shellspec), and the HTTP API by [runn](https://github.com/k1LoW/runn).
+- CLI behavior is covered by [atago](https://github.com/nao1215/atago), and the HTTP API by [runn](https://github.com/k1LoW/runn).
 
 ## Installation
 

@@ -1,0 +1,120 @@
+# Pixel-level conversion guarantees, adapted from atago's dogfood suite
+# (atago/test/e2e/tools/truss). These go beyond the ShellSpec magic-byte
+# checks: atago's `image` assertion decodes the output for real and
+# `similar_to` compares pixels against a committed baseline.
+#
+# The input image is a committed 16x16 PNG (testdata/sample.png). `fixture.from`
+# copies it into the per-scenario workdir; `similar_to` baselines resolve
+# against this spec's directory, so they point straight at the committed
+# testdata file. Run with: e2e/run.sh
+version: "1"
+
+suite:
+  name: truss pixel guarantees
+
+scenarios:
+  - name: inspect reports PNG format and dimensions as JSON
+    steps:
+      - fixture:
+          file: in.png
+          from: testdata/sample.png
+      - run:
+          command: truss inspect in.png
+      - assert:
+          exit_code: 0
+          stdout:
+            json:
+              path: $.format
+              equals: png
+      - assert:
+          stdout:
+            json:
+              path: $.width
+              equals: 16
+      - assert:
+          stdout:
+            json:
+              path: $.height
+              equals: 16
+
+  - name: convert PNG to JPEG yields a same-size opaque JPEG
+    steps:
+      - fixture:
+          file: in.png
+          from: testdata/sample.png
+      - run:
+          command: truss convert in.png -o out.jpg
+      - assert:
+          exit_code: 0
+          image:
+            path: out.jpg
+            format: jpeg
+            width: 16
+            height: 16
+            alpha: false
+
+  - name: resize with fit=fill produces the requested dimensions
+    steps:
+      - fixture:
+          file: in.png
+          from: testdata/sample.png
+      - run:
+          command: truss convert in.png -o thumb.png --width 8 --height 8 --fit fill
+      - assert:
+          exit_code: 0
+          image:
+            path: thumb.png
+            format: png
+            width: 8
+            height: 8
+
+  - name: convert to WebP yields a WebP of the same dimensions
+    steps:
+      - fixture:
+          file: in.png
+          from: testdata/sample.png
+      - run:
+          command: truss convert in.png -o out.webp --format webp
+      - assert:
+          exit_code: 0
+          image:
+            path: out.webp
+            format: webp
+            width: 16
+            height: 16
+
+  - name: a high-quality JPEG stays visually close to the source
+    steps:
+      - fixture:
+          file: in.png
+          from: testdata/sample.png
+      - run:
+          command: truss convert in.png -o out.jpg --quality 100
+      - assert:
+          exit_code: 0
+          image:
+            path: out.jpg
+            similar_to: testdata/sample.png
+            max_diff: 0.05
+
+  - name: a lossless PNG re-encode is pixel-identical to the source
+    steps:
+      - fixture:
+          file: in.png
+          from: testdata/sample.png
+      - run:
+          command: truss convert in.png -o copy.png
+      - assert:
+          exit_code: 0
+          image:
+            path: copy.png
+            similar_to: testdata/sample.png
+
+  - name: a missing input file exits with the I/O error code
+    steps:
+      - run:
+          command: truss convert does-not-exist.png -o out.jpg
+      - assert:
+          exit_code: 2
+          stderr:
+            contains: does-not-exist.png

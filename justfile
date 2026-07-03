@@ -82,10 +82,9 @@ coverage-html:
 # Integration tests (Docker-based)
 # ---------------------------------------------------------------------------
 
-# Run CLI integration tests with ShellSpec in Docker
+# Run CLI end-to-end tests with atago (builds truss, needs atago on PATH)
 integration-cli:
-    docker build -t truss-cli-test -f integration/cli/Dockerfile .
-    docker run --rm truss-cli-test
+    ./e2e/run.sh
 
 # Run API server integration tests with runn in Docker Compose
 integration-api:
