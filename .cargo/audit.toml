@@ -7,9 +7,17 @@
 # bypass) or the app to parse attacker-controlled CRLs (CRL panic), which truss does
 # not do through this path. Practical risk is therefore low.
 # The modern rustls 0.23 path uses the patched rustls-webpki 0.103.13.
+#
+# RUSTSEC-2026-0194 / RUSTSEC-2026-0195 (quick-xml < 0.41: attribute-check DoS and
+# NsReader namespace-allocation DoS): truss's own quick-xml (SVG parsing) is on the
+# patched 0.41, but the Azure SDK path (azure_core -> typespec 0.14) still pins
+# quick-xml ^0.39 and only uses it to parse Azure's own XML API responses — not
+# attacker-supplied documents. Remove these once typespec bumps quick-xml >= 0.41.
 ignore = [
     "RUSTSEC-2026-0049",
     "RUSTSEC-2026-0098",
     "RUSTSEC-2026-0099",
     "RUSTSEC-2026-0104",
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
 ]
