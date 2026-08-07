@@ -170,6 +170,13 @@ import sys; sys.stdout.buffer.write(png_1x1(255, 0, 0))
 " > "$AZUREONLY_FILE"
 upload "azureonly.png" "$AZUREONLY_FILE"
 
+# A blob name containing "/" is a virtual directory in Azure, and the SDK
+# percent-encodes it into the request path. This fixture is uploaded ONLY under
+# the nested key — nothing answers to the bare "nested-only.png" basename, on
+# Azure or on local disk — so the runbook can prove the whole nested key made it
+# through the encoding rather than just some prefix of it.
+upload "nested/dir/nested-only.png" "$AZUREONLY_FILE"
+
 rm -f "$HELPER_PY"
 
 # ── Wait for truss (via nginx), then exec the given command ──────

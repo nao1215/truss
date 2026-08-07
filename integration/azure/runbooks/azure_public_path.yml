@@ -82,6 +82,57 @@ steps:
       current.res.status == 200
       && current.res.headers['Content-Type'][0] contains 'image/'
 
+  sign_nested:
+    desc: "Compute signature for a blob stored under a virtual directory"
+    exec:
+      command: |
+        python3 -c "
+        import hmac, hashlib, urllib.parse
+        params = [('expires','{{ vars.expires }}'),('format','png'),('keyId','{{ vars.key_id }}'),('path','/nested/dir/nested-only.png')]
+        qs = urllib.parse.urlencode(params)
+        canonical = 'GET\n{{ vars.authority }}\n/images/by-path\n' + qs
+        sig = hmac.new(b'{{ vars.secret }}', canonical.encode(), hashlib.sha256).hexdigest()
+        target = '/images/by-path?' + qs + '&signature=' + sig
+        import sys; sys.stdout.write(target)
+        "
+    test: |
+      current.stdout != ''
+  get_nested_png:
+    desc: "GET nested/dir/nested-only.png — proves slashes in blob names survive URL encoding"
+    req:
+      "{{ steps.sign_nested.stdout }}":
+        get:
+          body: null
+    test: |
+      current.res.status == 200
+      && current.res.headers['Content-Type'][0] contains 'image/'
+
+  sign_nested_basename:
+    desc: "Compute signature for the nested fixture's bare basename"
+    exec:
+      command: |
+        python3 -c "
+        import hmac, hashlib, urllib.parse
+        params = [('expires','{{ vars.expires }}'),('format','png'),('keyId','{{ vars.key_id }}'),('path','/nested-only.png')]
+        qs = urllib.parse.urlencode(params)
+        canonical = 'GET\n{{ vars.authority }}\n/images/by-path\n' + qs
+        sig = hmac.new(b'{{ vars.secret }}', canonical.encode(), hashlib.sha256).hexdigest()
+        target = '/images/by-path?' + qs + '&signature=' + sig
+        import sys; sys.stdout.write(target)
+        "
+    test: |
+      current.stdout != ''
+  get_nested_basename_returns_404:
+    desc: >-
+      GET nested-only.png without its directory returns 404 — pins the previous
+      step to the full nested key rather than a truncated one
+    req:
+      "{{ steps.sign_nested_basename.stdout }}":
+        get:
+          body: null
+    test: |
+      current.res.status == 404
+
   sign_missing:
     desc: "Compute signature for a key that does not exist in Azure"
     exec:

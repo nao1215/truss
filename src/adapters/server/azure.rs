@@ -40,13 +40,7 @@ impl AzureContext {
         let endpoint = self.endpoint_url.clone();
         let container = self.default_container.clone();
         self.runtime.block_on(async {
-            let client = match azure_storage_blob::BlobClient::new(
-                &endpoint,
-                &container,
-                "__truss_health_probe__",
-                None,
-                None,
-            ) {
+            let client = match build_blob_client(&endpoint, &container, "__truss_health_probe__") {
                 Ok(c) => c,
                 Err(_) => return false,
             };
@@ -177,14 +171,10 @@ pub(super) fn read_azure_source_bytes(
 
     ctx.runtime.block_on(async {
         let result = tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), async {
-            let client =
-                azure_storage_blob::BlobClient::new(&ctx.endpoint_url, container, key, None, None)
-                    .map_err(|e| {
-                        super::stderr_write(&format!(
-                            "azure error: failed to create blob client: {e}"
-                        ));
-                        bad_gateway_response("failed to create Azure blob client")
-                    })?;
+            let client = build_blob_client(&ctx.endpoint_url, container, key).map_err(|e| {
+                super::stderr_write(&format!("azure error: failed to create blob client: {e}"));
+                bad_gateway_response("failed to create Azure blob client")
+            })?;
 
             let resp = client.download(None).await.map_err(map_azure_error)?;
 
@@ -232,6 +222,43 @@ pub(super) fn read_azure_source_bytes(
             }
         }
     })
+}
+
+/// Builds a [`azure_storage_blob::BlobClient`] for `container`/`key` under
+/// `endpoint_url`.
+///
+/// `azure_storage_blob` 1.0 dropped the `(endpoint, container, blob)`
+/// constructor in favour of one taking a fully-formed blob URL, so the URL is
+/// assembled here.  Both segments go through `path_segments_mut`, which
+/// percent-encodes them: a `/` inside a blob name becomes `%2F` and dot
+/// segments can never collapse into a parent-directory traversal out of the
+/// container.
+fn build_blob_client(
+    endpoint_url: &str,
+    container: &str,
+    key: &str,
+) -> Result<azure_storage_blob::BlobClient, azure_core::Error> {
+    let mut container_url: azure_core::http::Url = endpoint_url.parse().map_err(|e| {
+        azure_core::Error::with_message(
+            azure_core::error::ErrorKind::Other,
+            format!("invalid Azure endpoint URL: {e}"),
+        )
+    })?;
+    container_url
+        .path_segments_mut()
+        .map_err(|_| {
+            azure_core::Error::with_message(
+                azure_core::error::ErrorKind::Other,
+                format!("{endpoint_url} is not a valid base URL"),
+            )
+        })?
+        // An endpoint written with a trailing slash yields a trailing empty
+        // segment; dropping it avoids a doubled slash before the container.
+        .pop_if_empty()
+        .push(container);
+
+    let container_client = azure_storage_blob::BlobContainerClient::new(container_url, None, None)?;
+    Ok(container_client.blob_client(key))
 }
 
 /// Validates that an Azure blob name does not contain dangerous characters.
@@ -366,6 +393,63 @@ mod tests {
     fn test_map_azure_error_401_returns_bad_gateway() {
         let resp = map_azure_error(http_error(azure_core::http::StatusCode::Unauthorized));
         assert_eq!(resp.status, "502 Bad Gateway");
+    }
+
+    #[test]
+    fn test_build_blob_client_url_layout() {
+        let client = build_blob_client(
+            "https://acct.blob.core.windows.net",
+            "truss-test",
+            "sample.png",
+        )
+        .unwrap();
+        assert_eq!(
+            client.url().as_str(),
+            "https://acct.blob.core.windows.net/truss-test/sample.png"
+        );
+    }
+
+    #[test]
+    fn test_build_blob_client_keeps_path_style_account_endpoint() {
+        // Azurite (and other emulators) put the account in the path.
+        let client =
+            build_blob_client("http://azurite:10000/devstoreaccount1", "c", "1px.png").unwrap();
+        assert_eq!(
+            client.url().as_str(),
+            "http://azurite:10000/devstoreaccount1/c/1px.png"
+        );
+    }
+
+    #[test]
+    fn test_build_blob_client_tolerates_trailing_slash() {
+        let client =
+            build_blob_client("http://azurite:10000/devstoreaccount1/", "c", "a.png").unwrap();
+        assert_eq!(
+            client.url().as_str(),
+            "http://azurite:10000/devstoreaccount1/c/a.png"
+        );
+    }
+
+    #[test]
+    fn test_build_blob_client_escapes_dot_segments_in_key() {
+        // A key full of dot segments must stay inside the container rather than
+        // resolving to a sibling path on the storage account.
+        let client = build_blob_client(
+            "https://acct.blob.core.windows.net",
+            "truss-test",
+            "../etc/passwd",
+        )
+        .unwrap();
+        assert_eq!(
+            client.url().as_str(),
+            "https://acct.blob.core.windows.net/truss-test/..%2Fetc%2Fpasswd"
+        );
+    }
+
+    #[test]
+    fn test_build_blob_client_rejects_non_base_endpoint() {
+        assert!(build_blob_client("not a url", "c", "a.png").is_err());
+        assert!(build_blob_client("mailto:someone@example.com", "c", "a.png").is_err());
     }
 
     // L-3: Unicode / special character key tests
