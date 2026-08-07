@@ -170,6 +170,11 @@ import sys; sys.stdout.buffer.write(png_1x1(255, 0, 0))
 " > "$AZUREONLY_FILE"
 upload "azureonly.png" "$AZUREONLY_FILE"
 
+# A blob name containing "/" is a virtual directory in Azure, and the SDK
+# percent-encodes it into the request path. Keep a nested fixture so the
+# encoding stays covered end to end.
+upload "nested/dir/sample.png" /fixtures/sample.png
+
 rm -f "$HELPER_PY"
 
 # ── Wait for truss (via nginx), then exec the given command ──────
