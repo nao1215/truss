@@ -312,11 +312,11 @@ fn no_auto_orient_preserves_dimensions() {
 }
 
 // ---------------------------------------------------------------------------
-// Test 4: CLI warning output for --keep-metadata --format webp --quality
+// Test 4: --keep-metadata --format webp --quality carries EXIF into the container
 // ---------------------------------------------------------------------------
 
 #[test]
-fn keep_metadata_webp_emits_warning() {
+fn keep_metadata_webp_preserves_exif_without_warning() {
     let input_path = temp_file_path("warn-meta-in").with_extension("jpg");
     let output_path = temp_file_path("warn-meta-out").with_extension("webp");
     fs::write(&input_path, create_4x2_jpeg_with_orientation1()).expect("write input");
@@ -333,20 +333,25 @@ fn keep_metadata_webp_emits_warning() {
         .output()
         .expect("run truss convert");
 
+    let encoded = fs::read(&output_path).unwrap_or_default();
+
     let _ = fs::remove_file(&input_path);
     let _ = fs::remove_file(&output_path);
 
-    // Command should succeed even if metadata cannot be preserved.
     assert!(
         output.status.success(),
         "expected exit code 0, got {output:?}"
     );
 
-    // Stderr should contain a warning about metadata being dropped.
+    // Lossy WebP used to drop EXIF and warn about it; the chunk is written now.
+    assert!(
+        encoded.windows(4).any(|window| window == b"EXIF"),
+        "expected an EXIF chunk in the WebP container"
+    );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.to_lowercase().contains("warning"),
-        "expected stderr to contain 'warning', got: {stderr}"
+        !stderr.to_lowercase().contains("warning"),
+        "nothing was dropped, so nothing should warn; got: {stderr}"
     );
 }
 

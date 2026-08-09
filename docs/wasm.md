@@ -375,7 +375,7 @@ Frontend note:
 - AVIF encode/decode requires the `avif` feature.
 - Lossy WebP output requires the `webp-lossy` feature.
 - Metadata retention is not implemented for AVIF output.
-- Lossy WebP optimization cannot preserve metadata.
+- WebP output carries ICC, EXIF, and XMP in container chunks (lossy included); IPTC has no WebP chunk and is dropped.
 - The WASM adapter does not inject a transform deadline. Browser apps should own their own UX for cancellation, progress, and timeouts.
 - A browser may fail to preview a valid transformed artifact even when the conversion succeeded. In that case the output bytes are still usable for download.
 

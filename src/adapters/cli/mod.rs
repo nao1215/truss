@@ -127,7 +127,8 @@ OPTIONS:
       --rotate <DEG>       Rotate: 0, 90, 180, 270
       --auto-orient        Apply EXIF orientation and reset tag (default)
       --no-auto-orient     Skip EXIF orientation correction
-      --strip-metadata     Remove all metadata (default)
+      --strip-metadata     Remove all metadata (default; lossy optimization keeps the
+                           ICC profile so colors are not shifted by the re-encode)
       --keep-metadata      Preserve EXIF, ICC, and other supported metadata
       --preserve-exif      Preserve EXIF only (strip ICC and others)
       --crop <x,y,w,h>     Explicit crop region as x,y,width,height (applied before resize; raster-only)
@@ -168,7 +169,8 @@ OPTIONS:
                            Perceptual target for lossy optimization (e.g. ssim:0.98, psnr:42)
       --auto-orient        Apply EXIF orientation and reset tag (default)
       --no-auto-orient     Skip EXIF orientation correction
-      --strip-metadata     Remove all metadata (default)
+      --strip-metadata     Remove all metadata (default; lossy optimization keeps the
+                           ICC profile so colors are not shifted by the re-encode)
       --keep-metadata      Preserve EXIF, ICC, and other supported metadata
       --preserve-exif      Preserve EXIF only (strip ICC and others)
 

@@ -232,6 +232,20 @@ By default, truss strips all metadata for smaller and safer output.
 | `--auto-orient` (default) | Apply EXIF orientation tag and reset it |
 | `--no-auto-orient` | Skip EXIF orientation correction |
 
+Lossy optimization (`--mode lossy`, or `--optimize lossy` on `convert`) keeps the ICC profile
+even under `--strip-metadata`: dropping it would make the re-encoded image render with shifted
+colors. Use `--preserve-exif` if you want the profile gone. Formats that cannot carry a profile
+(AVIF, BMP, TIFF) strip it as asked.
+
+Metadata support per output format:
+
+| Format | ICC | EXIF | XMP | IPTC |
+|--------|-----|------|-----|------|
+| JPEG | yes | yes | yes | yes |
+| PNG | yes | yes | yes | no |
+| WebP | yes | yes | yes | no |
+| AVIF | no | no | no | no |
+
 ```sh
 # Keep all metadata (useful for archival)
 truss photo.jpg -o out.jpg --keep-metadata
