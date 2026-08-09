@@ -1,0 +1,187 @@
+# Color-model preservation across a transform.
+#
+# Regression coverage for https://github.com/nao1215/truss/issues/253: every decoded
+# image was widened to RGBA8 before encoding, so a no-op `truss convert in.png -o out.png`
+# on an opaque PNG flipped `hasAlpha` from false to true and grew the file. An alpha
+# channel is now written only when the pixels actually need one.
+#
+# `truss inspect` reads the color model straight out of the encoded header, which is the
+# observable the issue reports on; atago's `image: alpha:` assertion scans decoded pixels,
+# so the two together pin both the container and the pixels. Run with: e2e/run.sh
+version: "1"
+
+suite:
+  name: truss color model preservation
+
+scenarios:
+  - name: a no-op same-format pass keeps an opaque PNG opaque
+    steps:
+      - fixture:
+          file: in.png
+          from: testdata/sample.png
+      - run:
+          command: truss inspect in.png
+      - assert:
+          exit_code: 0
+          stdout:
+            json:
+              path: $.hasAlpha
+              equals: false
+      - run:
+          command: truss convert in.png -o out.png
+      - assert:
+          exit_code: 0
+      - run:
+          command: truss inspect out.png
+      - assert:
+          exit_code: 0
+          stdout:
+            json:
+              path: $.hasAlpha
+              equals: false
+      - assert:
+          image:
+            path: out.png
+            format: png
+            alpha: false
+      # A same-format pass must not change the pixels either.
+      - assert:
+          image:
+            path: out.png
+            similar_to: testdata/sample.png
+
+  - name: a resize keeps an opaque PNG opaque
+    steps:
+      - fixture:
+          file: in.png
+          from: testdata/sample.png
+      - run:
+          command: truss convert in.png -o resized.png --width 32
+      - assert:
+          exit_code: 0
+      - run:
+          command: truss inspect resized.png
+      - assert:
+          exit_code: 0
+          stdout:
+            json:
+              path: $.hasAlpha
+              equals: false
+
+  - name: an opaque PNG stays opaque through WebP output
+    steps:
+      - fixture:
+          file: in.png
+          from: testdata/sample.png
+      - run:
+          command: truss convert in.png -o out.webp --format webp
+      - assert:
+          exit_code: 0
+      - run:
+          command: truss inspect out.webp
+      - assert:
+          exit_code: 0
+          stdout:
+            json:
+              path: $.hasAlpha
+              equals: false
+
+  - name: an opaque PNG stays opaque through BMP output
+    steps:
+      - fixture:
+          file: in.png
+          from: testdata/sample.png
+      - run:
+          command: truss convert in.png -o out.bmp --format bmp
+      - assert:
+          exit_code: 0
+      - run:
+          command: truss inspect out.bmp
+      - assert:
+          exit_code: 0
+          stdout:
+            json:
+              path: $.hasAlpha
+              equals: false
+
+  - name: transparency survives a same-format PNG pass
+    steps:
+      - run:
+          shell: true
+          command: truss convert "$FIXTURES_DIR/transparent.png" -o keep.png
+      - assert:
+          exit_code: 0
+          image:
+            path: keep.png
+            format: png
+            alpha: true
+      - run:
+          command: truss inspect keep.png
+      - assert:
+          exit_code: 0
+          stdout:
+            json:
+              path: $.hasAlpha
+              equals: true
+
+  - name: transparency survives conversion to WebP
+    steps:
+      - run:
+          shell: true
+          command: truss convert "$FIXTURES_DIR/transparent.png" -o keep.webp --format webp
+      - assert:
+          exit_code: 0
+      - run:
+          command: truss inspect keep.webp
+      - assert:
+          exit_code: 0
+          stdout:
+            json:
+              path: $.hasAlpha
+              equals: true
+
+  - name: padding an opaque image into a wider box adds the alpha it needs
+    steps:
+      - fixture:
+          file: in.png
+          from: testdata/sample.png
+      # fit=contain letterboxes with the default transparent background, so the output
+      # genuinely needs an alpha channel.
+      - run:
+          command: truss convert in.png -o padded.png --width 32 --height 16 --fit contain
+      - assert:
+          exit_code: 0
+          image:
+            path: padded.png
+            format: png
+            alpha: true
+      - run:
+          command: truss inspect padded.png
+      - assert:
+          exit_code: 0
+          stdout:
+            json:
+              path: $.hasAlpha
+              equals: true
+
+  - name: padding with an opaque background keeps the output opaque
+    steps:
+      - fixture:
+          file: in.png
+          from: testdata/sample.png
+      - run:
+          command: truss convert in.png -o padded-white.png --width 32 --height 16 --fit contain --background ffffff
+      - assert:
+          exit_code: 0
+          image:
+            path: padded-white.png
+            format: png
+            alpha: false
+      - run:
+          command: truss inspect padded-white.png
+      - assert:
+          exit_code: 0
+          stdout:
+            json:
+              path: $.hasAlpha
+              equals: false
