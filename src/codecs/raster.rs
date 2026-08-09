@@ -645,19 +645,42 @@ fn check_input_pixel_limit(input: &Artifact) -> Result<(), TransformError> {
     Ok(())
 }
 
+/// Resolves the dimensions `apply_resize` will produce for the given request.
+///
+/// When only one axis is requested the other is derived from the source aspect ratio, exactly
+/// as `apply_resize` does, so callers see the real output size rather than the source size.
+fn resolved_output_dimensions(
+    current: (u32, u32),
+    width: Option<u32>,
+    height: Option<u32>,
+) -> (u32, u32) {
+    let (current_w, current_h) = current;
+    match (width, height) {
+        (None, None) => current,
+        (Some(target_width), None) => (
+            target_width,
+            scale_dimension(current_h, target_width, current_w),
+        ),
+        (None, Some(target_height)) => (
+            scale_dimension(current_w, target_height, current_h),
+            target_height,
+        ),
+        (Some(target_width), Some(target_height)) => (target_width, target_height),
+    }
+}
+
 /// Checks the output dimensions against [`MAX_OUTPUT_PIXELS`] before resize allocation.
 ///
 /// Computes the effective output pixel count from the requested dimensions and the current
-/// image size. The check runs before `apply_resize` so that oversized output buffers are
-/// never allocated.
+/// image size, deriving the omitted axis from the aspect ratio the same way `apply_resize`
+/// does. The check runs before `apply_resize` so that oversized output buffers are never
+/// allocated.
 fn check_output_pixel_limit(
     image: &DynamicImage,
     width: Option<u32>,
     height: Option<u32>,
 ) -> Result<(), TransformError> {
-    let (current_w, current_h) = image.dimensions();
-    let out_w = width.unwrap_or(current_w);
-    let out_h = height.unwrap_or(current_h);
+    let (out_w, out_h) = resolved_output_dimensions(image.dimensions(), width, height);
     let pixels = u64::from(out_w) * u64::from(out_h);
     if pixels > MAX_OUTPUT_PIXELS {
         return Err(TransformError::LimitExceeded(format!(
@@ -740,12 +763,11 @@ fn apply_resize(
 
     match (width, height) {
         (None, None) => image,
-        (Some(target_width), None) => {
-            let target_height = scale_dimension(original_height, target_width, original_width);
-            image.resize_exact(target_width, target_height, FilterType::Lanczos3)
-        }
-        (None, Some(target_height)) => {
-            let target_width = scale_dimension(original_width, target_height, original_height);
+        // Single-axis resize derives the other axis from the aspect ratio. The same helper
+        // backs `check_output_pixel_limit`, so the limit is applied to the real output size.
+        (Some(_), None) | (None, Some(_)) => {
+            let (target_width, target_height) =
+                resolved_output_dimensions((original_width, original_height), width, height);
             image.resize_exact(target_width, target_height, FilterType::Lanczos3)
         }
         (Some(target_width), Some(target_height)) => match fit.unwrap_or(Fit::Contain) {
@@ -3223,7 +3245,7 @@ mod tests {
     #[test]
     fn output_pixel_limit_rejects_oversized() {
         use super::check_output_pixel_limit;
-        // 8193 * 8192 = 67_116_032 > MAX_OUTPUT_PIXELS (67_108_864)
+        // 8193 * 8192 = 67_117_056 > MAX_OUTPUT_PIXELS (67_108_864)
         let image =
             image::DynamicImage::ImageRgba8(RgbaImage::from_pixel(1, 1, Rgba([0, 0, 0, 255])));
         let err = check_output_pixel_limit(&image, Some(8193), Some(8192)).unwrap_err();
@@ -3404,6 +3426,72 @@ mod tests {
         let round_tripped =
             sniff_artifact(RawArtifact::new(result.artifact.bytes, None)).expect("sniff output");
         assert_eq!(round_tripped.metadata.has_alpha, Some(false));
+    }
+
+    // Regression test for https://github.com/nao1215/truss/issues/252: the limit was
+    // computed against the *source* height when only --width was given, so a single
+    // oversized dimension slipped through and allocated a gigapixel buffer.
+    #[test]
+    fn output_pixel_limit_uses_aspect_scaled_height_when_only_width_is_given() {
+        use super::check_output_pixel_limit;
+
+        let image =
+            image::DynamicImage::ImageRgba8(RgbaImage::from_pixel(16, 16, Rgba([0, 0, 0, 255])));
+        // A square source scaled to width 10000 also becomes 10000 tall: 100 Mpx > 67_108_864.
+        let err = check_output_pixel_limit(&image, Some(10000), None).unwrap_err();
+        assert!(matches!(err, TransformError::LimitExceeded(_)));
+        assert!(err.to_string().contains("100000000"));
+    }
+
+    #[test]
+    fn output_pixel_limit_uses_aspect_scaled_width_when_only_height_is_given() {
+        use super::check_output_pixel_limit;
+
+        let image =
+            image::DynamicImage::ImageRgba8(RgbaImage::from_pixel(16, 16, Rgba([0, 0, 0, 255])));
+        let err = check_output_pixel_limit(&image, None, Some(10000)).unwrap_err();
+        assert!(matches!(err, TransformError::LimitExceeded(_)));
+        assert!(err.to_string().contains("100000000"));
+    }
+
+    #[test]
+    fn output_pixel_limit_accepts_aspect_scaled_single_dimension_within_limit() {
+        use super::check_output_pixel_limit;
+
+        // A 4:1 source scaled to width 8192 becomes 8192x2048 = 16_777_216 pixels.
+        let image =
+            image::DynamicImage::ImageRgba8(RgbaImage::from_pixel(16, 4, Rgba([0, 0, 0, 255])));
+        check_output_pixel_limit(&image, Some(8192), None).unwrap();
+    }
+
+    #[test]
+    fn transform_rejects_oversized_output_from_width_only_resize() {
+        let input = png_artifact(16, 16, Rgba([10, 20, 30, 255]));
+        let err = transform_raster(TransformRequest::new(
+            input,
+            TransformOptions {
+                width: Some(10000),
+                ..TransformOptions::default()
+            },
+        ))
+        .unwrap_err();
+        assert!(matches!(err, TransformError::LimitExceeded(_)));
+        assert!(err.to_string().contains("output image"));
+    }
+
+    #[test]
+    fn transform_rejects_oversized_output_from_height_only_resize() {
+        let input = png_artifact(16, 16, Rgba([10, 20, 30, 255]));
+        let err = transform_raster(TransformRequest::new(
+            input,
+            TransformOptions {
+                height: Some(10000),
+                ..TransformOptions::default()
+            },
+        ))
+        .unwrap_err();
+        assert!(matches!(err, TransformError::LimitExceeded(_)));
+        assert!(err.to_string().contains("output image"));
     }
 
     #[test]

@@ -1,0 +1,9 @@
+{
+  "schema_version": "1",
+  "failed": [
+    {
+      "spec_path": "e2e/atago/limits.atago.yaml",
+      "scenario": "applies the same limit to the optimize subcommand"
+    }
+  ]
+}
