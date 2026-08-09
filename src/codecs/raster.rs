@@ -3335,6 +3335,47 @@ mod tests {
     }
 
     #[test]
+    fn inject_webp_metadata_reuses_an_existing_vp8x_and_keeps_the_alpha_flag() {
+        use super::inject_webp_metadata;
+
+        // A transparent image makes libwebp emit an extended container (VP8X + ALPH),
+        // so the injector must extend the existing header rather than build a new one.
+        let transparent = transform_raster(TransformRequest::new(
+            png_artifact(8, 8, Rgba([10, 20, 30, 128])),
+            TransformOptions {
+                format: Some(MediaType::Webp),
+                quality: Some(80),
+                ..TransformOptions::default()
+            },
+        ))
+        .expect("encode lossy webp")
+        .artifact
+        .bytes;
+        let before = webp_chunk_payload(&transparent, b"VP8X").expect("VP8X chunk");
+        assert_eq!(before[0] & 0x10, 0x10, "libwebp should flag alpha");
+
+        let injected =
+            inject_webp_metadata(&transparent, Some(b"icc"), None, None).expect("inject");
+
+        let after = webp_chunk_payload(&injected, b"VP8X").expect("VP8X chunk");
+        assert_eq!(after[0] & 0x10, 0x10, "the alpha flag must survive");
+        assert_eq!(after[0] & 0x20, 0x20, "the ICC flag must be set");
+        assert_eq!(
+            after[4..10],
+            before[4..10],
+            "the canvas size must not change"
+        );
+        assert_eq!(
+            webp_chunk_payload(&injected, b"ICCP").as_deref(),
+            Some(&b"icc"[..])
+        );
+
+        let sniffed = sniff_artifact(RawArtifact::new(injected, None)).expect("sniff");
+        assert_eq!(sniffed.metadata.has_alpha, Some(true));
+        assert_eq!(sniffed.metadata.width, Some(8));
+    }
+
+    #[test]
     fn inject_webp_metadata_is_a_no_op_without_payloads() {
         use super::inject_webp_metadata;
 

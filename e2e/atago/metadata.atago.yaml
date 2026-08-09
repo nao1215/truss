@@ -161,6 +161,28 @@ scenarios:
             path: rt.jpg
             contains: "ICC_PROFILE"
 
+  - name: a transparent input keeps both its alpha and its ICC profile
+    steps:
+      # libwebp emits an extended container (VP8X + ALPH) for a transparent image, so the
+      # profile must be added to that header rather than replacing it.
+      - run:
+          shell: true
+          command: truss convert "$FIXTURES_DIR/transparent.png" -o alpha.webp --format webp --quality 80 --keep-metadata
+      - assert:
+          exit_code: 0
+          image:
+            path: alpha.webp
+            format: webp
+            alpha: true
+      - run:
+          command: truss inspect alpha.webp
+      - assert:
+          exit_code: 0
+          stdout:
+            json:
+              path: $.hasAlpha
+              equals: true
+
   - name: lossless WebP output keeps the ICC profile too
     steps:
       - run:
