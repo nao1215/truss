@@ -1,10 +1,15 @@
 # Changelog
 
-## Unreleased
+## v0.12.0
 
 ### Added
 
 - WebP output carries ICC, EXIF, and XMP in `ICCP`/`EXIF`/`XMP ` container chunks, lossy encoding included. libwebp embeds no metadata, so truss now writes the chunks itself, promoting the container to the extended (`VP8X`) format when needed.
+- E2E coverage (atago) for the output pixel budget, color-model preservation, and metadata retention, plus an `integration/fixtures/icc-profile.jpg` fixture carrying an embedded sRGB profile.
+
+### Changed
+
+- `--strip-metadata` now documents, in `truss help convert`/`help optimize` and the README, that lossy optimization keeps the ICC profile so colors are not shifted by the re-encode. The README also gains a per-format metadata support table.
 
 ### Fixed
 
