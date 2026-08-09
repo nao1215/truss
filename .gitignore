@@ -21,3 +21,6 @@ target
 #.idea/
 work
 web/dist/
+
+# atago run state (local last-failed cache)
+.atago/
