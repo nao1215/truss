@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # generate-fixtures.sh — Create integration test fixture images.
 #
-# Requires: ImageMagick 7 (magick), Python 3
+# Requires: ImageMagick 7 (magick), Python 3 with Pillow (for the ICC fixture)
 # Output:   integration/fixtures/
 #
 # These fixtures exercise edge cases that real-world image processing
@@ -64,6 +64,24 @@ echo "[8/14] exif-rotated.jpg — JPEG with EXIF Orientation=6 (90° CW)"
 magick -size 4x3 xc:'rgb(255,0,0)' \
   -set 'EXIF:Orientation' 6 \
   "$DIR/exif-rotated.jpg"
+
+# ---------------------------------------------------------------------------
+# 4b. ICC profile (needs Pillow's ImageCms; ImageMagick cannot mint a profile)
+# ---------------------------------------------------------------------------
+
+echo "[8b/14] icc-profile.jpg — JPEG carrying an embedded sRGB ICC profile, no EXIF"
+python3 -c "
+from PIL import Image, ImageCms
+
+# A gradient so lossy re-encoding has something to work with.
+img = Image.new('RGB', (64, 64))
+for x in range(64):
+    for y in range(64):
+        img.putpixel((x, y), (x * 4 % 256, y * 4 % 256, (x + y) * 2 % 256))
+icc = ImageCms.ImageCmsProfile(ImageCms.createProfile('sRGB')).tobytes()
+img.save('$DIR/icc-profile.jpg', 'JPEG', quality=90, icc_profile=icc)
+print(f'  wrote a {len(icc)}-byte ICC profile')
+"
 
 # ---------------------------------------------------------------------------
 # 5. CMYK JPEG

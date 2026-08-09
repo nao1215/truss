@@ -2,11 +2,17 @@
 
 ## Unreleased
 
+### Added
+
+- WebP output carries ICC, EXIF, and XMP in `ICCP`/`EXIF`/`XMP ` container chunks, lossy encoding included. libwebp embeds no metadata, so truss now writes the chunks itself, promoting the container to the extended (`VP8X`) format when needed.
+
 ### Fixed
 
 - `convert`/`optimize`: enforce `MAX_OUTPUT_PIXELS` against the real output size when only one of `--width`/`--height` is given ([#252](https://github.com/nao1215/truss/issues/252)). The check previously used the *source* size for the omitted axis, so `--width 10000` on a small image produced a 100-megapixel output with exit 0, and a large enough single dimension stalled while allocating the resize buffer.
 - `convert`/`optimize`: stop adding an alpha channel to opaque images ([#253](https://github.com/nao1215/truss/issues/253)). Every decoded image was widened to RGBA8 before encoding, so a no-op same-format pass flipped `hasAlpha` from `false` to `true` and grew the file. PNG, WebP, BMP, TIFF, and AVIF output now use an RGB color model whenever the pixels are fully opaque, and keep alpha whenever any pixel is not.
 - `inspect`: report `hasAlpha` for lossless WebP (VP8L) instead of `null`; the `alpha_is_used` header bit is now read.
+- `optimize --format webp --mode lossy` no longer fails on ICC-bearing input ([#279](https://github.com/nao1215/truss/issues/279)). The lossy encoder rejected any retained metadata, while a strip request is upgraded to "preserve ICC" for lossy output, so no flag combination worked — `--strip-metadata` was itself the reason the command failed.
+- The lossy "preserve ICC" upgrade now applies only to formats that can carry a profile (JPEG, PNG, WebP). For AVIF it stays a full strip instead of putting the pipeline into a state the encoder rejects.
 
 ## v0.11.5
 

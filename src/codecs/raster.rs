@@ -49,10 +49,10 @@ macro_rules! check_deadline_if_set {
 /// performs raster-only work for the current implementation phase: optional EXIF auto-orient
 /// for JPEG input, explicit rotation, resize handling, and encoding into the requested output
 /// format. Metadata stripping remains the default, while `preserve_exif` retains EXIF and
-/// `keep-metadata` retains EXIF plus ICC profiles for JPEG, PNG, and WebP output. Metadata types
-/// that the current encoders cannot round-trip, such as XMP or IPTC, are silently dropped and
-/// reported as [`TransformWarning::MetadataDropped`] warnings in the returned
-/// [`TransformResult`].
+/// `keep-metadata` retains EXIF plus ICC profiles for JPEG, PNG, and WebP output. XMP is carried
+/// for JPEG, PNG, and WebP; IPTC only for JPEG. Metadata the target format cannot round-trip is
+/// silently dropped and reported as [`TransformWarning::MetadataDropped`] warnings in the
+/// returned [`TransformResult`].
 ///
 /// # Errors
 ///
@@ -256,26 +256,15 @@ pub fn transform_raster(request: TransformRequest) -> Result<TransformResult, Tr
     )?;
     check_deadline_if_set!(start, deadline, "encode");
 
-    // Lossy WebP uses libwebp which cannot inject EXIF/ICC, so metadata is silently
-    // dropped even when keep-metadata was requested. Warn the caller.
-    if normalized.options.format == MediaType::Webp
-        && encoded.used_lossy_webp
-        && let Some(metadata) = retained_metadata.as_ref()
-    {
-        if metadata.exif_metadata.is_some() {
-            warnings.push(TransformWarning::MetadataDropped(MetadataKind::Exif));
-        }
-        if metadata.icc_profile.is_some() {
-            warnings.push(TransformWarning::MetadataDropped(MetadataKind::Icc));
-        }
-    }
-
-    // Post-encode byte-level injection for XMP and IPTC metadata.
+    // Post-encode byte-level injection for metadata the encoders cannot embed themselves:
+    // XMP/IPTC for JPEG and PNG, and the whole WebP metadata set for lossy output, which
+    // libwebp writes without any container chunks.
     let bytes = if let Some(ref metadata) = retained_metadata {
         inject_metadata(
             encoded.bytes,
             normalized.options.format,
             metadata,
+            encoded.used_lossy_webp,
             &mut warnings,
         )
     } else {
@@ -1638,11 +1627,6 @@ fn encode_lossy_with_quality(
             })
         }
         MediaType::Webp => {
-            if optimized && retained_metadata.is_some_and(|metadata| !metadata.is_empty()) {
-                return Err(TransformError::CapabilityMissing(
-                    "lossy WebP optimization cannot preserve metadata".to_string(),
-                ));
-            }
             let bytes = encode_webp_lossy_bytes(image, quality)?;
             deadline.check("encode lossy webp")?;
             Ok(EncodedOutput {
@@ -1915,9 +1899,210 @@ fn encode_tiff(image: &DynamicImage) -> Result<Vec<u8>, TransformError> {
     Ok(cursor.into_inner())
 }
 
-/// Injects XMP and IPTC metadata into encoded image bytes for formats that support
-/// post-encode byte-level insertion. Returns the (possibly modified) bytes and removes
-/// successfully injected metadata kinds from the warning list.
+/// A parsed RIFF chunk of a WebP container: its four-character code and payload range.
+struct WebpChunk {
+    fourcc: [u8; 4],
+    start: usize,
+    end: usize,
+}
+
+/// Splits a WebP container into its RIFF chunks.
+fn parse_webp_chunks(encoded: &[u8]) -> Result<Vec<WebpChunk>, TransformError> {
+    if encoded.len() < 12 || &encoded[0..4] != b"RIFF" || &encoded[8..12] != b"WEBP" {
+        return Err(TransformError::EncodeFailed(
+            "cannot inject metadata: output is not a valid WebP container".into(),
+        ));
+    }
+
+    let mut chunks = Vec::new();
+    let mut offset = 12;
+    while offset + 8 <= encoded.len() {
+        let mut fourcc = [0u8; 4];
+        fourcc.copy_from_slice(&encoded[offset..offset + 4]);
+        let size = u32::from_le_bytes([
+            encoded[offset + 4],
+            encoded[offset + 5],
+            encoded[offset + 6],
+            encoded[offset + 7],
+        ]) as usize;
+        let start = offset + 8;
+        let end = start
+            .checked_add(size)
+            .filter(|end| *end <= encoded.len())
+            .ok_or_else(|| {
+                TransformError::EncodeFailed(
+                    "cannot inject metadata: WebP chunk exceeds file".into(),
+                )
+            })?;
+        chunks.push(WebpChunk { fourcc, start, end });
+        // Chunk payloads are padded to an even length.
+        offset = end + (size % 2);
+    }
+
+    Ok(chunks)
+}
+
+/// Reads the canvas size and alpha flag a `VP8X` chunk must advertise.
+///
+/// A simple-format container carries them in the bitstream header instead, so they are read
+/// from the `VP8 ` (lossy) or `VP8L` (lossless) chunk when no `VP8X` is present.
+fn webp_canvas_info(
+    encoded: &[u8],
+    chunks: &[WebpChunk],
+) -> Result<(u32, u32, bool), TransformError> {
+    for chunk in chunks {
+        let data = &encoded[chunk.start..chunk.end];
+        match &chunk.fourcc {
+            b"VP8 " if data.len() >= 10 && data[3..6] == [0x9D, 0x01, 0x2A] => {
+                let width = u32::from(u16::from_le_bytes([data[6], data[7]]) & 0x3FFF);
+                let height = u32::from(u16::from_le_bytes([data[8], data[9]]) & 0x3FFF);
+                return Ok((width, height, false));
+            }
+            b"VP8L" if data.len() >= 5 && data[0] == 0x2F => {
+                let bits = u32::from_le_bytes([data[1], data[2], data[3], data[4]]);
+                let width = (bits & 0x3FFF) + 1;
+                let height = ((bits >> 14) & 0x3FFF) + 1;
+                return Ok((width, height, (bits >> 28) & 1 != 0));
+            }
+            _ => {}
+        }
+    }
+
+    Err(TransformError::EncodeFailed(
+        "cannot inject metadata: WebP container has no image chunk".into(),
+    ))
+}
+
+/// Appends one RIFF chunk, padding the payload to an even length.
+fn push_webp_chunk(out: &mut Vec<u8>, fourcc: &[u8; 4], payload: &[u8]) {
+    out.extend_from_slice(fourcc);
+    out.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+    out.extend_from_slice(payload);
+    if !payload.len().is_multiple_of(2) {
+        out.push(0);
+    }
+}
+
+/// Rewrites a WebP container so it carries the given ICC profile, EXIF, and XMP payloads.
+///
+/// libwebp emits a bare `RIFF....WEBPVP8 ` container for lossy output and has no API for
+/// embedding metadata, which is why lossy WebP used to reject any retained metadata outright
+/// (<https://github.com/nao1215/truss/issues/279>). The WebP container spec allows `ICCP`,
+/// `EXIF`, and `XMP ` chunks alongside a lossy `VP8 ` bitstream as long as the file is in the
+/// extended format, so a `VP8X` chunk is prepended when one is not already present and the
+/// chunks are written in the order the spec mandates:
+///
+/// ```text
+/// VP8X [ICCP] [ALPH] VP8 |VP8L [EXIF] [XMP ]
+/// ```
+///
+/// Payloads that are already present in the container are left untouched, so calling this on
+/// output from the `image` crate's lossless encoder (which writes `ICCP`/`EXIF` itself) only
+/// adds what is missing.
+fn inject_webp_metadata(
+    encoded: &[u8],
+    icc: Option<&[u8]>,
+    exif: Option<&[u8]>,
+    xmp: Option<&[u8]>,
+) -> Result<Vec<u8>, TransformError> {
+    const ICC_FLAG: u8 = 0x20;
+    const ALPHA_FLAG: u8 = 0x10;
+    const EXIF_FLAG: u8 = 0x08;
+    const XMP_FLAG: u8 = 0x04;
+
+    if icc.is_none() && exif.is_none() && xmp.is_none() {
+        return Ok(encoded.to_vec());
+    }
+
+    let chunks = parse_webp_chunks(encoded)?;
+    let existing = |fourcc: &[u8; 4]| chunks.iter().any(|chunk| &chunk.fourcc == fourcc);
+
+    // Only add what the container does not already carry.
+    let icc = icc.filter(|_| !existing(b"ICCP"));
+    let exif = exif.filter(|_| !existing(b"EXIF"));
+    let xmp = xmp.filter(|_| !existing(b"XMP "));
+    if icc.is_none() && exif.is_none() && xmp.is_none() {
+        return Ok(encoded.to_vec());
+    }
+
+    let mut vp8x = match chunks.iter().find(|chunk| &chunk.fourcc == b"VP8X") {
+        Some(chunk) if chunk.end - chunk.start >= 10 => {
+            encoded[chunk.start..chunk.start + 10].to_vec()
+        }
+        _ => {
+            let (width, height, has_alpha) = webp_canvas_info(encoded, &chunks)?;
+            if width == 0 || height == 0 || width > 1 << 24 || height > 1 << 24 {
+                return Err(TransformError::EncodeFailed(
+                    "cannot inject metadata: WebP canvas size is out of range".into(),
+                ));
+            }
+            let mut payload = vec![0u8; 10];
+            if has_alpha || existing(b"ALPH") {
+                payload[0] |= ALPHA_FLAG;
+            }
+            payload[4..7].copy_from_slice(&(width - 1).to_le_bytes()[..3]);
+            payload[7..10].copy_from_slice(&(height - 1).to_le_bytes()[..3]);
+            payload
+        }
+    };
+
+    if icc.is_some() {
+        vp8x[0] |= ICC_FLAG;
+    }
+    if exif.is_some() {
+        vp8x[0] |= EXIF_FLAG;
+    }
+    if xmp.is_some() {
+        vp8x[0] |= XMP_FLAG;
+    }
+
+    // Re-emits a metadata chunk the container already had, since the new payloads were
+    // filtered out for exactly those four-character codes.
+    let push_existing = |body: &mut Vec<u8>, fourcc: &[u8; 4]| {
+        if let Some(chunk) = chunks.iter().find(|chunk| &chunk.fourcc == fourcc) {
+            push_webp_chunk(body, fourcc, &encoded[chunk.start..chunk.end]);
+        }
+    };
+
+    let mut body = Vec::with_capacity(encoded.len() + 64);
+    push_webp_chunk(&mut body, b"VP8X", &vp8x);
+    match icc {
+        Some(icc) => push_webp_chunk(&mut body, b"ICCP", icc),
+        None => push_existing(&mut body, b"ICCP"),
+    }
+    for chunk in &chunks {
+        // VP8X was rewritten above; metadata chunks are placed around the bitstream.
+        if matches!(&chunk.fourcc, b"VP8X" | b"ICCP" | b"EXIF" | b"XMP ") {
+            continue;
+        }
+        push_webp_chunk(&mut body, &chunk.fourcc, &encoded[chunk.start..chunk.end]);
+    }
+    match exif {
+        Some(exif) => push_webp_chunk(&mut body, b"EXIF", exif),
+        None => push_existing(&mut body, b"EXIF"),
+    }
+    match xmp {
+        Some(xmp) => push_webp_chunk(&mut body, b"XMP ", xmp),
+        None => push_existing(&mut body, b"XMP "),
+    }
+
+    let riff_size = u32::try_from(body.len() + 4).map_err(|_| {
+        TransformError::EncodeFailed("cannot inject metadata: WebP output exceeds 4GB".into())
+    })?;
+    let mut out = Vec::with_capacity(body.len() + 12);
+    out.extend_from_slice(b"RIFF");
+    out.extend_from_slice(&riff_size.to_le_bytes());
+    out.extend_from_slice(b"WEBP");
+    out.extend_from_slice(&body);
+    Ok(out)
+}
+
+/// Injects metadata into encoded image bytes for formats that support post-encode
+/// byte-level insertion. Returns the (possibly modified) bytes and removes successfully
+/// injected metadata kinds from the warning list.
+///
+/// `lossy_webp` says whether the bytes came out of libwebp, which embeds nothing at all —
+/// the lossless WebP encoder writes ICCP and EXIF itself, so only XMP is added there.
 ///
 /// Injection failures (e.g. oversized payloads) are silently ignored — the original
 /// encoded bytes are returned unchanged and any pre-inserted `MetadataDropped` warning
@@ -1926,6 +2111,7 @@ fn inject_metadata(
     mut encoded: Vec<u8>,
     format: MediaType,
     metadata: &RetainedMetadata,
+    lossy_webp: bool,
     warnings: &mut Vec<TransformWarning>,
 ) -> Vec<u8> {
     match format {
@@ -1959,8 +2145,36 @@ fn inject_metadata(
             }
             // IPTC has no standard embedding in PNG; warning remains.
         }
+        MediaType::Webp => {
+            // The lossless encoder writes ICCP/EXIF itself, so only XMP is missing there.
+            // Lossy output comes straight out of libwebp with no metadata chunks at all.
+            let (icc, exif) = if lossy_webp {
+                (
+                    metadata.icc_profile.as_deref(),
+                    metadata.exif_metadata.as_deref(),
+                )
+            } else {
+                (None, None)
+            };
+            if let Ok(result) =
+                inject_webp_metadata(&encoded, icc, exif, metadata.xmp_metadata.as_deref())
+            {
+                encoded = result;
+                warnings
+                    .retain(|w| !matches!(w, TransformWarning::MetadataDropped(MetadataKind::Xmp)));
+            } else {
+                // The container could not be rewritten: report what did not survive.
+                if icc.is_some() {
+                    warnings.push(TransformWarning::MetadataDropped(MetadataKind::Icc));
+                }
+                if exif.is_some() {
+                    warnings.push(TransformWarning::MetadataDropped(MetadataKind::Exif));
+                }
+            }
+            // IPTC has no standard embedding in WebP; warning remains.
+        }
         _ => {
-            // WebP/AVIF: no post-encode injection supported.
+            // AVIF: no post-encode injection supported.
         }
     }
 
@@ -2178,8 +2392,12 @@ impl RetainedMetadata {
                 // XMP via iTXt injection. IPTC has no standard PNG embedding.
                 self.iptc_metadata = None;
             }
+            MediaType::Webp => {
+                // ICCP/EXIF/XMP ride in RIFF chunks. IPTC has no WebP container chunk.
+                self.iptc_metadata = None;
+            }
             _ => {
-                // WebP, AVIF: no post-encode injection support.
+                // AVIF: no post-encode injection support.
                 self.xmp_metadata = None;
                 self.iptc_metadata = None;
             }
@@ -2217,7 +2435,10 @@ fn extract_retained_metadata(
             // Metadata that can be injected post-encode will have its warning removed
             // later by inject_metadata on success.
             if metadata.xmp_metadata.is_some()
-                && !matches!(output_format, MediaType::Jpeg | MediaType::Png)
+                && !matches!(
+                    output_format,
+                    MediaType::Jpeg | MediaType::Png | MediaType::Webp
+                )
             {
                 warnings.push(TransformWarning::MetadataDropped(MetadataKind::Xmp));
             }
@@ -2339,6 +2560,19 @@ mod tests {
         RgbaImage,
     };
     use std::io::Cursor;
+
+    /// Reads a RIFF chunk payload straight out of a WebP container.
+    fn webp_chunk_payload(bytes: &[u8], fourcc: &[u8; 4]) -> Option<Vec<u8>> {
+        super::parse_webp_chunks(bytes)
+            .ok()?
+            .into_iter()
+            .find(|chunk| &chunk.fourcc == fourcc)
+            .map(|chunk| bytes[chunk.start..chunk.end].to_vec())
+    }
+
+    fn webp_icc_profile(bytes: &[u8]) -> Option<Vec<u8>> {
+        webp_chunk_payload(bytes, b"ICCP")
+    }
 
     fn png_artifact(width: u32, height: u32, fill: Rgba<u8>) -> Artifact {
         let image = RgbaImage::from_pixel(width, height, fill);
@@ -2897,9 +3131,12 @@ mod tests {
 
     #[cfg(feature = "webp-lossy")]
     #[test]
-    fn transform_raster_lossy_webp_optimization_rejects_metadata_retention() {
+    // Regression test for https://github.com/nao1215/truss/issues/279: `--mode lossy
+    // --format webp` used to fail outright on any ICC-bearing input, and because a strip
+    // request is upgraded to "preserve ICC" for lossy output, no flag combination worked.
+    fn transform_raster_lossy_webp_optimization_embeds_icc_profile() {
         let artifact = jpeg_artifact_with_metadata(4, 2, None, Some(b"demo-icc-profile"));
-        let error = transform_raster(TransformRequest::new(
+        let result = transform_raster(TransformRequest::new(
             artifact,
             TransformOptions {
                 format: Some(MediaType::Webp),
@@ -2907,14 +3144,225 @@ mod tests {
                 ..TransformOptions::default()
             },
         ))
-        .expect_err("lossy webp optimize should reject metadata retention");
+        .expect("lossy webp optimize should embed the ICC profile");
+
+        assert_eq!(result.artifact.media_type, MediaType::Webp);
+        assert_eq!(
+            webp_icc_profile(&result.artifact.bytes).as_deref(),
+            Some(b"demo-icc-profile".as_slice())
+        );
+        assert!(
+            !result
+                .warnings
+                .contains(&TransformWarning::MetadataDropped(MetadataKind::Icc))
+        );
+    }
+
+    #[test]
+    fn transform_raster_lossy_webp_succeeds_for_icc_input_with_strip_metadata() {
+        let artifact = jpeg_artifact_with_metadata(4, 2, None, Some(b"demo-icc-profile"));
+        let result = transform_raster(TransformRequest::new(
+            artifact,
+            TransformOptions {
+                format: Some(MediaType::Webp),
+                optimize: OptimizeMode::Lossy,
+                strip_metadata: true,
+                ..TransformOptions::default()
+            },
+        ))
+        .expect("--strip-metadata must never be the reason a command fails");
+
+        // The strip request is upgraded to PreserveIcc for lossy output so colors stay
+        // correct; that upgrade is only meaningful now that the profile can be written.
+        assert_eq!(
+            webp_icc_profile(&result.artifact.bytes).as_deref(),
+            Some(b"demo-icc-profile".as_slice())
+        );
+    }
+
+    #[test]
+    fn transform_raster_lossy_webp_keeps_exif_and_icc_with_keep_metadata() {
+        let artifact = jpeg_artifact_with_metadata(4, 2, Some(6), Some(b"demo-icc-profile"));
+        let result = transform_raster(TransformRequest::new(
+            artifact,
+            TransformOptions {
+                format: Some(MediaType::Webp),
+                optimize: OptimizeMode::Lossy,
+                strip_metadata: false,
+                ..TransformOptions::default()
+            },
+        ))
+        .expect("keep-metadata lossy webp should succeed");
 
         assert_eq!(
-            error,
-            TransformError::CapabilityMissing(
-                "lossy WebP optimization cannot preserve metadata".to_string()
-            )
+            webp_icc_profile(&result.artifact.bytes).as_deref(),
+            Some(b"demo-icc-profile".as_slice())
         );
+        assert!(
+            webp_chunk_payload(&result.artifact.bytes, b"EXIF").is_some(),
+            "EXIF should ride in an EXIF chunk"
+        );
+        assert!(
+            result.warnings.is_empty(),
+            "nothing was dropped, got: {:?}",
+            result.warnings
+        );
+    }
+
+    #[test]
+    fn transform_raster_lossy_webp_output_is_decodable_after_injection() {
+        let artifact = jpeg_artifact_with_metadata(8, 8, None, Some(b"demo-icc-profile"));
+        let result = transform_raster(TransformRequest::new(
+            artifact,
+            TransformOptions {
+                format: Some(MediaType::Webp),
+                optimize: OptimizeMode::Lossy,
+                ..TransformOptions::default()
+            },
+        ))
+        .expect("transform");
+
+        // The rewritten container must still be a valid WebP for decoders and for sniffing.
+        let sniffed =
+            sniff_artifact(RawArtifact::new(result.artifact.bytes.clone(), None)).expect("sniff");
+        assert_eq!(sniffed.media_type, MediaType::Webp);
+        assert_eq!(sniffed.metadata.width, Some(8));
+        assert_eq!(sniffed.metadata.height, Some(8));
+
+        let decoded =
+            image::load_from_memory_with_format(&result.artifact.bytes, image::ImageFormat::WebP)
+                .expect("decode injected webp");
+        assert_eq!(decoded.dimensions(), (8, 8));
+
+        let mut decoder =
+            WebPDecoder::new(Cursor::new(&result.artifact.bytes)).expect("webp decoder");
+        assert_eq!(
+            decoder.icc_profile().expect("icc").as_deref(),
+            Some(b"demo-icc-profile".as_slice())
+        );
+    }
+
+    #[cfg(feature = "avif")]
+    #[test]
+    fn transform_raster_lossy_avif_succeeds_for_icc_input_with_strip_metadata() {
+        // AVIF cannot carry a profile truss writes, so a strip request must stay StripAll
+        // instead of being upgraded into a state the encoder rejects.
+        let artifact = jpeg_artifact_with_metadata(4, 2, None, Some(b"demo-icc-profile"));
+        let result = transform_raster(TransformRequest::new(
+            artifact,
+            TransformOptions {
+                format: Some(MediaType::Avif),
+                optimize: OptimizeMode::Lossy,
+                strip_metadata: true,
+                ..TransformOptions::default()
+            },
+        ))
+        .expect("--strip-metadata must never be the reason a command fails");
+
+        assert_eq!(result.artifact.media_type, MediaType::Avif);
+    }
+
+    #[test]
+    fn transform_raster_lossless_webp_gains_an_xmp_chunk() {
+        let artifact = jpeg_with_xmp_iptc();
+        let result = transform_raster(TransformRequest::new(
+            artifact,
+            TransformOptions {
+                format: Some(MediaType::Webp),
+                strip_metadata: false,
+                ..TransformOptions::default()
+            },
+        ))
+        .expect("lossless webp keep-metadata should succeed");
+
+        assert!(
+            webp_chunk_payload(&result.artifact.bytes, b"XMP ").is_some(),
+            "XMP should be injected as an `XMP ` chunk"
+        );
+        // IPTC has no WebP container chunk, so only that warning survives.
+        assert_eq!(
+            result.warnings,
+            vec![TransformWarning::MetadataDropped(MetadataKind::Iptc)]
+        );
+    }
+
+    #[test]
+    fn inject_webp_metadata_promotes_a_simple_container_to_the_extended_format() {
+        use super::inject_webp_metadata;
+
+        let plain = transform_raster(TransformRequest::new(
+            png_artifact(9, 5, Rgba([10, 20, 30, 255])),
+            TransformOptions {
+                format: Some(MediaType::Webp),
+                quality: Some(80),
+                ..TransformOptions::default()
+            },
+        ))
+        .expect("encode lossy webp")
+        .artifact
+        .bytes;
+        assert!(
+            webp_chunk_payload(&plain, b"VP8X").is_none(),
+            "libwebp should emit a simple container for this input"
+        );
+
+        let injected = inject_webp_metadata(&plain, Some(b"icc"), Some(b"exif"), Some(b"xmp"))
+            .expect("inject");
+
+        let vp8x = webp_chunk_payload(&injected, b"VP8X").expect("VP8X chunk");
+        assert_eq!(vp8x.len(), 10);
+        // ICC (0x20) | EXIF (0x08) | XMP (0x04)
+        assert_eq!(vp8x[0] & 0x2C, 0x2C);
+        assert_eq!(&vp8x[4..7], &[8, 0, 0], "canvas width minus one");
+        assert_eq!(&vp8x[7..10], &[4, 0, 0], "canvas height minus one");
+
+        assert_eq!(
+            webp_chunk_payload(&injected, b"ICCP").as_deref(),
+            Some(&b"icc"[..])
+        );
+        assert_eq!(
+            webp_chunk_payload(&injected, b"EXIF").as_deref(),
+            Some(&b"exif"[..])
+        );
+        assert_eq!(
+            webp_chunk_payload(&injected, b"XMP ").as_deref(),
+            Some(&b"xmp"[..])
+        );
+
+        let sniffed = sniff_artifact(RawArtifact::new(injected, None)).expect("sniff");
+        assert_eq!(sniffed.metadata.width, Some(9));
+        assert_eq!(sniffed.metadata.height, Some(5));
+    }
+
+    #[test]
+    fn inject_webp_metadata_is_a_no_op_without_payloads() {
+        use super::inject_webp_metadata;
+
+        let plain = transform_raster(TransformRequest::new(
+            png_artifact(4, 4, Rgba([10, 20, 30, 255])),
+            TransformOptions {
+                format: Some(MediaType::Webp),
+                quality: Some(80),
+                ..TransformOptions::default()
+            },
+        ))
+        .expect("encode lossy webp")
+        .artifact
+        .bytes;
+
+        assert_eq!(
+            inject_webp_metadata(&plain, None, None, None).expect("inject"),
+            plain
+        );
+    }
+
+    #[test]
+    fn inject_webp_metadata_rejects_non_webp_bytes() {
+        use super::inject_webp_metadata;
+
+        let error = inject_webp_metadata(b"not a webp file", Some(b"icc"), None, None)
+            .expect_err("must not rewrite foreign bytes");
+        assert!(matches!(error, TransformError::EncodeFailed(_)));
     }
 
     #[test]
@@ -3058,7 +3506,7 @@ mod tests {
 
     #[cfg(feature = "webp-lossy")]
     #[test]
-    fn transform_raster_lossy_webp_warns_only_for_metadata_that_existed() {
+    fn transform_raster_lossy_webp_carries_metadata_that_existed() {
         let artifact = webp_artifact_with_metadata(4, 2, None, Some(b"demo-icc-profile"));
         let result = transform_raster(TransformRequest::new(
             artifact,
@@ -3071,15 +3519,14 @@ mod tests {
         ))
         .expect("lossy webp quality encode should succeed");
 
-        assert!(
-            result
-                .warnings
-                .contains(&TransformWarning::MetadataDropped(MetadataKind::Icc))
+        assert_eq!(
+            webp_icc_profile(&result.artifact.bytes).as_deref(),
+            Some(b"demo-icc-profile".as_slice())
         );
         assert!(
-            !result
-                .warnings
-                .contains(&TransformWarning::MetadataDropped(MetadataKind::Exif))
+            result.warnings.is_empty(),
+            "nothing was dropped, got: {:?}",
+            result.warnings
         );
     }
 
@@ -3545,25 +3992,23 @@ mod tests {
     }
 
     #[test]
-    fn keep_metadata_drops_xmp_iptc_for_webp_output_with_warnings() {
+    fn keep_metadata_retains_xmp_but_drops_iptc_for_webp_output() {
         use super::extract_retained_metadata;
         use crate::core::{MetadataKind, TransformWarning};
 
         let artifact = jpeg_with_xmp_iptc();
 
-        let (_, warnings) =
+        let (retained, warnings) =
             extract_retained_metadata(&artifact, MetadataPolicy::KeepAll, false, MediaType::Webp)
                 .expect("should not error");
 
-        // WebP does not support XMP/IPTC injection.
-        assert_eq!(warnings.len(), 2);
+        // XMP rides in an `XMP ` RIFF chunk; IPTC has no WebP container chunk.
+        let metadata = retained.expect("metadata should be retained");
+        assert!(metadata.xmp_metadata.is_some());
+        assert!(metadata.iptc_metadata.is_none());
         assert_eq!(
-            warnings[0],
-            TransformWarning::MetadataDropped(MetadataKind::Xmp)
-        );
-        assert_eq!(
-            warnings[1],
-            TransformWarning::MetadataDropped(MetadataKind::Iptc)
+            warnings,
+            vec![TransformWarning::MetadataDropped(MetadataKind::Iptc)]
         );
     }
 

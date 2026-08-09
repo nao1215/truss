@@ -280,6 +280,15 @@ impl MediaType {
         matches!(self, Self::Jpeg | Self::Webp | Self::Avif)
     }
 
+    /// Returns `true` if the encoded format can carry an embedded ICC profile.
+    ///
+    /// AVIF signals color through the container's `colr` box rather than a profile truss can
+    /// write, and BMP/TIFF/SVG output has no profile path in this pipeline.
+    #[must_use]
+    pub const fn supports_icc_profile(self) -> bool {
+        matches!(self, Self::Jpeg | Self::Png | Self::Webp)
+    }
+
     /// Returns `true` if this is a raster (bitmap) format, `false` for vector formats.
     #[must_use]
     pub const fn is_raster(self) -> bool {
@@ -831,6 +840,7 @@ impl TransformOptions {
                 self.strip_metadata,
                 self.preserve_exif,
                 optimize,
+                format,
             ),
             blur: self.blur,
             sharpen: self.sharpen,
@@ -1501,14 +1511,22 @@ fn validate_watermark(wm: &WatermarkInput) -> Result<(), TransformError> {
     Ok(())
 }
 
+/// Resolves the metadata flags into the policy the pipeline applies.
+///
+/// A lossy re-encode of a profile-tagged image renders with the wrong colors if the profile
+/// is dropped, so a strip request is upgraded to "keep the ICC profile only" for lossy output.
+/// The upgrade is limited to formats that can actually carry a profile: turning it on for a
+/// format that cannot made `--strip-metadata` fail with "cannot preserve metadata", which left
+/// no flag combination that worked (<https://github.com/nao1215/truss/issues/279>).
 fn normalize_metadata_policy(
     strip_metadata: bool,
     preserve_exif: bool,
     optimize: OptimizeMode,
+    format: MediaType,
 ) -> MetadataPolicy {
     if preserve_exif {
         MetadataPolicy::PreserveExif
-    } else if strip_metadata && optimize == OptimizeMode::Lossy {
+    } else if strip_metadata && optimize == OptimizeMode::Lossy && format.supports_icc_profile() {
         MetadataPolicy::PreserveIcc
     } else if strip_metadata {
         MetadataPolicy::StripAll
@@ -2399,6 +2417,37 @@ mod tests {
         .expect("normalize lossy optimize metadata policy");
 
         assert_eq!(normalized.metadata_policy, MetadataPolicy::PreserveIcc);
+    }
+
+    #[test]
+    fn normalize_lossy_optimize_preserves_icc_for_webp_output() {
+        let normalized = TransformOptions {
+            optimize: OptimizeMode::Lossy,
+            format: Some(MediaType::Webp),
+            strip_metadata: true,
+            ..TransformOptions::default()
+        }
+        .normalize(MediaType::Jpeg)
+        .expect("normalize lossy webp metadata policy");
+
+        assert_eq!(normalized.metadata_policy, MetadataPolicy::PreserveIcc);
+    }
+
+    // Regression test for https://github.com/nao1215/truss/issues/279: the ICC upgrade must
+    // not apply to a format that cannot carry a profile, or `--strip-metadata` puts the
+    // pipeline into a state the encoder rejects.
+    #[test]
+    fn normalize_lossy_optimize_strips_all_for_a_format_without_icc_support() {
+        let normalized = TransformOptions {
+            optimize: OptimizeMode::Lossy,
+            format: Some(MediaType::Avif),
+            strip_metadata: true,
+            ..TransformOptions::default()
+        }
+        .normalize(MediaType::Jpeg)
+        .expect("normalize lossy avif metadata policy");
+
+        assert_eq!(normalized.metadata_policy, MetadataPolicy::StripAll);
     }
 
     #[test]

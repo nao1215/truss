@@ -1,0 +1,179 @@
+# Metadata retention through the encoders, focused on lossy WebP.
+#
+# Regression coverage for https://github.com/nao1215/truss/issues/279:
+# `truss optimize --format webp --mode lossy` failed with exit 4 ("lossy WebP
+# optimization cannot preserve metadata") on every ICC-bearing input, and no flag
+# combination avoided it — a strip request is upgraded to "preserve ICC" for lossy
+# output, which is exactly the state the encoder rejected. libwebp still cannot embed
+# metadata, so truss now writes the ICCP/EXIF/XMP chunks into the container itself.
+#
+# `$FIXTURES_DIR/icc-profile.jpg` is a 64x64 JPEG carrying a 588-byte sRGB profile and
+# no EXIF, which is the shape of input that used to fail. Chunk four-character codes are
+# ASCII, so `file: contains:` reads them straight out of the binary; the `image`
+# assertion decodes the rewritten container for real. Run with: e2e/run.sh
+version: "1"
+
+suite:
+  name: truss metadata retention
+
+scenarios:
+  - name: lossy WebP optimization succeeds on ICC-bearing input and keeps the profile
+    steps:
+      - run:
+          shell: true
+          command: truss optimize "$FIXTURES_DIR/icc-profile.jpg" -o out.webp --format webp --mode lossy
+      - assert:
+          exit_code: 0
+          # A valid extended-format WebP that decoders can still read.
+          image:
+            path: out.webp
+            format: webp
+            width: 64
+            height: 64
+      - assert:
+          file:
+            path: out.webp
+            contains:
+              - "VP8X"
+              - "ICCP"
+
+  - name: --strip-metadata is never the reason the command fails
+    steps:
+      - run:
+          shell: true
+          command: truss optimize "$FIXTURES_DIR/icc-profile.jpg" -o strip.webp --format webp --mode lossy --strip-metadata
+      - assert:
+          exit_code: 0
+          image:
+            path: strip.webp
+            format: webp
+            width: 64
+            height: 64
+
+  - name: --keep-metadata keeps the ICC profile in lossy WebP output
+    steps:
+      - run:
+          shell: true
+          command: truss optimize "$FIXTURES_DIR/icc-profile.jpg" -o keep.webp --format webp --mode lossy --keep-metadata
+      - assert:
+          exit_code: 0
+          file:
+            path: keep.webp
+            contains: "ICCP"
+
+  - name: --preserve-exif drops the ICC profile as asked
+    steps:
+      - run:
+          shell: true
+          command: truss optimize "$FIXTURES_DIR/icc-profile.jpg" -o exif.webp --format webp --mode lossy --preserve-exif
+      - assert:
+          exit_code: 0
+          image:
+            path: exif.webp
+            format: webp
+            width: 64
+      - assert:
+          file:
+            path: exif.webp
+            not_contains: "ICCP"
+
+  - name: a target-quality lossy run works on ICC-bearing input
+    steps:
+      # The real-world command from the issue report.
+      - run:
+          shell: true
+          command: truss optimize "$FIXTURES_DIR/icc-profile.jpg" -o target.webp --format webp --mode lossy --target-quality ssim:0.995
+      - assert:
+          exit_code: 0
+          image:
+            path: target.webp
+            format: webp
+            width: 64
+            height: 64
+
+  - name: optimize and convert agree on ICC-bearing input
+    steps:
+      - run:
+          shell: true
+          command: truss convert "$FIXTURES_DIR/icc-profile.jpg" -o conv.webp --format webp --quality 80
+      - assert:
+          exit_code: 0
+          image:
+            path: conv.webp
+            format: webp
+            width: 64
+      - run:
+          shell: true
+          command: truss optimize "$FIXTURES_DIR/icc-profile.jpg" -o opt.webp --format webp --mode lossy
+      - assert:
+          exit_code: 0
+          image:
+            path: opt.webp
+            format: webp
+            width: 64
+
+  - name: --mode auto still succeeds on ICC-bearing input
+    steps:
+      - run:
+          shell: true
+          command: truss optimize "$FIXTURES_DIR/icc-profile.jpg" -o auto.webp --format webp --mode auto
+      - assert:
+          exit_code: 0
+          image:
+            path: auto.webp
+            format: webp
+            width: 64
+
+  - name: input without an ICC profile is unaffected
+    steps:
+      - run:
+          shell: true
+          command: truss optimize "$FIXTURES_DIR/sample.jpg" -o noicc.webp --format webp --mode lossy
+      - assert:
+          exit_code: 0
+          image:
+            path: noicc.webp
+            format: webp
+      - assert:
+          file:
+            path: noicc.webp
+            not_contains: "ICCP"
+
+  - name: the ICC profile survives a JPEG to lossy WebP and back round trip
+    steps:
+      - run:
+          shell: true
+          command: truss optimize "$FIXTURES_DIR/icc-profile.jpg" -o rt.webp --format webp --mode lossy --keep-metadata
+      - assert:
+          exit_code: 0
+      - run:
+          command: truss convert rt.webp -o rt.jpg --format jpeg --keep-metadata
+      - assert:
+          exit_code: 0
+          image:
+            path: rt.jpg
+            format: jpeg
+            width: 64
+            height: 64
+      - assert:
+          # JPEG carries the profile in an APP2 segment tagged "ICC_PROFILE".
+          file:
+            path: rt.jpg
+            contains: "ICC_PROFILE"
+
+  - name: lossless WebP output keeps the ICC profile too
+    steps:
+      - run:
+          shell: true
+          command: truss convert "$FIXTURES_DIR/icc-profile.jpg" -o lossless.webp --format webp --keep-metadata
+      - assert:
+          exit_code: 0
+          image:
+            path: lossless.webp
+            format: webp
+            width: 64
+            height: 64
+      - assert:
+          file:
+            path: lossless.webp
+            contains: "ICCP"
