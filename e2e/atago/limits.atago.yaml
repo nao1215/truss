@@ -1,0 +1,117 @@
+# Output pixel-budget enforcement (MAX_OUTPUT_PIXELS = 67_108_864).
+#
+# Regression coverage for https://github.com/nao1215/truss/issues/252: the limit
+# used to be computed against the SOURCE size of whichever axis the user omitted,
+# so `--width 10000` on a 16x16 input passed the check and then allocated a
+# 100-megapixel buffer. The limit now runs against the aspect-scaled output size,
+# so a single oversized dimension is rejected before anything is allocated.
+#
+# The input is the committed 16x16 testdata/sample.png (square, so a width-only
+# resize scales the height by the same factor). Run with: e2e/run.sh
+version: "1"
+
+suite:
+  name: truss output pixel limits
+
+scenarios:
+  - name: rejects a width-only resize whose aspect-scaled output exceeds the limit
+    steps:
+      - fixture:
+          file: in.png
+          from: testdata/sample.png
+      - run:
+          command: truss convert in.png -o big.png --width 10000
+      - assert:
+          exit_code: 4
+          stderr:
+            contains:
+              - "error:"
+              - "output image would have 100000000 pixels"
+          # The output must never be written: the limit is a pre-allocation check.
+          changes:
+            created: []
+            modified: []
+            deleted: []
+      - assert:
+          file:
+            path: big.png
+            exists: false
+
+  - name: rejects a height-only resize whose aspect-scaled output exceeds the limit
+    steps:
+      - fixture:
+          file: in.png
+          from: testdata/sample.png
+      - run:
+          command: truss convert in.png -o tall.png --height 10000
+      - assert:
+          exit_code: 4
+          stderr:
+            contains: "output image would have 100000000 pixels"
+      - assert:
+          file:
+            path: tall.png
+            exists: false
+
+  - name: rejects a gigapixel width-only resize quickly instead of hanging
+    steps:
+      - fixture:
+          file: in.png
+          from: testdata/sample.png
+      # 65536x65536 is ~4.3 gigapixels. Before the fix this got past the check
+      # and stalled trying to allocate the resize buffer.
+      - run:
+          command: truss convert in.png -o huge.png --width 65536
+      - assert:
+          exit_code: 4
+          stderr:
+            contains: "output image would have"
+          duration:
+            lt: 20s
+      - assert:
+          file:
+            path: huge.png
+            exists: false
+
+  - name: rejects a resize when both dimensions exceed the limit together
+    steps:
+      - fixture:
+          file: in.png
+          from: testdata/sample.png
+      # 8193 * 8192 = 67_116_032, just over MAX_OUTPUT_PIXELS.
+      - run:
+          command: truss convert in.png -o both.png --width 8193 --height 8192
+      - assert:
+          exit_code: 4
+          stderr:
+            contains: "output image would have 67117056 pixels"
+
+  - name: allows a width-only resize that stays inside the limit
+    steps:
+      - fixture:
+          file: in.png
+          from: testdata/sample.png
+      - run:
+          command: truss convert in.png -o ok.png --width 512
+      - assert:
+          exit_code: 0
+          image:
+            path: ok.png
+            format: png
+            width: 512
+            height: 512
+
+  - name: allows a height-only resize that stays inside the limit
+    steps:
+      - fixture:
+          file: in.png
+          from: testdata/sample.png
+      - run:
+          command: truss convert in.png -o ok-h.png --height 512
+      - assert:
+          exit_code: 0
+          image:
+            path: ok-h.png
+            format: png
+            width: 512
+            height: 512
