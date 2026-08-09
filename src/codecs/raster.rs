@@ -1674,6 +1674,65 @@ fn encode_jpeg(
     Ok(bytes)
 }
 
+/// Returns `true` when any pixel of `image` is non-opaque.
+///
+/// A color model that carries an alpha channel does not imply the image uses it: decoders and
+/// the padding helpers routinely widen opaque images to RGBA. Scanning the samples is what lets
+/// the encoders drop an alpha channel that holds no information.
+fn image_has_transparency(image: &DynamicImage) -> bool {
+    match image {
+        DynamicImage::ImageLumaA8(buffer) => buffer.pixels().any(|pixel| pixel[1] != u8::MAX),
+        DynamicImage::ImageLumaA16(buffer) => buffer.pixels().any(|pixel| pixel[1] != u16::MAX),
+        DynamicImage::ImageRgba8(buffer) => buffer.pixels().any(|pixel| pixel[3] != u8::MAX),
+        DynamicImage::ImageRgba16(buffer) => buffer.pixels().any(|pixel| pixel[3] != u16::MAX),
+        DynamicImage::ImageRgba32F(buffer) => buffer.pixels().any(|pixel| pixel[3] < 1.0),
+        // Every other variant is alpha-less by construction.
+        _ => false,
+    }
+}
+
+/// The 8-bit sample buffer an encoder writes, narrowed to RGB when the image is fully opaque.
+///
+/// Encoding an opaque image as RGBA adds an alpha channel the input never had, which inflates
+/// the output and breaks the expectation that a same-format pass preserves the color model
+/// (<https://github.com/nao1215/truss/issues/253>). Dropping an all-opaque alpha channel is
+/// pixel-lossless, so the narrower form is always safe.
+enum EncodeSamples {
+    Rgb(image::RgbImage),
+    Rgba(RgbaImage),
+}
+
+impl EncodeSamples {
+    fn from_image(image: &DynamicImage) -> Self {
+        if image_has_transparency(image) {
+            Self::Rgba(image.to_rgba8())
+        } else {
+            Self::Rgb(image.to_rgb8())
+        }
+    }
+
+    fn color_type(&self) -> ColorType {
+        match self {
+            Self::Rgb(_) => ColorType::Rgb8,
+            Self::Rgba(_) => ColorType::Rgba8,
+        }
+    }
+
+    fn as_bytes(&self) -> &[u8] {
+        match self {
+            Self::Rgb(buffer) => buffer.as_raw(),
+            Self::Rgba(buffer) => buffer.as_raw(),
+        }
+    }
+
+    fn dimensions(&self) -> (u32, u32) {
+        match self {
+            Self::Rgb(buffer) => buffer.dimensions(),
+            Self::Rgba(buffer) => buffer.dimensions(),
+        }
+    }
+}
+
 fn encode_png(
     image: &DynamicImage,
     retained_metadata: Option<&RetainedMetadata>,
@@ -1694,9 +1753,15 @@ fn encode_png(
                 .map_err(|error| TransformError::EncodeFailed(error.to_string()))?;
         }
     }
-    let rgba = image.to_rgba8();
+    let samples = EncodeSamples::from_image(image);
+    let (width, height) = samples.dimensions();
     encoder
-        .write_image(&rgba, rgba.width(), rgba.height(), ColorType::Rgba8.into())
+        .write_image(
+            samples.as_bytes(),
+            width,
+            height,
+            samples.color_type().into(),
+        )
         .map_err(|error| TransformError::EncodeFailed(error.to_string()))?;
     Ok(bytes)
 }
@@ -1706,7 +1771,7 @@ fn encode_webp_lossless(
     retained_metadata: Option<&RetainedMetadata>,
 ) -> Result<EncodedOutput, TransformError> {
     let mut bytes = Vec::new();
-    let rgba = image.to_rgba8();
+    let samples = EncodeSamples::from_image(image);
     let mut encoder = WebPEncoder::new_lossless(&mut bytes);
     if let Some(retained_metadata) = retained_metadata {
         if let Some(icc_profile) = &retained_metadata.icc_profile {
@@ -1720,8 +1785,14 @@ fn encode_webp_lossless(
                 .map_err(|error| TransformError::EncodeFailed(error.to_string()))?;
         }
     }
+    let (width, height) = samples.dimensions();
     encoder
-        .write_image(&rgba, rgba.width(), rgba.height(), ColorType::Rgba8.into())
+        .write_image(
+            samples.as_bytes(),
+            width,
+            height,
+            samples.color_type().into(),
+        )
         .map_err(|error| TransformError::EncodeFailed(error.to_string()))?;
 
     Ok(EncodedOutput {
@@ -1733,8 +1804,18 @@ fn encode_webp_lossless(
 fn encode_webp_lossy_bytes(image: &DynamicImage, quality: u8) -> Result<Vec<u8>, TransformError> {
     #[cfg(feature = "webp-lossy")]
     {
-        let rgba = image.to_rgba8();
-        let lossy_encoder = webp::Encoder::from_rgba(rgba.as_ref(), rgba.width(), rgba.height());
+        // Feeding libwebp an RGB buffer for an opaque image keeps the ALPH chunk out of the
+        // container, so the output does not gain an alpha channel the input never had.
+        let samples = EncodeSamples::from_image(image);
+        let (width, height) = samples.dimensions();
+        let lossy_encoder = match samples {
+            EncodeSamples::Rgb(ref buffer) => {
+                webp::Encoder::from_rgb(buffer.as_raw(), width, height)
+            }
+            EncodeSamples::Rgba(ref buffer) => {
+                webp::Encoder::from_rgba(buffer.as_raw(), width, height)
+            }
+        };
         Ok(lossy_encoder.encode(f32::from(quality)).to_vec())
     }
     #[cfg(not(feature = "webp-lossy"))]
@@ -1760,10 +1841,16 @@ fn encode_avif(
             ));
         }
         let mut bytes = Vec::new();
-        let rgba = image.to_rgba8();
+        let samples = EncodeSamples::from_image(image);
+        let (width, height) = samples.dimensions();
         let encoder = AvifEncoder::new_with_speed_quality(&mut bytes, speed, quality);
         encoder
-            .write_image(&rgba, rgba.width(), rgba.height(), ColorType::Rgba8.into())
+            .write_image(
+                samples.as_bytes(),
+                width,
+                height,
+                samples.color_type().into(),
+            )
             .map_err(|error| TransformError::EncodeFailed(error.to_string()))?;
         Ok(bytes)
     }
@@ -1778,18 +1865,30 @@ fn encode_avif(
 
 fn encode_bmp(image: &DynamicImage) -> Result<Vec<u8>, TransformError> {
     let mut bytes = Vec::new();
-    let rgba = image.to_rgba8();
+    let samples = EncodeSamples::from_image(image);
+    let (width, height) = samples.dimensions();
     image::codecs::bmp::BmpEncoder::new(&mut bytes)
-        .write_image(&rgba, rgba.width(), rgba.height(), ColorType::Rgba8.into())
+        .write_image(
+            samples.as_bytes(),
+            width,
+            height,
+            samples.color_type().into(),
+        )
         .map_err(|error: image::ImageError| TransformError::EncodeFailed(error.to_string()))?;
     Ok(bytes)
 }
 
 fn encode_tiff(image: &DynamicImage) -> Result<Vec<u8>, TransformError> {
-    let rgba = image.to_rgba8();
+    let samples = EncodeSamples::from_image(image);
+    let (width, height) = samples.dimensions();
     let mut cursor = Cursor::new(Vec::new());
     image::codecs::tiff::TiffEncoder::new(&mut cursor)
-        .write_image(&rgba, rgba.width(), rgba.height(), ColorType::Rgba8.into())
+        .write_image(
+            samples.as_bytes(),
+            width,
+            height,
+            samples.color_type().into(),
+        )
         .map_err(|error: image::ImageError| TransformError::EncodeFailed(error.to_string()))?;
     Ok(cursor.into_inner())
 }
@@ -2182,6 +2281,10 @@ fn read_input_metadata(input: &Artifact) -> Result<RetainedMetadata, TransformEr
     }
 }
 
+/// Reports whether the encoded output carries an alpha channel.
+///
+/// This mirrors the choice [`EncodeSamples::from_image`] makes, so the metadata reported by
+/// `convert` matches what `inspect` reads back from the encoded file.
 fn output_has_alpha(image: &DynamicImage, media_type: MediaType) -> bool {
     match media_type {
         MediaType::Jpeg => false,
@@ -2190,7 +2293,7 @@ fn output_has_alpha(image: &DynamicImage, media_type: MediaType) -> bool {
         | MediaType::Avif
         | MediaType::Svg
         | MediaType::Bmp
-        | MediaType::Tiff => image.color().has_alpha(),
+        | MediaType::Tiff => image_has_transparency(image),
     }
 }
 
@@ -2233,6 +2336,30 @@ mod tests {
                 has_alpha: Some(fill[3] < u8::MAX),
             },
         )
+    }
+
+    /// Builds an opaque PNG stored as PNG color type 2 (truecolor, no alpha channel).
+    fn opaque_rgb_png_artifact(width: u32, height: u32) -> Artifact {
+        let image = image::RgbImage::from_fn(width, height, |x, y| {
+            image::Rgb([(x * 8) as u8, (y * 8) as u8, 128])
+        });
+        let mut bytes = Vec::new();
+        PngEncoder::new(&mut bytes)
+            .write_image(&image, width, height, ColorType::Rgb8.into())
+            .expect("encode png");
+
+        let artifact = sniff_artifact(RawArtifact::new(bytes, None)).expect("sniff png");
+        assert_eq!(
+            artifact.metadata.has_alpha,
+            Some(false),
+            "fixture must start without an alpha channel"
+        );
+        artifact
+    }
+
+    fn encoded_png_has_alpha(bytes: &[u8]) -> bool {
+        let decoder = PngDecoder::new(Cursor::new(bytes)).expect("decode png");
+        decoder.color_type().has_alpha()
     }
 
     fn jpeg_artifact_with_metadata(
@@ -3117,6 +3244,166 @@ mod tests {
         .unwrap_err();
         assert!(matches!(err, TransformError::LimitExceeded(_)));
         assert!(err.to_string().contains("output image"));
+    }
+
+    // Regression tests for https://github.com/nao1215/truss/issues/253: every decoded image
+    // was widened to RGBA8 before encoding, so an opaque RGB PNG came back RGBA — a larger
+    // file, and a same-format pass that silently changed the color model.
+    #[test]
+    fn transform_raster_keeps_opaque_rgb_png_without_alpha() {
+        let input = opaque_rgb_png_artifact(16, 16);
+        let result = transform_raster(TransformRequest::new(
+            input,
+            TransformOptions {
+                format: Some(MediaType::Png),
+                ..TransformOptions::default()
+            },
+        ))
+        .expect("transform");
+
+        assert!(
+            !encoded_png_has_alpha(&result.artifact.bytes),
+            "a no-op same-format pass must not add an alpha channel"
+        );
+        assert_eq!(result.artifact.metadata.has_alpha, Some(false));
+        let round_tripped =
+            sniff_artifact(RawArtifact::new(result.artifact.bytes, None)).expect("sniff output");
+        assert_eq!(round_tripped.metadata.has_alpha, Some(false));
+    }
+
+    #[test]
+    fn transform_raster_keeps_opaque_rgb_png_without_alpha_after_resize() {
+        let input = opaque_rgb_png_artifact(16, 16);
+        let result = transform_raster(TransformRequest::new(
+            input,
+            TransformOptions {
+                format: Some(MediaType::Png),
+                width: Some(8),
+                ..TransformOptions::default()
+            },
+        ))
+        .expect("transform");
+
+        assert!(!encoded_png_has_alpha(&result.artifact.bytes));
+        assert_eq!(result.artifact.metadata.has_alpha, Some(false));
+    }
+
+    #[test]
+    fn transform_raster_keeps_alpha_for_a_transparent_png() {
+        let input = png_artifact(4, 4, Rgba([10, 20, 30, 128]));
+        let result = transform_raster(TransformRequest::new(
+            input,
+            TransformOptions {
+                format: Some(MediaType::Png),
+                ..TransformOptions::default()
+            },
+        ))
+        .expect("transform");
+
+        assert!(
+            encoded_png_has_alpha(&result.artifact.bytes),
+            "transparency must survive the round trip"
+        );
+        assert_eq!(result.artifact.metadata.has_alpha, Some(true));
+    }
+
+    #[test]
+    fn transform_raster_narrows_a_fully_opaque_rgba_png_to_rgb() {
+        // Dropping an all-opaque alpha channel is pixel-lossless and shrinks the output.
+        let input = png_artifact(4, 4, Rgba([10, 20, 30, 255]));
+        let result = transform_raster(TransformRequest::new(
+            input,
+            TransformOptions {
+                format: Some(MediaType::Png),
+                ..TransformOptions::default()
+            },
+        ))
+        .expect("transform");
+
+        assert!(!encoded_png_has_alpha(&result.artifact.bytes));
+        assert_eq!(result.artifact.metadata.has_alpha, Some(false));
+    }
+
+    #[test]
+    fn transform_raster_adds_alpha_when_contain_padding_is_transparent() {
+        // Padding an opaque image into a wider box with the default transparent fill is a
+        // case where the operation genuinely requires an alpha channel.
+        let input = opaque_rgb_png_artifact(8, 4);
+        let result = transform_raster(TransformRequest::new(
+            input,
+            TransformOptions {
+                format: Some(MediaType::Png),
+                width: Some(16),
+                height: Some(16),
+                fit: Some(Fit::Contain),
+                ..TransformOptions::default()
+            },
+        ))
+        .expect("transform");
+
+        assert!(encoded_png_has_alpha(&result.artifact.bytes));
+        assert_eq!(result.artifact.metadata.has_alpha, Some(true));
+    }
+
+    #[test]
+    fn transform_raster_keeps_opaque_output_when_contain_padding_is_opaque() {
+        let input = opaque_rgb_png_artifact(8, 4);
+        let result = transform_raster(TransformRequest::new(
+            input,
+            TransformOptions {
+                format: Some(MediaType::Png),
+                width: Some(16),
+                height: Some(16),
+                fit: Some(Fit::Contain),
+                background: Some(Rgba8 {
+                    r: 255,
+                    g: 255,
+                    b: 255,
+                    a: 255,
+                }),
+                ..TransformOptions::default()
+            },
+        ))
+        .expect("transform");
+
+        assert!(!encoded_png_has_alpha(&result.artifact.bytes));
+        assert_eq!(result.artifact.metadata.has_alpha, Some(false));
+    }
+
+    #[test]
+    fn transform_raster_keeps_opaque_bmp_output_without_alpha() {
+        let input = opaque_rgb_png_artifact(8, 8);
+        let result = transform_raster(TransformRequest::new(
+            input,
+            TransformOptions {
+                format: Some(MediaType::Bmp),
+                ..TransformOptions::default()
+            },
+        ))
+        .expect("transform");
+
+        assert_eq!(result.artifact.metadata.has_alpha, Some(false));
+        let round_tripped =
+            sniff_artifact(RawArtifact::new(result.artifact.bytes, None)).expect("sniff output");
+        assert_eq!(round_tripped.metadata.has_alpha, Some(false));
+    }
+
+    #[test]
+    fn transform_raster_keeps_opaque_webp_output_without_alpha() {
+        let input = opaque_rgb_png_artifact(8, 8);
+        let result = transform_raster(TransformRequest::new(
+            input,
+            TransformOptions {
+                format: Some(MediaType::Webp),
+                ..TransformOptions::default()
+            },
+        ))
+        .expect("transform");
+
+        assert_eq!(result.artifact.metadata.has_alpha, Some(false));
+        let round_tripped =
+            sniff_artifact(RawArtifact::new(result.artifact.bytes, None)).expect("sniff output");
+        assert_eq!(round_tripped.metadata.has_alpha, Some(false));
     }
 
     #[test]

@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- `convert`/`optimize`: stop adding an alpha channel to opaque images ([#253](https://github.com/nao1215/truss/issues/253)). Every decoded image was widened to RGBA8 before encoding, so a no-op same-format pass flipped `hasAlpha` from `false` to `true` and grew the file. PNG, WebP, BMP, TIFF, and AVIF output now use an RGB color model whenever the pixels are fully opaque, and keep alpha whenever any pixel is not.
+- `inspect`: report `hasAlpha` for lossless WebP (VP8L) instead of `null`; the `alpha_is_used` header bit is now read.
+
 ## v0.11.5
 
 ### Changed

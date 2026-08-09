@@ -1897,16 +1897,19 @@ fn sniff_webp_vp8l(bytes: &[u8]) -> Result<ArtifactMetadata, TransformError> {
         ));
     }
 
+    // VP8L header bits, LSB first: 14 bits width-1, 14 bits height-1, 1 bit alpha_is_used,
+    // 3 bits version.
     let bits = read_u32_le(&bytes[1..5])?;
     let width = (bits & 0x3FFF) + 1;
     let height = ((bits >> 14) & 0x3FFF) + 1;
+    let has_alpha = (bits >> 28) & 1 != 0;
 
     Ok(ArtifactMetadata {
         width: Some(width),
         height: Some(height),
         frame_count: 1,
         duration: None,
-        has_alpha: None,
+        has_alpha: Some(has_alpha),
     })
 }
 
@@ -2240,7 +2243,11 @@ mod tests {
     }
 
     fn webp_vp8l_bytes(width: u32, height: u32) -> Vec<u8> {
-        let packed = (width - 1) | ((height - 1) << 14);
+        webp_vp8l_bytes_with_alpha(width, height, false)
+    }
+
+    fn webp_vp8l_bytes_with_alpha(width: u32, height: u32, alpha_is_used: bool) -> Vec<u8> {
+        let packed = (width - 1) | ((height - 1) << 14) | (u32::from(alpha_is_used) << 28);
         let mut bytes = Vec::new();
         bytes.extend_from_slice(b"RIFF");
         bytes.extend_from_slice(&17_u32.to_le_bytes());
@@ -2711,6 +2718,18 @@ mod tests {
         assert_eq!(artifact.media_type, MediaType::Webp);
         assert_eq!(artifact.metadata.width, Some(123));
         assert_eq!(artifact.metadata.height, Some(77));
+        assert_eq!(artifact.metadata.has_alpha, Some(false));
+    }
+
+    #[test]
+    fn sniff_artifact_reads_the_webp_vp8l_alpha_bit() {
+        let artifact = sniff_artifact(RawArtifact::new(
+            webp_vp8l_bytes_with_alpha(123, 77, true),
+            None,
+        ))
+        .expect("sniff webp vp8l");
+
+        assert_eq!(artifact.metadata.has_alpha, Some(true));
     }
 
     #[test]
