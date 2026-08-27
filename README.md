@@ -47,6 +47,14 @@ Use the CLI for local files and shell pipelines, run the server behind a CDN or 
 brew install nao1215/tap/truss
 ```
 
+#### Arch Linux (AUR)
+
+```sh
+yay -S truss-bin   # or: paru -S truss-bin
+```
+
+[`truss-bin`](https://aur.archlinux.org/packages/truss-bin) is community-maintained and installs the release binary.
+
 #### Cargo
 
 ```sh
