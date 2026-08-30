@@ -65,6 +65,7 @@ pub(super) fn sign_from_clap(args: ClapSignArgs) -> Result<Command, CliError> {
         crop: args.crop,
         blur: args.blur,
         sharpen: args.sharpen,
+        grayscale: args.grayscale,
     }
     .into_options()
     .map_err(map_transform_error)?;

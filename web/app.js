@@ -44,6 +44,7 @@ const elements = {
   watermarkMargin: document.querySelector("#watermark-margin"),
   crop: document.querySelector("#crop"),
   autoOrient: document.querySelector("#auto-orient"),
+  grayscale: document.querySelector("#grayscale"),
   transformButton: document.querySelector("#transform-button"),
   downloadLink: document.querySelector("#download-link"),
   downloadNote: document.querySelector("#download-note"),
@@ -134,6 +135,12 @@ function wireEvents() {
     refreshQualityState();
   });
   elements.crop.addEventListener("input", () => {
+    refreshOptimizeState();
+    refreshQualityState();
+  });
+  // Grayscale rewrites pixels, so toggling it changes whether a JPEG can still take
+  // the lossless path.
+  elements.grayscale.addEventListener("change", () => {
     refreshOptimizeState();
     refreshQualityState();
   });
@@ -395,6 +402,7 @@ function collectOptions() {
     crop: emptyToNull(elements.crop.value.trim()),
     blur: parseSigma(elements.blurNumber.value),
     sharpen: parseSigma(elements.sharpenNumber.value),
+    grayscale: elements.grayscale.checked || null,
   };
 }
 
@@ -750,6 +758,7 @@ function hasJpegLosslessTransforms() {
     emptyToNull(elements.crop.value.trim()) !== null ||
     parseSigma(elements.blurNumber.value) !== null ||
     parseSigma(elements.sharpenNumber.value) !== null ||
+    elements.grayscale.checked ||
     state.watermarkBytes !== null
   );
 }

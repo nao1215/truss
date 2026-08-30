@@ -134,6 +134,8 @@ OPTIONS:
       --crop <x,y,w,h>     Explicit crop region as x,y,width,height (applied before resize; raster-only)
       --blur <SIGMA>       Gaussian blur sigma (0.1-100.0; raster-only, not supported for SVG inputs)
       --sharpen <SIGMA>    Sharpen sigma (0.1-100.0; raster-only, not supported for SVG inputs)
+      --grayscale          Desaturate the image to grayscale (applied after resize, blur,
+                           and sharpen, and before the watermark)
       --watermark <FILE>   Watermark image to composite onto the output (raster-only, not supported for SVG inputs)
       --watermark-position <POS>  Watermark placement (default: bottom-right; raster-only)
                            center, top, right, bottom, left,
@@ -326,7 +328,8 @@ OPTIONAL:
       --version <VALUE>    Cache-busting version tag
       --width, --height, --fit, --position, --format, --quality,
       --optimize, --target-quality, --background, --rotate, --auto-orient, --no-auto-orient,
-      --strip-metadata, --keep-metadata, --preserve-exif, --crop, --blur, --sharpen
+      --strip-metadata, --keep-metadata, --preserve-exif, --crop, --blur, --sharpen,
+      --grayscale
       --watermark-url <URL>          Watermark image URL to embed in the signed URL
       --watermark-position <POS>     Watermark placement (default: bottom-right)
       --watermark-opacity <1-100>    Watermark opacity (default: 50)
@@ -493,6 +496,9 @@ struct ClapConvertArgs {
     /// Apply sharpen filter (sigma: 0.1-100.0)
     #[arg(long, value_parser = parse_sharpen)]
     sharpen: Option<f32>,
+    /// Desaturate the image to grayscale
+    #[arg(long)]
+    grayscale: bool,
     /// Watermark image file path
     #[arg(long)]
     watermark: Option<PathBuf>,
@@ -675,6 +681,9 @@ struct ClapSignArgs {
     /// Apply sharpen filter (sigma: 0.1-100.0)
     #[arg(long, value_parser = parse_sharpen)]
     sharpen: Option<f32>,
+    /// Desaturate the image to grayscale
+    #[arg(long)]
+    grayscale: bool,
     /// Watermark image URL to composite onto the output
     #[arg(long, value_parser = parse_url_value)]
     watermark_url: Option<String>,
@@ -1219,6 +1228,7 @@ struct TransformFields {
     crop: Option<CropRegion>,
     blur: Option<f32>,
     sharpen: Option<f32>,
+    grayscale: bool,
 }
 
 impl TransformFields {
@@ -1257,6 +1267,7 @@ impl TransformFields {
             crop: self.crop,
             blur: self.blur,
             sharpen: self.sharpen,
+            grayscale: self.grayscale,
             deadline: None,
         })
     }

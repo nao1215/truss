@@ -547,6 +547,9 @@ pub(super) fn compute_cache_key(
     if options.preserve_exif {
         push_param(&mut canonical, "preserveExif", "true");
     }
+    if options.grayscale {
+        push_param(&mut canonical, "grayscale", "true");
+    }
     if let Some(q) = options.quality {
         let buf = q.to_string();
         push_param(&mut canonical, "quality", &buf);
@@ -708,6 +711,21 @@ mod tests {
         assert_ne!(
             key_a, key_b,
             "blur=0.11 and blur=0.14 must produce different cache keys"
+        );
+    }
+
+    #[test]
+    fn cache_key_differs_by_grayscale() {
+        let base = TransformOptions::default();
+        let gray = TransformOptions {
+            grayscale: true,
+            ..TransformOptions::default()
+        };
+
+        assert_ne!(
+            compute_cache_key("img.png", &base, None, None),
+            compute_cache_key("img.png", &gray, None, None),
+            "a grayscale request must not reuse the color variant's cache entry"
         );
     }
 

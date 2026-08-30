@@ -424,6 +424,10 @@ fn parse_transform_options(query: &BTreeMap<String, String>) -> TransformOptions
         sharpen: query
             .get("sharpen")
             .map(|value| value.parse().expect("parse signed sharpen")),
+        grayscale: query
+            .get("grayscale")
+            .map(|value| parse_bool_query(value, "grayscale"))
+            .unwrap_or(false),
         crop: query
             .get("crop")
             .map(|value| CropRegion::from_str(value).expect("parse signed crop")),

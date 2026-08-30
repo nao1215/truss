@@ -242,6 +242,11 @@ pub fn transform_raster(request: TransformRequest) -> Result<TransformResult, Tr
         check_deadline_if_set!(start, deadline, "sharpen");
     }
 
+    if normalized.options.grayscale {
+        image = apply_grayscale(image);
+        check_deadline_if_set!(start, deadline, "grayscale");
+    }
+
     if let Some(ref wm) = normalized.watermark {
         image = apply_watermark(image, wm)?;
         check_deadline_if_set!(start, deadline, "watermark");
@@ -728,6 +733,16 @@ fn apply_rotation(image: DynamicImage, rotation: Rotation) -> DynamicImage {
     }
 }
 
+/// Desaturates an image to grayscale while preserving its alpha channel.
+///
+/// Luminance uses the Rec. 601 weights applied by [`DynamicImage::grayscale`], so an
+/// opaque input becomes `Luma8` and an input with alpha becomes `LumaA8`. The encoder
+/// layer widens either back to `Rgb8`/`Rgba8`, so callers do not need to care which of
+/// the two comes out here.
+fn apply_grayscale(image: DynamicImage) -> DynamicImage {
+    image.grayscale()
+}
+
 fn apply_crop(image: DynamicImage, crop: CropRegion) -> Result<DynamicImage, TransformError> {
     let (iw, ih) = image.dimensions();
     if crop.x.saturating_add(crop.width) > iw || crop.y.saturating_add(crop.height) > ih {
@@ -1084,6 +1099,7 @@ fn is_passthrough_lossless_request(normalized: &NormalizedTransformRequest) -> b
         && normalized.options.crop.is_none()
         && normalized.options.blur.is_none()
         && normalized.options.sharpen.is_none()
+        && !normalized.options.grayscale
         && normalized.watermark.is_none()
         && (!normalized.options.auto_orient || jpeg_auto_orientation_is_noop(&normalized.input))
 }
@@ -4428,6 +4444,137 @@ mod tests {
             edge_pixel[0] > 0 && edge_pixel[0] < 255,
             "expected blurred edge pixel to be a mid-tone, got r={}",
             edge_pixel[0]
+        );
+    }
+
+    #[test]
+    fn transform_raster_applies_grayscale() {
+        // Distinct hues so a channel-collapsing bug is visible: pure red and pure blue
+        // have different luminance under Rec. 601, so they must not map to the same gray.
+        let mut image = RgbaImage::from_pixel(2, 1, Rgba([255, 0, 0, 255]));
+        image.put_pixel(1, 0, Rgba([0, 0, 255, 255]));
+        let mut bytes = Vec::new();
+        PngEncoder::new(&mut bytes)
+            .write_image(&image, 2, 1, ColorType::Rgba8.into())
+            .expect("encode png");
+        let artifact = Artifact::new(
+            bytes,
+            MediaType::Png,
+            ArtifactMetadata {
+                width: Some(2),
+                height: Some(1),
+                frame_count: 1,
+                duration: None,
+                has_alpha: Some(false),
+            },
+        );
+
+        let result = transform_raster(TransformRequest::new(
+            artifact,
+            TransformOptions {
+                grayscale: true,
+                ..TransformOptions::default()
+            },
+        ))
+        .expect("grayscale transform");
+
+        let output = image::load_from_memory_with_format(&result.artifact.bytes, ImageFormat::Png)
+            .expect("decode output")
+            .to_rgba8();
+
+        for (x, pixel) in output.pixels().enumerate() {
+            assert!(
+                pixel[0] == pixel[1] && pixel[1] == pixel[2],
+                "pixel {x} is not neutral gray: {pixel:?}"
+            );
+        }
+        assert_ne!(
+            output.get_pixel(0, 0)[0],
+            output.get_pixel(1, 0)[0],
+            "red and blue must map to different luminance values"
+        );
+    }
+
+    #[test]
+    fn transform_raster_grayscale_preserves_alpha() {
+        let mut image = RgbaImage::from_pixel(2, 1, Rgba([255, 0, 0, 128]));
+        image.put_pixel(1, 0, Rgba([0, 255, 0, 0]));
+        let mut bytes = Vec::new();
+        PngEncoder::new(&mut bytes)
+            .write_image(&image, 2, 1, ColorType::Rgba8.into())
+            .expect("encode png");
+        let artifact = Artifact::new(
+            bytes,
+            MediaType::Png,
+            ArtifactMetadata {
+                width: Some(2),
+                height: Some(1),
+                frame_count: 1,
+                duration: None,
+                has_alpha: Some(true),
+            },
+        );
+
+        let result = transform_raster(TransformRequest::new(
+            artifact,
+            TransformOptions {
+                grayscale: true,
+                ..TransformOptions::default()
+            },
+        ))
+        .expect("grayscale transform");
+
+        let output = image::load_from_memory_with_format(&result.artifact.bytes, ImageFormat::Png)
+            .expect("decode output")
+            .to_rgba8();
+        assert_eq!(
+            output.get_pixel(0, 0)[3],
+            128,
+            "alpha must survive grayscale"
+        );
+        assert_eq!(output.get_pixel(1, 0)[3], 0, "alpha must survive grayscale");
+    }
+
+    #[test]
+    fn grayscale_disables_lossless_passthrough() {
+        // A lossless PNG->PNG optimize with no other operation normally short-circuits
+        // before the pipeline runs. grayscale must defeat that, or it is silently dropped.
+        let mut image = RgbaImage::from_pixel(4, 4, Rgba([255, 0, 0, 255]));
+        image.put_pixel(0, 0, Rgba([0, 0, 255, 255]));
+        let mut bytes = Vec::new();
+        PngEncoder::new(&mut bytes)
+            .write_image(&image, 4, 4, ColorType::Rgba8.into())
+            .expect("encode png");
+        let artifact = Artifact::new(
+            bytes,
+            MediaType::Png,
+            ArtifactMetadata {
+                width: Some(4),
+                height: Some(4),
+                frame_count: 1,
+                duration: None,
+                has_alpha: Some(false),
+            },
+        );
+
+        let result = transform_raster(TransformRequest::new(
+            artifact,
+            TransformOptions {
+                grayscale: true,
+                optimize: OptimizeMode::Lossless,
+                format: Some(MediaType::Png),
+                ..TransformOptions::default()
+            },
+        ))
+        .expect("grayscale + lossless transform");
+
+        let output = image::load_from_memory_with_format(&result.artifact.bytes, ImageFormat::Png)
+            .expect("decode output")
+            .to_rgba8();
+        let pixel = output.get_pixel(1, 1);
+        assert!(
+            pixel[0] == pixel[1] && pixel[1] == pixel[2],
+            "lossless passthrough must not skip grayscale: {pixel:?}"
         );
     }
 

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- `--grayscale` on `convert` and `sign`, `grayscale` in the HTTP API (query parameter and JSON body), the WASM options object, and the `@nao1215/truss-url-signer` transform set ([#302](https://github.com/nao1215/truss/issues/302)). Luminance uses the Rec. 601 weights and the alpha channel is preserved. The stage runs after resize, blur, and sharpen and before the watermark, so a watermark keeps its own colors, and it participates in the cache key and the signed-URL canonical string. SVG input is supported when the output is a raster format.
+
 ### Fixed
 
 - Get CI green again: `chunks_exact_mut(4)` in the SVG premultiply loop is now `as_chunks_mut::<4>()`, which the `clippy::chunks_exact_to_as_chunks` lint on current stable rejects, and `h2` moves 0.4.15 -> 0.4.19 for RUSTSEC-2026-0258. The remaining unpatched `h2` 0.3.27 is ignored with a rationale: it is reachable only as an outbound S3 client through the legacy AWS SDK hyper 0.14 path, the 0.3 line has no patched release, and truss's own inbound server does not use h2.

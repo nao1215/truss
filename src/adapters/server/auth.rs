@@ -226,6 +226,9 @@ pub(super) fn extend_transform_query(
     if let Some(sharpen) = options.sharpen {
         query.insert("sharpen".to_string(), format!("{sharpen}"));
     }
+    if options.grayscale {
+        query.insert("grayscale".to_string(), "true".to_string());
+    }
 }
 
 pub(super) fn encode_background(color: Rgba8) -> String {
@@ -266,6 +269,7 @@ pub(super) fn validate_public_query_names(
                 | "crop"
                 | "blur"
                 | "sharpen"
+                | "grayscale"
                 | "watermarkUrl"
                 | "watermarkPosition"
                 | "watermarkOpacity"
@@ -837,6 +841,7 @@ mod tests {
             ("crop", "10,10,100,100"),
             ("blur", "2.5"),
             ("sharpen", "1.0"),
+            ("grayscale", "true"),
             ("version", "v2"),
             ("preset", "thumb"),
         ]);

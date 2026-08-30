@@ -3990,6 +3990,7 @@ mod tests {
                     crop: None,
                     blur: None,
                     sharpen: None,
+                    grayscale: None,
                 },
             );
             m
@@ -4067,6 +4068,7 @@ mod tests {
                     crop: None,
                     blur: None,
                     sharpen: None,
+                    grayscale: None,
                 },
             );
             m
