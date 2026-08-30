@@ -313,6 +313,7 @@ fn decode_input(input: &Artifact) -> Result<DynamicImage, TransformError> {
         }
         MediaType::Bmp => ImageFormat::Bmp,
         MediaType::Tiff => ImageFormat::Tiff,
+        MediaType::Gif => ImageFormat::Gif,
         MediaType::Svg => {
             return Err(TransformError::UnsupportedInputMediaType(
                 "SVG input should be routed to transform_svg, not transform_raster".into(),
@@ -1588,6 +1589,9 @@ fn encode_baseline_output(
         MediaType::Svg => Err(TransformError::EncodeFailed(
             "SVG encoding should be handled by transform_svg".into(),
         )),
+        MediaType::Gif => Err(TransformError::EncodeFailed(
+            "GIF output should be rejected before encoding".into(),
+        )),
     }
 }
 
@@ -2534,7 +2538,7 @@ fn read_input_metadata(input: &Artifact) -> Result<RetainedMetadata, TransformEr
                     .map_err(|error| TransformError::DecodeFailed(error.to_string()))?,
             })
         }
-        MediaType::Avif | MediaType::Svg | MediaType::Bmp | MediaType::Tiff => {
+        MediaType::Avif | MediaType::Svg | MediaType::Bmp | MediaType::Tiff | MediaType::Gif => {
             Ok(RetainedMetadata::default())
         }
     }
@@ -2552,7 +2556,8 @@ fn output_has_alpha(image: &DynamicImage, media_type: MediaType) -> bool {
         | MediaType::Avif
         | MediaType::Svg
         | MediaType::Bmp
-        | MediaType::Tiff => image_has_transparency(image),
+        | MediaType::Tiff
+        | MediaType::Gif => image_has_transparency(image),
     }
 }
 

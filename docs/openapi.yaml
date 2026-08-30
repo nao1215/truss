@@ -925,6 +925,9 @@ components:
         Output image format.
         When present, the `Accept` header is ignored.
         `svg` output is only valid for SVG input.
+        `gif` is not an output format: truss decodes GIF but does not encode it, so
+        requesting it returns 415. A GIF source with no `format` is served as PNG.
+        An animated GIF source is rejected with 415 rather than reduced to one frame.
       schema:
         type: string
         enum: [jpeg, png, webp, avif, bmp, tiff, svg]

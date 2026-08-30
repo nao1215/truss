@@ -1410,7 +1410,10 @@ fn transform_source_bytes_inner(
         };
 
     if options.format.is_none() {
-        options.format = Some(artifact.media_type);
+        // The server needs a concrete format here, ahead of the transform, for the cache
+        // key and the response Content-Type. `default_output` keeps the input's format
+        // except for a decode-only input such as GIF, which resolves to PNG.
+        options.format = Some(artifact.media_type.default_output());
     }
 
     // Check input pixel count against the server-level limit before decode.

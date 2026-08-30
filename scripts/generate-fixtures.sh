@@ -159,6 +159,21 @@ print('  wrote 256 random bytes')
 "
 
 # ---------------------------------------------------------------------------
+# 6b. GIF inputs (decode-only format)
+# ---------------------------------------------------------------------------
+
+echo "[gif] sample.gif — 4x3 static GIF87a"
+magick -size 4x3 xc:'rgb(255,0,0)' GIF87:"$DIR/sample.gif"
+
+echo "[gif] transparent.gif — 4x4 static GIF89a with a transparent color index"
+magick -size 4x4 xc:'rgba(0,0,0,0)' -type PaletteAlpha GIF:"$DIR/transparent.gif"
+
+echo "[gif] animated.gif — 3-frame animated GIF89a"
+magick -delay 10 -size 4x3 \
+  xc:red xc:green xc:blue \
+  -loop 0 "$DIR/animated.gif"
+
+# ---------------------------------------------------------------------------
 # 7. SVG edge cases (hand-crafted)
 # ---------------------------------------------------------------------------
 

@@ -80,8 +80,15 @@ See the [Signed URL Specification](signed-url-spec.md) for canonicalization rule
 | BMP         | Yes  | Yes | Yes  | Yes  | Yes | Yes  | -   |
 | TIFF        | Yes  | Yes | Yes  | Yes  | Yes | Yes  | -   |
 | SVG         | Yes  | Yes | Yes  | Yes  | Yes | Yes  | Yes |
+| GIF (static) | Yes  | Yes | Yes  | Yes  | Yes | Yes  | -   |
 
 SVG to SVG performs sanitization only, removing scripts and external references.
+
+GIF has no output column: truss decodes it but never encodes it, so `format=gif` returns
+`415 Unsupported Media Type`. A GIF request that does not name a format is served as PNG
+rather than echoing the input format back. An animated GIF is rejected with `415`, naming the
+frame count, instead of being reduced to its first frame; the CLI `truss inspect` still reads
+animated GIFs and reports `isAnimated`.
 
 ## CDN / Reverse-Proxy Integration
 

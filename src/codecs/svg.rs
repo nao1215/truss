@@ -747,6 +747,9 @@ fn encode_raster_output(
                 "SVG-to-SVG rasterization is not meaningful".into(),
             ));
         }
+        MediaType::Gif => {
+            return Err(TransformError::UnsupportedOutputMediaType(MediaType::Gif));
+        }
     }
 
     Ok(bytes)

@@ -1545,6 +1545,14 @@ pub(super) fn parse_format_preference_from_env() -> io::Result<Vec<crate::MediaT
                 format!("TRUSS_FORMAT_PREFERENCE: {e}"),
             )
         })?;
+        if !media_type.is_encodable() {
+            // The preference list drives Accept negotiation, so every entry has to be a
+            // format the server can actually produce.
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("TRUSS_FORMAT_PREFERENCE: `{name}` is an input-only format"),
+            ));
+        }
         if formats.contains(&media_type) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -2237,11 +2245,25 @@ mod tests {
     #[test]
     #[serial]
     fn parse_format_preference_invalid_format_rejected() {
-        let _env = ScopedEnv::set("TRUSS_FORMAT_PREFERENCE", "webp,gif");
+        let _env = ScopedEnv::set("TRUSS_FORMAT_PREFERENCE", "webp,heic");
         let result = parse_format_preference_from_env();
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("TRUSS_FORMAT_PREFERENCE"));
+    }
+
+    #[test]
+    #[serial]
+    fn parse_format_preference_rejects_a_decode_only_format() {
+        // `gif` parses as a media type but the server cannot encode it, so it has no
+        // business in a list that decides what Accept negotiation may return.
+        let _env = ScopedEnv::set("TRUSS_FORMAT_PREFERENCE", "webp,gif");
+        let result = parse_format_preference_from_env();
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("input-only"),
+            "the error should say why, got: {msg}"
+        );
     }
 
     #[test]

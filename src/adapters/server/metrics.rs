@@ -230,9 +230,9 @@ fn transform_error_index(error: &TransformError) -> usize {
 
 // ── MediaType index ──────────────────────────────────────────────────
 
-const MEDIA_TYPE_COUNT: usize = 7;
+const MEDIA_TYPE_COUNT: usize = 8;
 const MEDIA_TYPE_LABELS: [&str; MEDIA_TYPE_COUNT] =
-    ["jpeg", "png", "webp", "avif", "svg", "bmp", "tiff"];
+    ["jpeg", "png", "webp", "avif", "svg", "bmp", "tiff", "gif"];
 
 fn media_type_index(mt: MediaType) -> usize {
     match mt {
@@ -243,6 +243,8 @@ fn media_type_index(mt: MediaType) -> usize {
         MediaType::Svg => 4,
         MediaType::Bmp => 5,
         MediaType::Tiff => 6,
+        // GIF is input-only, so this index is only ever reached as an input label.
+        MediaType::Gif => 7,
     }
 }
 

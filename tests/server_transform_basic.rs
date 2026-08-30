@@ -1,8 +1,8 @@
 mod common;
 
 use common::{
-    png_bytes, send_metrics_request, send_raw_request, send_transform_request,
-    spawn_fixture_server, spawn_server, split_response, temp_dir,
+    animated_gif_bytes, gif_bytes, png_bytes, send_metrics_request, send_raw_request,
+    send_transform_request, spawn_fixture_server, spawn_server, split_response, temp_dir,
 };
 use serial_test::serial;
 use std::fs;
@@ -87,6 +87,106 @@ fn serve_once_applies_grayscale_from_the_json_body() {
     assert!(
         pixel[0] == pixel[1] && pixel[1] == pixel[2],
         "expected a neutral gray pixel, got {pixel:?}"
+    );
+}
+
+#[test]
+fn serve_once_transforms_a_static_gif_source() {
+    let storage_root = temp_dir("gif-source");
+    fs::write(storage_root.join("image.gif"), gif_bytes()).expect("write source fixture");
+    let (addr, handle) = spawn_server(ServerConfig::new(storage_root, Some("secret".to_string())));
+    let response = send_transform_request(
+        addr,
+        r#"{"source":{"kind":"path","path":"/image.gif"},"options":{"format":"png"}}"#,
+        Some("secret"),
+    );
+
+    handle
+        .join()
+        .expect("join server thread")
+        .expect("serve one request");
+
+    let (header, content_type, body) = split_response(&response);
+    let artifact = sniff_artifact(RawArtifact::new(body, None)).expect("sniff transformed output");
+
+    assert!(header.starts_with("HTTP/1.1 200 OK"));
+    assert_eq!(content_type, "image/png");
+    assert_eq!(artifact.media_type, MediaType::Png);
+    assert_eq!(artifact.metadata.width, Some(4));
+    assert_eq!(artifact.metadata.height, Some(3));
+}
+
+#[test]
+fn serve_once_serves_a_gif_source_as_png_when_no_format_is_requested() {
+    // "Keep the input format" cannot mean GIF, because truss has no GIF encoder. Without
+    // the PNG fallback this request would 400 on a perfectly ordinary stored image.
+    let storage_root = temp_dir("gif-default-format");
+    fs::write(storage_root.join("image.gif"), gif_bytes()).expect("write source fixture");
+    let (addr, handle) = spawn_server(ServerConfig::new(storage_root, Some("secret".to_string())));
+    let response = send_transform_request(
+        addr,
+        r#"{"source":{"kind":"path","path":"/image.gif"}}"#,
+        Some("secret"),
+    );
+
+    handle
+        .join()
+        .expect("join server thread")
+        .expect("serve one request");
+
+    let (header, content_type, _body) = split_response(&response);
+    assert!(header.starts_with("HTTP/1.1 200 OK"));
+    assert_eq!(content_type, "image/png");
+}
+
+#[test]
+fn serve_once_rejects_an_animated_gif_source() {
+    let storage_root = temp_dir("gif-animated");
+    fs::write(storage_root.join("image.gif"), animated_gif_bytes()).expect("write source fixture");
+    let (addr, handle) = spawn_server(ServerConfig::new(storage_root, Some("secret".to_string())));
+    let response = send_transform_request(
+        addr,
+        r#"{"source":{"kind":"path","path":"/image.gif"},"options":{"format":"png"}}"#,
+        Some("secret"),
+    );
+
+    handle
+        .join()
+        .expect("join server thread")
+        .expect("serve one request");
+
+    let (header, _content_type, body) = split_response(&response);
+    assert!(
+        header.starts_with("HTTP/1.1 415"),
+        "an animated GIF should be an unsupported-media-type error, got: {header}"
+    );
+    let text = String::from_utf8_lossy(&body);
+    assert!(
+        text.contains("animated GIF is not supported"),
+        "the response should say why, got: {text}"
+    );
+}
+
+#[test]
+fn serve_once_rejects_gif_as_an_output_format() {
+    let storage_root = temp_dir("gif-output");
+    fs::write(storage_root.join("image.png"), png_bytes()).expect("write source fixture");
+    let (addr, handle) = spawn_server(ServerConfig::new(storage_root, Some("secret".to_string())));
+    let response = send_transform_request(
+        addr,
+        r#"{"source":{"kind":"path","path":"/image.png"},"options":{"format":"gif"}}"#,
+        Some("secret"),
+    );
+
+    handle
+        .join()
+        .expect("join server thread")
+        .expect("serve one request");
+
+    let (header, _content_type, _body) = split_response(&response);
+    assert!(
+        header.starts_with("HTTP/1.1 415"),
+        "gif output should be an unsupported-media-type error, got: {header}"
     );
 }
 
