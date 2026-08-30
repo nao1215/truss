@@ -431,8 +431,10 @@ fn slow_header_client_is_answered_rather_than_held() {
 
     let started = Instant::now();
     let mut stream = TcpStream::connect(addr).expect("connect to test server");
+    // Short enough that the trickle loop below stays responsive, long enough that a single
+    // read is not mistaken for the server having nothing to say.
     stream
-        .set_read_timeout(Some(Duration::from_secs(60)))
+        .set_read_timeout(Some(Duration::from_millis(250)))
         .expect("set read timeout");
     stream
         .write_all(b"GET /health HTTP/1.1\r\n")
@@ -441,22 +443,24 @@ fn slow_header_client_is_answered_rather_than_held() {
 
     // Keep the socket busy without ever finishing the headers, for longer than the budget.
     // Each write resets an inactivity timeout; only a budget for the phase as a whole ends
-    // this, and the server has to answer before the trickle stops.
-    let trickle_until = Instant::now() + Duration::from_secs(25);
+    // this. The read is interleaved with the writes and the loop stops the moment the
+    // answer arrives: writing on past the server's close would reset the connection on
+    // Windows and discard the response that is the point of the test.
+    let mut response = Vec::new();
+    let trickle_until = Instant::now() + Duration::from_secs(40);
     while Instant::now() < trickle_until {
+        let mut chunk = [0_u8; 1024];
+        match stream.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(read) => {
+                response.extend_from_slice(&chunk[..read]);
+                break;
+            }
+            Err(_) => {}
+        }
         if stream.write_all(b"X-Pad: y\r\n").is_err() || stream.flush().is_err() {
             break;
         }
-        std::thread::sleep(Duration::from_millis(500));
-    }
-
-    let mut response = Vec::new();
-    let mut chunk = [0_u8; 1024];
-    while let Ok(read) = stream.read(&mut chunk) {
-        if read == 0 {
-            break;
-        }
-        response.extend_from_slice(&chunk[..read]);
     }
 
     handle
