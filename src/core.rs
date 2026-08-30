@@ -829,13 +829,13 @@ impl TransformOptions {
         // the caller clearly meant to have an effect.
         if self.without_enlargement && self.width.is_none() && self.height.is_none() {
             return Err(TransformError::InvalidOptions(
-                "without_enlargement requires width or height".to_string(),
+                "withoutEnlargement requires width or height".to_string(),
             ));
         }
 
         if self.preserve_exif && self.strip_metadata {
             return Err(TransformError::InvalidOptions(
-                "preserve_exif requires strip_metadata to be false".to_string(),
+                "preserveExif requires stripMetadata to be false".to_string(),
             ));
         }
 
@@ -2896,7 +2896,7 @@ mod tests {
         assert_eq!(
             err,
             TransformError::InvalidOptions(
-                "preserve_exif requires strip_metadata to be false".to_string()
+                "preserveExif requires stripMetadata to be false".to_string()
             )
         );
     }

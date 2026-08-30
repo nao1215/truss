@@ -100,7 +100,7 @@ export interface TransformQuery {
   autoOrient?: boolean | undefined;
   /** Strip all metadata from the output image. */
   stripMetadata?: boolean | undefined;
-  /** Preserve EXIF metadata in the output image. */
+  /** Preserve EXIF metadata in the output image. Implies `stripMetadata: false`. */
   preserveExif?: boolean | undefined;
   /** Crop region as `"x,y,w,h"`. */
   crop?: string | undefined;

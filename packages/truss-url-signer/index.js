@@ -259,11 +259,11 @@ function normalizeTransforms(transforms) {
   const background = normalizeOptionalBackground(transforms.background);
   const rotate = normalizeOptionalRotation(transforms.rotate);
   const autoOrient = normalizeOptionalBoolean("autoOrient", transforms.autoOrient);
-  const stripMetadata = normalizeOptionalBoolean(
+  let stripMetadata = normalizeOptionalBoolean(
     "stripMetadata",
     transforms.stripMetadata,
   );
-  const preserveExif = normalizeOptionalBoolean(
+  let preserveExif = normalizeOptionalBoolean(
     "preserveExif",
     transforms.preserveExif,
   );
@@ -288,6 +288,14 @@ function normalizeTransforms(transforms) {
     stripMetadata,
     preserveExif,
   });
+
+  // `preserveExif` implies "do not strip", the rule truss applies in its own
+  // `resolve_metadata_flags`. Requiring the caller to also pass `stripMetadata: false`
+  // made this package refuse a transform the CLI and the server both accept, and the
+  // resolution here is what makes the URL identical to the one `truss sign` produces.
+  if (preserveExif === true) {
+    stripMetadata = false;
+  }
 
   return {
     width,
@@ -354,7 +362,7 @@ function validateTransformMatrix(transforms) {
     throw new TypeError("position requires both width and height");
   }
 
-  if (transforms.preserveExif === true && transforms.stripMetadata !== false) {
+  if (transforms.preserveExif === true && transforms.stripMetadata === true) {
     throw new TypeError("preserveExif requires stripMetadata to be false");
   }
 

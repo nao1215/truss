@@ -758,3 +758,61 @@ fn serve_once_returns_404_for_missing_source_path() {
         "expected 404 for missing source file, got: {header}"
     );
 }
+
+#[test]
+#[serial]
+fn serve_once_accepts_preserve_exif_without_a_second_metadata_field() {
+    // `preserveExif` implies "do not strip" on the CLI and in the WASM build, both of
+    // which resolve the pair through `resolve_metadata_flags`. The server read the two
+    // fields independently, so this request - the one the OpenAPI spec describes - came
+    // back 400 with `preserve_exif requires strip_metadata to be false`, a Rust field
+    // name that appears nowhere in the API.
+    let storage_root = temp_dir("preserve-exif-alone");
+    fs::write(storage_root.join("image.png"), png_bytes()).expect("write source fixture");
+    let (addr, handle) = spawn_server(ServerConfig::new(storage_root, Some("secret".to_string())));
+    let response = send_transform_request(
+        addr,
+        r#"{"source":{"kind":"path","path":"/image.png"},"options":{"format":"png","preserveExif":true}}"#,
+        Some("secret"),
+    );
+
+    handle
+        .join()
+        .expect("join server thread")
+        .expect("serve one request");
+
+    let (header, content_type, body) = split_response(&response);
+    assert!(
+        header.starts_with("HTTP/1.1 200 OK"),
+        "preserveExif on its own is a complete request, got: {header}"
+    );
+    assert_eq!(content_type, "image/png");
+    let artifact = sniff_artifact(RawArtifact::new(body, None)).expect("sniff transformed output");
+    assert_eq!(artifact.media_type, MediaType::Png);
+}
+
+#[test]
+#[serial]
+fn serve_once_rejects_preserve_exif_only_when_stripping_is_asked_for_explicitly() {
+    let storage_root = temp_dir("preserve-exif-conflict");
+    fs::write(storage_root.join("image.png"), png_bytes()).expect("write source fixture");
+    let (addr, handle) = spawn_server(ServerConfig::new(storage_root, Some("secret".to_string())));
+    let response = send_transform_request(
+        addr,
+        r#"{"source":{"kind":"path","path":"/image.png"},"options":{"format":"png","preserveExif":true,"stripMetadata":true}}"#,
+        Some("secret"),
+    );
+
+    handle
+        .join()
+        .expect("join server thread")
+        .expect("serve one request");
+
+    // The pair resolves rather than failing, the same way `--strip-metadata
+    // --preserve-exif` does on the CLI: the more specific request decides.
+    let (header, _content_type, _body) = split_response(&response);
+    assert!(
+        header.starts_with("HTTP/1.1 200 OK"),
+        "the pair resolves the way the CLI resolves it, got: {header}"
+    );
+}
