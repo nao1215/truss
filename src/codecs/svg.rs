@@ -633,12 +633,16 @@ fn rasterize_svg(
 
     // resvg produces premultiplied RGBA. Convert to straight alpha for image crate.
     let mut rgba_data = pixmap.take();
-    for chunk in rgba_data.chunks_exact_mut(4) {
-        let a = chunk[3] as u16;
+    // `as_chunks_mut` over `chunks_exact_mut(4)`: the chunk size is a constant, so this
+    // yields `[u8; 4]` and the indexing below needs no bounds checks. The remainder is
+    // empty by construction, since a pixmap buffer is always a whole number of pixels.
+    let (pixels, _) = rgba_data.as_chunks_mut::<4>();
+    for pixel in pixels {
+        let a = u16::from(pixel[3]);
         if a > 0 && a < 255 {
-            chunk[0] = ((chunk[0] as u16 * 255 + a / 2) / a).min(255) as u8;
-            chunk[1] = ((chunk[1] as u16 * 255 + a / 2) / a).min(255) as u8;
-            chunk[2] = ((chunk[2] as u16 * 255 + a / 2) / a).min(255) as u8;
+            pixel[0] = ((u16::from(pixel[0]) * 255 + a / 2) / a).min(255) as u8;
+            pixel[1] = ((u16::from(pixel[1]) * 255 + a / 2) / a).min(255) as u8;
+            pixel[2] = ((u16::from(pixel[2]) * 255 + a / 2) / a).min(255) as u8;
         }
     }
 
