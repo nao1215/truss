@@ -5,14 +5,48 @@ on:
     tags:
       - "v*"
 
+# One release per tag at a time, and never cancel one midway: a half-run
+# release leaves crates.io, npm, GHCR and the GitHub Release out of step.
 concurrency:
   group: release-${{ github.ref_name }}
   cancel-in-progress: false
 
+# Least privilege by default; jobs opt into more only where they publish.
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
+  # Release binaries are built with an explicit compiler rather than whatever
+  # `stable` happens to be on the day of the tag. The `verify` job checks this
+  # against the crate's rust-version.
+  RUST_TOOLCHAIN: "1.94.1"
+  # Cargo features every published binary is built with. The release manifest
+  # records the transitive closure of these plus the default features.
+  RELEASE_FEATURES: "s3,gcs,azure"
+  NODE_VERSION: "22"
+
+# Third-party actions below are pinned to full commit SHAs; the trailing
+# comment on each `uses:` is the tag that SHA belonged to when it was pinned.
 
 jobs:
+  # ── 0. Distribution target matrix ───────────────────────────────────
+  # Single source of truth for what the release ships, shared by the build
+  # matrix, the manifest generator and the manifest verifier.
+  targets:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      matrix: ${{ steps.read.outputs.matrix }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Read distribution targets
+        id: read
+        run: echo "matrix=$(jq -c . .github/release-targets.json)" >> "$GITHUB_OUTPUT"
+
   # ── 1. Verify tag, run dry-run publish ──────────────────────────────
   verify:
     runs-on: ubuntu-latest
@@ -23,10 +57,15 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
 
       - name: Cache cargo artifacts
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+
+      - name: Ensure the pinned toolchain satisfies rust-version
+        run: node ./scripts/check-rust-toolchain-pin.mjs --toolchain "${RUST_TOOLCHAIN}"
 
       - name: Ensure tag matches Cargo.toml version
         run: |
@@ -39,10 +78,178 @@ jobs:
       - name: Verify publishable package
         run: cargo publish --locked --dry-run
 
-  # ── 2. Publish crate to crates.io ───────────────────────────────────
+  # ── 2. Build release binaries ───────────────────────────────────────
+  build-binaries:
+    needs: [verify, targets]
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.targets.outputs.matrix) }}
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: ${{ matrix.target }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install cross
+        if: matrix.cross
+        run: cargo install cross --locked
+
+      - name: Install cross-compilation toolchain
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Build release binary
+        run: ${{ matrix.cross && 'cross' || 'cargo' }} build --release --locked --target ${{ matrix.target }} --features "${{ env.RELEASE_FEATURES }}"
+
+      - name: Determine binary path
+        id: bin
+        shell: bash
+        run: |
+          if [ "${RUNNER_OS}" = "Windows" ]; then
+            echo "path=target/${{ matrix.target }}/release/truss.exe" >> "$GITHUB_OUTPUT"
+          else
+            echo "path=target/${{ matrix.target }}/release/truss" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Strip binary (Linux/macOS)
+        if: runner.os != 'Windows' && !matrix.cross
+        run: strip ${{ steps.bin.outputs.path }}
+
+      - name: Strip binary (cross aarch64)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: aarch64-linux-gnu-strip ${{ steps.bin.outputs.path }}
+
+      - name: Create archive
+        shell: bash
+        run: |
+          archive="truss-${GITHUB_REF_NAME}-${{ matrix.target }}.${{ matrix.archive }}"
+          ./scripts/pack-release-archive.sh "${{ steps.bin.outputs.path }}" "${archive}"
+          echo "ARCHIVE=${archive}" >> "$GITHUB_ENV"
+
+      # Structural check on every target, plus `truss --version` on the ones
+      # this runner can execute. Cross-compiled artifacts are checked for
+      # layout, permissions and ownership only.
+      - name: Check archive
+        shell: bash
+        run: |
+          node ./scripts/check-release-archive.mjs \
+            --archive "${ARCHIVE}" \
+            --target "${{ matrix.target }}" \
+            --tag "${GITHUB_REF_NAME}" \
+            ${{ matrix.executable && '--exec' || '' }}
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: binary-${{ matrix.target }}
+          path: ${{ env.ARCHIVE }}
+
+  # ── 3. Release manifest, checksums, and whole-release verification ──
+  # Every SHA-256 in the release is computed here, once. checksums.txt is
+  # rendered from the manifest so the two cannot disagree.
+  release-artifacts:
+    needs: [targets, build-binaries]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Download all binary artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: binary-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Generate release manifest and checksums
+        run: |
+          node ./scripts/generate-release-manifest.mjs \
+            --dir release-assets \
+            --tag "${GITHUB_REF_NAME}" \
+            --repository "${GITHUB_REPOSITORY}" \
+            --features "${RELEASE_FEATURES}"
+
+      - name: Verify release artifacts against the manifest
+        run: |
+          node ./scripts/verify-release-manifest.mjs \
+            --dir release-assets \
+            --tag "${GITHUB_REF_NAME}" \
+            --repository "${GITHUB_REPOSITORY}" \
+            --exec-target x86_64-unknown-linux-gnu
+
+      - name: Upload release manifest
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-manifest
+          path: |
+            release-assets/release-manifest.json
+            release-assets/checksums.txt
+
+  # ── 4. CycloneDX SBOM ───────────────────────────────────────────────
+  build-sbom:
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+
+      - name: Install cargo-cyclonedx
+        run: cargo install cargo-cyclonedx --version 0.5.9 --locked
+
+      - name: Generate CycloneDX SBOM
+        run: |
+          cargo cyclonedx \
+            --format json \
+            --all-features \
+            --target all \
+            --spec-version 1.5 \
+            --override-filename "truss-${GITHUB_REF_NAME}-sbom.cdx"
+
+      - name: Upload SBOM artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: sbom
+          path: truss-${{ github.ref_name }}-sbom.cdx.json
+
+  # ── 5. Publish crate to crates.io ───────────────────────────────────
   publish-crate:
     runs-on: ubuntu-latest
-    needs: verify
+    needs: [verify, release-artifacts]
     permissions:
       contents: read
       id-token: write
@@ -53,15 +260,17 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
 
       - name: Cache cargo artifacts
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
 
       - name: Authenticate to crates.io with trusted publishing
         if: env.HAS_CARGO_REGISTRY_TOKEN == 'false'
         id: crates-auth
-        uses: rust-lang/crates-io-auth-action@v1
+        uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1
 
       - name: Publish crate with API token
         if: env.HAS_CARGO_REGISTRY_TOKEN == 'true'
@@ -75,109 +284,6 @@ jobs:
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.crates-auth.outputs.token }}
 
-  # ── 2b. Build release binaries ──────────────────────────────────────
-  build-binaries:
-    needs: verify
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
-            archive: tar.gz
-          - target: aarch64-unknown-linux-gnu
-            os: ubuntu-latest
-            archive: tar.gz
-            cross: true
-          - target: x86_64-apple-darwin
-            os: macos-latest
-            archive: tar.gz
-          - target: aarch64-apple-darwin
-            os: macos-latest
-            archive: tar.gz
-          - target: x86_64-pc-windows-msvc
-            os: windows-latest
-            archive: zip
-    runs-on: ${{ matrix.os }}
-    permissions:
-      contents: read
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-
-      - name: Cache cargo artifacts
-        uses: Swatinem/rust-cache@v2
-        with:
-          key: ${{ matrix.target }}
-
-      - name: Install cross
-        if: matrix.cross
-        run: cargo install cross --locked
-
-      - name: Install cross-compilation toolchain
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
-        run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
-
-      - name: Build release binary
-        run: ${{ matrix.cross && 'cross' || 'cargo' }} build --release --locked --target ${{ matrix.target }} --features "s3,gcs,azure"
-
-      - name: Determine binary path
-        id: bin
-        shell: bash
-        run: |
-          if [ "${{ matrix.os }}" = "windows-latest" ]; then
-            echo "path=target/${{ matrix.target }}/release/truss.exe" >> "$GITHUB_OUTPUT"
-            echo "name=truss.exe" >> "$GITHUB_OUTPUT"
-          else
-            echo "path=target/${{ matrix.target }}/release/truss" >> "$GITHUB_OUTPUT"
-            echo "name=truss" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Strip binary (Linux/macOS)
-        if: matrix.os != 'windows-latest' && !matrix.cross
-        run: strip ${{ steps.bin.outputs.path }}
-
-      - name: Strip binary (cross aarch64)
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
-        run: aarch64-linux-gnu-strip ${{ steps.bin.outputs.path }}
-
-      - name: Create archive (tar.gz)
-        if: matrix.archive == 'tar.gz'
-        run: |
-          archive_name="truss-${GITHUB_REF_NAME}-${{ matrix.target }}.tar.gz"
-          tar czf "${archive_name}" -C "$(dirname ${{ steps.bin.outputs.path }})" ${{ steps.bin.outputs.name }}
-          echo "ARCHIVE=${archive_name}" >> "$GITHUB_ENV"
-
-      - name: Create archive (zip)
-        if: matrix.archive == 'zip'
-        shell: bash
-        run: |
-          archive_name="truss-${GITHUB_REF_NAME}-${{ matrix.target }}.zip"
-          (cd "$(dirname "${{ steps.bin.outputs.path }}")" && 7z a "${GITHUB_WORKSPACE}/${archive_name}" "${{ steps.bin.outputs.name }}")
-          echo "ARCHIVE=${archive_name}" >> "$GITHUB_ENV"
-
-      - name: Generate checksum
-        shell: bash
-        run: |
-          if [ "${{ matrix.os }}" = "macos-latest" ]; then
-            shasum -a 256 "${ARCHIVE}" > "${ARCHIVE}.sha256"
-          else
-            sha256sum "${ARCHIVE}" > "${ARCHIVE}.sha256"
-          fi
-
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v7
-        with:
-          name: binary-${{ matrix.target }}
-          path: |
-            ${{ env.ARCHIVE }}
-            ${{ env.ARCHIVE }}.sha256
-
   build-wasm-package:
     needs: verify
     runs-on: ubuntu-latest
@@ -188,17 +294,18 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
         with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           targets: wasm32-unknown-unknown
 
       - name: Setup Node.js
         uses: actions/setup-node@v7
         with:
-          node-version: 22
+          node-version: ${{ env.NODE_VERSION }}
 
       - name: Cache cargo artifacts
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
 
       - name: Read Wasm package config
         id: wasm-package-config
@@ -236,7 +343,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v7
         with:
-          node-version: 22
+          node-version: ${{ env.NODE_VERSION }}
 
       - name: Verify TypeScript URL signer package version metadata
         run: |
@@ -265,7 +372,7 @@ jobs:
           path: packages/truss-url-signer/*.tgz
 
   publish-url-signer-package:
-    needs: build-url-signer-package
+    needs: [build-url-signer-package, release-artifacts]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -287,7 +394,7 @@ jobs:
         run: npm publish --access public ./npm-release/*.tgz
 
   publish-wasm-package:
-    needs: build-wasm-package
+    needs: [build-wasm-package, release-artifacts]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -326,38 +433,24 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
-      - name: Download macOS Intel binary artifact
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Download release manifest
         uses: actions/download-artifact@v8
         with:
-          name: binary-x86_64-apple-darwin
-          path: homebrew-assets/x86_64-apple-darwin
+          name: release-manifest
+          path: homebrew-assets
 
-      - name: Download macOS Apple Silicon binary artifact
-        uses: actions/download-artifact@v8
-        with:
-          name: binary-aarch64-apple-darwin
-          path: homebrew-assets/aarch64-apple-darwin
-
-      - name: Download Linux x86_64 binary artifact
-        uses: actions/download-artifact@v8
-        with:
-          name: binary-x86_64-unknown-linux-gnu
-          path: homebrew-assets/x86_64-unknown-linux-gnu
-
-      - name: Download Linux aarch64 binary artifact
-        uses: actions/download-artifact@v8
-        with:
-          name: binary-aarch64-unknown-linux-gnu
-          path: homebrew-assets/aarch64-unknown-linux-gnu
-
+      # The formula reads its URLs and hashes out of the same manifest the
+      # release publishes, so Homebrew cannot drift from checksums.txt.
       - name: Render Homebrew formula
         run: |
           node ./scripts/render-homebrew-formula.mjs \
             "${GITHUB_REF_NAME}" \
-            homebrew-assets/x86_64-apple-darwin/*.sha256 \
-            homebrew-assets/aarch64-apple-darwin/*.sha256 \
-            homebrew-assets/x86_64-unknown-linux-gnu/*.sha256 \
-            homebrew-assets/aarch64-unknown-linux-gnu/*.sha256 \
+            homebrew-assets/release-manifest.json \
             > truss.rb
 
       - name: Syntax-check Homebrew formula
@@ -408,7 +501,7 @@ jobs:
       - name: Run Homebrew formula test
         run: brew test nao1215/tap/truss
 
-  # ── 3. Build & push container image ─────────────────────────────────
+  # ── 6. Build & push container image ─────────────────────────────────
   publish-container:
     runs-on: ubuntu-latest
     needs: [publish-crate, build-binaries]
@@ -445,14 +538,14 @@ jobs:
         run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v4
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4
 
       - name: Extract image metadata
         id: meta
-        uses: docker/metadata-action@v6
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6
         with:
           images: ${{ steps.image.outputs.name }}
           flavor: |
@@ -463,14 +556,14 @@ jobs:
             type=semver,pattern={{major}}.{{minor}},value=${{ github.ref_name }}
 
       - name: Log in to GHCR
-        uses: docker/login-action@v4
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push (amd64)
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
         with:
           context: context-amd64
           file: context-amd64/Dockerfile
@@ -480,7 +573,7 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
 
       - name: Build and push (arm64)
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
         with:
           context: context-arm64
           file: context-arm64/Dockerfile
@@ -501,17 +594,29 @@ jobs:
             "${IMAGE}:${{ github.ref_name }}-amd64" \
             "${IMAGE}:${{ github.ref_name }}-arm64"
 
-  # ── 4. Create GitHub Release ────────────────────────────────────────
+  # ── 7. Create GitHub Release ────────────────────────────────────────
   create-release:
     runs-on: ubuntu-latest
-    needs: [publish-container, build-binaries, build-wasm-package, publish-wasm-package, build-url-signer-package, publish-url-signer-package]
+    needs:
+      - publish-container
+      - release-artifacts
+      - build-sbom
+      - publish-wasm-package
+      - publish-url-signer-package
     permissions:
       contents: write
+      id-token: write
+      attestations: write
     steps:
       - name: Checkout
         uses: actions/checkout@v7
         with:
           fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
 
       - name: Download all binary artifacts
         uses: actions/download-artifact@v8
@@ -520,18 +625,43 @@ jobs:
           path: release-assets
           merge-multiple: true
 
-      - name: Download npm Wasm package artifact
+      - name: Download release manifest and checksums
+        uses: actions/download-artifact@v8
+        with:
+          name: release-manifest
+          path: release-assets
+
+      - name: Download SBOM
+        uses: actions/download-artifact@v8
+        with:
+          name: sbom
+          path: release-assets
+
+      - name: Download npm package artifacts
         uses: actions/download-artifact@v8
         with:
           pattern: npm-package-*
           path: release-assets
           merge-multiple: true
 
-      - name: Generate combined checksums
+      # Re-run the verification against the exact directory that is uploaded,
+      # so nothing reaches the release without passing it.
+      - name: Verify release assets before upload
         run: |
-          cd release-assets
-          cat *.sha256 | sort > checksums.txt
-          rm -f *.sha256
+          node ./scripts/verify-release-manifest.mjs \
+            --dir release-assets \
+            --tag "${GITHUB_REF_NAME}" \
+            --repository "${GITHUB_REPOSITORY}" \
+            --exec-target x86_64-unknown-linux-gnu
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: |
+            release-assets/truss-*.tar.gz
+            release-assets/truss-*.zip
+            release-assets/release-manifest.json
+            release-assets/truss-*-sbom.cdx.json
 
       - name: Extract tag name
         id: tag
@@ -567,7 +697,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Create Release
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
         with:
           tag_name: ${{ steps.tag.outputs.TAG_NAME }}
           name: ${{ steps.tag.outputs.TAG_NAME }}
