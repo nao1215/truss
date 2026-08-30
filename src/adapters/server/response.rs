@@ -329,9 +329,9 @@ pub(super) fn transform_error_response(error: TransformError) -> HttpResponse {
         TransformError::UnsupportedInputMediaType(reason) => {
             unsupported_media_type_response(&reason)
         }
-        TransformError::UnsupportedOutputMediaType(media_type) => unsupported_media_type_response(
-            &format!("output format `{}` is not supported", media_type.as_name()),
-        ),
+        ref error @ TransformError::UnsupportedOutputMediaType(_) => {
+            unsupported_media_type_response(&error.to_string())
+        }
         TransformError::EncodeFailed(reason) => {
             internal_error_response(&format!("failed to encode transformed artifact: {reason}"))
         }
@@ -645,11 +645,25 @@ mod tests {
 
     #[test]
     fn test_transform_error_response_unsupported_output_media_type() {
+        // Only gif and svg reach this arm, and each is refused for its own reason, so the
+        // detail names the rule instead of restating the format the caller already sent.
         let resp =
-            transform_error_response(TransformError::UnsupportedOutputMediaType(MediaType::Bmp));
+            transform_error_response(TransformError::UnsupportedOutputMediaType(MediaType::Gif));
         assert_eq!(resp.status, "415 Unsupported Media Type");
         let v = parse_body(&resp);
-        assert_eq!(v["detail"], "output format `bmp` is not supported");
+        assert_eq!(
+            v["detail"],
+            "gif is an input-only format; choose an output format such as png, jpeg, webp, or avif"
+        );
+
+        let resp =
+            transform_error_response(TransformError::UnsupportedOutputMediaType(MediaType::Svg));
+        assert_eq!(resp.status, "415 Unsupported Media Type");
+        let v = parse_body(&resp);
+        assert_eq!(
+            v["detail"],
+            "svg output requires an svg input; choose a raster output format such as png, jpeg, webp, or avif"
+        );
     }
 
     #[test]
