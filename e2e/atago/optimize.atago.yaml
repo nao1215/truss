@@ -13,6 +13,98 @@ suite:
   name: truss optimize
 
 scenarios:
+  - name: optimizing a flat JPEG returns it rather than a larger re-encode
+    steps:
+      # An encoder does not always beat whatever produced the input. A flat colour is the
+      # everyday case where it does not, and auto used to compare two re-encodes and never
+      # the bytes it was handed, so it returned a bigger file than lossless did — having
+      # paid a generation loss for it. The snapshot pins both files' hashes, and they are
+      # the same hash: the output IS the input.
+      - fixture:
+          file: in.jpg
+          from: ${fixtures}/flat.jpg
+      - run:
+          command: truss optimize in.jpg -o out.jpg --mode auto
+      - assert:
+          exit_code: 0
+          image:
+            path: out.jpg
+            format: jpeg
+            width: 256
+            height: 256
+      - assert:
+          dir:
+            path: .
+            snapshot: testdata/optimize-flat-jpeg.snap
+
+  - name: optimizing an indexed PNG returns it, palette and all
+    steps:
+      # PNG-8 is what a design tool exports for an icon or a flat illustration. There is
+      # no encoder for colour type 3 here, so a re-encode comes back as truecolour and 45%
+      # larger; handing back the input keeps both the size and the colour model.
+      - fixture:
+          file: in.png
+          from: ${fixtures}/indexed.png
+      - run:
+          command: truss optimize in.png -o out.png --mode lossless
+      - assert:
+          exit_code: 0
+          image:
+            path: out.png
+            format: png
+            width: 128
+            height: 128
+      - assert:
+          dir:
+            path: .
+            snapshot: testdata/optimize-indexed-png.snap
+
+  - name: auto does the same for an indexed PNG
+    steps:
+      - fixture:
+          file: in.png
+          from: ${fixtures}/indexed.png
+      - run:
+          command: truss optimize in.png -o out.png --mode auto
+      - assert:
+          exit_code: 0
+          dir:
+            path: .
+            snapshot: testdata/optimize-indexed-png.snap
+
+  - name: an image the encoder does beat is still optimized
+    steps:
+      # The guard must not disable the optimization. sample.png is truecolour and truss's
+      # PNG encoder compresses it better than the fixture was written, so the output is
+      # smaller and therefore not the input.
+      - fixture:
+          file: in.png
+          from: ${fixtures}/sample.png
+      - run:
+          command: truss optimize in.png -o out.png --mode lossless
+      - assert:
+          exit_code: 0
+          image:
+            path: out.png
+            format: png
+      - assert:
+          dir:
+            path: .
+            snapshot: testdata/optimize-sample-png.snap
+
+  - name: a request that transforms is not eligible for the passthrough
+    steps:
+      - fixture:
+          file: in.png
+          from: ${fixtures}/indexed.png
+      - run:
+          command: truss optimize in.png -o out.png --mode auto --format webp
+      - assert:
+          exit_code: 0
+          image:
+            path: out.png
+            format: webp
+
   - name: lossless optimization keeps a phone photo's EXIF orientation
     steps:
       # exif-rotated.jpg is stored 40x20 with orientation 6, which is what a phone

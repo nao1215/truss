@@ -43,6 +43,31 @@ magick -size 10000x1 xc:blue "$DIR/large.png"
 echo "[5/14] tall.png — 1x10000 tall image"
 magick -size 1x10000 xc:green "$DIR/tall.png"
 
+echo "[5b/18] indexed.png — 128x128 PNG-8 (colour type 3, 16-colour palette)"
+# Every other PNG fixture is truecolour, which is why an indexed input going through the
+# pipeline as RGB went unnoticed: there is no encoder for colour type 3 here, so a
+# same-format pass used to come back 45% larger than it started.
+python3 -c "
+from PIL import Image
+
+image = Image.new('RGB', (128, 128))
+for x in range(128):
+    for y in range(128):
+        image.putpixel((x, y), ((x // 16) * 32, (y // 16) * 32, 64))
+image.convert('P', palette=Image.ADAPTIVE, colors=16).save('$DIR/indexed.png', optimize=True)
+print('  wrote a 16-colour indexed PNG')
+"
+
+echo "[5c/18] flat.jpg — 256x256 single-colour JPEG"
+# An encoder does not always beat whatever produced the input. A flat colour is the
+# everyday case where it does not: a colour swatch, a placeholder, a document scan.
+python3 -c "
+from PIL import Image
+
+Image.new('RGB', (256, 256), (30, 80, 200)).save('$DIR/flat.jpg', quality=85)
+print('  wrote a 256x256 flat JPEG')
+"
+
 # ---------------------------------------------------------------------------
 # 3. Alpha / transparency
 # ---------------------------------------------------------------------------
