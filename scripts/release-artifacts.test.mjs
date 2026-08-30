@@ -25,6 +25,13 @@ const REPOSITORY = "nao1215/truss";
 const FEATURES = "s3,gcs,azure";
 const EXEC_TARGET = "x86_64-unknown-linux-gnu";
 
+// The stand-in executable is a `#!/bin/sh` script, which Windows cannot run, so
+// the checks that spawn it are skipped there. The rest of the suite still runs
+// on Windows -- that is where the ZIP branch of the packing script lives, and
+// on macOS it is the bsdtar branch, neither of which a Linux-only run reaches.
+const CAN_RUN_SHELL_SCRIPT = process.platform !== "win32";
+const EXEC_ARGS = CAN_RUN_SHELL_SCRIPT ? ["--exec-target", EXEC_TARGET] : [];
+
 const targets = JSON.parse(readFileSync(join(ROOT, ".github/release-targets.json"), "utf8"));
 const version = readCargoField(readFileSync(join(ROOT, "Cargo.toml"), "utf8"), "package", "version");
 const tag = `v${version}`;
@@ -214,7 +221,7 @@ describe("release distribution tooling", () => {
   });
 
   test("verification passes on the generated release", () => {
-    const result = verify(distribution, ["--exec-target", EXEC_TARGET]);
+    const result = verify(distribution, EXEC_ARGS);
 
     assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
     assert.match(result.stdout, /ok$/m);
@@ -230,7 +237,7 @@ describe("release distribution tooling", () => {
         "--tag",
         tag,
       ];
-      if (entry.target === EXEC_TARGET) {
+      if (entry.target === EXEC_TARGET && CAN_RUN_SHELL_SCRIPT) {
         args.push("--exec");
       }
 
@@ -239,7 +246,7 @@ describe("release distribution tooling", () => {
     }
   });
 
-  test("the executable target really is executed and its version compared", () => {
+  test("the executable target really is executed and its version compared", { skip: !CAN_RUN_SHELL_SCRIPT }, () => {
     const clone = cloneDistribution();
     pack(EXEC_TARGET, "tar.gz", clone, "0.0.1");
     assert.equal(generate(clone).status, 0);
