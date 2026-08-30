@@ -8,6 +8,7 @@
 #   svg-script.svg         <script>, onclick, onload attributes
 #   svg-external-ref.svg   External xlink:href references
 #   svg-minimal.svg        Smallest valid SVG (1x1, no content)
+#   svg-animate-xss.svg    SMIL <animate>/<set> setting href, plus <handler>
 #
 # Run with: e2e/run.sh
 version: "1"
@@ -49,6 +50,35 @@ scenarios:
           exit_code: 0
           image:
             path: noextref.png
+            format: png
+
+  - name: strips SMIL animation that sets href at render time
+    steps:
+      # The attribute filter only inspects `href`. SMIL writes it after the fact through
+      # `to`/`values`/`from`/`by`, so the canonical payload used to pass through a
+      # sanitizer that removes <script> and on* handlers byte for byte. `convert` to SVG
+      # is the sanitize-only path, so the output is the sanitizer's own answer.
+      - run:
+          command: truss convert "${fixtures}/svg-animate-xss.svg" -o sanitized.svg --format svg
+      - assert:
+          exit_code: 0
+      - assert:
+          file:
+            path: sanitized.svg
+            not_contains:
+              - "javascript:"
+              - "evil.example.com"
+              - "animate"
+              - "handler"
+
+  - name: rasterizes the SMIL payload without executing it
+    steps:
+      - run:
+          command: truss convert "${fixtures}/svg-animate-xss.svg" -o animated.png --format png
+      - assert:
+          exit_code: 0
+          image:
+            path: animated.png
             format: png
 
   - name: inspects a minimal SVG

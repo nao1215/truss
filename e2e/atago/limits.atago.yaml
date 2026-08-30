@@ -86,6 +86,63 @@ scenarios:
           stderr:
             contains: "output image would have 67117056 pixels"
 
+  - name: rejects fit=cover when the pre-crop buffer exceeds the limit
+    steps:
+      # cover scales the source until it covers the box on BOTH axes and crops afterwards,
+      # so the buffer it materializes is not the size it returns. A 10000x1 source into a
+      # 3x9999 box returns 3x9999 (29,997 pixels) after scaling to 99990000x9999 first.
+      # The limit has to see the buffer, or the allocation aborts the process.
+      - run:
+          command: truss convert "${fixtures}/large.png" -o cover.png --width 3 --height 9999 --fit cover
+      - assert:
+          exit_code: 4
+          stderr:
+            contains:
+              - "error:"
+              - "fit=cover scales 10000x1"
+          duration:
+            lt: 20s
+      - assert:
+          file:
+            path: cover.png
+            exists: false
+
+  - name: the other fit modes accept the request cover rejects
+    steps:
+      # They scale by the smaller ratio, so their buffer is bounded by the box. This is
+      # what makes the cover rejection specific rather than a blanket refusal.
+      - run:
+          command: truss convert "${fixtures}/large.png" -o contain.png --width 3 --height 9999 --fit contain
+      - assert:
+          exit_code: 0
+          image:
+            path: contain.png
+            width: 3
+            height: 9999
+      - run:
+          command: truss convert "${fixtures}/large.png" -o inside.png --width 3 --height 9999 --fit inside
+      - assert:
+          exit_code: 0
+          image:
+            path: inside.png
+            width: 3
+            height: 1
+
+  - name: allows fit=cover when the pre-crop buffer stays inside the limit
+    steps:
+      - fixture:
+          file: in.png
+          from: testdata/sample.png
+      - run:
+          command: truss convert in.png -o ok-cover.png --width 8 --height 32 --fit cover
+      - assert:
+          exit_code: 0
+          image:
+            path: ok-cover.png
+            format: png
+            width: 8
+            height: 32
+
   - name: allows a width-only resize that stays inside the limit
     steps:
       - fixture:

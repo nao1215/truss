@@ -10,6 +10,8 @@
 #   transparent.png     4x4 fully transparent PNG (all alpha=0)
 #   semitransparent.png 16x8 with partial alpha
 #   exif-rotated.jpg    40x20 JPEG with EXIF Orientation=6 (90 degrees CW)
+#   exif-transposed-5.jpg  40x20 JPEG with EXIF Orientation=5 (mirror + 270 CW)
+#   exif-transposed-7.jpg  40x20 JPEG with EXIF Orientation=7 (mirror + 90 CW)
 #   cmyk.jpg            CMYK color space JPEG
 #   truncated.jpg       JPEG truncated mid-stream (~60% of data)
 #   corrupt-header.jpg  JPEG with zeroed header bytes
@@ -155,6 +157,72 @@ scenarios:
             format: png
             alpha: true
 
+  - name: JPEG output composites alpha the same way with and without a padding stage
+    steps:
+      # JPEG has no alpha channel. Truncating it leaves a half-transparent red as a fully
+      # saturated red and a fully transparent pixel as black; compositing resolves it
+      # against the background. A `contain` resize already composites on its way through,
+      # so the two paths agreeing is the property, and the one that used to be false.
+      - run:
+          command: truss convert "${fixtures}/semitransparent.png" -o direct.jpg --background ffffff
+      - assert:
+          exit_code: 0
+      - run:
+          command: truss convert "${fixtures}/semitransparent.png" -o padded.jpg --width 16 --height 8 --fit contain --background ffffff
+      - assert:
+          exit_code: 0
+          image:
+            path: direct.jpg
+            similar_to: padded.jpg
+
+  - name: a fully transparent PNG converts to the background color, not to black
+    steps:
+      # The default for a format without alpha is white, which is what the padding path
+      # has always used. An explicit --background wins over it on the direct path too.
+      - run:
+          command: truss convert "${fixtures}/transparent.png" -o white.jpg
+      - assert:
+          exit_code: 0
+      - run:
+          command: truss convert "${fixtures}/transparent.png" -o white-padded.jpg --width 4 --height 4 --fit contain
+      - assert:
+          exit_code: 0
+          image:
+            path: white.jpg
+            similar_to: white-padded.jpg
+      - run:
+          command: truss convert "${fixtures}/transparent.png" -o red.jpg --background ff0000
+      - assert:
+          exit_code: 0
+      - run:
+          command: truss convert "${fixtures}/transparent.png" -o red-padded.jpg --width 4 --height 4 --fit contain --background ff0000
+      - assert:
+          exit_code: 0
+          image:
+            path: red.jpg
+            similar_to: red-padded.jpg
+
+  - name: alpha-capable output formats keep their transparency
+    steps:
+      # Flattening is only correct where the channel cannot survive the encode. PNG and
+      # WebP carry it, so the same source must come out with alpha intact.
+      - run:
+          command: truss convert "${fixtures}/semitransparent.png" -o keep.png
+      - assert:
+          exit_code: 0
+          image:
+            path: keep.png
+            format: png
+            alpha: true
+      - run:
+          command: truss convert "${fixtures}/semitransparent.png" -o keep.webp
+      - assert:
+          exit_code: 0
+          image:
+            path: keep.webp
+            format: webp
+            alpha: true
+
   - name: inspect reports the stored size of an EXIF-rotated JPEG
     steps:
       # inspect reads the container, so it reports what the file stores (40x20). The
@@ -198,6 +266,84 @@ scenarios:
             format: png
             width: 40
             height: 20
+
+  - name: inspect reports the orientation tag and the dimensions convert will produce
+    steps:
+      # width/height are what the container stores; orientedWidth/orientedHeight are what
+      # `convert` produces. A caller that records dimensions at upload time and serves
+      # derivatives later needs the second pair, and cannot derive it from the first.
+      - run:
+          command: truss inspect "${fixtures}/exif-rotated.jpg"
+      - assert:
+          exit_code: 0
+          stdout:
+            json:
+              - path: $.width
+                equals: 40
+              - path: $.height
+                equals: 20
+              - path: $.orientation
+                equals: 6
+              - path: $.orientedWidth
+                equals: 20
+              - path: $.orientedHeight
+                equals: 40
+
+  - name: inspect reports the stored dimensions as oriented when there is no orientation tag
+    steps:
+      # sample.png has no EXIF at all, so the two pairs agree. This is what lets a caller
+      # read orientedWidth/orientedHeight unconditionally instead of branching.
+      - run:
+          command: truss inspect "${fixtures}/sample.png"
+      - assert:
+          exit_code: 0
+          stdout:
+            json:
+              - path: $.width
+                equals: 4
+              - path: $.orientedWidth
+                equals: 4
+              - path: $.height
+                equals: 3
+              - path: $.orientedHeight
+                equals: 3
+
+  - name: converting applies EXIF orientation 5 as mirror plus 270 CW
+    steps:
+      # Orientations 5 to 8 all turn 40x20 into 20x40, so the dimensions cannot tell them
+      # apart. The baseline is Pillow's exif_transpose output, an independent oracle, so
+      # this fails if the transform is the one that belongs to another orientation value.
+      - run:
+          command: truss convert "${fixtures}/exif-transposed-5.jpg" -o o5.png
+      - assert:
+          exit_code: 0
+          image:
+            path: o5.png
+            format: png
+            width: 20
+            height: 40
+      - assert:
+          image:
+            path: o5.png
+            similar_to: testdata/exif-orientation-5.png
+            max_diff: 0.01
+
+  - name: converting applies EXIF orientation 7 as mirror plus 90 CW
+    steps:
+      - run:
+          command: truss convert "${fixtures}/exif-transposed-7.jpg" -o o7.png
+      - assert:
+          exit_code: 0
+          image:
+            path: o7.png
+            format: png
+            width: 20
+            height: 40
+      - assert:
+          image:
+            path: o7.png
+            similar_to: testdata/exif-orientation-7.png
+            max_diff: 0.01
 
   - name: inspects a CMYK JPEG
     steps:

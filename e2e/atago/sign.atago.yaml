@@ -68,6 +68,22 @@ scenarios:
           stdout:
             equals: "https://cdn.example.com/images/by-path?expires=1700000000&keyId=k1&path=%2Fhero.jpg&signature=dab916051280ac685f656e44884e6a87f2822d0a5de48b657e95616a86a364eb"
 
+  - name: the signature is 64 lowercase hex characters
+    steps:
+      # docs/signed-url-spec.md fixes the encoding, and the server now rejects anything
+      # else: one signed URL has to be one URL string, or a CDN caches it under as many
+      # keys as there are case permutations. Pinning the signer here is what keeps the two
+      # ends from drifting in opposite directions.
+      - run:
+          command: truss sign --base-url "https://cdn.example.com" --path "/hero.jpg" --key-id "k1" --secret "s3cret" --expires 1700000000 --width 800
+      - assert:
+          exit_code: 0
+          stdout:
+            matches: "signature=[0-9a-f]{64}(&|$)"
+      - assert:
+          stdout:
+            not_matches: "signature=[0-9a-f]*[A-F]"
+
   - name: --preserve-exif signs both the flag and the stripping it implies
     steps:
       # preserveExif means "do not strip", so the signed query carries stripMetadata=false

@@ -222,6 +222,9 @@ type WasmInspectResponse = {
     mimeType: string;
     width: number | null;
     height: number | null;
+    orientation: number | null;
+    orientedWidth: number | null;
+    orientedHeight: number | null;
     frameCount: number;
     hasAlpha: boolean | null;
   };
@@ -229,6 +232,12 @@ type WasmInspectResponse = {
 ```
 
 This is useful for building your UI before running a transform.
+
+`width` and `height` are the dimensions as stored in the container. `orientedWidth` and
+`orientedHeight` are the dimensions a transform produces, which differ whenever an EXIF
+orientation transposes the axes — the usual case for a photo taken in portrait on a phone.
+They equal `width` and `height` when there is no orientation tag, so intrinsic-size markup
+can read them unconditionally.
 
 ### `transformImage(inputBytes, declaredMediaType?, optionsJson)`
 
@@ -250,6 +259,9 @@ type WasmTransformResponse = {
     mimeType: string;
     width: number | null;
     height: number | null;
+    orientation: number | null;
+    orientedWidth: number | null;
+    orientedHeight: number | null;
     frameCount: number;
     hasAlpha: boolean | null;
   };
