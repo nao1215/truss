@@ -255,6 +255,10 @@ pub(super) fn payload_too_large_response(message: &str) -> HttpResponse {
     problem_response("413 Payload Too Large", 413, "Payload Too Large", message)
 }
 
+pub(super) fn request_timeout_response(message: &str) -> HttpResponse {
+    problem_response("408 Request Timeout", 408, "Request Timeout", message)
+}
+
 pub(super) fn internal_error_response(message: &str) -> HttpResponse {
     problem_response(
         "500 Internal Server Error",

@@ -13,7 +13,7 @@ use super::handler::{
     handle_upload_request,
 };
 use super::http_parse;
-use super::lifecycle::{SOCKET_READ_TIMEOUT, SOCKET_WRITE_TIMEOUT};
+use super::lifecycle::{HEADER_READ_DEADLINE, SOCKET_READ_TIMEOUT, SOCKET_WRITE_TIMEOUT};
 use super::metrics::{RouteMetric, record_http_metrics, record_http_request_duration, status_code};
 use super::response::{
     HttpResponse, NOT_FOUND_BODY, too_many_requests_response, write_response,
@@ -164,7 +164,19 @@ pub(super) fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io:
     let mut requests_served: u64 = 0;
 
     loop {
-        let partial = match http_parse::read_request_headers(&mut stream, config.max_upload_bytes) {
+        // The socket read timeout is an inactivity timeout and resets on every byte, so it
+        // cannot bound the header phase on its own. The deadline does, and the socket is
+        // given the same budget so a connection that sends nothing at all is not held for
+        // the full SOCKET_READ_TIMEOUT either.
+        if let Err(err) = stream.set_read_timeout(Some(HEADER_READ_DEADLINE)) {
+            config.log_warn(&format!("failed to set header read timeout: {err}"));
+        }
+        let header_deadline = Instant::now() + HEADER_READ_DEADLINE;
+        let partial = match http_parse::read_request_headers(
+            &mut stream,
+            config.max_upload_bytes,
+            Some(header_deadline),
+        ) {
             Ok(partial) => partial,
             Err(response) => {
                 if requests_served > 0 {
@@ -223,6 +235,13 @@ pub(super) fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io:
                 },
             );
             return Ok(());
+        }
+
+        // A body is read under the longer inactivity timeout: a legitimate upload can be
+        // up to `max_upload_bytes` over a slow link, and the routes that accept one reject
+        // an unauthenticated request from the headers alone, before reaching this point.
+        if let Err(err) = stream.set_read_timeout(Some(SOCKET_READ_TIMEOUT)) {
+            config.log_warn(&format!("failed to restore socket read timeout: {err}"));
         }
 
         let client_wants_close = partial

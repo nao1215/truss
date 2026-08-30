@@ -157,7 +157,7 @@ mod tests {
     /// Test-only convenience wrapper that reads headers + body in one shot,
     /// preserving the original `read_request` semantics for existing tests.
     fn read_request<R: Read>(stream: &mut R) -> Result<HttpRequest, HttpResponse> {
-        let partial = read_request_headers(stream, DEFAULT_MAX_UPLOAD_BODY_BYTES)?;
+        let partial = read_request_headers(stream, DEFAULT_MAX_UPLOAD_BODY_BYTES, None)?;
         read_request_body(stream, partial)
     }
 
