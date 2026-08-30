@@ -2945,8 +2945,9 @@ mod tests {
         transform_raster,
     };
     use crate::core::{
-        Artifact, ArtifactMetadata, Fit, MediaType, MetadataKind, MetadataPolicy, OptimizeMode,
-        Position, Rotation, TransformOptions, TransformRequest, TransformWarning, WatermarkInput,
+        Artifact, ArtifactMetadata, CropRegion, Fit, MediaType, MetadataKind, MetadataPolicy,
+        OptimizeMode, Position, Rotation, TransformOptions, TransformRequest, TransformWarning,
+        WatermarkInput,
     };
     use crate::{RawArtifact, Rgba8, TransformError, sniff_artifact};
     use image::codecs::jpeg::JpegDecoder;
@@ -5661,6 +5662,106 @@ mod tests {
         assert!(
             matches!(err, TransformError::InvalidOptions(ref msg) if msg.contains("exceeds image bounds")),
             "unexpected error: {err}"
+        );
+    }
+
+    // ── Declared pipeline order ─────────────────────────────────────────
+
+    /// Rotation runs before the crop, so the crop box is checked against the rotated size.
+    ///
+    /// `truss capabilities` declares this order. A caller composing operations of its own
+    /// depends on it: truss applies its options in a fixed order whatever order they were
+    /// given in, so a chain needing a different one has to be split across invocations.
+    #[test]
+    fn the_pipeline_rotates_before_it_crops() {
+        // A 2x4 crop does not fit the 4x2 source, and does fit it once rotated.
+        let result = transform_raster(TransformRequest::new(
+            png_artifact(4, 2, Rgba([255, 0, 0, 255])),
+            TransformOptions {
+                format: Some(MediaType::Png),
+                rotate: Rotation::from_degrees(90),
+                crop: Some(CropRegion {
+                    x: 0,
+                    y: 0,
+                    width: 2,
+                    height: 4,
+                }),
+                ..TransformOptions::default()
+            },
+        ))
+        .expect("the crop fits the rotated image");
+
+        assert_eq!(result.artifact.metadata.width, Some(2));
+        assert_eq!(result.artifact.metadata.height, Some(4));
+    }
+
+    /// The crop runs before the resize, so a single-axis resize scales the cropped region.
+    #[test]
+    fn the_pipeline_crops_before_it_resizes() {
+        // 8x4 cropped to a 4x4 square, then widened to 8: crop-first is 8x8. A resize
+        // running first would produce 8x4 and then crop to 4x4.
+        let result = transform_raster(TransformRequest::new(
+            png_artifact(8, 4, Rgba([255, 0, 0, 255])),
+            TransformOptions {
+                format: Some(MediaType::Png),
+                crop: Some(CropRegion {
+                    x: 0,
+                    y: 0,
+                    width: 4,
+                    height: 4,
+                }),
+                width: Some(8),
+                ..TransformOptions::default()
+            },
+        ))
+        .expect("transform");
+
+        assert_eq!(result.artifact.metadata.width, Some(8));
+        assert_eq!(result.artifact.metadata.height, Some(8));
+    }
+
+    /// The watermark is composited after the resize, so it keeps its own size.
+    #[test]
+    fn the_pipeline_resizes_before_it_watermarks() {
+        let watermark = sniff_artifact(RawArtifact::new(
+            png_artifact(4, 4, Rgba([0, 0, 255, 255])).bytes,
+            None,
+        ))
+        .expect("sniff watermark");
+
+        let result = transform_raster(TransformRequest::with_watermark(
+            png_artifact(8, 8, Rgba([255, 0, 0, 255])),
+            TransformOptions {
+                format: Some(MediaType::Png),
+                width: Some(64),
+                height: Some(64),
+                fit: Some(Fit::Fill),
+                ..TransformOptions::default()
+            },
+            WatermarkInput {
+                image: watermark,
+                position: Position::TopLeft,
+                opacity: 100,
+                margin: 0,
+            },
+        ))
+        .expect("transform");
+
+        let image = image::load_from_memory_with_format(&result.artifact.bytes, ImageFormat::Png)
+            .expect("decode output")
+            .to_rgba8();
+
+        // A 4x4 watermark on a 64x64 output covers (0,0) and leaves (8,8) alone. Had it
+        // been composited before the resize, the scale would have grown it to 32x32.
+        assert_eq!(
+            image.get_pixel(0, 0)[2],
+            255,
+            "the watermark is at the corner"
+        );
+        assert_eq!(
+            image.get_pixel(8, 8)[2],
+            0,
+            "the watermark was not scaled with the image"
         );
     }
 

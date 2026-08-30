@@ -10,6 +10,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::str::FromStr;
 
+mod capabilities;
 mod convert;
 mod inspect;
 mod serve;
@@ -55,6 +56,7 @@ COMMANDS:
   convert       Convert and transform an image file
   optimize      Optimize an image for smaller output size
   inspect       Show metadata (format, dimensions, alpha) of an image
+  capabilities  Print what this build can do (formats, pipeline, features) as JSON
   serve         Start the HTTP image-transform server
   validate      Check server configuration without starting the server
   sign          Generate a signed public URL for the server
@@ -369,6 +371,27 @@ of each error found.
 Useful in CI/CD pipelines to catch configuration mistakes early.
 ";
 
+const HELP_CAPABILITIES: &str = "\
+truss capabilities - print what this build can do, as JSON
+
+USAGE:
+  truss capabilities
+
+Reports the formats this binary reads and writes, the pixel stages a transform
+runs and the order it runs them in, the option vocabularies (fit modes,
+positions, optimize modes), the optional features it was compiled with, and the
+pixel limits it enforces.
+
+A release binary is not one thing: AVIF, SVG, lossy WebP, and each storage
+backend are compile-time choices. A caller that drives truss as a subprocess can
+read this instead of hardcoding what it assumes the binary supports.
+
+EXAMPLES:
+  truss capabilities
+  truss capabilities | jq -r '.outputFormats[]'
+  truss capabilities | jq '.features.avif'
+";
+
 const HELP_COMPLETIONS: &str = "\
 truss completions - generate shell completion scripts
 
@@ -434,6 +457,9 @@ enum CliSubcommand {
     /// Validate server configuration without starting the server
     #[command(disable_help_flag = true)]
     Validate(ClapValidateArgs),
+    /// Print what this build can do as JSON
+    #[command(disable_help_flag = true)]
+    Capabilities(ClapCapabilitiesArgs),
     /// Generate shell completion scripts
     #[command(disable_help_flag = true)]
     Completions {
@@ -620,6 +646,13 @@ struct ClapServeArgs {
 #[derive(clap::Args)]
 struct ClapValidateArgs {
     /// Show help for validate
+    #[arg(short = 'h', long = "help")]
+    help: bool,
+}
+
+#[derive(clap::Args)]
+struct ClapCapabilitiesArgs {
+    /// Show help for capabilities
     #[arg(short = 'h', long = "help")]
     help: bool,
 }
@@ -937,6 +970,7 @@ enum HelpTopic {
     Inspect,
     Serve,
     Validate,
+    Capabilities,
     Sign,
     Completions,
     Version,
@@ -948,6 +982,7 @@ enum Command {
     Version,
     Serve(ServeCommand),
     Validate,
+    Capabilities,
     Inspect(InspectCommand),
     Convert(ConvertCommand),
     Optimize(ConvertCommand),
@@ -1041,6 +1076,7 @@ where
                 HelpTopic::Inspect => HELP_INSPECT.to_string(),
                 HelpTopic::Serve => help_serve(),
                 HelpTopic::Validate => HELP_VALIDATE.to_string(),
+                HelpTopic::Capabilities => HELP_CAPABILITIES.to_string(),
                 HelpTopic::Sign => HELP_SIGN.to_string(),
                 HelpTopic::Completions => HELP_COMPLETIONS.to_string(),
                 HelpTopic::Version => HELP_VERSION.to_string(),
@@ -1059,6 +1095,10 @@ where
             Err(error) => write_error(stderr, error),
         },
         Ok(Command::Validate) => match serve::execute_validate(stdout) {
+            Ok(()) => EXIT_SUCCESS,
+            Err(error) => write_error(stderr, error),
+        },
+        Ok(Command::Capabilities) => match capabilities::execute_capabilities(stdout) {
             Ok(()) => EXIT_SUCCESS,
             Err(error) => write_error(stderr, error),
         },
@@ -1094,6 +1134,7 @@ const KNOWN_SUBCOMMANDS: &[&str] = &[
     "inspect",
     "serve",
     "validate",
+    "capabilities",
     "sign",
     "help",
     "completions",
@@ -1224,6 +1265,13 @@ where
         Some(CliSubcommand::Inspect(args)) => inspect::inspect_from_clap(args),
         Some(CliSubcommand::Serve(args)) => serve::serve_from_clap(args),
         Some(CliSubcommand::Validate(args)) => serve::validate_from_clap(args),
+        Some(CliSubcommand::Capabilities(args)) => {
+            if args.help {
+                Ok(Command::Help(HelpTopic::Capabilities))
+            } else {
+                Ok(Command::Capabilities)
+            }
+        }
         Some(CliSubcommand::Sign(args)) => sign::sign_from_clap(args),
     }
 }
@@ -1254,6 +1302,7 @@ fn parse_help_topic(topic: Option<String>) -> Result<Command, CliError> {
         Some("inspect") => Ok(Command::Help(HelpTopic::Inspect)),
         Some("serve") => Ok(Command::Help(HelpTopic::Serve)),
         Some("validate") => Ok(Command::Help(HelpTopic::Validate)),
+        Some("capabilities") => Ok(Command::Help(HelpTopic::Capabilities)),
         Some("sign") => Ok(Command::Help(HelpTopic::Sign)),
         Some("completions") => Ok(Command::Help(HelpTopic::Completions)),
         Some("version") => Ok(Command::Help(HelpTopic::Version)),
@@ -1262,7 +1311,7 @@ fn parse_help_topic(topic: Option<String>) -> Result<Command, CliError> {
             message: format!("unknown help topic '{other}'"),
             usage: None,
             hint: Some(
-                "available topics: convert, optimize, inspect, serve, validate, sign, completions, version"
+                "available topics: convert, optimize, inspect, capabilities, serve, validate, sign, completions, version"
                     .to_string(),
             ),
         }),
