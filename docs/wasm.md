@@ -124,7 +124,7 @@ const result = transformImage(
 
 The official package wraps the raw browser bindings and initializes the Wasm module at import time, so there is no explicit `init()` step.
 
-For Vite, add [`vite-plugin-top-level-await`](https://github.com/Menci/vite-plugin-top-level-await), as shown in [`examples/vite-truss-wasm/vite.config.js`](../examples/vite-truss-wasm/vite.config.js).
+For Vite, set a `build.target` whose browsers support top-level await natively, as shown in [`examples/vite-truss-wasm/vite.config.js`](../examples/vite-truss-wasm/vite.config.js). No plugin is needed.
 
 For a runnable browser consumer example, see [`examples/vite-truss-wasm`](../examples/vite-truss-wasm).
 
