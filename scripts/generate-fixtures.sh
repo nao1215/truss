@@ -50,20 +50,45 @@ magick -size 1x10000 xc:green "$DIR/tall.png"
 echo "[6/14] transparent.png — fully transparent 4x4 RGBA"
 magick -size 4x4 xc:'rgba(0,0,0,0)' -type TrueColorAlpha PNG32:"$DIR/transparent.png"
 
-echo "[7/14] semitransparent.png — checkerboard with alpha"
-magick -size 8x8 \
-  xc:'rgba(255,0,0,128)' xc:'rgba(0,0,255,64)' \
-  +append \
-  "$DIR/semitransparent.png"
+echo "[7/14] semitransparent.png — two half-transparent blocks, 16x8"
+# Pillow, not ImageMagick. `magick xc:'rgba(255,0,0,128)'` composites the alpha away
+# unless the canvas already has an alpha channel, and PNG32: only adds a channel that is
+# opaque everywhere, which is how this fixture ended up fully opaque despite its name.
+python3 -c "
+from PIL import Image
+
+image = Image.new('RGBA', (16, 8))
+for x in range(16):
+    for y in range(8):
+        image.putpixel((x, y), (255, 0, 0, 128) if x < 8 else (0, 0, 255, 64))
+image.save('$DIR/semitransparent.png')
+print('  wrote 16x8 with alpha 128 and 64')
+"
 
 # ---------------------------------------------------------------------------
 # 4. EXIF orientation
 # ---------------------------------------------------------------------------
 
-echo "[8/14] exif-rotated.jpg — JPEG with EXIF Orientation=6 (90° CW)"
-magick -size 4x3 xc:'rgb(255,0,0)' \
-  -set 'EXIF:Orientation' 6 \
-  "$DIR/exif-rotated.jpg"
+echo "[8/14] exif-rotated.jpg — 40x20 JPEG with EXIF Orientation=6 (90° CW)"
+# Pillow, not ImageMagick: `magick -set 'EXIF:Orientation'` is a no-op on an image that
+# has no EXIF profile to begin with, so this fixture used to carry no orientation tag at
+# all and every test named for it was vacuous.
+#
+# The image is deliberately non-square and two-toned, so applying the orientation is
+# observable twice over: the dimensions swap 40x20 -> 20x40, and the blue stripe moves
+# from the left edge to the top.
+python3 -c "
+from PIL import Image
+
+image = Image.new('RGB', (40, 20), (255, 0, 0))
+for x in range(10):
+    for y in range(20):
+        image.putpixel((x, y), (0, 0, 255))
+exif = image.getexif()
+exif[274] = 6  # Orientation: rotate 90 degrees clockwise
+image.save('$DIR/exif-rotated.jpg', exif=exif.tobytes(), quality=95)
+print('  wrote 40x20 with EXIF Orientation=6')
+"
 
 # ---------------------------------------------------------------------------
 # 4b. ICC profile (needs Pillow's ImageCms; ImageMagick cannot mint a profile)

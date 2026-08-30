@@ -17,6 +17,7 @@
 
 ### Fixed
 
+- Two test fixtures did not have the property they were named for, so the end-to-end scenarios built on them asserted nothing. `integration/fixtures/exif-rotated.jpg` carried no EXIF Orientation tag at all, because `magick -set 'EXIF:Orientation'` is a no-op on an image with no EXIF profile, and `semitransparent.png` was fully opaque, because `magick xc:'rgba(...)'` composites the alpha away unless the canvas already has an alpha channel. Both are now generated with Pillow and actually carry the property, and the scenarios assert the behavior instead of only the output format: an Orientation=6 JPEG must come out with its dimensions swapped, `--no-auto-orient` must leave them alone, and partial alpha must survive a PNG pass and flatten for JPEG.
 - Get CI green again: `chunks_exact_mut(4)` in the SVG premultiply loop is now `as_chunks_mut::<4>()`, which the `clippy::chunks_exact_to_as_chunks` lint on current stable rejects, and `h2` moves 0.4.15 -> 0.4.19 for RUSTSEC-2026-0258. The remaining unpatched `h2` 0.3.27 is ignored with a rationale: it is reachable only as an outbound S3 client through the legacy AWS SDK hyper 0.14 path, the 0.3 line has no patched release, and truss's own inbound server does not use h2.
 
 ## v0.12.0
