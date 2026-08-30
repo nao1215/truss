@@ -1331,7 +1331,7 @@ pub(super) fn transform_source_bytes(
     if let Some(ref cache) = cache
         && options.format.is_some()
     {
-        let cache_key = compute_cache_key(source_hash, &options, None, watermark_identity);
+        let cache_key = compute_cache_key(source_hash, &options, watermark_identity);
         if let CacheLookup::Hit {
             media_type,
             body,
@@ -1456,12 +1456,12 @@ fn transform_source_bytes_inner(
         }
     }
 
-    let negotiated_accept = if negotiation_used {
-        request.header("accept")
-    } else {
-        None
-    };
-    let cache_key = compute_cache_key(source_hash, &options, negotiated_accept, watermark_identity);
+    // The Accept header is deliberately absent from the key. Negotiation's whole output is
+    // the format, which `options.format` already carries, so including the raw header would
+    // write one copy of the same image per distinct header string — unboundedly many, and
+    // straight off the request. `Vary: Accept` is built per response from `negotiation_used`,
+    // so an entry shared with a request that named the format explicitly still answers right.
+    let cache_key = compute_cache_key(source_hash, &options, watermark_identity);
 
     if let Some(cache) = cache
         && let CacheLookup::Hit {

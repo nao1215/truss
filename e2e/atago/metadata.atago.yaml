@@ -17,6 +17,64 @@ suite:
   name: truss metadata retention
 
 scenarios:
+  - name: dropping an EXIF orientation with the pixels as stored warns
+    steps:
+      # --no-auto-orient leaves the pixels as the file stores them, and the default
+      # --strip-metadata removes the tag that says how to display them. Each flag is
+      # honest on its own; together they rotate the picture, and that has to be said.
+      - run:
+          command: truss convert "${fixtures}/exif-rotated.jpg" -o rotated.png --no-auto-orient
+      - assert:
+          exit_code: 0
+          stderr:
+            contains:
+              - "warning:"
+              - "EXIF orientation 6"
+      - assert:
+          image:
+            path: rotated.png
+            width: 40
+            height: 20
+
+  - name: keeping the metadata keeps the tag, so nothing is warned about
+    steps:
+      - run:
+          command: truss convert "${fixtures}/exif-rotated.jpg" -o kept.jpg --no-auto-orient --keep-metadata
+      - assert:
+          exit_code: 0
+          stderr:
+            not_contains: "warning:"
+      - run:
+          command: truss inspect kept.jpg
+      - assert:
+          exit_code: 0
+          stdout:
+            json:
+              path: $.orientation
+              equals: 6
+
+  - name: applying the orientation is not a drop, so nothing is warned about
+    steps:
+      - run:
+          command: truss convert "${fixtures}/exif-rotated.jpg" -o applied.png
+      - assert:
+          exit_code: 0
+          stderr:
+            not_contains: "warning:"
+          image:
+            path: applied.png
+            width: 20
+            height: 40
+
+  - name: an input with no orientation to drop does not warn
+    steps:
+      - run:
+          command: truss convert "${fixtures}/sample.jpg" -o plain.png --no-auto-orient
+      - assert:
+          exit_code: 0
+          stderr:
+            not_contains: "warning:"
+
   - name: lossy WebP optimization succeeds on ICC-bearing input and keeps the profile
     steps:
       - run:

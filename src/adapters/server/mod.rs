@@ -661,8 +661,8 @@ mod tests {
             format: Some(MediaType::Webp),
             ..TransformOptions::default()
         };
-        let key1 = super::cache::compute_cache_key("source-abc", &opts, None, None);
-        let key2 = super::cache::compute_cache_key("source-abc", &opts, None, None);
+        let key1 = super::cache::compute_cache_key("source-abc", &opts, None);
+        let key2 = super::cache::compute_cache_key("source-abc", &opts, None);
         assert_eq!(key1, key2);
         assert_eq!(key1.len(), 64);
     }
@@ -679,18 +679,45 @@ mod tests {
             format: Some(MediaType::Webp),
             ..TransformOptions::default()
         };
-        let key1 = super::cache::compute_cache_key("same-source", &opts1, None, None);
-        let key2 = super::cache::compute_cache_key("same-source", &opts2, None, None);
+        let key1 = super::cache::compute_cache_key("same-source", &opts1, None);
+        let key2 = super::cache::compute_cache_key("same-source", &opts2, None);
         assert_ne!(key1, key2);
     }
 
+    /// The key is the format, not the header that chose it.
+    ///
+    /// Negotiation's whole output is `options.format`, which the key already carries, so a
+    /// second copy of the same image per distinct `Accept` string buys nothing. There are
+    /// unboundedly many equivalent strings and they come straight off the request, so
+    /// including the header meant one public URL could write as many entries as it liked.
     #[test]
-    fn compute_cache_key_includes_accept_when_present() {
-        let opts = TransformOptions::default();
-        let key_no_accept = super::cache::compute_cache_key("src", &opts, None, None);
-        let key_with_accept =
-            super::cache::compute_cache_key("src", &opts, Some("image/webp"), None);
-        assert_ne!(key_no_accept, key_with_accept);
+    fn compute_cache_key_is_the_same_for_any_accept_header() {
+        let opts = TransformOptions {
+            format: Some(MediaType::Webp),
+            ..TransformOptions::default()
+        };
+        let key = super::cache::compute_cache_key("src", &opts, None);
+
+        assert_eq!(key, super::cache::compute_cache_key("src", &opts, None));
+    }
+
+    /// Two requests that resolve to the same format share one entry, however they got
+    /// there: negotiated from a header, or named explicitly.
+    #[test]
+    fn compute_cache_key_still_differs_by_resolved_format() {
+        let webp = TransformOptions {
+            format: Some(MediaType::Webp),
+            ..TransformOptions::default()
+        };
+        let avif = TransformOptions {
+            format: Some(MediaType::Avif),
+            ..TransformOptions::default()
+        };
+
+        assert_ne!(
+            super::cache::compute_cache_key("src", &webp, None),
+            super::cache::compute_cache_key("src", &avif, None)
+        );
     }
 
     #[test]

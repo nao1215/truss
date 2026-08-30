@@ -209,6 +209,12 @@ pub fn transform_raster(request: TransformRequest) -> Result<TransformResult, Tr
 
     if normalized.options.auto_orient {
         image = apply_auto_orientation(image, &normalized.input);
+    } else if let Some(warning) = dropped_orientation_warning(
+        &normalized.input,
+        normalized.options.auto_orient,
+        normalized.options.metadata_policy,
+    ) {
+        warnings.push(warning);
     }
 
     image = apply_rotation(
@@ -1403,9 +1409,9 @@ fn try_passthrough_lossless_optimization(
     match normalized.options.format {
         MediaType::Jpeg => {
             if !is_passthrough_lossless_request(normalized) {
-                return Err(TransformError::CapabilityMissing(
-                    "lossless JPEG optimization is only supported when no pixel transforms are applied".to_string(),
-                ));
+                return Err(TransformError::CapabilityMissing(lossless_jpeg_refusal(
+                    normalized,
+                )));
             }
 
             let bytes = optimize_jpeg_bytes_losslessly(
@@ -1413,13 +1419,22 @@ fn try_passthrough_lossless_optimization(
                 normalized.options.metadata_policy,
             )?;
 
+            let mut warnings = Vec::new();
+            if let Some(warning) = dropped_orientation_warning(
+                &normalized.input,
+                normalized.options.auto_orient,
+                normalized.options.metadata_policy,
+            ) {
+                warnings.push(warning);
+            }
+
             Ok(Some(TransformResult {
                 artifact: Artifact::new(
                     bytes,
                     normalized.options.format,
                     normalized.input.metadata.clone(),
                 ),
-                warnings: Vec::new(),
+                warnings,
             }))
         }
         MediaType::Avif => Err(TransformError::CapabilityMissing(
@@ -1441,7 +1456,62 @@ fn is_passthrough_lossless_request(normalized: &NormalizedTransformRequest) -> b
         && normalized.options.sharpen.is_none()
         && !normalized.options.grayscale
         && normalized.watermark.is_none()
-        && (!normalized.options.auto_orient || jpeg_auto_orientation_is_noop(&normalized.input))
+        // Auto-orientation is satisfied either by there being nothing to apply, or by the
+        // tag surviving into the output: the stored pixels and the retained tag then
+        // describe the same picture they described in the input, and rotating them —
+        // which would need a decode and a re-encode, and so would not be lossless — is
+        // not what makes the result correct.
+        && (!normalized.options.auto_orient
+            || jpeg_auto_orientation_is_noop(&normalized.input)
+            || metadata_policy_retains_exif(normalized.options.metadata_policy))
+}
+
+/// Reports whether this policy copies a JPEG's Exif APP1 segment through.
+///
+/// Asked of the same function that does the copying, so the two cannot disagree.
+fn metadata_policy_retains_exif(metadata_policy: MetadataPolicy) -> bool {
+    should_keep_jpeg_segment(0xE1, b"Exif\0\0", metadata_policy)
+}
+
+/// The message for a lossless JPEG request that cannot be served as a passthrough.
+///
+/// An EXIF orientation gets its own wording because it is the common reason — a phone
+/// photo carries one — and because the generic message blames "pixel transforms" the
+/// caller did not ask for, which sends readers looking for a flag they never passed.
+fn lossless_jpeg_refusal(normalized: &NormalizedTransformRequest) -> String {
+    if normalized.options.auto_orient
+        && !jpeg_auto_orientation_is_noop(&normalized.input)
+        && let Some(orientation) = crate::core::jpeg_exif_orientation(&normalized.input.bytes)
+    {
+        return format!(
+            "lossless JPEG optimization cannot apply the EXIF orientation ({orientation}) this file carries; keep the metadata to preserve the file's own orientation, or use a re-encoding optimize mode"
+        );
+    }
+
+    "lossless JPEG optimization is only supported when no pixel transforms are applied".to_string()
+}
+
+/// The warning for an input whose EXIF orientation the output records nowhere.
+///
+/// With auto-orientation off the pixels stay as stored, and with the metadata stripped the
+/// tag that said how to display them is gone, so the output displays rotated. Each flag on
+/// its own is honest; the combination is a rotation, and nothing else says so.
+fn dropped_orientation_warning(
+    input: &Artifact,
+    auto_orient: bool,
+    metadata_policy: MetadataPolicy,
+) -> Option<TransformWarning> {
+    if auto_orient
+        || input.media_type != MediaType::Jpeg
+        || metadata_policy_retains_exif(metadata_policy)
+    {
+        return None;
+    }
+
+    match crate::core::jpeg_exif_orientation(&input.bytes) {
+        Some(orientation @ 2..=8) => Some(TransformWarning::OrientationDropped { orientation }),
+        _ => None,
+    }
 }
 
 fn jpeg_auto_orientation_is_noop(input: &Artifact) -> bool {
@@ -2946,8 +3016,8 @@ mod tests {
     };
     use crate::core::{
         Artifact, ArtifactMetadata, CropRegion, Fit, MediaType, MetadataKind, MetadataPolicy,
-        OptimizeMode, Position, Rotation, TransformOptions, TransformRequest, TransformWarning,
-        WatermarkInput,
+        OptimizeMode, Position, Rotation, TransformOptions, TransformRequest, TransformResult,
+        TransformWarning, WatermarkInput,
     };
     use crate::{RawArtifact, Rgba8, TransformError, sniff_artifact};
     use image::codecs::jpeg::JpegDecoder;
@@ -5662,6 +5732,232 @@ mod tests {
         assert!(
             matches!(err, TransformError::InvalidOptions(ref msg) if msg.contains("exceeds image bounds")),
             "unexpected error: {err}"
+        );
+    }
+
+    // ── Lossless optimization and the EXIF orientation tag ──────────────
+
+    fn optimize_losslessly(
+        artifact: Artifact,
+        auto_orient: bool,
+        strip_metadata: bool,
+        preserve_exif: bool,
+    ) -> Result<TransformResult, TransformError> {
+        transform_raster(TransformRequest::new(
+            artifact,
+            TransformOptions {
+                format: Some(MediaType::Jpeg),
+                optimize: OptimizeMode::Lossless,
+                auto_orient,
+                strip_metadata,
+                preserve_exif,
+                ..TransformOptions::default()
+            },
+        ))
+    }
+
+    /// A JPEG whose orientation tag survives into the output optimizes losslessly.
+    ///
+    /// Rotating the pixels would need a decode and a re-encode, so it cannot happen here;
+    /// it also does not need to. The stored pixels and the retained tag describe the same
+    /// picture they described in the input.
+    #[test]
+    fn lossless_optimization_accepts_an_oriented_jpeg_when_the_tag_is_kept() {
+        for (strip_metadata, preserve_exif) in [(false, false), (false, true)] {
+            let result = optimize_losslessly(
+                jpeg_artifact_with_metadata(40, 20, Some(6), None),
+                true,
+                strip_metadata,
+                preserve_exif,
+            )
+            .expect("the tag survives, so nothing has to be rotated");
+
+            let output = sniff_artifact(RawArtifact::new(result.artifact.bytes, None))
+                .expect("sniff output");
+            assert_eq!(
+                output.metadata.orientation,
+                Some(6),
+                "the output must still carry the tag, or it displays rotated"
+            );
+            assert!(
+                result.warnings.is_empty(),
+                "nothing was dropped: {:?}",
+                result.warnings
+            );
+        }
+    }
+
+    /// With the metadata stripped there is nowhere for the orientation to go, so the
+    /// request is refused — and the message says what is in the way.
+    #[test]
+    fn lossless_optimization_refuses_an_oriented_jpeg_when_the_tag_is_stripped() {
+        let error = optimize_losslessly(
+            jpeg_artifact_with_metadata(40, 20, Some(6), None),
+            true,
+            true,
+            false,
+        )
+        .expect_err("the orientation cannot be applied losslessly or preserved");
+
+        let TransformError::CapabilityMissing(message) = error else {
+            panic!("unexpected error: {error}");
+        };
+        assert!(
+            message.contains("EXIF orientation (6)"),
+            "the message should name the orientation: {message}"
+        );
+        assert!(
+            !message.contains("no pixel transforms are applied"),
+            "the generic message blames a transform the caller did not ask for: {message}"
+        );
+    }
+
+    /// The cases that already worked keep working under every metadata policy.
+    #[test]
+    fn lossless_optimization_accepts_a_jpeg_with_no_orientation_to_apply() {
+        for orientation in [None, Some(1)] {
+            for (strip_metadata, preserve_exif) in [(true, false), (false, false), (false, true)] {
+                let result = optimize_losslessly(
+                    jpeg_artifact_with_metadata(40, 20, orientation, None),
+                    true,
+                    strip_metadata,
+                    preserve_exif,
+                )
+                .unwrap_or_else(|error| {
+                    panic!("orientation {orientation:?} should optimize: {error}")
+                });
+                assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+            }
+        }
+    }
+
+    /// A real pixel transform is still refused, with the message that describes it.
+    #[test]
+    fn lossless_optimization_still_refuses_an_actual_pixel_transform() {
+        let error = transform_raster(TransformRequest::new(
+            jpeg_artifact_with_metadata(40, 20, None, None),
+            TransformOptions {
+                format: Some(MediaType::Jpeg),
+                optimize: OptimizeMode::Lossless,
+                width: Some(20),
+                ..TransformOptions::default()
+            },
+        ))
+        .expect_err("a resize is not lossless");
+
+        assert!(
+            matches!(error, TransformError::CapabilityMissing(ref message) if message.contains("no pixel transforms are applied")),
+            "unexpected error: {error}"
+        );
+    }
+
+    // ── Silently dropping an EXIF orientation ───────────────────────────
+
+    /// Leaving the pixels as stored while stripping the tag that says how to display them
+    /// is a rotation. Each flag is honest on its own; the combination has to say so.
+    #[test]
+    fn dropping_the_orientation_with_the_pixels_as_stored_warns() {
+        let result = transform_raster(TransformRequest::new(
+            jpeg_artifact_with_metadata(40, 20, Some(6), None),
+            TransformOptions {
+                format: Some(MediaType::Png),
+                auto_orient: false,
+                ..TransformOptions::default()
+            },
+        ))
+        .expect("transform");
+
+        assert!(
+            result
+                .warnings
+                .contains(&TransformWarning::OrientationDropped { orientation: 6 }),
+            "expected an orientation warning, got {:?}",
+            result.warnings
+        );
+        // The output really is the stored size, which is what the warning is about.
+        assert_eq!(result.artifact.metadata.width, Some(40));
+        assert_eq!(result.artifact.metadata.height, Some(20));
+    }
+
+    /// Keeping the metadata keeps the tag, so there is nothing to warn about.
+    #[test]
+    fn dropping_the_orientation_does_not_warn_when_the_tag_is_kept() {
+        let result = transform_raster(TransformRequest::new(
+            jpeg_artifact_with_metadata(40, 20, Some(6), None),
+            TransformOptions {
+                format: Some(MediaType::Jpeg),
+                auto_orient: false,
+                strip_metadata: false,
+                ..TransformOptions::default()
+            },
+        ))
+        .expect("transform");
+
+        assert!(
+            !result
+                .warnings
+                .iter()
+                .any(|warning| matches!(warning, TransformWarning::OrientationDropped { .. })),
+            "unexpected warning: {:?}",
+            result.warnings
+        );
+    }
+
+    /// Orientation 1 and no tag at all record nothing, so nothing is lost.
+    #[test]
+    fn dropping_the_orientation_does_not_warn_when_there_is_nothing_to_drop() {
+        for orientation in [None, Some(1)] {
+            let result = transform_raster(TransformRequest::new(
+                jpeg_artifact_with_metadata(40, 20, orientation, None),
+                TransformOptions {
+                    format: Some(MediaType::Png),
+                    auto_orient: false,
+                    ..TransformOptions::default()
+                },
+            ))
+            .expect("transform");
+
+            assert!(
+                result.warnings.is_empty(),
+                "orientation {orientation:?} produced {:?}",
+                result.warnings
+            );
+        }
+    }
+
+    /// A PNG has no orientation in this pipeline, so it never warns.
+    #[test]
+    fn dropping_the_orientation_does_not_warn_for_a_png_input() {
+        let result = transform_raster(TransformRequest::new(
+            png_artifact(4, 2, Rgba([255, 0, 0, 255])),
+            TransformOptions {
+                format: Some(MediaType::Png),
+                auto_orient: false,
+                ..TransformOptions::default()
+            },
+        ))
+        .expect("transform");
+
+        assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+    }
+
+    /// The lossless passthrough returns early, so it needs the warning of its own.
+    #[test]
+    fn the_lossless_passthrough_warns_about_a_dropped_orientation() {
+        let result = optimize_losslessly(
+            jpeg_artifact_with_metadata(40, 20, Some(8), None),
+            false,
+            true,
+            false,
+        )
+        .expect("no orientation is applied, so the passthrough is allowed");
+
+        assert!(
+            result
+                .warnings
+                .contains(&TransformWarning::OrientationDropped { orientation: 8 }),
+            "expected an orientation warning, got {:?}",
+            result.warnings
         );
     }
 

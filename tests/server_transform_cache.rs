@@ -154,3 +154,86 @@ fn serve_once_public_get_returns_not_modified_for_matching_etag() {
         })
     );
 }
+
+/// Two requests differing only in an equivalent `Accept` header share one cache entry.
+///
+/// Negotiation's whole output is the format, which the key already carries. Including the
+/// raw header meant every distinct string wrote its own copy of the same image: there are
+/// unboundedly many equivalent strings, they come straight off the request, and with the
+/// default `TRUSS_CACHE_MAX_BYTES` of 0 nothing reclaims them.
+#[test]
+fn serve_once_shares_one_cache_entry_across_equivalent_accept_headers() {
+    let storage_root = temp_dir("accept-cache-sharing");
+    fs::write(storage_root.join("image.png"), png_bytes()).expect("write source fixture");
+    let cache_root = temp_dir("accept-cache-sharing-cache");
+    let config = ServerConfig::new(storage_root, Some("secret".to_string()))
+        .with_signed_url_credentials("public-dev", "secret-value")
+        .with_cache_root(cache_root.clone());
+    let target = signed_target(
+        "/images/by-path",
+        BTreeMap::from([
+            ("path".to_string(), "/image.png".to_string()),
+            ("keyId".to_string(), "public-dev".to_string()),
+            ("expires".to_string(), "4102444800".to_string()),
+        ]),
+        "cdn.example.com",
+        "secret-value",
+    );
+
+    let (addr, handle) = spawn_server(config.clone());
+    let first = send_public_get_request_with_headers(
+        addr,
+        &target,
+        "cdn.example.com",
+        &[("Accept", "image/webp")],
+    );
+    handle
+        .join()
+        .expect("join server thread")
+        .expect("serve one request");
+    let (first_header, first_content_type, first_body) = split_response(&first);
+    assert!(first_header.contains("Cache-Status: \"truss\"; fwd=miss"));
+
+    // A different string with the same meaning: webp is still the preferred type.
+    let (addr, handle) = spawn_server(config);
+    let second = send_public_get_request_with_headers(
+        addr,
+        &target,
+        "cdn.example.com",
+        &[("Accept", "image/webp,image/png;q=0.5")],
+    );
+    handle
+        .join()
+        .expect("join server thread")
+        .expect("serve one request");
+    let (second_header, second_content_type, second_body) = split_response(&second);
+
+    assert_eq!(first_content_type, second_content_type);
+    assert_eq!(first_body, second_body);
+    assert!(
+        second_header.contains("Cache-Status: \"truss\"; hit"),
+        "the second request should hit the entry the first wrote: {second_header}"
+    );
+    // Negotiation still happened, so the response still varies on Accept.
+    assert!(second_header.lines().any(|line| line == "Vary: Accept"));
+
+    let entries = walk_files(&cache_root);
+    assert_eq!(
+        entries, 1,
+        "two equivalent Accept headers wrote {entries} cache entries"
+    );
+}
+
+/// Counts the regular files under `root`, at any depth.
+fn walk_files(root: &std::path::Path) -> usize {
+    let Ok(entries) = fs::read_dir(root) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .map(|entry| {
+            let path = entry.path();
+            if path.is_dir() { walk_files(&path) } else { 1 }
+        })
+        .sum()
+}

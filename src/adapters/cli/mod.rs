@@ -134,7 +134,8 @@ OPTIONS:
                            corners with --background (transparent, or white for formats
                            without alpha)
       --auto-orient        Apply EXIF orientation and reset tag (default)
-      --no-auto-orient     Skip EXIF orientation correction
+      --no-auto-orient     Skip EXIF orientation correction (add --keep-metadata to keep
+                           the tag; stripping it as well leaves the image rotated)
       --strip-metadata     Remove all metadata (default; lossy optimization keeps the
                            ICC profile so colors are not shifted by the re-encode)
       --keep-metadata      Preserve EXIF, ICC, and other supported metadata
@@ -178,11 +179,14 @@ OPTIONS:
       --format <FMT>       Output format: jpeg, png, webp, avif
                            (default: inferred from output extension or input format)
       --mode <MODE>        Optimization mode: auto (default), lossless, lossy, none
+                           lossless cannot rotate pixels, so a JPEG carrying an EXIF
+                           orientation needs --keep-metadata or --preserve-exif
       --quality <1-100>    Optional quality cap for lossy optimization
       --target-quality <TARGET>
                            Perceptual target for lossy optimization (e.g. ssim:0.98, psnr:42)
       --auto-orient        Apply EXIF orientation and reset tag (default)
-      --no-auto-orient     Skip EXIF orientation correction
+      --no-auto-orient     Skip EXIF orientation correction (add --keep-metadata to keep
+                           the tag; stripping it as well leaves the image rotated)
       --strip-metadata     Remove all metadata (default; lossy optimization keeps the
                            ICC profile so colors are not shifted by the re-encode)
       --keep-metadata      Preserve EXIF, ICC, and other supported metadata

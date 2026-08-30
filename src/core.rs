@@ -1526,6 +1526,12 @@ pub enum TransformWarning {
     /// Metadata of the given kind was present in the input but could not be preserved
     /// by the output encoder and was silently dropped.
     MetadataDropped(MetadataKind),
+    /// The input carries an EXIF orientation that the output records neither in its pixels
+    /// nor in its metadata, so the output displays rotated relative to the input.
+    OrientationDropped {
+        /// The EXIF orientation value the input carried.
+        orientation: u16,
+    },
 }
 
 impl fmt::Display for TransformWarning {
@@ -1534,6 +1540,10 @@ impl fmt::Display for TransformWarning {
             Self::MetadataDropped(kind) => write!(
                 f,
                 "{kind} metadata was present in the input but could not be preserved by the output encoder"
+            ),
+            Self::OrientationDropped { orientation } => write!(
+                f,
+                "the input carries EXIF orientation {orientation}; with autoOrient off and the metadata stripped the output records it neither in its pixels nor in its metadata, so it displays rotated. Keep the metadata to preserve the tag, or leave autoOrient on to apply it to the pixels"
             ),
         }
     }
