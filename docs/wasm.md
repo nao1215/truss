@@ -316,6 +316,8 @@ Notes:
 - `width` and `height` must be greater than zero when provided.
 - `fit` and `position` require both `width` and `height`.
 - `format: "svg"` is only valid when the input is already SVG.
+- GIF is an input-only format. It has no entry in `format`, a GIF input with no `format` is
+  encoded as PNG, and an animated GIF is rejected rather than reduced to its first frame.
 - `quality` must be between `1` and `100`, and only applies to lossy output formats.
 - `quality` cannot be combined with `optimize: "lossless"`.
 - `targetQuality` accepts values such as `ssim:0.98` or `psnr:42`.

@@ -33,7 +33,7 @@ Use the CLI for local files and shell pipelines, run the server behind a CDN or 
 
 - One Rust core across the CLI, the HTTP server, and the browser/WASM build.
 - Signed URLs, SSRF protections, and SVG sanitization are built in.
-- Supports JPEG, PNG, WebP, AVIF, BMP, TIFF, and SVG.
+- Supports JPEG, PNG, WebP, AVIF, BMP, TIFF, and SVG, plus GIF as a decode-only input.
 - Runs on Linux, macOS, and Windows.
 - CLI behavior is covered by [atago](https://github.com/nao1215/atago), and the HTTP API by [runn](https://github.com/k1LoW/runn).
 
@@ -115,6 +115,9 @@ truss inspect photo.jpg
 
 truss supports **JPEG, PNG, WebP, AVIF, BMP, TIFF, and SVG**. The output format is inferred from the file extension, or you can specify it explicitly with `--format`.
 
+GIF is read but never written. `--format gif` is rejected, and a GIF input with no other
+format hint converts to PNG rather than back to GIF.
+
 | Format | File size (640 x 427) | Notes |
 |--------|----------------------:|-------|
 | JPEG (original) | 80 KB | Lossy, widely supported |
@@ -140,6 +143,34 @@ Use `--optimize auto|lossless|lossy` on `truss convert`, or the dedicated `truss
 | Quality 90 (95 KB) | Original (80 KB) | Quality 30 (27 KB) |
 |---|---|---|
 | ![q90](./docs/img/sample-bee-q90.jpg) | ![original](./docs/img/sample-bee.jpg) | ![q30](./docs/img/sample-bee-q30.jpg) |
+
+#### GIF input
+
+GIF is a decode-only format: truss reads it and writes one of the formats it can encode.
+
+```sh
+# Convert a GIF to PNG, keeping the palette colors and any transparent index
+truss photo.gif -o photo.png
+
+# Any transform works the same as for other raster inputs
+truss photo.gif -o thumb.webp --width 320 --format webp
+
+# Check whether an upload is animated before converting it
+truss inspect upload.gif
+```
+
+Animated GIF is refused rather than reduced to its first frame:
+
+```sh
+$ truss convert animated.gif -o out.png
+error: animated GIF is not supported (3 frames); truss transforms single-frame images only
+$ echo $?
+3
+```
+
+Silently returning frame one with exit code 0 would give a caller no way to notice the
+animation was discarded. `truss inspect` still reads animated GIFs and reports
+`"isAnimated": true`, so a pipeline can branch on that before converting.
 
 #### Resize & fit modes
 
@@ -482,7 +513,7 @@ The GitHub Pages demo is intentionally built with `wasm,svg`. The official npm p
 |---------|-------------|
 | `convert` | Convert and transform an image file (can be omitted; see above) |
 | `optimize` | Optimize an image with format-aware auto/lossless/lossy modes (`truss optimize photo.jpg -o photo-optimized.jpg --mode auto`) |
-| `inspect` | Show metadata (format, dimensions, alpha) of an image |
+| `inspect` | Show metadata (format, dimensions, alpha, animation) of an image |
 | `serve` | Start the HTTP image-transform server (implied when server flags are used at the top level) |
 | `validate` | Validate server configuration without starting the server (useful in CI/CD) |
 | `sign` | Generate a signed public URL for the server |
@@ -567,6 +598,7 @@ Feature comparison with [imgproxy](https://github.com/imgproxy/imgproxy) and [im
 | JPEG / PNG / WebP / AVIF | Yes | Yes | Yes |
 | JPEG XL (JXL) | No | Input only | Yes |
 | TIFF | Yes | Yes | Yes |
+| GIF (static) | Input only | Yes | Yes |
 | GIF animation processing | No (out of scope) | Yes | Yes |
 | SVG sanitization | Yes | Yes | No |
 | Smart crop | No | Yes | Yes |

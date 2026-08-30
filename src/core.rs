@@ -231,6 +231,12 @@ pub enum MediaType {
     Bmp,
     /// TIFF image data.
     Tiff,
+    /// GIF image data.
+    ///
+    /// GIF is an input-only format: truss decodes it but never encodes it, the same way
+    /// it treats a raster input requesting SVG output. Requesting `gif` output returns
+    /// [`TransformError::UnsupportedOutputMediaType`].
+    Gif,
 }
 
 impl MediaType {
@@ -245,6 +251,7 @@ impl MediaType {
             Self::Svg => "svg",
             Self::Bmp => "bmp",
             Self::Tiff => "tiff",
+            Self::Gif => "gif",
         }
     }
 
@@ -259,6 +266,7 @@ impl MediaType {
             Self::Svg => "image/svg+xml",
             Self::Bmp => "image/bmp",
             Self::Tiff => "image/tiff",
+            Self::Gif => "image/gif",
         }
     }
 
@@ -294,6 +302,41 @@ impl MediaType {
     pub const fn is_raster(self) -> bool {
         !matches!(self, Self::Svg)
     }
+
+    /// Returns `true` if truss can encode this format, not merely decode it.
+    ///
+    /// GIF is decode-only: animation, palette quantization, and frame disposal are a
+    /// different problem from the single-frame pipeline, so truss reads GIF input and
+    /// writes one of the formats it fully supports. SVG is encodable only in the sense
+    /// that an SVG input can be sanitized back out as SVG, which
+    /// [`crate::codecs::transform`] handles on its own path.
+    #[must_use]
+    pub const fn is_encodable(self) -> bool {
+        !matches!(self, Self::Gif)
+    }
+
+    /// The output format to use when a request does not name one.
+    ///
+    /// Normally that is the input's own format, so a transform without an explicit
+    /// `format` does not silently re-encode into something else. A decode-only input has
+    /// no such option: GIF falls back to PNG, which is lossless and reproduces a palette
+    /// and a transparent color index exactly.
+    ///
+    /// Every adapter that has to resolve a missing format goes through here, so the rule
+    /// cannot drift between the CLI, the server, and the WASM build.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use truss::MediaType;
+    ///
+    /// assert_eq!(MediaType::Jpeg.default_output(), MediaType::Jpeg);
+    /// assert_eq!(MediaType::Gif.default_output(), MediaType::Png);
+    /// ```
+    #[must_use]
+    pub const fn default_output(self) -> Self {
+        if self.is_encodable() { self } else { Self::Png }
+    }
 }
 
 impl fmt::Display for MediaType {
@@ -314,6 +357,7 @@ impl FromStr for MediaType {
             "svg" => Ok(Self::Svg),
             "bmp" => Ok(Self::Bmp),
             "tiff" | "tif" => Ok(Self::Tiff),
+            "gif" => Ok(Self::Gif),
             _ => Err(format!("unsupported media type `{value}`")),
         }
     }
@@ -777,7 +821,11 @@ impl TransformOptions {
             ));
         }
 
-        let format = self.format.unwrap_or(input_media_type);
+        // An explicit `format: Some(Gif)` is a different request from an absent one, and is
+        // rejected by `codecs::transform` rather than quietly rewritten here.
+        let format = self
+            .format
+            .unwrap_or_else(|| input_media_type.default_output());
         let optimize = self.optimize;
 
         if optimize != OptimizeMode::None && !format.supports_optimization() {
@@ -1571,6 +1619,10 @@ fn detect_artifact(bytes: &[u8]) -> Result<(MediaType, ArtifactMetadata), Transf
         return Ok((MediaType::Tiff, sniff_tiff(bytes)?));
     }
 
+    if is_gif(bytes) {
+        return Ok((MediaType::Gif, sniff_gif(bytes)?));
+    }
+
     // SVG check goes last: it relies on text scanning which is slower than binary
     // magic-number checks and could produce false positives on non-SVG XML.
     if is_svg(bytes) {
@@ -1707,6 +1759,130 @@ fn is_tiff(bytes: &[u8]) -> bool {
     bytes.len() >= 4
         && ((bytes[0] == b'I' && bytes[1] == b'I' && bytes[2] == 0x2A && bytes[3] == 0x00)
             || (bytes[0] == b'M' && bytes[1] == b'M' && bytes[2] == 0x00 && bytes[3] == 0x2A))
+}
+
+fn is_gif(bytes: &[u8]) -> bool {
+    bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a")
+}
+
+/// Extracts GIF metadata by walking the block stream in the header.
+///
+/// The Logical Screen Descriptor carries the canvas size, which is also the size the
+/// `image` crate reports for the decoded first frame, so a frame smaller than the canvas
+/// still lines up. Frames and transparency need a walk over the block stream: `frame_count`
+/// is how [`crate::inspect`] reports animation, and refusing to encode an animation depends
+/// on getting the count right, so this deliberately walks the whole file rather than
+/// stopping at the first image descriptor.
+///
+/// Transparency is read from the Graphic Control Extension's transparent-color flag. Like
+/// [`sniff_png`], which reads the PNG color type, this reports what the container declares
+/// rather than scanning pixels.
+fn sniff_gif(bytes: &[u8]) -> Result<ArtifactMetadata, TransformError> {
+    // 6-byte signature + 7-byte Logical Screen Descriptor.
+    if bytes.len() < 13 {
+        return Err(TransformError::DecodeFailed(
+            "gif file is too short".to_string(),
+        ));
+    }
+
+    let width = u32::from(read_u16_le(&bytes[6..8])?);
+    let height = u32::from(read_u16_le(&bytes[8..10])?);
+    let packed = bytes[10];
+
+    let mut offset = 13usize;
+    // Skip the Global Color Table when the flag in the packed field is set. Its entry
+    // count is 2^(N+1), three bytes per entry.
+    if packed & 0b1000_0000 != 0 {
+        let entries = 1usize << ((packed & 0b0000_0111) + 1);
+        offset = offset.saturating_add(entries * 3);
+    }
+
+    let mut frame_count = 0u32;
+    let mut has_alpha = false;
+
+    while offset < bytes.len() {
+        match bytes[offset] {
+            // Trailer.
+            0x3B => break,
+            // Extension introducer.
+            0x21 => {
+                if offset + 1 >= bytes.len() {
+                    break;
+                }
+                let label = bytes[offset + 1];
+                let mut cursor = offset + 2;
+                // A Graphic Control Extension declares transparency in bit 0 of the
+                // packed field, which is the first byte of its single data sub-block.
+                if label == 0xF9
+                    && cursor + 2 < bytes.len()
+                    && bytes[cursor] >= 1
+                    && bytes[cursor + 1] & 0b0000_0001 != 0
+                {
+                    has_alpha = true;
+                }
+                cursor = skip_gif_sub_blocks(bytes, cursor)?;
+                offset = cursor;
+            }
+            // Image descriptor: 10 bytes, then an optional Local Color Table, then the
+            // LZW minimum code size byte, then the image data sub-blocks.
+            0x2C => {
+                frame_count = frame_count.saturating_add(1);
+                if offset + 10 > bytes.len() {
+                    break;
+                }
+                let local_packed = bytes[offset + 9];
+                let mut cursor = offset + 10;
+                if local_packed & 0b1000_0000 != 0 {
+                    let entries = 1usize << ((local_packed & 0b0000_0111) + 1);
+                    cursor = cursor.saturating_add(entries * 3);
+                }
+                // LZW minimum code size.
+                cursor = cursor.saturating_add(1);
+                cursor = skip_gif_sub_blocks(bytes, cursor)?;
+                offset = cursor;
+            }
+            other => {
+                return Err(TransformError::DecodeFailed(format!(
+                    "gif file has an unknown block introducer 0x{other:02x}"
+                )));
+            }
+        }
+    }
+
+    if frame_count == 0 {
+        return Err(TransformError::DecodeFailed(
+            "gif file contains no image data".to_string(),
+        ));
+    }
+
+    Ok(ArtifactMetadata {
+        width: Some(width),
+        height: Some(height),
+        frame_count,
+        duration: None,
+        has_alpha: Some(has_alpha),
+    })
+}
+
+/// Advances past a GIF sub-block chain, returning the offset just after its terminator.
+///
+/// A chain is a run of `[length: u8][length bytes]` records ending in a zero-length record.
+/// Running off the end means the file is truncated, which is a decode failure rather than a
+/// silently short read.
+fn skip_gif_sub_blocks(bytes: &[u8], mut offset: usize) -> Result<usize, TransformError> {
+    loop {
+        if offset >= bytes.len() {
+            return Err(TransformError::DecodeFailed(
+                "gif file ends inside a data block".to_string(),
+            ));
+        }
+        let len = bytes[offset] as usize;
+        offset += 1;
+        if len == 0 {
+            return Ok(offset);
+        }
+        offset = offset.saturating_add(len);
+    }
 }
 
 /// Extracts TIFF metadata by decoding the image header via the `image` crate.
@@ -2247,6 +2423,49 @@ mod tests {
         bytes
     }
 
+    /// Builds a GIF whose block structure is valid, which is all `sniff_gif` walks.
+    ///
+    /// The LZW payload is deliberately opaque bytes: the sniffer never decodes image data,
+    /// so a real compressed stream would only obscure what each test is pinning.
+    fn gif_bytes(
+        version: &[u8; 3],
+        width: u16,
+        height: u16,
+        frames: usize,
+        transparent: bool,
+    ) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"GIF");
+        bytes.extend_from_slice(version);
+        bytes.extend_from_slice(&width.to_le_bytes());
+        bytes.extend_from_slice(&height.to_le_bytes());
+        // Global Color Table present, 2 entries (2^(0+1)).
+        bytes.push(0b1000_0000);
+        bytes.push(0); // background color index
+        bytes.push(0); // pixel aspect ratio
+        bytes.extend_from_slice(&[0xFF, 0x00, 0x00, 0x00, 0x00, 0xFF]);
+
+        for _ in 0..frames {
+            if transparent {
+                // Graphic Control Extension with the transparent-color flag set.
+                bytes.extend_from_slice(&[0x21, 0xF9, 0x04, 0b0000_0001, 0x00, 0x00, 0x00, 0x00]);
+            }
+            // Image descriptor: position, size, no local color table.
+            bytes.push(0x2C);
+            bytes.extend_from_slice(&0u16.to_le_bytes());
+            bytes.extend_from_slice(&0u16.to_le_bytes());
+            bytes.extend_from_slice(&width.to_le_bytes());
+            bytes.extend_from_slice(&height.to_le_bytes());
+            bytes.push(0);
+            // LZW minimum code size, then one data sub-block and the terminator.
+            bytes.push(0x02);
+            bytes.extend_from_slice(&[0x02, 0x44, 0x01, 0x00]);
+        }
+
+        bytes.push(0x3B);
+        bytes
+    }
+
     fn webp_vp8x_bytes(width: u32, height: u32, flags: u8) -> Vec<u8> {
         let width_minus_one = width - 1;
         let height_minus_one = height - 1;
@@ -2339,7 +2558,10 @@ mod tests {
         assert_eq!("jpeg".parse::<MediaType>(), Ok(MediaType::Jpeg));
         assert_eq!("jpg".parse::<MediaType>(), Ok(MediaType::Jpeg));
         assert_eq!("png".parse::<MediaType>(), Ok(MediaType::Png));
-        assert!("gif".parse::<MediaType>().is_err());
+        // `gif` parses: it is a supported input. Whether it may be used as an output is a
+        // separate question, answered by `is_encodable`.
+        assert_eq!("gif".parse::<MediaType>(), Ok(MediaType::Gif));
+        assert!("heic".parse::<MediaType>().is_err());
     }
 
     #[test]
@@ -2754,6 +2976,165 @@ mod tests {
         assert_eq!(artifact.metadata.width, Some(320));
         assert_eq!(artifact.metadata.height, Some(240));
         assert_eq!(artifact.metadata.has_alpha, Some(false));
+    }
+
+    #[test]
+    fn normalize_defaults_gif_input_to_png_output() {
+        // "Keep the input format" cannot mean GIF, because truss has no GIF encoder.
+        let options = TransformOptions::default()
+            .normalize(MediaType::Gif)
+            .expect("gif input should normalize");
+
+        assert_eq!(options.format, MediaType::Png);
+    }
+
+    #[test]
+    fn normalize_keeps_an_explicit_format_for_gif_input() {
+        let options = TransformOptions {
+            format: Some(MediaType::Webp),
+            ..TransformOptions::default()
+        }
+        .normalize(MediaType::Gif)
+        .expect("gif input with an explicit format should normalize");
+
+        assert_eq!(options.format, MediaType::Webp);
+    }
+
+    #[test]
+    fn gif_is_not_encodable() {
+        assert!(!MediaType::Gif.is_encodable());
+        for media_type in [
+            MediaType::Jpeg,
+            MediaType::Png,
+            MediaType::Webp,
+            MediaType::Avif,
+            MediaType::Svg,
+            MediaType::Bmp,
+            MediaType::Tiff,
+        ] {
+            assert!(
+                media_type.is_encodable(),
+                "{} should be encodable",
+                media_type.as_name()
+            );
+        }
+    }
+
+    #[test]
+    fn sniff_artifact_detects_static_gif87a() {
+        let artifact = sniff_artifact(RawArtifact::new(
+            gif_bytes(b"87a", 640, 480, 1, false),
+            None,
+        ))
+        .expect("sniff gif87a");
+
+        assert_eq!(artifact.media_type, MediaType::Gif);
+        assert_eq!(artifact.metadata.width, Some(640));
+        assert_eq!(artifact.metadata.height, Some(480));
+        assert_eq!(artifact.metadata.frame_count, 1);
+        assert_eq!(artifact.metadata.has_alpha, Some(false));
+    }
+
+    #[test]
+    fn sniff_artifact_detects_gif89a_transparency() {
+        let artifact = sniff_artifact(RawArtifact::new(gif_bytes(b"89a", 4, 4, 1, true), None))
+            .expect("sniff transparent gif");
+
+        assert_eq!(artifact.media_type, MediaType::Gif);
+        assert_eq!(
+            artifact.metadata.has_alpha,
+            Some(true),
+            "a Graphic Control Extension with the transparent-color flag means alpha"
+        );
+    }
+
+    #[test]
+    fn sniff_artifact_counts_gif_frames() {
+        // Frame count is what `inspect` turns into `isAnimated` and what the transform
+        // pipeline refuses on, so the walk has to reach every image descriptor rather than
+        // stopping at the first one.
+        let artifact = sniff_artifact(RawArtifact::new(gif_bytes(b"89a", 8, 8, 5, true), None))
+            .expect("sniff animated gif");
+
+        assert_eq!(artifact.metadata.frame_count, 5);
+    }
+
+    #[test]
+    fn sniff_gif_rejects_a_header_shorter_than_the_screen_descriptor() {
+        let err = sniff_artifact(RawArtifact::new(b"GIF89a\x04\x00".to_vec(), None))
+            .expect_err("a 9-byte gif should be rejected");
+
+        assert!(
+            matches!(err, TransformError::DecodeFailed(ref msg) if msg.contains("too short")),
+            "expected a too-short decode error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn sniff_gif_rejects_a_file_truncated_inside_a_data_block() {
+        let mut bytes = gif_bytes(b"89a", 4, 4, 1, false);
+        // Drop the trailer and the sub-block terminator so the walk runs off the end.
+        bytes.truncate(bytes.len() - 2);
+        let err = sniff_artifact(RawArtifact::new(bytes, None))
+            .expect_err("a truncated gif should be rejected");
+
+        assert!(
+            matches!(err, TransformError::DecodeFailed(ref msg) if msg.contains("ends inside a data block")),
+            "expected a truncated-block decode error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn sniff_gif_rejects_a_file_with_no_image_data() {
+        let err = sniff_artifact(RawArtifact::new(gif_bytes(b"89a", 4, 4, 0, false), None))
+            .expect_err("a gif with no frames should be rejected");
+
+        assert!(
+            matches!(err, TransformError::DecodeFailed(ref msg) if msg.contains("no image data")),
+            "expected a no-image-data decode error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn sniff_gif_rejects_an_unknown_block_introducer() {
+        let mut bytes = gif_bytes(b"89a", 4, 4, 1, false);
+        // Replace the trailer with a byte that is neither an extension, an image
+        // descriptor, nor a trailer.
+        let last = bytes.len() - 1;
+        bytes[last] = 0x99;
+        let err = sniff_artifact(RawArtifact::new(bytes, None))
+            .expect_err("an unknown block introducer should be rejected");
+
+        assert!(
+            matches!(err, TransformError::DecodeFailed(ref msg) if msg.contains("unknown block introducer")),
+            "expected an unknown-introducer decode error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn sniff_gif_skips_a_local_color_table() {
+        // A frame carrying its own palette shifts every later offset. Getting the skip
+        // wrong would land the walk mid-palette and report a bogus block introducer.
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"GIF89a");
+        bytes.extend_from_slice(&4u16.to_le_bytes());
+        bytes.extend_from_slice(&4u16.to_le_bytes());
+        bytes.extend_from_slice(&[0x00, 0x00, 0x00]); // no global color table
+        bytes.push(0x2C);
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        bytes.extend_from_slice(&4u16.to_le_bytes());
+        bytes.extend_from_slice(&4u16.to_le_bytes());
+        bytes.push(0b1000_0001); // local color table, 4 entries (2^(1+1))
+        bytes.extend_from_slice(&[0u8; 12]);
+        bytes.push(0x02);
+        bytes.extend_from_slice(&[0x02, 0x44, 0x01, 0x00]);
+        bytes.push(0x3B);
+
+        let artifact =
+            sniff_artifact(RawArtifact::new(bytes, None)).expect("sniff gif with local palette");
+        assert_eq!(artifact.metadata.frame_count, 1);
+        assert_eq!(artifact.metadata.width, Some(4));
     }
 
     #[test]

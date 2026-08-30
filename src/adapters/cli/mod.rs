@@ -716,8 +716,20 @@ fn parse_position(s: &str) -> Result<Position, String> {
     Position::from_str(s)
 }
 
+/// Parses an output format, refusing formats truss can read but not write.
+///
+/// `--format gif` would otherwise parse cleanly and fail deep in the pipeline. Rejecting
+/// it here puts the error next to the flag the user typed and names the alternatives.
 fn parse_media_type(s: &str) -> Result<MediaType, String> {
-    MediaType::from_str(s)
+    let media_type = MediaType::from_str(s)?;
+    if media_type.is_encodable() {
+        Ok(media_type)
+    } else {
+        Err(format!(
+            "{} is an input-only format; choose an output format such as png, jpeg, webp, or avif",
+            media_type.as_name()
+        ))
+    }
 }
 
 fn parse_optimizable_media_type(s: &str) -> Result<MediaType, String> {
@@ -1417,8 +1429,15 @@ fn map_transform_error(error: crate::TransformError) -> CliError {
     match error {
         crate::TransformError::InvalidOptions(reason) => runtime_error(EXIT_USAGE, &reason),
         crate::TransformError::InvalidInput(reason) => runtime_error(EXIT_INPUT, &reason),
-        crate::TransformError::UnsupportedInputMediaType(reason)
-        | crate::TransformError::DecodeFailed(reason)
+        // An input truss cannot process is an input error (3), the same class the
+        // documented exit-code table gives an unsupported format, not a transform
+        // failure (4). The sniff in `execute_convert` already reports unreadable bytes
+        // that way; this arm covers the inputs that are readable but unsupported, such
+        // as an animated GIF.
+        crate::TransformError::UnsupportedInputMediaType(reason) => {
+            runtime_error(EXIT_INPUT, &reason)
+        }
+        crate::TransformError::DecodeFailed(reason)
         | crate::TransformError::EncodeFailed(reason)
         | crate::TransformError::CapabilityMissing(reason)
         | crate::TransformError::LimitExceeded(reason) => runtime_error(EXIT_TRANSFORM, &reason),

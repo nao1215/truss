@@ -29,6 +29,27 @@ pub fn png_bytes() -> Vec<u8> {
     bytes
 }
 
+/// The 4x3 static GIF87a from `integration/fixtures`.
+///
+/// These come from the committed fixtures rather than a hand-built byte string so the
+/// server tests exercise a GIF a real encoder produced, LZW stream included.
+pub fn gif_bytes() -> Vec<u8> {
+    include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/integration/fixtures/sample.gif"
+    ))
+    .to_vec()
+}
+
+/// The 3-frame animated GIF89a from `integration/fixtures`.
+pub fn animated_gif_bytes() -> Vec<u8> {
+    include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/integration/fixtures/animated.gif"
+    ))
+    .to_vec()
+}
+
 /// Small 2x2 PNG suitable for cloud integration tests where image content
 /// does not matter and a minimal payload is preferred.
 pub fn tiny_png() -> Vec<u8> {

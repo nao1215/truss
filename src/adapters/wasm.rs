@@ -274,9 +274,23 @@ where
         .transpose()
 }
 
+/// Parses an output format name, refusing formats truss can read but not write.
+///
+/// `format: "gif"` parses as a media type but has no encoder behind it. Catching that here
+/// makes it an options error the caller can act on, rather than a transform failure raised
+/// after the image has already been decoded.
 fn parse_media_type(value: &str, field: &str) -> Result<MediaType, TransformError> {
-    MediaType::from_str(value)
-        .map_err(|reason| TransformError::InvalidOptions(format!("{field} is invalid: {reason}")))
+    let media_type = MediaType::from_str(value).map_err(|reason| {
+        TransformError::InvalidOptions(format!("{field} is invalid: {reason}"))
+    })?;
+    if media_type.is_encodable() {
+        Ok(media_type)
+    } else {
+        Err(TransformError::InvalidOptions(format!(
+            "{field} is invalid: {} is an input-only format",
+            media_type.as_name()
+        )))
+    }
 }
 
 fn parse_rotation(value: Option<u16>) -> Result<Rotation, TransformError> {
@@ -321,6 +335,9 @@ fn output_extension(media_type: MediaType) -> &'static str {
         MediaType::Svg => "svg",
         MediaType::Bmp => "bmp",
         MediaType::Tiff => "tiff",
+        // Unreachable for a real output: `gif` output is rejected before encoding. The
+        // arm exists so adding an input-only format cannot silently become an output one.
+        MediaType::Gif => "gif",
     }
 }
 
@@ -1032,12 +1049,31 @@ mod tests {
     #[test]
     fn parse_wasm_options_rejects_invalid_format() {
         let error = parse_wasm_options(WasmTransformOptions {
-            format: Some("gif".to_string()),
+            format: Some("heic".to_string()),
             ..WasmTransformOptions::default()
         })
         .expect_err("invalid format should fail");
 
         assert!(matches!(error, TransformError::InvalidOptions(_)));
+    }
+
+    #[test]
+    fn parse_wasm_options_rejects_a_decode_only_output_format() {
+        // `gif` is a real media type but has no encoder, so it must fail as an options
+        // error here rather than surviving to the transform.
+        let error = parse_wasm_options(WasmTransformOptions {
+            format: Some("gif".to_string()),
+            ..WasmTransformOptions::default()
+        })
+        .expect_err("gif output should fail");
+
+        match error {
+            TransformError::InvalidOptions(message) => assert!(
+                message.contains("input-only"),
+                "the error should say why, got: {message}"
+            ),
+            other => panic!("expected InvalidOptions, got: {other}"),
+        }
     }
 
     #[test]

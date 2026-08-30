@@ -196,7 +196,10 @@ where
 
     let mut options = command.options;
     if options.format.is_none() {
-        options.format = infer_output_format(&command.output).or(Some(input.media_type));
+        // Leave it None when the output gives no hint (stdout, or an extension truss does
+        // not recognize) so `TransformOptions::normalize` picks the default. It resolves to
+        // the input format, except for GIF input, which has no encoder and falls back to PNG.
+        options.format = infer_output_format(&command.output);
     }
 
     let watermark = if let Some(ref wm_path) = command.watermark_path {
