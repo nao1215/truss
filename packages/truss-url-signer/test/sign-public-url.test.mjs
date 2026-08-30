@@ -316,10 +316,6 @@ test("rejects transform combinations that truss would reject", () => {
       pattern: /position requires both width and height/,
     },
     {
-      options: { transforms: { preserveExif: true, stripMetadata: true } },
-      pattern: /preserveExif requires stripMetadata to be false/,
-    },
-    {
       options: {
         transforms: { format: "jpeg", quality: 80, optimize: "lossless" },
       },
@@ -455,4 +451,16 @@ test("preserveExif implies stripMetadata=false, matching `truss sign --preserve-
     expires: 1700000000,
   });
   assert.equal(spelledOut, expected, "both spellings sign the same request");
+
+  // truss resolves the contradictory pair rather than refusing it, and
+  // `truss sign --strip-metadata --preserve-exif` prints this same string.
+  const contradictory = signPublicUrl({
+    baseUrl: "https://cdn.example.com",
+    source: { kind: "path", path: "/hero.jpg" },
+    transforms: { preserveExif: true, stripMetadata: true },
+    keyId: "k1",
+    secret: "s3cret",
+    expires: 1700000000,
+  });
+  assert.equal(contradictory, expected, "preserveExif wins over an explicit strip");
 });

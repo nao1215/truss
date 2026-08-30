@@ -290,9 +290,11 @@ function normalizeTransforms(transforms) {
   });
 
   // `preserveExif` implies "do not strip", the rule truss applies in its own
-  // `resolve_metadata_flags`. Requiring the caller to also pass `stripMetadata: false`
-  // made this package refuse a transform the CLI and the server both accept, and the
-  // resolution here is what makes the URL identical to the one `truss sign` produces.
+  // `resolve_metadata_flags`: it resolves the pair rather than refusing it, so an
+  // explicit `stripMetadata: true` beside it loses. Throwing here instead - which is
+  // what this package used to do, for `{preserveExif: true}` on its own as well as for
+  // the pair - made it refuse transforms the CLI and the server both accept, and left
+  // it as the one adapter that answered differently.
   if (preserveExif === true) {
     stripMetadata = false;
   }
@@ -362,9 +364,6 @@ function validateTransformMatrix(transforms) {
     throw new TypeError("position requires both width and height");
   }
 
-  if (transforms.preserveExif === true && transforms.stripMetadata === true) {
-    throw new TypeError("preserveExif requires stripMetadata to be false");
-  }
 
   if (
     transforms.optimize !== null &&
