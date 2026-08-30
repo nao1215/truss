@@ -8,8 +8,8 @@
 #   large.png           10000x1 extremely wide PNG
 #   tall.png            1x10000 extremely tall PNG
 #   transparent.png     4x4 fully transparent PNG (all alpha=0)
-#   semitransparent.png 8x8 with partial alpha
-#   exif-rotated.jpg    JPEG with EXIF Orientation=6 (90 degrees CW)
+#   semitransparent.png 16x8 with partial alpha
+#   exif-rotated.jpg    40x20 JPEG with EXIF Orientation=6 (90 degrees CW)
 #   cmyk.jpg            CMYK color space JPEG
 #   truncated.jpg       JPEG truncated mid-stream (~60% of data)
 #   corrupt-header.jpg  JPEG with zeroed header bytes
@@ -134,6 +134,18 @@ scenarios:
 
   - name: converts a semi-transparent PNG to JPEG
     steps:
+      # The source really does carry partial alpha, so this pins the flattening: JPEG has
+      # no alpha channel, and the output must come out fully opaque rather than carrying
+      # a channel the format cannot store.
+      - run:
+          shell: true
+          command: truss inspect "$FIXTURES_DIR/semitransparent.png"
+      - assert:
+          exit_code: 0
+          stdout:
+            json:
+              path: $.hasAlpha
+              equals: true
       - run:
           shell: true
           command: truss convert "$FIXTURES_DIR/semitransparent.png" -o semi.jpg
@@ -142,9 +154,22 @@ scenarios:
           image:
             path: semi.jpg
             format: jpeg
+            alpha: false
+      # Partial alpha survives a format that can hold it.
+      - run:
+          shell: true
+          command: truss convert "$FIXTURES_DIR/semitransparent.png" -o semi.png
+      - assert:
+          exit_code: 0
+          image:
+            path: semi.png
+            format: png
+            alpha: true
 
-  - name: inspects an EXIF-rotated JPEG
+  - name: inspect reports the stored size of an EXIF-rotated JPEG
     steps:
+      # inspect reads the container, so it reports what the file stores (40x20). The
+      # orientation tag says how to display it; applying that is convert's job.
       - run:
           shell: true
           command: truss inspect "$FIXTURES_DIR/exif-rotated.jpg"
@@ -152,11 +177,18 @@ scenarios:
           exit_code: 0
           stdout:
             json:
-              path: $.format
-              equals: jpeg
+              - path: $.format
+                equals: jpeg
+              - path: $.width
+                equals: 40
+              - path: $.height
+                equals: 20
 
-  - name: converts an EXIF-rotated JPEG to PNG
+  - name: converting an EXIF-rotated JPEG applies the orientation
     steps:
+      # Orientation=6 means "rotate 90 degrees clockwise to display". A phone photo is the
+      # everyday case, and getting this wrong ships sideways images, so the dimension swap
+      # is the assertion, not just that a PNG came out.
       - run:
           shell: true
           command: truss convert "$FIXTURES_DIR/exif-rotated.jpg" -o exif.png
@@ -165,6 +197,21 @@ scenarios:
           image:
             path: exif.png
             format: png
+            width: 20
+            height: 40
+
+  - name: --no-auto-orient leaves an EXIF-rotated JPEG as stored
+    steps:
+      - run:
+          shell: true
+          command: truss convert "$FIXTURES_DIR/exif-rotated.jpg" -o as-stored.png --no-auto-orient
+      - assert:
+          exit_code: 0
+          image:
+            path: as-stored.png
+            format: png
+            width: 40
+            height: 20
 
   - name: inspects a CMYK JPEG
     steps:
