@@ -54,7 +54,7 @@ yuvutils-rs = { version = "0.8", optional = true }
 wasm-bindgen = { version = "0.2.114", optional = true }
 webp = { version = "0.3", optional = true }
 quick-xml = { version = "0.41", optional = true }
-resvg = { version = "0.47", optional = true }
+resvg = { version = "0.48", optional = true }
 aws-sdk-s3 = { version = "1", optional = true }
 aws-config = { version = "1", optional = true }
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "io-util", "time"], optional = true }
