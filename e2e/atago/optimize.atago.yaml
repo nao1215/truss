@@ -13,6 +13,71 @@ suite:
   name: truss optimize
 
 scenarios:
+  - name: lossless optimization keeps a phone photo's EXIF orientation
+    steps:
+      # exif-rotated.jpg is stored 40x20 with orientation 6, which is what a phone
+      # produces for a portrait photo. Lossless optimization cannot rotate the pixels —
+      # that would need a decode and a re-encode — but it does not need to: keeping the
+      # tag leaves the stored pixels and the tag describing the same picture as before.
+      - run:
+          command: truss optimize "${fixtures}/exif-rotated.jpg" -o kept.jpg --mode lossless --keep-metadata
+      - assert:
+          exit_code: 0
+      - run:
+          command: truss inspect kept.jpg
+      - assert:
+          exit_code: 0
+          stdout:
+            json:
+              - path: $.orientation
+                equals: 6
+              - path: $.width
+                equals: 40
+              - path: $.orientedWidth
+                equals: 20
+              - path: $.orientedHeight
+                equals: 40
+
+  - name: --preserve-exif is enough to keep it
+    steps:
+      - run:
+          command: truss optimize "${fixtures}/exif-rotated.jpg" -o exif.jpg --mode lossless --preserve-exif
+      - assert:
+          exit_code: 0
+      - run:
+          command: truss inspect exif.jpg
+      - assert:
+          exit_code: 0
+          stdout:
+            json:
+              path: $.orientation
+              equals: 6
+
+  - name: lossless optimization refuses an oriented JPEG whose metadata is stripped, and says why
+    steps:
+      # There is nowhere for the orientation to go: the pixels cannot be rotated
+      # losslessly and the tag is being removed. The message has to name the orientation
+      # rather than blaming a pixel transform the caller never asked for.
+      - run:
+          command: truss optimize "${fixtures}/exif-rotated.jpg" -o stripped.jpg --mode lossless
+      - assert:
+          exit_code: 4
+          stderr:
+            contains:
+              - "error:"
+              - "EXIF orientation (6)"
+            not_contains: "no pixel transforms are applied"
+
+  - name: lossless optimization of a JPEG with no orientation still works
+    steps:
+      - run:
+          command: truss optimize "${fixtures}/sample.jpg" -o plain.jpg --mode lossless
+      - assert:
+          exit_code: 0
+          image:
+            path: plain.jpg
+            format: jpeg
+
   - name: lossless optimization of a JPEG returns the same bytes
     steps:
       # There is nothing lossless left to do to an already-encoded JPEG, so the file is

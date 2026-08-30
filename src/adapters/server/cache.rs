@@ -481,7 +481,6 @@ pub(super) fn unique_tmp_suffix() -> String {
 pub(super) fn compute_cache_key(
     source_identifier: &str,
     options: &TransformOptions,
-    negotiated_accept: Option<&str>,
     watermark_identity: Option<&str>,
 ) -> String {
     use std::fmt::Write;
@@ -588,10 +587,6 @@ pub(super) fn compute_cache_key(
     }
 
     canonical.push('\n');
-    if let Some(accept) = negotiated_accept {
-        canonical.push_str(accept);
-    }
-    canonical.push('\n');
     if let Some(wm) = watermark_identity {
         canonical.push_str(wm);
     }
@@ -660,7 +655,7 @@ pub(super) fn try_versioned_cache_lookup(
 
     let cache =
         TransformCache::new(cache_root.clone()).with_log_handler(config.log_handler.clone());
-    let cache_key = compute_cache_key(source_hash, options, None, watermark_identity);
+    let cache_key = compute_cache_key(source_hash, options, watermark_identity);
     if let CacheLookup::Hit {
         media_type,
         body,
@@ -709,8 +704,8 @@ mod tests {
             blur: Some(0.14),
             ..TransformOptions::default()
         };
-        let key_a = compute_cache_key("img.png", &opts_a, None, None);
-        let key_b = compute_cache_key("img.png", &opts_b, None, None);
+        let key_a = compute_cache_key("img.png", &opts_a, None);
+        let key_b = compute_cache_key("img.png", &opts_b, None);
         assert_ne!(
             key_a, key_b,
             "blur=0.11 and blur=0.14 must produce different cache keys"
@@ -732,8 +727,8 @@ mod tests {
         };
 
         assert_ne!(
-            compute_cache_key("img.png", &base, None, None),
-            compute_cache_key("img.png", &clamped, None, None)
+            compute_cache_key("img.png", &base, None),
+            compute_cache_key("img.png", &clamped, None)
         );
     }
 
@@ -746,8 +741,8 @@ mod tests {
         };
 
         assert_ne!(
-            compute_cache_key("img.png", &base, None, None),
-            compute_cache_key("img.png", &gray, None, None),
+            compute_cache_key("img.png", &base, None),
+            compute_cache_key("img.png", &gray, None),
             "a grayscale request must not reuse the color variant's cache entry"
         );
     }
@@ -761,8 +756,8 @@ mod tests {
         };
 
         assert_ne!(
-            compute_cache_key("img.png", &base, None, None),
-            compute_cache_key("img.png", &optimized, None, None)
+            compute_cache_key("img.png", &base, None),
+            compute_cache_key("img.png", &optimized, None)
         );
     }
 
@@ -788,8 +783,8 @@ mod tests {
         };
 
         assert_ne!(
-            compute_cache_key("img.png", &a, None, None),
-            compute_cache_key("img.png", &b, None, None)
+            compute_cache_key("img.png", &a, None),
+            compute_cache_key("img.png", &b, None)
         );
     }
 
@@ -808,8 +803,8 @@ mod tests {
         };
 
         assert_eq!(
-            compute_cache_key("img.png", &implicit, None, None),
-            compute_cache_key("img.png", &explicit, None, None)
+            compute_cache_key("img.png", &implicit, None),
+            compute_cache_key("img.png", &explicit, None)
         );
     }
 
