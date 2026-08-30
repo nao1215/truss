@@ -17,7 +17,7 @@ decode → auto-orient → rotate → crop → resize → blur → sharpen → g
 | 5 | **Resize** | `width` and/or `height` set | Scale the image according to `fit` (contain / cover / fill / inside) and `position`. |
 | 6 | **Blur** | `blur` set | Gaussian blur with the given sigma (0.1–100.0). |
 | 7 | **Sharpen** | `sharpen` set | Unsharp mask with the given sigma (0.1–100.0). |
-| 8 | **Grayscale** | `grayscale == true` | Collapse the color channels to luminance (Rec. 601 weights), preserving alpha. Runs before the watermark so an overlay keeps its own colors. |
+| 8 | **Grayscale** | `grayscale == true` | Collapse the color channels to luminance (Rec. 601 weights), preserving alpha. Runs before the watermark so an overlay keeps its own colors, and after the stages that fill with `background`, so rotation corners and `fit=contain` padding are desaturated along with the image. |
 | 9 | **Watermark** | `watermark` provided | Alpha-composite a watermark image at the specified position, opacity, and margin. |
 | 10 | **Encode** | — | Encode to the output format (JPEG, PNG, WebP, AVIF, BMP, TIFF) with optional quality and metadata injection. GIF is not an output format. |
 
