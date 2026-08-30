@@ -86,10 +86,17 @@ pub struct WasmArtifactInfo {
     pub media_type: String,
     /// MIME type string such as `image/png`.
     pub mime_type: String,
-    /// Rendered width in pixels when known.
+    /// Width in pixels as stored in the container, when known.
     pub width: Option<u32>,
-    /// Rendered height in pixels when known.
+    /// Height in pixels as stored in the container, when known.
     pub height: Option<u32>,
+    /// The EXIF orientation tag, when the artifact carries one.
+    pub orientation: Option<u16>,
+    /// Width in pixels after the EXIF orientation is applied, which is what a transform
+    /// produces. Equal to `width` whenever the orientation does not transpose the axes.
+    pub oriented_width: Option<u32>,
+    /// Height in pixels after the EXIF orientation is applied.
+    pub oriented_height: Option<u32>,
     /// Frame count for the artifact.
     pub frame_count: u32,
     /// Whether the artifact contains alpha when known.
@@ -319,11 +326,15 @@ fn dispatch_browser_transform_with_watermark(
 }
 
 fn artifact_info(artifact: &Artifact) -> WasmArtifactInfo {
+    let oriented = artifact.metadata.oriented_dimensions();
     WasmArtifactInfo {
         media_type: artifact.media_type.as_name().to_string(),
         mime_type: artifact.media_type.as_mime().to_string(),
         width: artifact.metadata.width,
         height: artifact.metadata.height,
+        orientation: artifact.metadata.orientation,
+        oriented_width: oriented.map(|dimensions| dimensions.width),
+        oriented_height: oriented.map(|dimensions| dimensions.height),
         frame_count: artifact.metadata.frame_count,
         has_alpha: artifact.metadata.has_alpha,
     }
@@ -614,6 +625,29 @@ mod tests {
         assert_eq!(response.artifact.width, Some(4));
         assert_eq!(response.artifact.height, Some(3));
         assert_eq!(response.artifact.has_alpha, Some(true));
+        // No EXIF, so the oriented dimensions are the stored ones. A caller reading only
+        // these two is right for every input, which is the point of reporting them.
+        assert_eq!(response.artifact.orientation, None);
+        assert_eq!(response.artifact.oriented_width, Some(4));
+        assert_eq!(response.artifact.oriented_height, Some(3));
+    }
+
+    /// A JPEG tagged with a transposing orientation reports the size a transform produces.
+    #[test]
+    fn inspect_browser_artifact_reports_the_oriented_dimensions() {
+        let bytes = include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/integration/fixtures/exif-rotated.jpg"
+        ))
+        .to_vec();
+
+        let response = inspect_browser_artifact(bytes, Some("jpeg")).expect("inspect jpeg");
+
+        assert_eq!(response.artifact.width, Some(40));
+        assert_eq!(response.artifact.height, Some(20));
+        assert_eq!(response.artifact.orientation, Some(6));
+        assert_eq!(response.artifact.oriented_width, Some(20));
+        assert_eq!(response.artifact.oriented_height, Some(40));
     }
 
     #[test]

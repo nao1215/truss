@@ -206,6 +206,10 @@ USAGE:
 OUTPUT:
   Prints JSON with format, MIME type, dimensions, alpha, and animation info.
 
+  width/height are the dimensions as stored in the file. orientedWidth/orientedHeight
+  are what 'truss convert' produces: an EXIF orientation of 5 to 8 transposes them, and
+  orientation reports the tag when the file carries one.
+
 EXAMPLES:
   truss inspect photo.jpg
   truss inspect --url https://example.com/photo.jpg

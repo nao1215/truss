@@ -119,6 +119,18 @@ pub(super) enum TransformSourcePayload {
     },
 }
 
+/// Appends one length-prefixed field to a cache identifier.
+///
+/// A separator that can occur inside a field is not a separator. Joining the fields with a
+/// newline made `("a.png\nv1", "x")` and `("a.png", "v1\nx")` the same identifier, so the
+/// second request was served the first one's bytes from a cache that reported a hit. Object
+/// keys containing a newline are legal on a filesystem and on S3, GCS, and Azure Blob alike.
+fn push_identifier_field(id: &mut String, field: &str) {
+    id.push_str(&field.len().to_string());
+    id.push(':');
+    id.push_str(field);
+}
+
 impl TransformSourcePayload {
     /// Computes a stable source hash from the reference and version, avoiding the
     /// need to read the full source bytes when a version tag is present. Returns
@@ -142,53 +154,50 @@ impl TransformSourcePayload {
                 let (scheme, effective_bucket) =
                     storage_scheme_and_bucket(bucket.as_deref(), config);
                 let effective_bucket = effective_bucket?;
-                (
-                    "storage",
-                    format!("{scheme}://{effective_bucket}/{key}").into(),
-                    version.as_deref(),
-                )
+                // Length-prefixed for the same reason the outer identifier is: a key
+                // containing a slash would otherwise reach across the bucket boundary.
+                let mut reference = String::new();
+                push_identifier_field(&mut reference, scheme);
+                push_identifier_field(&mut reference, effective_bucket);
+                push_identifier_field(&mut reference, key);
+                ("storage", reference.into(), version.as_deref())
             }
         };
         let version = version?;
-        // Use newline separators so that values containing colons cannot collide
-        // with different (reference, version) pairs. Include configuration boundaries
-        // to prevent cross-instance cache poisoning.
+        // Every field is length-prefixed, so no value can forge a delimiter and reach into
+        // the next field. Configuration boundaries are included to prevent cross-instance
+        // cache poisoning.
         let mut id = String::new();
-        id.push_str(kind);
-        id.push('\n');
-        id.push_str(&reference);
-        id.push('\n');
-        id.push_str(version);
-        id.push('\n');
-        id.push_str(config.storage_root.to_string_lossy().as_ref());
-        id.push('\n');
-        id.push_str(if config.allow_insecure_url_sources {
-            "insecure"
-        } else {
-            "strict"
-        });
+        push_identifier_field(&mut id, kind);
+        push_identifier_field(&mut id, &reference);
+        push_identifier_field(&mut id, version);
+        push_identifier_field(&mut id, config.storage_root.to_string_lossy().as_ref());
+        push_identifier_field(
+            &mut id,
+            if config.allow_insecure_url_sources {
+                "insecure"
+            } else {
+                "strict"
+            },
+        );
         #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
         {
-            id.push('\n');
-            id.push_str(storage_backend_label(config));
+            push_identifier_field(&mut id, storage_backend_label(config));
             #[cfg(feature = "s3")]
             if let Some(ref ctx) = config.s3_context
                 && let Some(ref endpoint) = ctx.endpoint_url
             {
-                id.push('\n');
-                id.push_str(endpoint);
+                push_identifier_field(&mut id, endpoint);
             }
             #[cfg(feature = "gcs")]
             if let Some(ref ctx) = config.gcs_context
                 && let Some(ref endpoint) = ctx.endpoint_url
             {
-                id.push('\n');
-                id.push_str(endpoint);
+                push_identifier_field(&mut id, endpoint);
             }
             #[cfg(feature = "azure")]
             if let Some(ref ctx) = config.azure_context {
-                id.push('\n');
-                id.push_str(&ctx.endpoint_url);
+                push_identifier_field(&mut id, &ctx.endpoint_url);
             }
         }
         Some(hex::encode(Sha256::digest(id.as_bytes())))

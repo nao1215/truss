@@ -243,3 +243,50 @@ fn serve_once_rejects_signed_public_request_with_unknown_query_parameter() {
     assert!(header.starts_with("HTTP/1.1 400 Bad Request"));
     assert!(body.to_lowercase().contains("is not supported"));
 }
+
+/// The signature encoding is part of the contract: `docs/signed-url-spec.md` fixes it at
+/// lowercase hex. `hex::decode` accepts either case, so one signed URL used to verify under
+/// 2^64 distinct URL strings, each of which misses a CDN cache and reaches the origin.
+#[test]
+fn serve_once_rejects_a_signed_public_request_with_an_uppercase_signature() {
+    let storage_root = temp_dir("uppercase-signature");
+    fs::write(storage_root.join("image.png"), png_bytes()).expect("write source fixture");
+    let (addr, handle) = spawn_server(
+        ServerConfig::new(storage_root, Some("secret".to_string()))
+            .with_signed_url_credentials("public-dev", "secret-value"),
+    );
+    let target = signed_target(
+        "/images/by-path",
+        BTreeMap::from([
+            ("path".to_string(), "/image.png".to_string()),
+            ("keyId".to_string(), "public-dev".to_string()),
+            ("expires".to_string(), "4102444800".to_string()),
+            ("format".to_string(), "jpeg".to_string()),
+        ]),
+        "cdn.example.com",
+        "secret-value",
+    );
+
+    let (prefix, rest) = target
+        .split_once("signature=")
+        .expect("the signed target carries a signature");
+    let (signature, suffix) = rest.split_once('&').unwrap_or((rest, ""));
+    let uppercased = format!(
+        "{prefix}signature={}{}{suffix}",
+        signature.to_ascii_uppercase(),
+        if suffix.is_empty() { "" } else { "&" }
+    );
+    let response = send_public_get_request(addr, &uppercased, "cdn.example.com");
+
+    handle
+        .join()
+        .expect("join server thread")
+        .expect("serve one request");
+
+    let (header, _content_type, _body) = split_response(&response);
+
+    assert!(
+        header.starts_with("HTTP/1.1 401 Unauthorized"),
+        "unexpected response: {header}"
+    );
+}

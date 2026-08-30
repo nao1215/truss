@@ -77,6 +77,10 @@ where
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// `width` and `height` are the dimensions as stored in the container.
+/// `orientedWidth` and `orientedHeight` are the dimensions `truss convert` produces, which
+/// differ whenever an EXIF orientation transposes the axes. They are always present, so a
+/// caller recording dimensions for later markup can read those two and be right either way.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct InspectionOutput {
@@ -84,16 +88,24 @@ struct InspectionOutput {
     mime: String,
     width: Option<u32>,
     height: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    orientation: Option<u16>,
+    oriented_width: Option<u32>,
+    oriented_height: Option<u32>,
     has_alpha: Option<bool>,
     is_animated: bool,
 }
 
 fn render_inspection_json(artifact: &crate::Artifact) -> String {
+    let oriented = artifact.metadata.oriented_dimensions();
     let output = InspectionOutput {
         format: artifact.media_type.as_name().to_string(),
         mime: artifact.media_type.as_mime().to_string(),
         width: artifact.metadata.width,
         height: artifact.metadata.height,
+        orientation: artifact.metadata.orientation,
+        oriented_width: oriented.map(|dimensions| dimensions.width),
+        oriented_height: oriented.map(|dimensions| dimensions.height),
         has_alpha: artifact.metadata.has_alpha,
         is_animated: artifact.metadata.frame_count > 1 || artifact.metadata.duration.is_some(),
     };
@@ -125,8 +137,62 @@ mod tests {
                 has_alpha,
                 frame_count,
                 duration,
+                orientation: None,
             },
         }
+    }
+
+    fn make_oriented_artifact(width: u32, height: u32, orientation: Option<u16>) -> Artifact {
+        Artifact {
+            bytes: vec![],
+            media_type: MediaType::Jpeg,
+            metadata: ArtifactMetadata {
+                width: Some(width),
+                height: Some(height),
+                has_alpha: Some(false),
+                frame_count: 1,
+                duration: None,
+                orientation,
+            },
+        }
+    }
+
+    fn parse(artifact: &Artifact) -> serde_json::Value {
+        serde_json::from_str(&render_inspection_json(artifact)).unwrap()
+    }
+
+    /// Orientations 5 to 8 include a quarter turn, so the oriented dimensions are swapped.
+    /// The other values, and no tag at all, leave them equal to the stored ones.
+    #[test]
+    fn render_inspection_json_reports_the_oriented_dimensions() {
+        for orientation in [None, Some(1), Some(2), Some(3), Some(4)] {
+            let parsed = parse(&make_oriented_artifact(40, 20, orientation));
+            assert_eq!(parsed["orientedWidth"], 40, "orientation {orientation:?}");
+            assert_eq!(parsed["orientedHeight"], 20, "orientation {orientation:?}");
+        }
+
+        for orientation in [5, 6, 7, 8] {
+            let parsed = parse(&make_oriented_artifact(40, 20, Some(orientation)));
+            assert_eq!(parsed["orientation"], orientation);
+            assert_eq!(parsed["orientedWidth"], 20, "orientation {orientation}");
+            assert_eq!(parsed["orientedHeight"], 40, "orientation {orientation}");
+        }
+    }
+
+    /// An input without the tag omits the field rather than reporting a value it does not have.
+    #[test]
+    fn render_inspection_json_omits_orientation_when_there_is_no_tag() {
+        let parsed = parse(&make_oriented_artifact(40, 20, None));
+        assert!(parsed.get("orientation").is_none());
+    }
+
+    /// The oriented fields are present even when the dimensions are unknown.
+    #[test]
+    fn render_inspection_json_reports_null_oriented_dimensions_for_an_unsized_input() {
+        let artifact = make_artifact(MediaType::Svg, None, None, None, 1, None);
+        let parsed = parse(&artifact);
+        assert!(parsed["orientedWidth"].is_null());
+        assert!(parsed["orientedHeight"].is_null());
     }
 
     #[test]

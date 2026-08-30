@@ -194,6 +194,7 @@ mod tests {
                 frame_count: 1,
                 duration: None,
                 has_alpha: Some(has_alpha),
+                orientation: None,
             },
         )
     }
@@ -1816,6 +1817,50 @@ mod tests {
         );
     }
 
+    /// A field that contains the separator must not be able to forge one.
+    ///
+    /// `("a.png\nv1", "x")` and `("a.png", "v1\nx")` serialized to the same string when the
+    /// fields were newline-joined, so two different objects shared one cache entry and the
+    /// second request was served the first one's bytes.
+    #[test]
+    fn versioned_source_hash_separates_a_reference_containing_the_separator() {
+        let cfg = make_test_config();
+        let separators = ["\n", ":", "/", "\u{0}"];
+
+        for separator in separators {
+            let in_reference = TransformSourcePayload::Path {
+                path: format!("a.png{separator}v1"),
+                version: Some("x".to_string()),
+            };
+            let in_version = TransformSourcePayload::Path {
+                path: "a.png".to_string(),
+                version: Some(format!("v1{separator}x")),
+            };
+            assert_ne!(
+                in_reference.versioned_source_hash(&cfg).unwrap(),
+                in_version.versioned_source_hash(&cfg).unwrap(),
+                "a {separator:?} in the path collided with one in the version"
+            );
+        }
+    }
+
+    #[test]
+    fn versioned_source_hash_separates_a_url_containing_the_separator() {
+        let cfg = make_test_config();
+        let in_url = TransformSourcePayload::Url {
+            url: "https://example.com/a.png\nv1".to_string(),
+            version: Some("x".to_string()),
+        };
+        let in_version = TransformSourcePayload::Url {
+            url: "https://example.com/a.png".to_string(),
+            version: Some("v1\nx".to_string()),
+        };
+        assert_ne!(
+            in_url.versioned_source_hash(&cfg).unwrap(),
+            in_version.versioned_source_hash(&cfg).unwrap()
+        );
+    }
+
     #[test]
     fn versioned_source_hash_differs_by_storage_root() {
         let cfg1 = ServerConfig::new(PathBuf::from("/data/images"), None);
@@ -1897,6 +1942,27 @@ mod tests {
         assert_ne!(
             s1.versioned_source_hash(&cfg).unwrap(),
             s2.versioned_source_hash(&cfg).unwrap()
+        );
+    }
+
+    /// The bucket and the key are separate fields, so a slash in one cannot reach the other.
+    #[test]
+    #[cfg(feature = "s3")]
+    fn versioned_source_hash_separates_bucket_from_key() {
+        let cfg = make_test_config();
+        let in_bucket = TransformSourcePayload::Storage {
+            bucket: Some("bucket/photos".to_string()),
+            key: "hero.jpg".to_string(),
+            version: Some("v1".to_string()),
+        };
+        let in_key = TransformSourcePayload::Storage {
+            bucket: Some("bucket".to_string()),
+            key: "photos/hero.jpg".to_string(),
+            version: Some("v1".to_string()),
+        };
+        assert_ne!(
+            in_bucket.versioned_source_hash(&cfg).unwrap(),
+            in_key.versioned_source_hash(&cfg).unwrap()
         );
     }
 
