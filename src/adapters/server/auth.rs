@@ -6,7 +6,7 @@ use super::response::{
     service_unavailable_response, signed_url_unauthorized_response,
 };
 use super::signing::{HmacSha256, SignedUrlSource};
-use crate::{Rgba8, Rotation, TransformOptions};
+use crate::{Rgba8, TransformOptions};
 use hmac::{KeyInit, Mac};
 use std::collections::BTreeMap;
 use subtle::ConstantTimeEq;
@@ -202,11 +202,8 @@ pub(super) fn extend_transform_query(
     if let Some(background) = options.background {
         query.insert("background".to_string(), encode_background(background));
     }
-    if options.rotate != Rotation::Deg0 {
-        query.insert(
-            "rotate".to_string(),
-            options.rotate.as_degrees().to_string(),
-        );
+    if !options.rotate.is_identity() {
+        query.insert("rotate".to_string(), options.rotate.to_string());
     }
     if !options.auto_orient {
         query.insert("autoOrient".to_string(), "false".to_string());

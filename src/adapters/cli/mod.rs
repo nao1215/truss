@@ -124,7 +124,12 @@ OPTIONS:
       --target-quality <TARGET>
                            Perceptual target for lossy optimization (e.g. ssim:0.98, psnr:42)
       --background <COLOR> Background color as RRGGBB or RRGGBBAA hex
-      --rotate <DEG>       Rotate: 0, 90, 180, 270
+      --rotate <DEG>       Rotate clockwise by whole degrees. Negative turns counter-clockwise,
+                           and angles past a full turn wrap, so -90 and 270 are the same.
+                           A multiple of 90 is exact; any other angle resamples and grows
+                           the canvas to the rotated bounding box, filling the exposed
+                           corners with --background (transparent, or white for formats
+                           without alpha)
       --auto-orient        Apply EXIF orientation and reset tag (default)
       --no-auto-orient     Skip EXIF orientation correction
       --strip-metadata     Remove all metadata (default; lossy optimization keeps the
@@ -469,8 +474,11 @@ struct ClapConvertArgs {
     /// Background color as RRGGBB or RRGGBBAA hex
     #[arg(long, value_parser = parse_background)]
     background: Option<Rgba8>,
-    /// Rotate: 0, 90, 180, 270
-    #[arg(long, value_parser = parse_rotation)]
+    /// Rotate clockwise by whole degrees; negative turns counter-clockwise
+    ///
+    /// `allow_hyphen_values` is what lets `--rotate -90` through: without it clap reads
+    /// the leading `-` as the start of another flag and rejects the value.
+    #[arg(long, value_parser = parse_rotation, allow_hyphen_values = true)]
     rotate: Option<Rotation>,
     /// Apply EXIF orientation and reset tag
     #[arg(long)]
@@ -654,8 +662,11 @@ struct ClapSignArgs {
     /// Background color as RRGGBB or RRGGBBAA hex
     #[arg(long, value_parser = parse_background)]
     background: Option<Rgba8>,
-    /// Rotate: 0, 90, 180, 270
-    #[arg(long, value_parser = parse_rotation)]
+    /// Rotate clockwise by whole degrees; negative turns counter-clockwise
+    ///
+    /// `allow_hyphen_values` is what lets `--rotate -90` through: without it clap reads
+    /// the leading `-` as the start of another flag and rejects the value.
+    #[arg(long, value_parser = parse_rotation, allow_hyphen_values = true)]
     rotate: Option<Rotation>,
     /// Apply EXIF orientation
     #[arg(long)]

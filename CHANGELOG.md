@@ -4,11 +4,13 @@
 
 ### Added
 
+- `--rotate` accepts any whole number of degrees, not only quarter turns ([#303](https://github.com/nao1215/truss/issues/303)), across the CLI, the HTTP API, the WASM build, and `@nao1215/truss-url-signer`. Positive turns clockwise and negative counter-clockwise, and angles are normalized into `0`-`359`, so `-90`, `270`, and `630` are the same rotation. A multiple of 90 keeps the exact pixel-permuting path; any other angle resamples bilinearly in premultiplied alpha, grows the output to the rotated bounding box so no corner is cropped, fills the exposed area with `--background` (transparent by default, white for formats without an alpha channel), and is checked against `MAX_OUTPUT_PIXELS` before the canvas is allocated.
 - Static GIF input on `convert`, `optimize`, `inspect`, the HTTP server, and the WASM build ([#301](https://github.com/nao1215/truss/issues/301)). GIF is decode-only: `format=gif` is rejected, and a GIF input that names no output format is encoded as PNG rather than echoed back as GIF. An animated GIF is refused with an error naming the frame count instead of being reduced to its first frame, while `inspect` still reads it and reports `isAnimated`. `integration/fixtures` gains `sample.gif`, `transparent.gif`, and `animated.gif`.
 - `--grayscale` on `convert` and `sign`, `grayscale` in the HTTP API (query parameter and JSON body), the WASM options object, and the `@nao1215/truss-url-signer` transform set ([#302](https://github.com/nao1215/truss/issues/302)). Luminance uses the Rec. 601 weights and the alpha channel is preserved. The stage runs after resize, blur, and sharpen and before the watermark, so a watermark keeps its own colors, and it participates in the cache key and the signed-URL canonical string. SVG input is supported when the output is a raster format.
 
 ### Changed
 
+- Breaking: `Rotation` is a newtype over whole degrees instead of a four-variant enum. `Rotation::Deg90` becomes `Rotation::DEG_90`, `Rotation::from_degrees(i32)` normalizes any integer, and `quarter_turns()` and `is_identity()` replace matching on the variants. `as_degrees()` still returns `u16`, so the cache key and the signed-URL canonical string are unchanged for the angles that were already expressible. In `@nao1215/truss-url-signer` the `QuarterTurn` type is replaced by `RotationDegrees`, and the signer normalizes an angle into `0`-`359` before signing, because the signature covers the query string as sent.
 - An input truss can read but cannot process now exits 3 (input error) from the CLI instead of 4 (transform error), matching the documented exit-code table. The only case that reaches this in practice is an animated GIF; unreadable bytes already exited 3.
 
 ### Fixed

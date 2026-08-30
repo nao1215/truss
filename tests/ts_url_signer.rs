@@ -200,7 +200,7 @@ fn typescript_signer_matches_rust_head_canonicalization_with_preset_and_watermar
                 .expect("parse target quality"),
         ),
         background: Some(Rgba8::from_hex("ffffff").expect("parse color")),
-        rotate: Rotation::Deg180,
+        rotate: Rotation::DEG_180,
         strip_metadata: false,
         crop: Some("0,0,1200,628".parse().expect("parse crop")),
         sharpen: Some(1.25),

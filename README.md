@@ -224,16 +224,31 @@ truss photo.jpg -o thumb.jpg --width 300 --height 300 --fit cover --position top
 # Crop a region (x, y, width, height) -- applied before resize
 truss photo.jpg -o cropped.jpg --crop 100,50,400,300
 
-# Rotate 270 degrees clockwise (accepts 0, 90, 180, 270)
+# Rotate clockwise by any whole number of degrees
 truss photo.jpg -o rotated.jpg --rotate 270
+
+# Negative turns counter-clockwise, and angles past a full turn wrap:
+# these three are the same rotation
+truss photo.jpg -o a.jpg --rotate 270
+truss photo.jpg -o b.jpg --rotate -90
+truss photo.jpg -o c.jpg --rotate 630
+
+# An angle that is not a multiple of 90 grows the canvas to fit the whole image,
+# and fills the exposed corners with --background
+truss photo.jpg -o tilted.jpg --rotate 45 --background 202020
 
 # Background color as RRGGBB or RRGGBBAA hex (useful with contain or PNG alpha)
 truss photo.jpg -o out.png --width 300 --height 300 --fit contain --background FF6B35FF
 ```
 
-| Original | Crop (`--crop 100,50,400,300`) | Rotate (`--rotate 270`) | Background (`--background FF6B35FF`) |
-|---|---|---|---|
-| ![original](./docs/img/sample-bee.jpg) | ![cropped](./docs/img/sample-bee-cropped.jpg) | ![rotated](./docs/img/sample-bee-rotated.jpg) | ![background](./docs/img/sample-bee-bg.png) |
+| Original | Crop (`--crop 100,50,400,300`) | Rotate (`--rotate 270`) | Rotate (`--rotate 45`) | Background (`--background FF6B35FF`) |
+|---|---|---|---|---|
+| ![original](./docs/img/sample-bee.jpg) | ![cropped](./docs/img/sample-bee-cropped.jpg) | ![rotated](./docs/img/sample-bee-rotated.jpg) | ![rotated 45](./docs/img/sample-bee-rotated-45.jpg) | ![background](./docs/img/sample-bee-bg.png) |
+
+A multiple of 90 only permutes pixels, so it stays exact. Any other angle resamples with
+bilinear interpolation and expands the output to the rotated bounding box, so no corner is
+cropped away. The exposed area takes `--background`; without it, transparent for formats
+with an alpha channel and white for those without.
 
 #### Blur, sharpen & watermark
 

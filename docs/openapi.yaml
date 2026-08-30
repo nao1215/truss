@@ -989,12 +989,19 @@ components:
       name: rotate
       in: query
       required: false
-      description: Rotation in degrees, applied after EXIF auto-orient
+      description: |
+        Clockwise rotation in whole degrees, applied after EXIF auto-orient.
+        Any integer is accepted: a negative angle turns counter-clockwise and an angle past
+        a full turn wraps, so `-90` and `270` are the same rotation.
+        Signed URLs must carry the value already wrapped into 0-359, because the signature
+        covers the query string as sent.
+        A multiple of 90 is exact. Any other angle resamples and grows the output to the
+        rotated bounding box, filling the exposed corners with `background`
+        (transparent by default, white for formats without an alpha channel).
       schema:
         type: integer
-        enum: [0, 90, 180, 270]
         default: 0
-      example: 90
+      example: 45
     AutoOrient:
       name: autoOrient
       in: query
@@ -1285,9 +1292,12 @@ components:
           description: Background color for padding or flattening transparency.
         rotate:
           type: integer
-          enum: [0, 90, 180, 270]
           default: 0
-          description: Extra clockwise rotation applied after auto-orientation.
+          description: >-
+            Extra clockwise rotation in whole degrees, applied after auto-orientation.
+            Negative turns counter-clockwise and angles past a full turn wrap. A multiple of
+            90 is exact; any other angle resamples and grows the output to the rotated
+            bounding box, filling the exposed corners with `background`.
         autoOrient:
           type: boolean
           default: true

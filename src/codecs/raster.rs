@@ -212,7 +212,12 @@ pub fn transform_raster(request: TransformRequest) -> Result<TransformResult, Tr
         image = apply_auto_orientation(image, &normalized.input);
     }
 
-    image = apply_rotation(image, normalized.options.rotate);
+    image = apply_rotation(
+        image,
+        normalized.options.rotate,
+        normalized.options.background,
+        normalized.options.format,
+    )?;
     check_deadline_if_set!(start, deadline, "rotate");
 
     if let Some(crop) = normalized.options.crop {
@@ -725,13 +730,190 @@ fn apply_exif_orientation(image: DynamicImage, orientation: u32) -> DynamicImage
     }
 }
 
-fn apply_rotation(image: DynamicImage, rotation: Rotation) -> DynamicImage {
-    match rotation {
-        Rotation::Deg0 => image,
-        Rotation::Deg90 => image.rotate90(),
-        Rotation::Deg180 => image.rotate180(),
-        Rotation::Deg270 => image.rotate270(),
+/// Rotates an image clockwise by any whole number of degrees.
+///
+/// A multiple of 90 keeps the exact path: those only permute pixels, so resampling them
+/// would lose sharpness for nothing. Any other angle goes through [`rotate_arbitrary`].
+///
+/// The SVG codec calls this too, once it has rasterized: a rotated SVG needs the same
+/// quarter-turn shortcut, bounding box, background rule, and pixel limit as any other
+/// raster input, and one function is what keeps the two from drifting.
+///
+/// # Errors
+///
+/// Returns [`TransformError::LimitExceeded`] when the rotated bounding box would exceed
+/// [`MAX_OUTPUT_PIXELS`].
+pub(crate) fn apply_rotation(
+    image: DynamicImage,
+    rotation: Rotation,
+    background: Option<Rgba8>,
+    output_format: MediaType,
+) -> Result<DynamicImage, TransformError> {
+    match rotation.quarter_turns() {
+        Some(0) => Ok(image),
+        Some(1) => Ok(image.rotate90()),
+        Some(2) => Ok(image.rotate180()),
+        Some(3) => Ok(image.rotate270()),
+        _ => rotate_arbitrary(image, rotation, background, output_format),
     }
+}
+
+/// The output size that holds a rotated image whole.
+///
+/// The corners of the source sweep out a larger axis-aligned box, so the canvas grows: a
+/// 45-degree turn of a square needs about 1.41x each side. Cropping back to the original
+/// size instead would silently cut the corners off, so the box expands and the exposed
+/// area is filled with the background color.
+fn rotated_bounding_box(width: u32, height: u32, degrees: u16) -> (u32, u32) {
+    // Quarter turns are exact, and must be computed exactly: `cos(90f64.to_radians())` is
+    // 6.1e-17 rather than 0, so the general formula rounds 8.0 up to 9 and reports a canvas
+    // one pixel too large.
+    match degrees {
+        0 | 180 => return (width, height),
+        90 | 270 => return (height, width),
+        _ => {}
+    }
+
+    let radians = f64::from(degrees).to_radians();
+    let (sin, cos) = radians.sin_cos();
+    let (w, h) = (f64::from(width), f64::from(height));
+    let out_w = (w * cos.abs() + h * sin.abs()).ceil().max(1.0);
+    let out_h = (w * sin.abs() + h * cos.abs()).ceil().max(1.0);
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    (out_w as u32, out_h as u32)
+}
+
+/// Checks the rotated canvas against [`MAX_OUTPUT_PIXELS`], returning its size.
+///
+/// A 45-degree turn roughly doubles the pixel count, and the input budget
+/// ([`MAX_DECODED_PIXELS`]) is larger than the output one, so a legal input can rotate into
+/// an illegal output. This runs on dimensions alone, before the canvas is allocated.
+///
+/// # Errors
+///
+/// Returns [`TransformError::LimitExceeded`] when the rotated canvas would be too large.
+fn check_rotated_pixel_limit(
+    width: u32,
+    height: u32,
+    degrees: u16,
+) -> Result<(u32, u32), TransformError> {
+    let (out_w, out_h) = rotated_bounding_box(width, height, degrees);
+    let pixels = u64::from(out_w) * u64::from(out_h);
+    if pixels > MAX_OUTPUT_PIXELS {
+        return Err(TransformError::LimitExceeded(format!(
+            "rotating {width}x{height} by {degrees} degrees needs a {out_w}x{out_h} canvas ({pixels} pixels), limit is {MAX_OUTPUT_PIXELS}"
+        )));
+    }
+    Ok((out_w, out_h))
+}
+
+/// Rotates by an angle that is not a quarter turn, sampling with bilinear interpolation.
+///
+/// Works backwards from the destination: every output pixel is mapped through the inverse
+/// rotation to a source coordinate and sampled there, which is what leaves no unwritten
+/// gaps between pixels the way a forward mapping would.
+///
+/// Sampling happens in premultiplied alpha. Interpolating straight RGBA next to a
+/// transparent pixel pulls that pixel's meaningless color into the result, which shows up
+/// as a dark or white fringe along the rotated edge. Off-image samples read as the
+/// background color, so the boundary anti-aliases into the fill instead of against it.
+fn rotate_arbitrary(
+    image: DynamicImage,
+    rotation: Rotation,
+    background: Option<Rgba8>,
+    output_format: MediaType,
+) -> Result<DynamicImage, TransformError> {
+    let source = image.to_rgba8();
+    let (src_w, src_h) = source.dimensions();
+    let degrees = rotation.as_degrees();
+    let (out_w, out_h) = check_rotated_pixel_limit(src_w, src_h, degrees)?;
+
+    let fill = background_pixel(background, output_format);
+    let fill_premultiplied = premultiply(fill);
+
+    let radians = f64::from(degrees).to_radians();
+    let (sin, cos) = radians.sin_cos();
+    let (src_cx, src_cy) = (f64::from(src_w) / 2.0, f64::from(src_h) / 2.0);
+    let (out_cx, out_cy) = (f64::from(out_w) / 2.0, f64::from(out_h) / 2.0);
+
+    let mut canvas = RgbaImage::from_pixel(out_w, out_h, fill);
+    for y in 0..out_h {
+        let dy = f64::from(y) + 0.5 - out_cy;
+        for x in 0..out_w {
+            let dx = f64::from(x) + 0.5 - out_cx;
+            // Inverse of a clockwise rotation in image coordinates, where y grows downward.
+            let sx = dx.mul_add(cos, dy * sin) + src_cx - 0.5;
+            let sy = dx.mul_add(-sin, dy * cos) + src_cy - 0.5;
+            canvas.put_pixel(x, y, sample_bilinear(&source, sx, sy, fill_premultiplied));
+        }
+    }
+
+    Ok(DynamicImage::ImageRgba8(canvas))
+}
+
+/// Converts a pixel to premultiplied alpha as `f64` channels.
+fn premultiply(pixel: Rgba<u8>) -> [f64; 4] {
+    let alpha = f64::from(pixel[3]) / 255.0;
+    [
+        f64::from(pixel[0]) * alpha,
+        f64::from(pixel[1]) * alpha,
+        f64::from(pixel[2]) * alpha,
+        f64::from(pixel[3]),
+    ]
+}
+
+/// Samples a source image at fractional coordinates, blending the four nearest pixels.
+///
+/// Coordinates outside the image read as `outside`, which is the background in
+/// premultiplied form. Sampling and blending both happen premultiplied; the result is
+/// divided back out so the caller gets straight alpha again.
+fn sample_bilinear(source: &RgbaImage, x: f64, y: f64, outside: [f64; 4]) -> Rgba<u8> {
+    let x0 = x.floor();
+    let y0 = y.floor();
+    let fx = x - x0;
+    let fy = y - y0;
+
+    #[allow(clippy::cast_possible_truncation)]
+    let (x0, y0) = (x0 as i64, y0 as i64);
+
+    let at = |px: i64, py: i64| -> [f64; 4] {
+        if px < 0 || py < 0 {
+            return outside;
+        }
+        #[allow(clippy::cast_sign_loss)]
+        let (px, py) = (px as u32, py as u32);
+        if px >= source.width() || py >= source.height() {
+            return outside;
+        }
+        premultiply(*source.get_pixel(px, py))
+    };
+
+    let top_left = at(x0, y0);
+    let top_right = at(x0 + 1, y0);
+    let bottom_left = at(x0, y0 + 1);
+    let bottom_right = at(x0 + 1, y0 + 1);
+
+    let mut blended = [0.0_f64; 4];
+    for channel in 0..4 {
+        let top = top_left[channel] * (1.0 - fx) + top_right[channel] * fx;
+        let bottom = bottom_left[channel] * (1.0 - fx) + bottom_right[channel] * fx;
+        blended[channel] = top * (1.0 - fy) + bottom * fy;
+    }
+
+    let alpha = blended[3];
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let to_u8 = |value: f64| value.round().clamp(0.0, 255.0) as u8;
+
+    if alpha <= 0.0 {
+        return Rgba([0, 0, 0, 0]);
+    }
+    let scale = 255.0 / alpha;
+    Rgba([
+        to_u8(blended[0] * scale),
+        to_u8(blended[1] * scale),
+        to_u8(blended[2] * scale),
+        to_u8(alpha),
+    ])
 }
 
 /// Desaturates an image to grayscale while preserving its alpha channel.
@@ -1096,7 +1278,7 @@ fn is_passthrough_lossless_request(normalized: &NormalizedTransformRequest) -> b
         && normalized.options.height.is_none()
         && normalized.options.quality.is_none()
         && normalized.options.background.is_none()
-        && normalized.options.rotate == Rotation::Deg0
+        && normalized.options.rotate.is_identity()
         && normalized.options.crop.is_none()
         && normalized.options.blur.is_none()
         && normalized.options.sharpen.is_none()
@@ -2563,7 +2745,10 @@ fn output_has_alpha(image: &DynamicImage, media_type: MediaType) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_exif_orientation, optimize_jpeg_bytes_losslessly, transform_raster};
+    use super::{
+        apply_exif_orientation, check_rotated_pixel_limit, optimize_jpeg_bytes_losslessly,
+        rotated_bounding_box, transform_raster,
+    };
     use crate::core::{
         Artifact, ArtifactMetadata, Fit, MediaType, MetadataKind, MetadataPolicy, OptimizeMode,
         Position, Rotation, TransformOptions, TransformRequest, TransformWarning, WatermarkInput,
@@ -2968,7 +3153,7 @@ mod tests {
         let result = transform_raster(TransformRequest::new(
             artifact,
             TransformOptions {
-                rotate: Rotation::Deg90,
+                rotate: Rotation::DEG_90,
                 ..TransformOptions::default()
             },
         ))
@@ -4450,6 +4635,220 @@ mod tests {
             "expected blurred edge pixel to be a mid-tone, got r={}",
             edge_pixel[0]
         );
+    }
+
+    #[test]
+    fn rotated_bounding_box_grows_to_hold_the_whole_image() {
+        // A quarter turn just swaps the axes.
+        assert_eq!(rotated_bounding_box(16, 8, 90), (8, 16));
+        assert_eq!(rotated_bounding_box(16, 8, 180), (16, 8));
+        // 45 degrees needs sqrt(2)/2 of each side on both axes: (16+8)*0.7071 = 16.97.
+        assert_eq!(rotated_bounding_box(16, 8, 45), (17, 17));
+        // A degenerate 1-pixel input never collapses to zero.
+        assert_eq!(rotated_bounding_box(1, 1, 45), (2, 2));
+    }
+
+    #[test]
+    fn rotation_pixel_limit_is_checked_before_allocation() {
+        // The input budget is larger than the output one, so a legal input can rotate into
+        // an illegal output. This is dimensions-only so the test never allocates.
+        let error = check_rotated_pixel_limit(9_000, 9_000, 45)
+            .expect_err("a 45 degree turn of 9000x9000 should exceed the output budget");
+
+        match error {
+            TransformError::LimitExceeded(message) => {
+                assert!(
+                    message.contains("rotating 9000x9000 by 45 degrees"),
+                    "the error should name the request, got: {message}"
+                );
+            }
+            other => panic!("expected LimitExceeded, got: {other}"),
+        }
+
+        // The same angle is fine on a source small enough that the grown canvas still fits.
+        assert_eq!(
+            check_rotated_pixel_limit(4_000, 4_000, 45).expect("a smaller source fits"),
+            (5_657, 5_657)
+        );
+    }
+
+    #[test]
+    fn transform_raster_rotates_by_an_arbitrary_angle() {
+        // 16x8, red on the left half and blue on the right.
+        let mut image = RgbaImage::from_pixel(16, 8, Rgba([0, 0, 255, 255]));
+        for y in 0..8 {
+            for x in 0..8 {
+                image.put_pixel(x, y, Rgba([255, 0, 0, 255]));
+            }
+        }
+        let mut bytes = Vec::new();
+        PngEncoder::new(&mut bytes)
+            .write_image(&image, 16, 8, ColorType::Rgba8.into())
+            .expect("encode png");
+        let artifact = Artifact::new(
+            bytes,
+            MediaType::Png,
+            ArtifactMetadata {
+                width: Some(16),
+                height: Some(8),
+                frame_count: 1,
+                duration: None,
+                has_alpha: Some(false),
+            },
+        );
+
+        let result = transform_raster(TransformRequest::new(
+            artifact,
+            TransformOptions {
+                rotate: Rotation::from_degrees(45),
+                ..TransformOptions::default()
+            },
+        ))
+        .expect("45 degree rotation");
+
+        assert_eq!(result.artifact.metadata.width, Some(17));
+        assert_eq!(result.artifact.metadata.height, Some(17));
+
+        let output = image::load_from_memory_with_format(&result.artifact.bytes, ImageFormat::Png)
+            .expect("decode output")
+            .to_rgba8();
+
+        // Clockwise: the left half swings up and to the left, the right half down and right.
+        // Getting the sign wrong would swap these two, which a size assertion cannot catch.
+        let upper_left = output.get_pixel(4, 4);
+        let lower_right = output.get_pixel(12, 12);
+        assert!(
+            upper_left[0] > upper_left[2],
+            "the left half should land upper-left, got {upper_left:?}"
+        );
+        assert!(
+            lower_right[2] > lower_right[0],
+            "the right half should land lower-right, got {lower_right:?}"
+        );
+        // The exposed corner takes the default background, which is transparent for PNG.
+        assert_eq!(output.get_pixel(0, 0)[3], 0, "corner should be transparent");
+    }
+
+    #[test]
+    fn arbitrary_rotation_fills_corners_with_the_requested_background() {
+        let image = RgbaImage::from_pixel(8, 8, Rgba([0, 0, 0, 255]));
+        let mut bytes = Vec::new();
+        PngEncoder::new(&mut bytes)
+            .write_image(&image, 8, 8, ColorType::Rgba8.into())
+            .expect("encode png");
+        let artifact = Artifact::new(
+            bytes,
+            MediaType::Png,
+            ArtifactMetadata {
+                width: Some(8),
+                height: Some(8),
+                frame_count: 1,
+                duration: None,
+                has_alpha: Some(false),
+            },
+        );
+
+        let result = transform_raster(TransformRequest::new(
+            artifact,
+            TransformOptions {
+                rotate: Rotation::from_degrees(30),
+                background: Some(Rgba8 {
+                    r: 255,
+                    g: 0,
+                    b: 0,
+                    a: 255,
+                }),
+                ..TransformOptions::default()
+            },
+        ))
+        .expect("30 degree rotation with a background");
+
+        let output = image::load_from_memory_with_format(&result.artifact.bytes, ImageFormat::Png)
+            .expect("decode output")
+            .to_rgba8();
+        assert_eq!(
+            *output.get_pixel(0, 0),
+            Rgba([255, 0, 0, 255]),
+            "the exposed corner should take the requested background"
+        );
+    }
+
+    #[test]
+    fn quarter_turns_stay_pixel_exact() {
+        // Two 90 degree turns must equal one 180 degree turn to the byte. If the quarter
+        // turn ever fell through to the resampling path this would drift.
+        let mut image = RgbaImage::from_pixel(6, 4, Rgba([0, 0, 255, 255]));
+        image.put_pixel(0, 0, Rgba([255, 0, 0, 255]));
+        image.put_pixel(5, 3, Rgba([0, 255, 0, 255]));
+        let mut bytes = Vec::new();
+        PngEncoder::new(&mut bytes)
+            .write_image(&image, 6, 4, ColorType::Rgba8.into())
+            .expect("encode png");
+
+        let rotate = |degrees: i32, source: Vec<u8>| -> Vec<u8> {
+            let artifact = Artifact::new(
+                source,
+                MediaType::Png,
+                ArtifactMetadata {
+                    width: None,
+                    height: None,
+                    frame_count: 1,
+                    duration: None,
+                    has_alpha: Some(false),
+                },
+            );
+            transform_raster(TransformRequest::new(
+                artifact,
+                TransformOptions {
+                    rotate: Rotation::from_degrees(degrees),
+                    ..TransformOptions::default()
+                },
+            ))
+            .expect("rotate")
+            .artifact
+            .bytes
+        };
+
+        let twice = rotate(90, rotate(90, bytes.clone()));
+        let once = rotate(180, bytes);
+        assert_eq!(twice, once, "90 + 90 must equal 180 exactly");
+    }
+
+    #[test]
+    fn negative_and_wrapped_rotations_agree() {
+        let image = RgbaImage::from_pixel(5, 3, Rgba([12, 34, 56, 255]));
+        let mut bytes = Vec::new();
+        PngEncoder::new(&mut bytes)
+            .write_image(&image, 5, 3, ColorType::Rgba8.into())
+            .expect("encode png");
+
+        let rotate = |degrees: i32| -> Vec<u8> {
+            let artifact = Artifact::new(
+                bytes.clone(),
+                MediaType::Png,
+                ArtifactMetadata {
+                    width: None,
+                    height: None,
+                    frame_count: 1,
+                    duration: None,
+                    has_alpha: Some(false),
+                },
+            );
+            transform_raster(TransformRequest::new(
+                artifact,
+                TransformOptions {
+                    rotate: Rotation::from_degrees(degrees),
+                    ..TransformOptions::default()
+                },
+            ))
+            .expect("rotate")
+            .artifact
+            .bytes
+        };
+
+        assert_eq!(rotate(-90), rotate(270));
+        assert_eq!(rotate(370), rotate(10));
+        assert_eq!(rotate(-360), rotate(0));
     }
 
     #[test]

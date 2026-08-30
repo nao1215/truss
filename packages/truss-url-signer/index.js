@@ -16,7 +16,6 @@ const OUTPUT_FORMATS = new Set(["jpeg", "png", "webp", "avif", "svg", "bmp", "ti
 const OPTIMIZE_MODES = new Set(["none", "auto", "lossless", "lossy"]);
 const LOSSY_FORMATS = new Set(["jpeg", "webp", "avif"]);
 const OPTIMIZABLE_FORMATS = new Set(["jpeg", "png", "webp", "avif"]);
-const QUARTER_TURNS = new Set([0, 90, 180, 270]);
 const HEX_COLOR_PATTERN = /^[0-9A-Fa-f]{6}([0-9A-Fa-f]{2})?$/;
 const TARGET_QUALITY_VALUE_PATTERN = /^(?:0(?:\.[0-9]+)?|[1-9][0-9]*(?:\.[0-9]+)?)$/;
 
@@ -536,15 +535,23 @@ function normalizeOptionalSigma(name, value) {
   return normalized;
 }
 
+/**
+ * Normalizes a rotation to the whole degrees truss puts in the canonical query string.
+ *
+ * Any integer is accepted and wrapped into 0..359, so a negative angle turns
+ * counter-clockwise and a value past a full turn wraps. The wrapping has to happen here
+ * rather than server-side, because the signature covers the query string as written:
+ * signing `rotate=-90` and having truss canonicalize it to `270` would never verify.
+ */
 function normalizeOptionalRotation(value) {
   if (value === undefined) {
     return null;
   }
   const normalized = normalizeOptionalInteger("rotate", value);
-  if (!QUARTER_TURNS.has(normalized)) {
-    throw new TypeError("rotate must be 0, 90, 180, or 270");
+  if (normalized === undefined) {
+    return null;
   }
-  return normalized;
+  return ((normalized % 360) + 360) % 360;
 }
 
 function normalizeOptionalEnum(name, value, allowed, label) {

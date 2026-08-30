@@ -686,12 +686,12 @@ pub(crate) fn default_lossy_target_quality(media_type: MediaType) -> Option<Targ
 ///     height: Some(600),
 ///     format: Some(MediaType::Webp),
 ///     quality: Some(80),
-///     rotate: Rotation::Deg90,
+///     rotate: Rotation::DEG_90,
 ///     ..TransformOptions::default()
 /// };
 /// assert_eq!(opts.width, Some(800));
 /// assert_eq!(opts.quality, Some(80));
-/// assert_eq!(opts.rotate, Rotation::Deg90);
+/// assert_eq!(opts.rotate, Rotation::DEG_90);
 /// // strip_metadata defaults to true
 /// assert!(opts.strip_metadata);
 /// ```
@@ -768,7 +768,7 @@ impl Default for TransformOptions {
             optimize: OptimizeMode::None,
             target_quality: None,
             background: None,
-            rotate: Rotation::Deg0,
+            rotate: Rotation::DEG_0,
             auto_orient: true,
             strip_metadata: true,
             preserve_exif: false,
@@ -1072,7 +1072,17 @@ impl FromStr for Position {
     }
 }
 
-/// Rotation that is applied after auto-orientation.
+/// Clockwise rotation in whole degrees, applied after auto-orientation.
+///
+/// Any integer is accepted and normalized into `0..360`, so a negative angle turns
+/// counter-clockwise and a value past a full turn wraps: `-90` and `270` are the same
+/// rotation, and so are `370` and `10`.
+///
+/// Degrees are whole numbers on purpose. The value appears verbatim in the cache key and
+/// in the signed-URL canonical string, and a fractional angle would have to round-trip
+/// bit-identically through Rust's and JavaScript's float formatting for a signature to
+/// verify. Whole degrees sidestep that entirely, and no real caller asks for a fraction of
+/// one.
 ///
 /// # Examples
 ///
@@ -1081,34 +1091,76 @@ impl FromStr for Position {
 /// use std::str::FromStr;
 ///
 /// let rot = Rotation::from_str("270").unwrap();
-/// assert_eq!(rot, Rotation::Deg270);
 /// assert_eq!(rot.as_degrees(), 270);
 ///
-/// assert_eq!(Rotation::Deg0.as_degrees(), 0);
-/// assert!(Rotation::from_str("45").is_err());
+/// // Negative turns counter-clockwise, and wraps to the same rotation.
+/// assert_eq!(Rotation::from_str("-90").unwrap(), rot);
+/// // Angles past a full turn wrap too.
+/// assert_eq!(Rotation::from_str("630").unwrap(), rot);
+///
+/// // Any whole angle is allowed, not just quarter turns.
+/// assert_eq!(Rotation::from_str("45").unwrap().as_degrees(), 45);
+/// assert!(Rotation::from_str("45.5").is_err());
+///
+/// assert!(Rotation::DEG_0.is_identity());
+/// assert_eq!(Rotation::DEG_90.quarter_turns(), Some(1));
+/// assert_eq!(Rotation::from_degrees(45).quarter_turns(), None);
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Rotation {
-    /// No extra rotation.
-    Deg0,
-    /// Rotate 90 degrees clockwise.
-    Deg90,
-    /// Rotate 180 degrees.
-    Deg180,
-    /// Rotate 270 degrees clockwise.
-    Deg270,
-}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Rotation(u16);
 
 impl Rotation {
-    /// Returns the canonical degree value used by the API and CLI.
+    /// No rotation.
+    pub const DEG_0: Self = Self(0);
+    /// A quarter turn clockwise.
+    pub const DEG_90: Self = Self(90);
+    /// A half turn.
+    pub const DEG_180: Self = Self(180);
+    /// Three quarter turns clockwise.
+    pub const DEG_270: Self = Self(270);
+
+    /// Builds a rotation from any whole number of degrees, normalizing into `0..360`.
+    ///
+    /// Positive turns clockwise and negative turns counter-clockwise, which is the
+    /// convention `--rotate` has always used and the one image tools generally agree on.
+    #[must_use]
+    pub const fn from_degrees(degrees: i32) -> Self {
+        let wrapped = degrees % 360;
+        let normalized = if wrapped < 0 { wrapped + 360 } else { wrapped };
+        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+        Self(normalized as u16)
+    }
+
+    /// Returns the normalized degree value used by the API, the CLI, and the cache key.
     #[must_use]
     pub const fn as_degrees(self) -> u16 {
-        match self {
-            Self::Deg0 => 0,
-            Self::Deg90 => 90,
-            Self::Deg180 => 180,
-            Self::Deg270 => 270,
+        self.0
+    }
+
+    /// Returns `true` when the rotation leaves the image untouched.
+    #[must_use]
+    pub const fn is_identity(self) -> bool {
+        self.0 == 0
+    }
+
+    /// Returns the number of clockwise quarter turns when the angle is a multiple of 90.
+    ///
+    /// A quarter turn only permutes pixels, so the pipeline keeps that exact path instead
+    /// of resampling. Anything else returns `None` and goes through the general rotation.
+    #[must_use]
+    pub const fn quarter_turns(self) -> Option<u8> {
+        if self.0.is_multiple_of(90) {
+            #[allow(clippy::cast_possible_truncation)]
+            Some((self.0 / 90) as u8)
+        } else {
+            None
         }
+    }
+}
+
+impl fmt::Display for Rotation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
     }
 }
 
@@ -1116,12 +1168,11 @@ impl FromStr for Rotation {
     type Err = String;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value {
-            "0" => Ok(Self::Deg0),
-            "90" => Ok(Self::Deg90),
-            "180" => Ok(Self::Deg180),
-            "270" => Ok(Self::Deg270),
-            _ => Err(format!("unsupported rotation `{value}`")),
+        match value.parse::<i32>() {
+            Ok(degrees) => Ok(Self::from_degrees(degrees)),
+            Err(_) => Err(format!(
+                "unsupported rotation `{value}`: expected a whole number of degrees"
+            )),
         }
     }
 }
@@ -2539,7 +2590,7 @@ mod tests {
         assert_eq!(options.position, None);
         assert_eq!(options.format, None);
         assert_eq!(options.quality, None);
-        assert_eq!(options.rotate, Rotation::Deg0);
+        assert_eq!(options.rotate, Rotation::DEG_0);
         assert!(options.auto_orient);
         assert!(options.strip_metadata);
         assert!(!options.preserve_exif);
@@ -2571,7 +2622,7 @@ mod tests {
             "bottom-right".parse::<Position>(),
             Ok(Position::BottomRight)
         );
-        assert_eq!("270".parse::<Rotation>(), Ok(Rotation::Deg270));
+        assert_eq!("270".parse::<Rotation>(), Ok(Rotation::DEG_270));
         assert_eq!(
             Rgba8::from_hex("AABBCCDD"),
             Ok(Rgba8 {
