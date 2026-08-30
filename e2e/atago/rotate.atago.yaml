@@ -1,0 +1,220 @@
+# Arbitrary-angle rotation for https://github.com/nao1215/truss/issues/303.
+#
+# `--rotate` used to accept only 0, 90, 180, and 270. It now takes any whole number of
+# degrees, which brings three behaviours worth pinning down rather than assuming:
+#
+#   1. the normalization rules — negative turns counter-clockwise, past a full turn wraps;
+#   2. that quarter turns stay pixel-exact and did not quietly start resampling;
+#   3. that a non-quarter angle grows the canvas to the whole rotated image and fills the
+#      exposed corners according to the background rule.
+#
+# The committed testdata/sample.png is 16x16, so a 45-degree turn needs
+# ceil(16 * sqrt(2)) = 23 pixels on each side.
+#
+# Run with: e2e/run.sh --filter rotate
+version: "1"
+
+suite:
+  name: truss rotate
+
+scenarios:
+  - name: a 45 degree turn grows the canvas to the rotated bounding box
+    steps:
+      - fixture:
+          file: in.png
+          from: testdata/sample.png
+      - run:
+          command: truss convert in.png -o tilted.png --rotate 45
+      - assert:
+          exit_code: 0
+          image:
+            path: tilted.png
+            format: png
+            width: 23
+            height: 23
+      # Cropping back to 16x16 would cut the corners off, so the size is the contract.
+      - assert:
+          image:
+            path: tilted.png
+            similar_to: testdata/sample-rotate-45.png
+
+  - name: a negative angle turns counter-clockwise and equals its positive twin
+    steps:
+      - fixture:
+          file: in.png
+          from: testdata/sample.png
+      - run:
+          command: truss convert in.png -o minus90.png --rotate -90
+      - assert:
+          exit_code: 0
+      - run:
+          command: truss convert in.png -o plus270.png --rotate 270
+      - assert:
+          exit_code: 0
+          image:
+            path: minus90.png
+            similar_to: plus270.png
+
+  - name: an angle past a full turn wraps
+    steps:
+      - fixture:
+          file: in.png
+          from: testdata/sample.png
+      - run:
+          command: truss convert in.png -o wrapped.png --rotate 370
+      - assert:
+          exit_code: 0
+      - run:
+          command: truss convert in.png -o direct.png --rotate 10
+      - assert:
+          exit_code: 0
+          image:
+            path: wrapped.png
+            similar_to: direct.png
+
+  - name: a full turn is the identity
+    steps:
+      - fixture:
+          file: in.png
+          from: testdata/sample.png
+      - run:
+          command: truss convert in.png -o full.png --rotate 360
+      - assert:
+          exit_code: 0
+          image:
+            path: full.png
+            width: 16
+            height: 16
+            similar_to: testdata/sample.png
+
+  - name: quarter turns stay pixel-exact
+    steps:
+      - fixture:
+          file: in.png
+          from: testdata/sample.png
+      # Two 90 degree turns only permute pixels, so they must equal one 180 degree turn
+      # exactly. If a quarter turn ever fell through to the resampling path, this drifts.
+      - run:
+          command: truss convert in.png -o once.png --rotate 90
+      - assert:
+          exit_code: 0
+      - run:
+          command: truss convert once.png -o twice.png --rotate 90
+      - assert:
+          exit_code: 0
+      - run:
+          command: truss convert in.png -o half.png --rotate 180
+      - assert:
+          exit_code: 0
+          image:
+            path: twice.png
+            similar_to: half.png
+
+  - name: the exposed corners default to transparent for a format with alpha
+    steps:
+      - fixture:
+          file: in.png
+          from: testdata/sample.png
+      - run:
+          command: truss convert in.png -o tilted.png --rotate 30
+      - assert:
+          exit_code: 0
+          image:
+            path: tilted.png
+            format: png
+            alpha: true
+      - run:
+          command: truss inspect tilted.png
+      - assert:
+          exit_code: 0
+          stdout:
+            json:
+              path: $.hasAlpha
+              equals: true
+
+  - name: the exposed corners default to white for a format without alpha
+    steps:
+      - fixture:
+          file: in.png
+          from: testdata/sample.png
+      # JPEG carries no alpha channel, so a transparent fill would encode as black. The
+      # same rule fit=contain padding already uses applies here.
+      - run:
+          command: truss convert in.png -o tilted.jpg --rotate 30
+      - assert:
+          exit_code: 0
+          image:
+            path: tilted.jpg
+            format: jpeg
+            alpha: false
+
+  - name: an explicit background fills the exposed corners
+    steps:
+      - fixture:
+          file: in.png
+          from: testdata/sample.png
+      - run:
+          command: truss convert in.png -o red.png --rotate 30 --background ff0000
+      - assert:
+          exit_code: 0
+          image:
+            path: red.png
+            format: png
+            alpha: false
+      - run:
+          command: truss convert in.png -o clear.png --rotate 30
+      - assert:
+          exit_code: 0
+      # An opaque fill and the default transparent fill cannot produce the same file.
+      - run:
+          shell: true
+          command: cmp -s red.png clear.png; echo "differs=$?"
+      - assert:
+          stdout:
+            contains: "differs=1"
+
+  - name: a fractional angle is rejected at the flag
+    steps:
+      - run:
+          shell: true
+          command: truss convert "$FIXTURES_DIR/sample.png" -o out.png --rotate 45.5
+      - assert:
+          exit_code: 1
+          stderr:
+            contains:
+              - "unsupported rotation"
+              - "whole number of degrees"
+
+  - name: a non-numeric angle is rejected at the flag
+    steps:
+      - run:
+          shell: true
+          command: truss convert "$FIXTURES_DIR/sample.png" -o out.png --rotate sideways
+      - assert:
+          exit_code: 1
+          stderr:
+            contains: "unsupported rotation"
+
+  - name: an SVG rasterizes and rotates through the same path
+    steps:
+      - run:
+          shell: true
+          command: truss convert "$FIXTURES_DIR/svg-minimal.svg" -o svg.png --format png --width 16 --height 16 --rotate 45
+      - assert:
+          exit_code: 0
+          image:
+            path: svg.png
+            format: png
+            width: 23
+            height: 23
+
+  - name: convert help documents the rotation rules
+    steps:
+      - run:
+          command: truss help convert
+      - assert:
+          exit_code: 0
+          stdout:
+            contains:
+              - "--rotate"
+              - "Negative turns counter-clockwise"

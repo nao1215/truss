@@ -25,8 +25,8 @@
 //!   operations.
 
 use crate::core::{
-    Artifact, ArtifactMetadata, MAX_OUTPUT_PIXELS, MediaType, Rotation, TransformError,
-    TransformRequest, TransformResult,
+    Artifact, ArtifactMetadata, MAX_OUTPUT_PIXELS, MediaType, TransformError, TransformRequest,
+    TransformResult,
 };
 use image::codecs::jpeg::JpegEncoder;
 use image::codecs::png::PngEncoder;
@@ -141,18 +141,18 @@ pub fn transform_svg(request: TransformRequest) -> Result<TransformResult, Trans
         crate::codecs::raster::check_deadline(start.elapsed(), limit, "rasterize")?;
     }
 
-    // Apply rotation if requested.
-    let rgba_image = if normalized.options.rotate != Rotation::Deg0 {
-        let dynamic = image::DynamicImage::ImageRgba8(rgba_image);
-        let rotated = match normalized.options.rotate {
-            Rotation::Deg90 => dynamic.rotate90(),
-            Rotation::Deg180 => dynamic.rotate180(),
-            Rotation::Deg270 => dynamic.rotate270(),
-            Rotation::Deg0 => dynamic,
-        };
-        rotated.into_rgba8()
-    } else {
+    // Apply rotation if requested. The raster codec owns the arbitrary-angle path, so a
+    // rasterized SVG rotates through exactly the same code and the same background rule.
+    let rgba_image = if normalized.options.rotate.is_identity() {
         rgba_image
+    } else {
+        crate::codecs::raster::apply_rotation(
+            image::DynamicImage::ImageRgba8(rgba_image),
+            normalized.options.rotate,
+            normalized.options.background,
+            normalized.options.format,
+        )?
+        .into_rgba8()
     };
 
     // Desaturate after rotation so the operation order matches the raster pipeline.
@@ -1090,7 +1090,7 @@ mod tests {
             input,
             TransformOptions {
                 format: Some(MediaType::Png),
-                rotate: Rotation::Deg90,
+                rotate: Rotation::DEG_90,
                 ..TransformOptions::default()
             },
         ))
@@ -1144,7 +1144,7 @@ mod tests {
             input,
             TransformOptions {
                 format: Some(MediaType::Png),
-                rotate: Rotation::Deg180,
+                rotate: Rotation::DEG_180,
                 ..TransformOptions::default()
             },
         ))

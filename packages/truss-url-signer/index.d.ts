@@ -47,8 +47,14 @@ export type OutputFormat =
 /** Optimization strategy applied after encoding. */
 export type OptimizeMode = "none" | "auto" | "lossless" | "lossy";
 
-/** Rotation angle in 90-degree increments. */
-export type QuarterTurn = 0 | 90 | 180 | 270;
+/**
+ * Clockwise rotation in whole degrees.
+ *
+ * Any integer is accepted: negatives turn counter-clockwise and values past a full turn
+ * wrap, so `-90` and `270` are the same rotation. The signer normalizes into `0..359`
+ * before signing.
+ */
+export type RotationDegrees = number;
 
 /**
  * Target quality metric for adaptive encoding.
@@ -88,8 +94,8 @@ export interface TransformQuery {
   targetQuality?: TargetQuality | undefined;
   /** Background colour as 6- or 8-digit hex without `#` (e.g. `"ff0000"`, `"ff000080"`). */
   background?: string | undefined;
-  /** Rotation in 90-degree increments. */
-  rotate?: QuarterTurn | undefined;
+  /** Clockwise rotation in whole degrees; negatives turn counter-clockwise. */
+  rotate?: RotationDegrees | undefined;
   /** Auto-orient based on EXIF data. */
   autoOrient?: boolean | undefined;
   /** Strip all metadata from the output image. */

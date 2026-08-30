@@ -300,7 +300,7 @@ type WasmTransformOptions = {
   optimize?: "none" | "auto" | "lossless" | "lossy";
   targetQuality?: string;
   background?: string;
-  rotate?: 0 | 90 | 180 | 270;
+  rotate?: number;
   autoOrient?: boolean;
   keepMetadata?: boolean;
   preserveExif?: boolean;
@@ -331,6 +331,9 @@ Notes:
 - `grayscale` defaults to `false`, and preserves the alpha channel when enabled.
 - `keepMetadata` and `preserveExif` are mutually exclusive.
 - `autoOrient` defaults to `true`.
+- `rotate` is clockwise whole degrees. Negatives turn counter-clockwise and values past a
+  full turn wrap, so `-90` and `270` are the same. A multiple of 90 is exact; any other
+  angle resamples and grows the output to the rotated bounding box.
 
 Transform semantics are the same as the CLI pipeline described in the main [README](../README.md).
 

@@ -40,8 +40,11 @@ pub struct WasmTransformOptions {
     pub target_quality: Option<String>,
     /// Optional background color as `RRGGBB` or `RRGGBBAA`.
     pub background: Option<String>,
-    /// Optional clockwise rotation in degrees. Supported values are `0`, `90`, `180`, `270`.
-    pub rotate: Option<u16>,
+    /// Optional clockwise rotation in whole degrees.
+    ///
+    /// Any integer works: negatives turn counter-clockwise and values past a full turn
+    /// wrap, so `-90` and `270` mean the same thing.
+    pub rotate: Option<i32>,
     /// Whether EXIF auto-orientation should run. Defaults to `true`.
     pub auto_orient: Option<bool>,
     /// Whether all supported metadata should be retained when possible.
@@ -293,16 +296,13 @@ fn parse_media_type(value: &str, field: &str) -> Result<MediaType, TransformErro
     }
 }
 
-fn parse_rotation(value: Option<u16>) -> Result<Rotation, TransformError> {
-    match value.unwrap_or(0) {
-        0 => Ok(Rotation::Deg0),
-        90 => Ok(Rotation::Deg90),
-        180 => Ok(Rotation::Deg180),
-        270 => Ok(Rotation::Deg270),
-        other => Err(TransformError::InvalidOptions(format!(
-            "rotate is invalid: unsupported rotation `{other}`"
-        ))),
-    }
+/// Normalizes a rotation from the browser options object.
+///
+/// Any whole angle is accepted, including negatives and values past a full turn, so this
+/// cannot fail. It stays a `Result` because every other option parser in this module is
+/// one, and a caller matching on the set should not have to special-case rotation.
+fn parse_rotation(value: Option<i32>) -> Result<Rotation, TransformError> {
+    Ok(Rotation::from_degrees(value.unwrap_or(0)))
 }
 
 fn dispatch_browser_transform_with_watermark(
@@ -845,17 +845,21 @@ mod tests {
 
     #[test]
     fn parse_rotation_accepts_valid_values() {
-        assert_eq!(parse_rotation(None).unwrap(), Rotation::Deg0);
-        assert_eq!(parse_rotation(Some(0)).unwrap(), Rotation::Deg0);
-        assert_eq!(parse_rotation(Some(90)).unwrap(), Rotation::Deg90);
-        assert_eq!(parse_rotation(Some(180)).unwrap(), Rotation::Deg180);
-        assert_eq!(parse_rotation(Some(270)).unwrap(), Rotation::Deg270);
+        assert_eq!(parse_rotation(None).unwrap(), Rotation::DEG_0);
+        assert_eq!(parse_rotation(Some(0)).unwrap(), Rotation::DEG_0);
+        assert_eq!(parse_rotation(Some(90)).unwrap(), Rotation::DEG_90);
+        assert_eq!(parse_rotation(Some(180)).unwrap(), Rotation::DEG_180);
+        assert_eq!(parse_rotation(Some(270)).unwrap(), Rotation::DEG_270);
     }
 
     #[test]
-    fn parse_rotation_rejects_invalid_values() {
-        let error = parse_rotation(Some(45)).expect_err("45 degrees should fail");
-        assert!(matches!(error, TransformError::InvalidOptions(_)));
+    fn parse_rotation_accepts_arbitrary_and_wrapping_angles() {
+        assert_eq!(parse_rotation(Some(45)).unwrap().as_degrees(), 45);
+        // Negative turns counter-clockwise, and wraps to the same rotation as 270.
+        assert_eq!(parse_rotation(Some(-90)).unwrap(), Rotation::DEG_270);
+        // Angles past a full turn wrap too.
+        assert_eq!(parse_rotation(Some(370)).unwrap().as_degrees(), 10);
+        assert_eq!(parse_rotation(Some(-360)).unwrap(), Rotation::DEG_0);
     }
 
     #[test]

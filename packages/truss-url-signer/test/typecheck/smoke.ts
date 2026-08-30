@@ -26,8 +26,12 @@ const signedUrl: string = signPublicUrl({
 
 void signedUrl;
 
-// @ts-expect-error rotate only accepts quarter turns
+// Any whole angle is allowed, including negatives.
 signPublicUrl({ ...baseOptions, transforms: { rotate: 45 } });
+signPublicUrl({ ...baseOptions, transforms: { rotate: -90 } });
+
+// @ts-expect-error rotate is a number of degrees, not a string
+signPublicUrl({ ...baseOptions, transforms: { rotate: "90" } });
 
 // @ts-expect-error format is constrained to documented output types
 signPublicUrl({ ...baseOptions, transforms: { format: "gif" } });

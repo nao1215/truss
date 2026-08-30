@@ -130,10 +130,14 @@ function wireEvents() {
     refreshOptimizeState();
     refreshQualityState();
   });
-  elements.rotate.addEventListener("change", () => {
-    refreshOptimizeState();
-    refreshQualityState();
-  });
+  // A number input reports "input" as the user types and "change" on commit; both matter
+  // because rotation decides whether a JPEG can still take the lossless path.
+  for (const event of ["input", "change"]) {
+    elements.rotate.addEventListener(event, () => {
+      refreshOptimizeState();
+      refreshQualityState();
+    });
+  }
   elements.crop.addEventListener("input", () => {
     refreshOptimizeState();
     refreshQualityState();
@@ -391,7 +395,7 @@ function collectOptions() {
     height,
     fit: boundedResize ? emptyToNull(elements.fit.value) : null,
     position: boundedResize ? emptyToNull(elements.position.value) : null,
-    rotate: Number(elements.rotate.value),
+    rotate: parseRotation(elements.rotate.value),
     quality: qualityEnabled() ? Number(elements.qualityNumber.value) : null,
     optimize,
     targetQuality: targetQualityEnabled() ? emptyToNull(elements.targetQuality.value.trim()) : null,
@@ -754,7 +758,7 @@ function hasJpegLosslessTransforms() {
   return (
     (width !== null && state.inputArtifact.width !== null && width !== state.inputArtifact.width) ||
     (height !== null && state.inputArtifact.height !== null && height !== state.inputArtifact.height) ||
-    Number(elements.rotate.value) !== 0 ||
+    parseRotation(elements.rotate.value) !== 0 ||
     emptyToNull(elements.crop.value.trim()) !== null ||
     parseSigma(elements.blurNumber.value) !== null ||
     parseSigma(elements.sharpenNumber.value) !== null ||
@@ -793,6 +797,20 @@ function normalizeOptimizeMode(mode) {
 
 function currentOptimizeMode() {
   return normalizeOptimizeMode(elements.optimizeMode.value);
+}
+
+/**
+ * Reads the rotation field as whole degrees, wrapped into 0..359.
+ *
+ * An empty or non-numeric field means no rotation. Wrapping here matches what truss does
+ * with the value, so the field can hold -90 and still describe the same transform as 270.
+ */
+function parseRotation(value) {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed)) {
+    return 0;
+  }
+  return ((parsed % 360) + 360) % 360;
 }
 
 function parseSigma(value) {

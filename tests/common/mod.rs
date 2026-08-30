@@ -426,7 +426,7 @@ fn parse_transform_options(query: &BTreeMap<String, String>) -> TransformOptions
         rotate: query
             .get("rotate")
             .map(|value| Rotation::from_str(value).expect("parse signed rotation"))
-            .unwrap_or(Rotation::Deg0),
+            .unwrap_or(Rotation::DEG_0),
         auto_orient: query
             .get("autoOrient")
             .map(|value| parse_bool_query(value, "autoOrient"))

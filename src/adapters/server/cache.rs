@@ -43,7 +43,7 @@ use super::negotiate::{
 };
 use super::response::HttpResponse;
 use crate::core::default_lossy_target_quality;
-use crate::{Fit, Position, Rotation, TransformOptions};
+use crate::{Fit, Position, TransformOptions};
 
 pub(super) const DEFAULT_CACHE_TTL_SECONDS: u64 = 3600;
 
@@ -567,8 +567,8 @@ pub(super) fn compute_cache_key(
         let buf = target_quality.to_string();
         push_param(&mut canonical, "targetQuality", &buf);
     }
-    if options.rotate != Rotation::Deg0 {
-        let buf = options.rotate.as_degrees().to_string();
+    if !options.rotate.is_identity() {
+        let buf = options.rotate.to_string();
         push_param(&mut canonical, "rotate", &buf);
     }
     if let Some(sharpen) = options.sharpen {

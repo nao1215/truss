@@ -44,6 +44,9 @@ The following parts of the signed-URL format are part of the compatibility contr
 The following rules are also part of the contract:
 
 - Query parameter names are case-sensitive.
+- `rotate` is whole clockwise degrees, already wrapped into `0`-`359`. The signature covers
+  the query string as sent, so a signer must normalize `-90` to `270` before signing rather
+  than relying on the server to canonicalize it.
 - Query parameters must not be repeated.
 - Unsupported query parameters are rejected with `400 Bad Request`.
 - Query parameter order on the wire is not significant. truss canonicalizes parameters before verification.

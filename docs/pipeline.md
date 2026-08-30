@@ -12,7 +12,7 @@ decode → auto-orient → rotate → crop → resize → blur → sharpen → g
 |---|-------|-------|-------------|
 | 1 | **Decode** | — | Parse input bytes into a `DynamicImage` using the detected codec (JPEG, PNG, WebP, AVIF, BMP, TIFF, GIF). |
 | 2 | **Auto-orient** | `auto_orient == true` | Apply EXIF orientation tag (JPEG only, tags 2–8). |
-| 3 | **Rotate** | `rotate != 0` | Explicit rotation by 0°, 90°, 180°, or 270°. |
+| 3 | **Rotate** | `rotate != 0` | Clockwise rotation by any whole number of degrees. A multiple of 90 permutes pixels exactly; any other angle resamples bilinearly, grows the canvas to the rotated bounding box, and fills the exposed corners with `background`. |
 | 4 | **Crop** | `crop` set | Extract a sub-region defined by `(x, y, width, height)`. |
 | 5 | **Resize** | `width` and/or `height` set | Scale the image according to `fit` (contain / cover / fill / inside) and `position`. |
 | 6 | **Blur** | `blur` set | Gaussian blur with the given sigma (0.1–100.0). |
@@ -26,6 +26,26 @@ Each stage checks the optional deadline (server: 30 s) and returns `TransformErr
 ## Deadline checkpoints
 
 The server adapter injects a 30-second deadline. The pipeline checks elapsed time after decode, rotate, crop, resize, blur, sharpen, grayscale, watermark, and encode. The CLI does not set a deadline.
+
+## Rotation
+
+`rotate` is normalized into `0..360` before it reaches the pipeline, so a negative angle
+turns counter-clockwise and an angle past a full turn wraps. Degrees are whole numbers: the
+value goes verbatim into the cache key and the signed-URL canonical string, and a fractional
+angle would have to survive Rust and JavaScript float formatting identically for a signature
+to verify.
+
+A multiple of 90 takes an exact path that only permutes pixels. Any other angle:
+
+- maps each destination pixel back through the inverse rotation and samples the source
+  bilinearly, in premultiplied alpha so a transparent neighbor does not bleed its color into
+  the rotated edge;
+- expands the canvas to the axis-aligned bounding box of the rotated image, so the corners
+  are never cropped away;
+- fills the exposed area with `background`, defaulting to transparent, or white for output
+  formats that carry no alpha channel — the same rule `fit=contain` padding already uses;
+- is checked against `MAX_OUTPUT_PIXELS` before the canvas is allocated, because the input
+  budget is larger than the output one and a 45-degree turn nearly doubles the pixel count.
 
 ## GIF input
 

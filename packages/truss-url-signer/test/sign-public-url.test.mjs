@@ -149,6 +149,32 @@ test("emits grayscale only when it is requested", () => {
   );
 });
 
+test("normalizes any whole rotation into the signed 0..359 range", () => {
+  const rotateParam = (rotate) =>
+    new URL(
+      signPublicUrl({
+        baseUrl: "https://images.example.com",
+        source: { kind: "path", path: "image.png" },
+        transforms: { rotate },
+        keyId: "public-demo",
+        secret: "secret-value",
+        expires: 1900000000,
+      }),
+    ).searchParams.get("rotate");
+
+  // Arbitrary angles, not just quarter turns.
+  assert.equal(rotateParam(45), "45");
+  // Negative turns counter-clockwise and wraps to the equivalent positive angle. The
+  // wrapping has to happen before signing, or the signature covers a string truss would
+  // never reconstruct.
+  assert.equal(rotateParam(-90), "270");
+  assert.equal(rotateParam(-1), "359");
+  // Past a full turn wraps too.
+  assert.equal(rotateParam(370), "10");
+  assert.equal(rotateParam(720), null, "a full turn is the default and is omitted");
+  assert.equal(rotateParam(0), null);
+});
+
 test("rejects invalid base URLs and expires values", () => {
   assert.throws(
     () =>
@@ -233,8 +259,8 @@ test("rejects transform combinations that truss would reject", () => {
       pattern: /quality must be between 1 and 100/,
     },
     {
-      options: { transforms: { rotate: 45 } },
-      pattern: /rotate must be 0, 90, 180, or 270/,
+      options: { transforms: { rotate: 45.5 } },
+      pattern: /rotate must be a finite integer/,
     },
     {
       options: { transforms: { width: 320, fit: "cover" } },
