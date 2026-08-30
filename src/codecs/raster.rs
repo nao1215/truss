@@ -6310,7 +6310,7 @@ mod tests {
 
     /// Rotation runs before the crop, so the crop box is checked against the rotated size.
     ///
-    /// `truss capabilities` declares this order. A caller composing operations of its own
+    /// `docs/pipeline.md` states this order. A caller composing operations of its own
     /// depends on it: truss applies its options in a fixed order whatever order they were
     /// given in, so a chain needing a different one has to be split across invocations.
     #[test]

@@ -23,6 +23,27 @@ decode → auto-orient → rotate → crop → resize → blur → sharpen → g
 
 Each stage checks the optional deadline (server: 30 s) and returns `TransformError::LimitExceeded` if exceeded.
 
+## The order is fixed
+
+The stages run in the order above no matter what order the options were written in.
+`--width 800 --rotate 90` and `--rotate 90 --width 800` are the same request: the rotation
+happens first in both, and the resize sees the rotated image. The same holds for the HTTP
+API, the WASM options object, and the signed-URL parameters.
+
+A caller that has an ordered operation chain of its own — an image-style pipeline, a
+method chain it is translating — therefore has to split it across invocations wherever its
+order differs from this one, carrying the intermediate through a lossless format:
+
+```sh
+# "scale to 800 wide, then rotate 90" is two passes, because resize comes after rotate here
+truss convert in.jpg -o pass1.png --width 800
+truss convert pass1.png -o out.jpg --rotate 90
+```
+
+A chain that already follows this order needs one invocation, whatever order it is written
+in. There is no option to change the order; see
+[issue #328](https://github.com/nao1215/truss/issues/328) for the discussion of one.
+
 ## Deadline checkpoints
 
 The server adapter injects a 30-second deadline. The pipeline checks elapsed time after decode, rotate, crop, resize, blur, sharpen, grayscale, watermark, and encode. The CLI does not set a deadline.
