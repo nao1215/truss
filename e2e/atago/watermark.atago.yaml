@@ -27,10 +27,17 @@ scenarios:
             path: base.png
             width: 64
             height: 64
+            similar_to: testdata/sample-64.png
+      # Without the flag the pass reproduces the unmarked base; with it, the marked
+      # baseline. The two baselines are different images, so a --watermark that parsed
+      # but composited nothing could not satisfy both assertions.
       - run:
           command: truss convert base.png -o plain.png
       - assert:
           exit_code: 0
+          image:
+            path: plain.png
+            similar_to: testdata/sample-64.png
       - run:
           command: truss convert base.png -o marked.png --watermark mark.png
       - assert:
@@ -40,8 +47,9 @@ scenarios:
             format: png
             width: 64
             height: 64
-      # Compositing at full opacity in a corner has to leave the opposite corner alone,
-      # so the output stays recognizably the same image at the same size.
+            similar_to: testdata/sample-64-watermarked.png
+      # Compositing is deterministic: the same mark in the same place twice is the
+      # same file, so a signed URL or a cache key keeps pointing at one image.
       - run:
           command: truss convert base.png -o marked-again.png --watermark mark.png
       - assert:
