@@ -191,6 +191,42 @@ fn serve_once_rejects_gif_as_an_output_format() {
 }
 
 #[test]
+fn serve_once_honours_fit_inside_and_without_enlargement() {
+    // png_bytes() is 4x3. Bounded by 8x8, inside scales it to 8x6 with no padding; adding
+    // withoutEnlargement leaves it at 4x3. Both go over real HTTP, because the query
+    // parsing and the pipeline are what this pins together.
+    let storage_root = temp_dir("fit-inside");
+    fs::write(storage_root.join("image.png"), png_bytes()).expect("write source fixture");
+
+    let request = |body: &str| {
+        let (addr, handle) = spawn_server(ServerConfig::new(
+            storage_root.clone(),
+            Some("secret".to_string()),
+        ));
+        let response = send_transform_request(addr, body, Some("secret"));
+        handle
+            .join()
+            .expect("join server thread")
+            .expect("serve one request");
+        let (header, _content_type, body) = split_response(&response);
+        assert!(header.starts_with("HTTP/1.1 200 OK"), "{header}");
+        sniff_artifact(RawArtifact::new(body, None)).expect("sniff transformed output")
+    };
+
+    let enlarged = request(
+        r#"{"source":{"kind":"path","path":"/image.png"},"options":{"format":"png","width":8,"height":8,"fit":"inside"}}"#,
+    );
+    assert_eq!(enlarged.metadata.width, Some(8));
+    assert_eq!(enlarged.metadata.height, Some(6));
+
+    let kept = request(
+        r#"{"source":{"kind":"path","path":"/image.png"},"options":{"format":"png","width":8,"height":8,"fit":"inside","withoutEnlargement":true}}"#,
+    );
+    assert_eq!(kept.metadata.width, Some(4));
+    assert_eq!(kept.metadata.height, Some(3));
+}
+
+#[test]
 fn serve_once_rejects_private_url_sources_by_default() {
     let storage_root = temp_dir("url-blocked");
     let (addr, handle) = spawn_server(ServerConfig::new(storage_root, Some("secret".to_string())));

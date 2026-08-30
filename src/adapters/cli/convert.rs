@@ -89,6 +89,7 @@ pub(super) fn convert_from_clap(args: ClapConvertArgs) -> Result<Command, CliErr
         blur: args.blur,
         sharpen: args.sharpen,
         grayscale: args.grayscale,
+        without_enlargement: args.without_enlargement,
     }
     .into_options()
     .map_err(map_transform_error)?;
@@ -162,6 +163,7 @@ pub(super) fn optimize_from_clap(args: ClapOptimizeArgs) -> Result<Command, CliE
         blur: None,
         sharpen: None,
         grayscale: false,
+        without_enlargement: false,
     }
     .into_options()
     .map_err(map_transform_error)?;

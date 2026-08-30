@@ -741,6 +741,14 @@ pub struct TransformOptions {
     /// its own colors. Luminance is computed with the Rec. 601 weights the
     /// `image` crate uses, and the alpha channel is preserved.
     pub grayscale: bool,
+    /// Whether a source smaller than the requested size may be scaled up.
+    ///
+    /// When true, the resize never enlarges: an image already within the requested
+    /// bounds is left at its own size. This is a separate question from [`Fit`], which
+    /// decides how the image is arranged relative to the box, so the two combine freely.
+    /// `contain` still pads out to the full requested box; only the content inside it
+    /// stops growing.
+    pub without_enlargement: bool,
     /// Optional explicit crop region applied before resize.
     ///
     /// When set, the image is cropped to the specified rectangle before any resize
@@ -775,6 +783,7 @@ impl Default for TransformOptions {
             blur: None,
             sharpen: None,
             grayscale: false,
+            without_enlargement: false,
             crop: None,
             deadline: None,
         }
@@ -812,6 +821,15 @@ impl TransformOptions {
         if self.position.is_some() && !has_bounded_resize {
             return Err(TransformError::InvalidOptions(
                 "position requires both width and height".to_string(),
+            ));
+        }
+
+        // Unlike fit and position, this is meaningful with a single axis too, so it only
+        // needs some resize to act on. Rejecting it outright beats silently ignoring a flag
+        // the caller clearly meant to have an effect.
+        if self.without_enlargement && self.width.is_none() && self.height.is_none() {
+            return Err(TransformError::InvalidOptions(
+                "without_enlargement requires width or height".to_string(),
             ));
         }
 
@@ -901,6 +919,7 @@ impl TransformOptions {
             blur: self.blur,
             sharpen: self.sharpen,
             grayscale: self.grayscale,
+            without_enlargement: self.without_enlargement,
             crop: self.crop,
             deadline: self.deadline,
         })
@@ -940,6 +959,8 @@ pub struct NormalizedTransformOptions {
     pub sharpen: Option<f32>,
     /// Whether the image should be desaturated to grayscale.
     pub grayscale: bool,
+    /// Whether a source smaller than the requested size may be scaled up.
+    pub without_enlargement: bool,
     /// Optional explicit crop region applied before resize.
     pub crop: Option<CropRegion>,
     /// Optional wall-clock deadline for the transform pipeline.
@@ -962,13 +983,23 @@ pub struct NormalizedTransformOptions {
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Fit {
-    /// Scale to fit within the box while preserving aspect ratio.
+    /// Scale to fit inside the box, preserving aspect ratio, then pad to the exact box.
+    ///
+    /// The output is always the requested width and height. When the aspect ratios differ,
+    /// the remaining area is filled with the requested background.
     Contain,
-    /// Scale to cover the box while preserving aspect ratio.
+    /// Scale to cover the box, preserving aspect ratio, then crop to the exact box.
     Cover,
-    /// Stretch to fill the box.
+    /// Stretch each axis to the box independently, without preserving aspect ratio.
     Fill,
-    /// Scale down only when the input is larger than the box.
+    /// Scale to fit inside the box, preserving aspect ratio, and add no padding.
+    ///
+    /// The output is at most the requested width and height, and is usually smaller on one
+    /// axis: a 640x427 source in a 200x200 box becomes 200x133. This is the difference from
+    /// [`Fit::Contain`], which pads that same result out to 200x200.
+    ///
+    /// Whether a smaller source may be scaled up is not part of this mode. That is
+    /// [`TransformOptions::without_enlargement`], which applies to every fit.
     Inside,
 }
 

@@ -179,12 +179,16 @@ animation was discarded. `truss inspect` still reads animated GIFs and reports
 
 Specify `--width` and/or `--height` to resize. When both are given, `--fit` controls how the image fits the target box:
 
-| Mode | Behavior |
-|------|----------|
-| `contain` (default) | Scale down to fit entirely inside the box, preserving aspect ratio. Padding is filled with `--background`. |
-| `cover` | Scale to fill the box completely, cropping excess. Use `--position` to choose the crop anchor. |
-| `fill` | Stretch to exact dimensions (ignores aspect ratio). |
-| `inside` | Like `contain`, but never upscales a smaller image. |
+| Mode | Output size | Behavior |
+|------|-------------|----------|
+| `contain` (default) | exactly the box | Scale to fit inside the box, preserving aspect ratio, then pad the remainder with `--background`. |
+| `cover` | exactly the box | Scale to fill the box, preserving aspect ratio, then crop the excess. Use `--position` to choose the crop anchor. |
+| `fill` | exactly the box | Stretch each axis to the box, ignoring aspect ratio. |
+| `inside` | at most the box | Scale to fit inside the box, preserving aspect ratio, and add no padding. Usually smaller than the box on one axis. |
+
+`contain` and `inside` scale the image identically. The difference is what happens next:
+a 640 x 427 photo bounded by 300 x 300 becomes 300 x 200 either way, and `contain` then pads
+that out to 300 x 300 while `inside` returns it as is.
 
 | Original (640 x 427) | contain 300 x 300 | cover 300 x 300 | fill 300 x 300 | inside 300 x 300 |
 |---|---|---|---|---|
@@ -200,12 +204,31 @@ truss photo.jpg -o out.jpg --width 300 --height 300 --fit cover
 # fill -- stretch to exact dimensions
 truss photo.jpg -o out.jpg --width 300 --height 300 --fit fill
 
-# inside -- like contain, but never upscale
+# inside -- bound the image by the box without padding it
 truss photo.jpg -o out.jpg --width 300 --height 300 --fit inside
 
 # Width only -- height is calculated to preserve aspect ratio
 truss photo.jpg -o out.jpg --width 800
 ```
+
+#### Never enlarging a small image
+
+Whether a resize may scale an image up is a separate question from how it fits the box, so
+it is a separate flag rather than part of a fit mode. `--without-enlargement` works with any
+`--fit`, and with a single-axis resize:
+
+```sh
+# The everyday "max 800x600, leave small images alone" resize
+truss photo.jpg -o out.jpg --width 800 --height 600 --fit inside --without-enlargement
+
+# Contain still pads out to the full box; only the content stops growing
+truss photo.jpg -o out.jpg --width 800 --height 600 --fit contain --without-enlargement
+
+# Works on a single axis too
+truss photo.jpg -o out.jpg --width 800 --without-enlargement
+```
+
+Without it, a source smaller than the requested size is scaled up to reach it.
 
 #### Cover position
 

@@ -226,6 +226,9 @@ pub(super) fn extend_transform_query(
     if options.grayscale {
         query.insert("grayscale".to_string(), "true".to_string());
     }
+    if options.without_enlargement {
+        query.insert("withoutEnlargement".to_string(), "true".to_string());
+    }
 }
 
 pub(super) fn encode_background(color: Rgba8) -> String {
@@ -267,6 +270,7 @@ pub(super) fn validate_public_query_names(
                 | "blur"
                 | "sharpen"
                 | "grayscale"
+                | "withoutEnlargement"
                 | "watermarkUrl"
                 | "watermarkPosition"
                 | "watermarkOpacity"
@@ -839,6 +843,7 @@ mod tests {
             ("blur", "2.5"),
             ("sharpen", "1.0"),
             ("grayscale", "true"),
+            ("withoutEnlargement", "true"),
             ("version", "v2"),
             ("preset", "thumb"),
         ]);

@@ -225,7 +225,13 @@ pub fn transform_raster(request: TransformRequest) -> Result<TransformResult, Tr
         check_deadline_if_set!(start, deadline, "crop");
     }
 
-    check_output_pixel_limit(&image, normalized.options.width, normalized.options.height)?;
+    check_output_pixel_limit(
+        &image,
+        normalized.options.width,
+        normalized.options.height,
+        normalized.options.fit,
+        normalized.options.without_enlargement,
+    )?;
     image = apply_resize(
         image,
         normalized.options.width,
@@ -234,6 +240,7 @@ pub fn transform_raster(request: TransformRequest) -> Result<TransformResult, Tr
         normalized.options.position,
         normalized.options.background,
         normalized.options.format,
+        normalized.options.without_enlargement,
     );
     check_deadline_if_set!(start, deadline, "resize");
 
@@ -649,23 +656,114 @@ fn check_input_pixel_limit(input: &Artifact) -> Result<(), TransformError> {
 ///
 /// When only one axis is requested the other is derived from the source aspect ratio, exactly
 /// as `apply_resize` does, so callers see the real output size rather than the source size.
+/// The uniform scale a fit mode applies to the source before any cropping or padding.
+///
+/// `contain` and `inside` shrink until both axes are within the box, so they take the
+/// smaller ratio. `cover` has to overflow the box on one axis to fill it on the other, so
+/// it takes the larger. `fill` scales the axes independently and has no single factor,
+/// which is why it never reaches here.
+fn fit_scale(source: (u32, u32), target: (u32, u32), fit: Fit) -> f64 {
+    let (source_w, source_h) = (f64::from(source.0), f64::from(source.1));
+    let (target_w, target_h) = (f64::from(target.0), f64::from(target.1));
+    match fit {
+        Fit::Contain | Fit::Inside => f64::min(target_w / source_w, target_h / source_h),
+        Fit::Cover => f64::max(target_w / source_w, target_h / source_h),
+        Fit::Fill => 1.0,
+    }
+}
+
+/// Applies a scale factor to both axes, never producing a zero dimension.
+fn scale_both(source: (u32, u32), scale: f64) -> (u32, u32) {
+    let scaled_w = (f64::from(source.0) * scale).round().max(1.0);
+    let scaled_h = (f64::from(source.1) * scale).round().max(1.0);
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    (scaled_w as u32, scaled_h as u32)
+}
+
+/// The size the source is scaled to for a fit mode, before padding or cropping.
+///
+/// `without_enlargement` clamps the scale at 1.0 rather than being folded into any one fit
+/// mode: whether a request may upscale is a separate question from how it fits the box, and
+/// every mode has a meaningful answer to it.
+fn fit_content_size(
+    source: (u32, u32),
+    target: (u32, u32),
+    fit: Fit,
+    without_enlargement: bool,
+) -> (u32, u32) {
+    if fit == Fit::Fill {
+        // Fill stretches each axis on its own, so the clamp applies per axis.
+        return if without_enlargement {
+            (target.0.min(source.0), target.1.min(source.1))
+        } else {
+            target
+        };
+    }
+
+    let scale = fit_scale(source, target, fit);
+    let scale = if without_enlargement {
+        scale.min(1.0)
+    } else {
+        scale
+    };
+    scale_both(source, scale)
+}
+
+/// The final output size of a resize request, canvas included.
+///
+/// This is what [`check_output_pixel_limit`] measures and what [`apply_resize`] produces, so
+/// the limit is always applied to the size that actually gets allocated. `contain` reports
+/// the requested box because it pads out to it; `inside` reports the scaled content, which is
+/// the whole difference between the two modes.
 fn resolved_output_dimensions(
     current: (u32, u32),
     width: Option<u32>,
     height: Option<u32>,
+    fit: Option<Fit>,
+    without_enlargement: bool,
 ) -> (u32, u32) {
     let (current_w, current_h) = current;
     match (width, height) {
         (None, None) => current,
-        (Some(target_width), None) => (
-            target_width,
-            scale_dimension(current_h, target_width, current_w),
-        ),
-        (None, Some(target_height)) => (
-            scale_dimension(current_w, target_height, current_h),
-            target_height,
-        ),
-        (Some(target_width), Some(target_height)) => (target_width, target_height),
+        // A single axis is a scale request: the other axis follows from the aspect ratio.
+        (Some(target_width), None) => {
+            let target_width = if without_enlargement {
+                target_width.min(current_w)
+            } else {
+                target_width
+            };
+            (
+                target_width,
+                scale_dimension(current_h, target_width, current_w),
+            )
+        }
+        (None, Some(target_height)) => {
+            let target_height = if without_enlargement {
+                target_height.min(current_h)
+            } else {
+                target_height
+            };
+            (
+                scale_dimension(current_w, target_height, current_h),
+                target_height,
+            )
+        }
+        (Some(target_width), Some(target_height)) => {
+            let target = (target_width, target_height);
+            let fit = fit.unwrap_or(Fit::Contain);
+            let content = fit_content_size(current, target, fit, without_enlargement);
+            match fit {
+                // Contain pads out to the requested box, so that is the output size.
+                Fit::Contain => target,
+                // Inside returns the scaled content itself, with no padding.
+                Fit::Inside => content,
+                // Fill's content size is already the target, clamped when asked.
+                Fit::Fill => content,
+                // Cover crops back to the box. It can only fall short of it when
+                // `without_enlargement` stopped the scale from reaching it.
+                Fit::Cover => (target.0.min(content.0), target.1.min(content.1)),
+            }
+        }
     }
 }
 
@@ -679,8 +777,11 @@ fn check_output_pixel_limit(
     image: &DynamicImage,
     width: Option<u32>,
     height: Option<u32>,
+    fit: Option<Fit>,
+    without_enlargement: bool,
 ) -> Result<(), TransformError> {
-    let (out_w, out_h) = resolved_output_dimensions(image.dimensions(), width, height);
+    let (out_w, out_h) =
+        resolved_output_dimensions(image.dimensions(), width, height, fit, without_enlargement);
     let pixels = u64::from(out_w) * u64::from(out_h);
     if pixels > MAX_OUTPUT_PIXELS {
         return Err(TransformError::LimitExceeded(format!(
@@ -937,6 +1038,12 @@ fn apply_crop(image: DynamicImage, crop: CropRegion) -> Result<DynamicImage, Tra
     Ok(image.crop_imm(crop.x, crop.y, crop.width, crop.height))
 }
 
+/// Resizes according to the fit mode, the enlargement policy, and the requested box.
+///
+/// The argument list is long because a resize genuinely depends on all of it, and bundling
+/// the parameters into a struct would only move the same fields somewhere else while adding
+/// a type that nothing outside this function would use.
+#[allow(clippy::too_many_arguments)]
 fn apply_resize(
     image: DynamicImage,
     width: Option<u32>,
@@ -945,8 +1052,9 @@ fn apply_resize(
     position: Position,
     background: Option<Rgba8>,
     output_format: MediaType,
+    without_enlargement: bool,
 ) -> DynamicImage {
-    let (original_width, original_height) = image.dimensions();
+    let source = image.dimensions();
 
     match (width, height) {
         (None, None) => image,
@@ -954,48 +1062,54 @@ fn apply_resize(
         // backs `check_output_pixel_limit`, so the limit is applied to the real output size.
         (Some(_), None) | (None, Some(_)) => {
             let (target_width, target_height) =
-                resolved_output_dimensions((original_width, original_height), width, height);
+                resolved_output_dimensions(source, width, height, fit, without_enlargement);
+            if (target_width, target_height) == source {
+                return image;
+            }
             image.resize_exact(target_width, target_height, FilterType::Lanczos3)
         }
-        (Some(target_width), Some(target_height)) => match fit.unwrap_or(Fit::Contain) {
-            Fit::Fill => image.resize_exact(target_width, target_height, FilterType::Lanczos3),
-            Fit::Contain => {
-                let resized = image.resize(target_width, target_height, FilterType::Lanczos3);
-                pad_to_box(
-                    resized,
-                    target_width,
-                    target_height,
-                    position,
-                    background,
-                    output_format,
-                )
-            }
-            Fit::Inside => {
-                let resized = if original_width <= target_width && original_height <= target_height
-                {
-                    image
-                } else {
-                    image.resize(target_width, target_height, FilterType::Lanczos3)
-                };
+        (Some(target_width), Some(target_height)) => {
+            let target = (target_width, target_height);
+            let fit = fit.unwrap_or(Fit::Contain);
+            let (content_width, content_height) =
+                fit_content_size(source, target, fit, without_enlargement);
 
-                pad_to_box(
-                    resized,
+            match fit {
+                Fit::Fill | Fit::Inside => {
+                    // Both write the content size straight out. Fill got there by scaling the
+                    // axes independently, Inside by one shared factor, and neither pads.
+                    if (content_width, content_height) == source {
+                        return image;
+                    }
+                    image.resize_exact(content_width, content_height, FilterType::Lanczos3)
+                }
+                Fit::Contain => {
+                    let resized = if (content_width, content_height) == source {
+                        image
+                    } else {
+                        image.resize_exact(content_width, content_height, FilterType::Lanczos3)
+                    };
+                    pad_to_box(
+                        resized,
+                        target_width,
+                        target_height,
+                        position,
+                        background,
+                        output_format,
+                    )
+                }
+                Fit::Cover => cover_to_box(
+                    image,
+                    content_width,
+                    content_height,
                     target_width,
                     target_height,
                     position,
                     background,
                     output_format,
-                )
+                ),
             }
-            Fit::Cover => cover_to_box(
-                image,
-                target_width,
-                target_height,
-                position,
-                background,
-                output_format,
-            ),
-        },
+        }
     }
 }
 
@@ -1158,40 +1272,44 @@ fn pad_to_box(
     DynamicImage::ImageRgba8(canvas)
 }
 
+/// Scales to `resized_*` and crops back to the box, anchored by `position`.
+///
+/// The crop box is clamped to the scaled image. Normally the scaled image covers the target
+/// on both axes and the clamp is a no-op; it only bites when `without_enlargement` stopped
+/// the scale from reaching the box, in which case the output is legitimately smaller than
+/// requested rather than padded out to it.
+#[allow(clippy::too_many_arguments)]
 fn cover_to_box(
     image: DynamicImage,
+    resized_width: u32,
+    resized_height: u32,
     target_width: u32,
     target_height: u32,
     position: Position,
     background: Option<Rgba8>,
     output_format: MediaType,
 ) -> DynamicImage {
-    let (original_width, original_height) = image.dimensions();
-    let scale = f64::max(
-        f64::from(target_width) / f64::from(original_width),
-        f64::from(target_height) / f64::from(original_height),
-    );
-    let resized_width = (f64::from(original_width) * scale).ceil().max(1.0) as u32;
-    let resized_height = (f64::from(original_height) * scale).ceil().max(1.0) as u32;
     let resized = image
         .resize_exact(resized_width, resized_height, FilterType::Lanczos3)
         .to_rgba8();
 
-    if resized_width == target_width && resized_height == target_height {
+    let crop_width = target_width.min(resized_width);
+    let crop_height = target_height.min(resized_height);
+
+    if resized_width == crop_width && resized_height == crop_height {
         return DynamicImage::ImageRgba8(resized);
     }
 
     let fill = background_pixel(background, output_format);
-    let mut canvas = RgbaImage::from_pixel(target_width, target_height, fill);
+    let mut canvas = RgbaImage::from_pixel(crop_width, crop_height, fill);
     let (crop_x, crop_y) = position_offset(
         resized_width,
         resized_height,
-        target_width,
-        target_height,
+        crop_width,
+        crop_height,
         position,
     );
-    let cropped =
-        imageops::crop_imm(&resized, crop_x, crop_y, target_width, target_height).to_image();
+    let cropped = imageops::crop_imm(&resized, crop_x, crop_y, crop_width, crop_height).to_image();
 
     imageops::overlay(&mut canvas, &cropped, 0, 0);
     DynamicImage::ImageRgba8(canvas)
@@ -2747,7 +2865,7 @@ fn output_has_alpha(image: &DynamicImage, media_type: MediaType) -> bool {
 mod tests {
     use super::{
         apply_exif_orientation, check_rotated_pixel_limit, optimize_jpeg_bytes_losslessly,
-        rotated_bounding_box, transform_raster,
+        resolved_output_dimensions, rotated_bounding_box, transform_raster,
     };
     use crate::core::{
         Artifact, ArtifactMetadata, Fit, MediaType, MetadataKind, MetadataPolicy, OptimizeMode,
@@ -3933,7 +4051,7 @@ mod tests {
             8192,
             Rgba([0, 0, 0, 255]),
         ));
-        check_output_pixel_limit(&image, Some(8192), Some(8192)).unwrap();
+        check_output_pixel_limit(&image, Some(8192), Some(8192), None, false).unwrap();
     }
 
     #[test]
@@ -3942,7 +4060,8 @@ mod tests {
         // 8193 * 8192 = 67_117_056 > MAX_OUTPUT_PIXELS (67_108_864)
         let image =
             image::DynamicImage::ImageRgba8(RgbaImage::from_pixel(1, 1, Rgba([0, 0, 0, 255])));
-        let err = check_output_pixel_limit(&image, Some(8193), Some(8192)).unwrap_err();
+        let err =
+            check_output_pixel_limit(&image, Some(8193), Some(8192), None, false).unwrap_err();
         assert!(matches!(err, TransformError::LimitExceeded(_)));
     }
 
@@ -4132,7 +4251,7 @@ mod tests {
         let image =
             image::DynamicImage::ImageRgba8(RgbaImage::from_pixel(16, 16, Rgba([0, 0, 0, 255])));
         // A square source scaled to width 10000 also becomes 10000 tall: 100 Mpx > 67_108_864.
-        let err = check_output_pixel_limit(&image, Some(10000), None).unwrap_err();
+        let err = check_output_pixel_limit(&image, Some(10000), None, None, false).unwrap_err();
         assert!(matches!(err, TransformError::LimitExceeded(_)));
         assert!(err.to_string().contains("100000000"));
     }
@@ -4143,7 +4262,7 @@ mod tests {
 
         let image =
             image::DynamicImage::ImageRgba8(RgbaImage::from_pixel(16, 16, Rgba([0, 0, 0, 255])));
-        let err = check_output_pixel_limit(&image, None, Some(10000)).unwrap_err();
+        let err = check_output_pixel_limit(&image, None, Some(10000), None, false).unwrap_err();
         assert!(matches!(err, TransformError::LimitExceeded(_)));
         assert!(err.to_string().contains("100000000"));
     }
@@ -4155,7 +4274,7 @@ mod tests {
         // A 4:1 source scaled to width 8192 becomes 8192x2048 = 16_777_216 pixels.
         let image =
             image::DynamicImage::ImageRgba8(RgbaImage::from_pixel(16, 4, Rgba([0, 0, 0, 255])));
-        check_output_pixel_limit(&image, Some(8192), None).unwrap();
+        check_output_pixel_limit(&image, Some(8192), None, None, false).unwrap();
     }
 
     #[test]
@@ -4635,6 +4754,229 @@ mod tests {
             "expected blurred edge pixel to be a mid-tone, got r={}",
             edge_pixel[0]
         );
+    }
+
+    // ── resize: fit modes and the enlargement policy ──────────────────────────
+    //
+    // These drive `resolved_output_dimensions`, which is both what the pipeline resizes to
+    // and what the output pixel limit measures, so a divergence between the reported and
+    // the produced size cannot hide. The pixel-level consequences (padding, cropping) are
+    // asserted separately below through `transform_raster`.
+
+    fn output_size(
+        source: (u32, u32),
+        width: Option<u32>,
+        height: Option<u32>,
+        fit: Option<Fit>,
+        without_enlargement: bool,
+    ) -> (u32, u32) {
+        resolved_output_dimensions(source, width, height, fit, without_enlargement)
+    }
+
+    #[test]
+    fn inside_fits_a_landscape_image_without_padding() {
+        // The case from https://github.com/nao1215/truss/issues/312: 640x427 bounded by
+        // 200x200 is 200x133, not a 200x200 letterbox.
+        assert_eq!(
+            output_size((640, 427), Some(200), Some(200), Some(Fit::Inside), false),
+            (200, 133)
+        );
+    }
+
+    #[test]
+    fn inside_fits_a_portrait_image_within_both_bounds() {
+        let (w, h) = output_size((300, 900), Some(200), Some(200), Some(Fit::Inside), false);
+        assert!(
+            w <= 200 && h <= 200,
+            "inside must not exceed either bound, got {w}x{h}"
+        );
+        // The constrained axis reaches the bound exactly; the other follows the ratio.
+        assert_eq!((w, h), (67, 200));
+    }
+
+    #[test]
+    fn contain_always_reports_the_requested_box() {
+        // Same source and box as the inside case: contain pads that 200x133 out to 200x200.
+        assert_eq!(
+            output_size((640, 427), Some(200), Some(200), Some(Fit::Contain), false),
+            (200, 200)
+        );
+        // Contain is the default when no fit is named.
+        assert_eq!(
+            output_size((640, 427), Some(200), Some(200), None, false),
+            (200, 200)
+        );
+    }
+
+    #[test]
+    fn cover_and_fill_still_report_the_requested_box() {
+        assert_eq!(
+            output_size((640, 427), Some(200), Some(200), Some(Fit::Cover), false),
+            (200, 200)
+        );
+        assert_eq!(
+            output_size((640, 427), Some(200), Some(200), Some(Fit::Fill), false),
+            (200, 200)
+        );
+    }
+
+    #[test]
+    fn enlargement_is_allowed_by_default() {
+        for fit in [Fit::Inside, Fit::Contain, Fit::Cover, Fit::Fill] {
+            assert_eq!(
+                output_size((16, 16), Some(200), Some(200), Some(fit), false),
+                (200, 200),
+                "{fit:?} should enlarge a small source when not told otherwise"
+            );
+        }
+        // A single-axis request enlarges too.
+        assert_eq!(
+            output_size((16, 16), Some(200), None, None, false),
+            (200, 200)
+        );
+    }
+
+    #[test]
+    fn without_enlargement_stops_a_small_source_from_growing() {
+        // Inside, cover, and fill report the content size, so all three stay at the source.
+        for fit in [Fit::Inside, Fit::Cover, Fit::Fill] {
+            assert_eq!(
+                output_size((16, 16), Some(200), Some(200), Some(fit), true),
+                (16, 16),
+                "{fit:?} should leave a smaller source alone"
+            );
+        }
+        // Contain still pads out to the requested box; only the content stops growing.
+        assert_eq!(
+            output_size((16, 16), Some(200), Some(200), Some(Fit::Contain), true),
+            (200, 200)
+        );
+        // Single-axis requests honour it on both axes.
+        assert_eq!(output_size((16, 16), Some(200), None, None, true), (16, 16));
+        assert_eq!(output_size((16, 16), None, Some(200), None, true), (16, 16));
+    }
+
+    #[test]
+    fn without_enlargement_does_not_shrink_what_already_fits() {
+        // A source larger than the box is still reduced; the flag only removes upscaling.
+        assert_eq!(
+            output_size((640, 427), Some(200), Some(200), Some(Fit::Inside), true),
+            (200, 133)
+        );
+        assert_eq!(
+            output_size((640, 427), Some(200), None, None, true),
+            (200, 133)
+        );
+    }
+
+    #[test]
+    fn single_axis_resize_derives_the_other_from_the_aspect_ratio() {
+        assert_eq!(
+            output_size((640, 427), Some(200), None, None, false),
+            (200, 133)
+        );
+        assert_eq!(
+            output_size((640, 427), None, Some(200), None, false),
+            (300, 200)
+        );
+        // No axis at all is a passthrough, whatever the flags say.
+        assert_eq!(output_size((640, 427), None, None, None, true), (640, 427));
+    }
+
+    #[test]
+    fn transform_raster_inside_adds_no_padding() {
+        // 16x8 solid red. Bounded by 8x8, inside gives 8x4 with no transparent bars; contain
+        // gives 8x8 with them. Asserting the pixels is what separates the two modes, since
+        // both agree the content is 8x4.
+        let image = RgbaImage::from_pixel(16, 8, Rgba([255, 0, 0, 255]));
+        let mut bytes = Vec::new();
+        PngEncoder::new(&mut bytes)
+            .write_image(&image, 16, 8, ColorType::Rgba8.into())
+            .expect("encode png");
+
+        let run = |fit: Fit| -> RgbaImage {
+            let artifact = Artifact::new(
+                bytes.clone(),
+                MediaType::Png,
+                ArtifactMetadata {
+                    width: Some(16),
+                    height: Some(8),
+                    frame_count: 1,
+                    duration: None,
+                    has_alpha: Some(false),
+                },
+            );
+            let result = transform_raster(TransformRequest::new(
+                artifact,
+                TransformOptions {
+                    width: Some(8),
+                    height: Some(8),
+                    fit: Some(fit),
+                    ..TransformOptions::default()
+                },
+            ))
+            .expect("resize");
+            image::load_from_memory_with_format(&result.artifact.bytes, ImageFormat::Png)
+                .expect("decode output")
+                .to_rgba8()
+        };
+
+        let inside = run(Fit::Inside);
+        assert_eq!(inside.dimensions(), (8, 4));
+        assert!(
+            inside.pixels().all(|pixel| pixel[3] == 255),
+            "inside must not introduce transparent padding"
+        );
+
+        let contain = run(Fit::Contain);
+        assert_eq!(contain.dimensions(), (8, 8));
+        assert_eq!(
+            contain.get_pixel(0, 0)[3],
+            0,
+            "contain pads the difference in aspect ratio"
+        );
+    }
+
+    #[test]
+    fn transform_raster_without_enlargement_leaves_a_small_source_untouched() {
+        let mut image = RgbaImage::from_pixel(4, 4, Rgba([0, 0, 255, 255]));
+        image.put_pixel(0, 0, Rgba([255, 0, 0, 255]));
+        let mut bytes = Vec::new();
+        PngEncoder::new(&mut bytes)
+            .write_image(&image, 4, 4, ColorType::Rgba8.into())
+            .expect("encode png");
+        let artifact = Artifact::new(
+            bytes,
+            MediaType::Png,
+            ArtifactMetadata {
+                width: Some(4),
+                height: Some(4),
+                frame_count: 1,
+                duration: None,
+                has_alpha: Some(false),
+            },
+        );
+
+        let result = transform_raster(TransformRequest::new(
+            artifact,
+            TransformOptions {
+                width: Some(64),
+                height: Some(64),
+                fit: Some(Fit::Inside),
+                without_enlargement: true,
+                ..TransformOptions::default()
+            },
+        ))
+        .expect("resize");
+
+        let output = image::load_from_memory_with_format(&result.artifact.bytes, ImageFormat::Png)
+            .expect("decode output")
+            .to_rgba8();
+        assert_eq!(output.dimensions(), (4, 4));
+        // Skipping the resize entirely also means the pixels are untouched, not resampled
+        // back to the same size.
+        assert_eq!(*output.get_pixel(0, 0), Rgba([255, 0, 0, 255]));
+        assert_eq!(*output.get_pixel(3, 3), Rgba([0, 0, 255, 255]));
     }
 
     #[test]

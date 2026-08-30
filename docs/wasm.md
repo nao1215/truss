@@ -308,6 +308,7 @@ type WasmTransformOptions = {
   blur?: number;
   sharpen?: number;
   grayscale?: boolean;
+  withoutEnlargement?: boolean;
 };
 ```
 
@@ -315,6 +316,11 @@ Notes:
 
 - `width` and `height` must be greater than zero when provided.
 - `fit` and `position` require both `width` and `height`.
+- `fit: "inside"` bounds the image by the box without padding, so the result is usually
+  smaller than the requested size on one axis. `fit: "contain"` pads that same result out to
+  the exact box.
+- `withoutEnlargement` stops a smaller source from being scaled up. It is independent of
+  `fit` and also applies to a single-axis resize, and it requires `width` or `height`.
 - `format: "svg"` is only valid when the input is already SVG.
 - GIF is an input-only format. It has no entry in `format`, a GIF input with no `format` is
   encoded as PNG, and an animated GIF is rejected rather than reduced to its first frame.

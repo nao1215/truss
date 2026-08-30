@@ -14,7 +14,7 @@ decode → auto-orient → rotate → crop → resize → blur → sharpen → g
 | 2 | **Auto-orient** | `auto_orient == true` | Apply EXIF orientation tag (JPEG only, tags 2–8). |
 | 3 | **Rotate** | `rotate != 0` | Clockwise rotation by any whole number of degrees. A multiple of 90 permutes pixels exactly; any other angle resamples bilinearly, grows the canvas to the rotated bounding box, and fills the exposed corners with `background`. |
 | 4 | **Crop** | `crop` set | Extract a sub-region defined by `(x, y, width, height)`. |
-| 5 | **Resize** | `width` and/or `height` set | Scale the image according to `fit` (contain / cover / fill / inside) and `position`. |
+| 5 | **Resize** | `width` and/or `height` set | Scale the image according to `fit` and `position`, honouring `without_enlargement`. See [Resize](#resize). |
 | 6 | **Blur** | `blur` set | Gaussian blur with the given sigma (0.1–100.0). |
 | 7 | **Sharpen** | `sharpen` set | Unsharp mask with the given sigma (0.1–100.0). |
 | 8 | **Grayscale** | `grayscale == true` | Collapse the color channels to luminance (Rec. 601 weights), preserving alpha. Runs before the watermark so an overlay keeps its own colors, and after the stages that fill with `background`, so rotation corners and `fit=contain` padding are desaturated along with the image. |
@@ -26,6 +26,31 @@ Each stage checks the optional deadline (server: 30 s) and returns `TransformErr
 ## Deadline checkpoints
 
 The server adapter injects a 30-second deadline. The pipeline checks elapsed time after decode, rotate, crop, resize, blur, sharpen, grayscale, watermark, and encode. The CLI does not set a deadline.
+
+## Resize
+
+`fit` decides how the image is arranged relative to the requested box. All four modes scale
+with the same Lanczos3 filter; they differ in what the output size ends up being.
+
+| Mode | Scale factor | Output size |
+|---|---|---|
+| `contain` | `min(tw/w, th/h)` | exactly the box, padded with `background` |
+| `inside` | `min(tw/w, th/h)` | the scaled content, no padding |
+| `cover` | `max(tw/w, th/h)` | exactly the box, cropped at `position` |
+| `fill` | per axis | exactly the box |
+
+`contain` and `inside` compute the same scale. The only difference is that `contain` pads the
+result out to the box and `inside` returns it, which is why a 640x427 source bounded by
+200x200 is 200x200 under `contain` and 200x133 under `inside`.
+
+`without_enlargement` is deliberately not part of any fit mode. It clamps the scale factor at
+`1.0` (and, for `fill`, clamps each target axis to the source), which is meaningful for every
+mode and for a single-axis resize. `contain` still reports the full box, because padding out
+to the requested size is what `contain` means; only the content inside stops growing.
+
+`resolved_output_dimensions` is the single place these rules live. Both the resize itself and
+the `MAX_OUTPUT_PIXELS` check read from it, so the limit is always applied to the size that
+actually gets allocated.
 
 ## Rotation
 

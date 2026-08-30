@@ -125,7 +125,7 @@ CDN cache keys must vary by the signed-URL authentication inputs and any transfo
 
 - Authentication: `keyId`, `expires`, `signature`
 - Source: `path` or `url`, `version`
-- Transform: `width`, `height`, `fit`, `position`, `format`, `quality`, `optimize`, `targetQuality`, `background`, `rotate`, `autoOrient`, `stripMetadata`, `preserveExif`, `crop`, `blur`, `sharpen`, `grayscale`, `watermarkUrl`, `watermarkPosition`, `watermarkOpacity`, `watermarkMargin`, `preset`
+- Transform: `width`, `height`, `fit`, `position`, `format`, `quality`, `optimize`, `targetQuality`, `background`, `rotate`, `autoOrient`, `stripMetadata`, `preserveExif`, `crop`, `blur`, `sharpen`, `grayscale`, `withoutEnlargement`, `watermarkUrl`, `watermarkPosition`, `watermarkOpacity`, `watermarkMargin`, `preset`
 
 This ensures that a cached response for one signed URL is not served to requests with different or expired signatures, and different transform options produce separate cache entries.
 

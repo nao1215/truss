@@ -26,6 +26,15 @@ const signedUrl: string = signPublicUrl({
 
 void signedUrl;
 
+// Enlargement policy is independent of the fit mode.
+signPublicUrl({
+  ...baseOptions,
+  transforms: { width: 800, height: 600, fit: "inside", withoutEnlargement: true },
+});
+
+// @ts-expect-error withoutEnlargement is a boolean
+signPublicUrl({ ...baseOptions, transforms: { withoutEnlargement: "yes" } });
+
 // Any whole angle is allowed, including negatives.
 signPublicUrl({ ...baseOptions, transforms: { rotate: 45 } });
 signPublicUrl({ ...baseOptions, transforms: { rotate: -90 } });

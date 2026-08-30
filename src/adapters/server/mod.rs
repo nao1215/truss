@@ -3991,6 +3991,7 @@ mod tests {
                     blur: None,
                     sharpen: None,
                     grayscale: None,
+                    without_enlargement: None,
                 },
             );
             m
@@ -4069,6 +4070,7 @@ mod tests {
                     blur: None,
                     sharpen: None,
                     grayscale: None,
+                    without_enlargement: None,
                 },
             );
             m

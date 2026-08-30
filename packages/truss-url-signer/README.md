@@ -73,7 +73,7 @@ The package exports one function:
 
 - `baseUrl`: externally visible `http` or `https` origin for truss
 - `source`: `{ kind: "path", path, version? }` or `{ kind: "url", url, version? }`
-- `transforms`: public query parameters such as `width`, `height`, `fit`, `format`, `quality`, `optimize`, `targetQuality`, `crop`, `blur`, `sharpen`, and `grayscale`
+- `transforms`: public query parameters such as `width`, `height`, `fit`, `format`, `quality`, `optimize`, `targetQuality`, `crop`, `blur`, `sharpen`, `grayscale`, and `withoutEnlargement`
 - `watermark`: optional `watermarkUrl` parameters
 - `keyId`, `secret`, `expires`
 - `method`: optional canonical HTTP method, default `GET`

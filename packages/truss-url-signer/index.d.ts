@@ -110,6 +110,13 @@ export interface TransformQuery {
   sharpen?: number | undefined;
   /** Desaturate the image to grayscale. */
   grayscale?: boolean | undefined;
+  /**
+   * Never scale an image up to reach the requested size.
+   *
+   * Independent of `fit`: `contain` still pads out to the full requested box, only the
+   * content inside it stops growing.
+   */
+  withoutEnlargement?: boolean | undefined;
 }
 
 /**

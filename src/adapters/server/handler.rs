@@ -290,6 +290,7 @@ pub struct TransformOptionsPayload {
     pub blur: Option<f32>,
     pub sharpen: Option<f32>,
     pub grayscale: Option<bool>,
+    pub without_enlargement: Option<bool>,
 }
 
 impl TransformOptionsPayload {
@@ -314,6 +315,7 @@ impl TransformOptionsPayload {
             blur: overrides.blur.or(self.blur),
             sharpen: overrides.sharpen.or(self.sharpen),
             grayscale: overrides.grayscale.or(self.grayscale),
+            without_enlargement: overrides.without_enlargement.or(self.without_enlargement),
         }
     }
 
@@ -358,6 +360,9 @@ impl TransformOptionsPayload {
             blur: self.blur,
             sharpen: self.sharpen,
             grayscale: self.grayscale.unwrap_or(defaults.grayscale),
+            without_enlargement: self
+                .without_enlargement
+                .unwrap_or(defaults.without_enlargement),
             deadline: defaults.deadline,
         })
     }
@@ -1252,6 +1257,7 @@ pub(super) fn parse_public_get_request(
         blur: parse_optional_float_query(query, "blur")?,
         sharpen: parse_optional_float_query(query, "sharpen")?,
         grayscale: parse_optional_bool_query(query, "grayscale")?,
+        without_enlargement: parse_optional_bool_query(query, "withoutEnlargement")?,
     };
 
     // Resolve preset and merge with per-request overrides.
