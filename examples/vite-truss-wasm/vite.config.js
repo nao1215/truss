@@ -1,14 +1,15 @@
 import { defineConfig } from "vite";
-import topLevelAwait from "vite-plugin-top-level-await";
 
 export default defineConfig({
-  // Vite's default baseline includes Safari 14.0, whose destructuring support
-  // esbuild >= 0.28 flags as broken. esbuild cannot lower the destructuring
-  // emitted by the wasm-bindgen glue, so the build fails. Safari 14.1 is the
-  // first release that ships a usable implementation, and it is also the first
-  // Safari with top-level await, which this example relies on.
+  // `@nao1215/truss-wasm` initializes with a top-level await, so the build target has to be
+  // one where browsers support that natively. These are the first releases that do, and
+  // they are also the floor for the `new URL(..., import.meta.url)` asset resolution the
+  // package uses to locate its `.wasm` binary, so nothing here is arbitrary.
+  //
+  // Targeting anything older means transforming the top-level await with a plugin, which
+  // this example used to do. Dropping that plugin also removes the Rollup dependency it
+  // pulled in, which is what blocked even attempting Vite 8.
   build: {
-    target: ["es2020", "edge88", "firefox78", "chrome87", "safari14.1"],
+    target: ["es2022", "edge89", "firefox89", "chrome89", "safari15"],
   },
-  plugins: [topLevelAwait()],
 });

@@ -5,7 +5,7 @@ Minimal browser consumer for `@nao1215/truss-wasm`.
 This example is intentionally small:
 
 - imports `getCapabilitiesJson`, `inspectImageJson`, and `transformImage`
-- configures Vite with `vite-plugin-top-level-await`
+- sets a Vite build target with native top-level await, so no plugin is needed
 - runs a transform immediately on page load with an inline 1px PNG
 - lets you select your own local image and rerun the same pipeline
 
@@ -40,7 +40,7 @@ node ./scripts/run-wasm-vite-example-runtime-smoke.mjs
 
 - npm installation with `@nao1215/truss-wasm`
 - direct ESM import in a Vite app
-- the minimal Vite setup required for the package wrapper's top-level await
+- the minimal Vite setup for the package wrapper's top-level await
 - runtime capability inspection
 - byte-in / byte-out transform flow without any server
 
@@ -50,10 +50,11 @@ If you are creating your own Vite app from scratch, the minimum setup is:
 npm create vite@latest my-truss-app -- --template vanilla
 cd my-truss-app
 npm install @nao1215/truss-wasm
-npm install -D vite-plugin-top-level-await
 ```
 
-Then add the same plugin setup as [`vite.config.js`](./vite.config.js).
+Then set the same `build.target` as [`vite.config.js`](./vite.config.js). The package
+wrapper initializes with a top-level await, so the target has to be browsers that support
+it natively.
 
 ## Core Import
 

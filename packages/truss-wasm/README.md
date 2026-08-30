@@ -59,21 +59,30 @@ const outputBlob = new Blob([result.bytes], {
 
 ### Vite
 
-Vite needs top-level await support for the package wrapper. Use `vite-plugin-top-level-await`:
+The package wrapper initializes with a top-level await, so the build target has to be one
+where browsers support that natively. No plugin is needed:
 
 ```sh
 npm install @nao1215/truss-wasm
-npm install -D vite-plugin-top-level-await
 ```
 
 ```ts
 import { defineConfig } from "vite";
-import topLevelAwait from "vite-plugin-top-level-await";
 
 export default defineConfig({
-  plugins: [topLevelAwait()],
+  build: {
+    target: ["es2022", "edge89", "firefox89", "chrome89", "safari15"],
+  },
 });
 ```
+
+Those are the first browser releases with native top-level await, and also the floor for
+the `new URL(..., import.meta.url)` asset resolution the wrapper uses to locate the `.wasm`
+binary. An older target needs a plugin such as `vite-plugin-top-level-await` to transform
+the await.
+
+Vite 8 is not supported yet. It builds with Rolldown, which emits the `.wasm` asset but
+leaves no reference to it in the bundle, so the page compiles and then 404s at runtime.
 
 For a runnable example, see `examples/vite-truss-wasm` in the repository.
 

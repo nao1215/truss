@@ -10,7 +10,8 @@
 
 ### Changed
 
-- Dependency updates consolidated from Dependabot: `uuid` 1.24 -> 1.26, `ureq` 3.3 -> 3.4, `http` 1.4.2 -> 1.5.0, and `puppeteer-core` 25.4 -> 25.9 in the Vite example. `vite` stays on the 7.x line: Vite 8 drops the wasm-bindgen `new URL(..., import.meta.url)` asset reference and breaks the WASM example.
+- Dependency updates consolidated from Dependabot: `uuid` 1.24 -> 1.26, `ureq` 3.3 -> 3.4, `http` 1.4.2 -> 1.5.0, and `puppeteer-core` 25.4 -> 25.9 in the Vite example.
+- The Vite example drops `vite-plugin-top-level-await` and raises its build target to browsers with native top-level await, so nothing has to transform it. `vite` stays on the 7.x line: Vite 8 builds with Rolldown, which emits the `.wasm` asset but leaves no reference to it in the bundle, so the page 404s at runtime.
 - Breaking: `Rotation` is a newtype over whole degrees instead of a four-variant enum. `Rotation::Deg90` becomes `Rotation::DEG_90`, `Rotation::from_degrees(i32)` normalizes any integer, and `quarter_turns()` and `is_identity()` replace matching on the variants. `as_degrees()` still returns `u16`, so the cache key and the signed-URL canonical string are unchanged for the angles that were already expressible. In `@nao1215/truss-url-signer` the `QuarterTurn` type is replaced by `RotationDegrees`, and the signer normalizes an angle into `0`-`359` before signing, because the signature covers the query string as sent.
 - An input truss can read but cannot process now exits 3 (input error) from the CLI instead of 4 (transform error), matching the documented exit-code table. The only case that reaches this in practice is an animated GIF; unreadable bytes already exited 3.
 
