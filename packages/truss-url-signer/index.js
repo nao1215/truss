@@ -142,6 +142,10 @@ function appendTransformEntries(entries, transforms) {
   if (transforms.grayscale === true) {
     entries.push(["grayscale", "true"]);
   }
+
+  if (transforms.withoutEnlargement === true) {
+    entries.push(["withoutEnlargement", "true"]);
+  }
 }
 
 function appendWatermarkEntries(entries, watermark) {
@@ -267,6 +271,10 @@ function normalizeTransforms(transforms) {
   const blur = normalizeOptionalSigma("blur", transforms.blur);
   const sharpen = normalizeOptionalSigma("sharpen", transforms.sharpen);
   const grayscale = normalizeOptionalBoolean("grayscale", transforms.grayscale);
+  const withoutEnlargement = normalizeOptionalBoolean(
+    "withoutEnlargement",
+    transforms.withoutEnlargement,
+  );
 
   validateTransformMatrix({
     width,
@@ -299,6 +307,7 @@ function normalizeTransforms(transforms) {
     blur,
     sharpen,
     grayscale,
+    withoutEnlargement,
   };
 }
 

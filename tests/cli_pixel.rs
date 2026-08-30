@@ -356,13 +356,13 @@ fn keep_metadata_webp_preserves_exif_without_warning() {
 }
 
 // ---------------------------------------------------------------------------
-// Test 5: fit=inside never upscales
+// Test 5: fit=inside adds no padding, and enlargement is a separate switch
 // ---------------------------------------------------------------------------
 
-#[test]
-fn fit_inside_does_not_upscale() {
-    let input_path = temp_file_path("inside-noup-in").with_extension("png");
-    let output_path = temp_file_path("inside-noup-out").with_extension("png");
+/// Runs `truss convert` on a 2x2 green PNG into a 4x4 box and returns the output pixels.
+fn resize_green_2x2_into_4x4(label: &str, extra: &[&str]) -> image::RgbaImage {
+    let input_path = temp_file_path(&format!("{label}-in")).with_extension("png");
+    let output_path = temp_file_path(&format!("{label}-out")).with_extension("png");
     fs::write(&input_path, create_solid_green_2x2_png()).expect("write input");
 
     let output = Command::new(env!("CARGO_BIN_EXE_truss"))
@@ -373,34 +373,69 @@ fn fit_inside_does_not_upscale() {
         .arg("4")
         .arg("--height")
         .arg("4")
-        .arg("--fit")
-        .arg("inside")
         .arg("--background")
         .arg("ff0000")
         .arg("--format")
         .arg("png")
+        .args(extra)
         .output()
         .expect("run truss convert");
 
     assert!(output.status.success(), "{output:?}");
-
     let result = image::open(&output_path).expect("open output").to_rgba8();
 
     let _ = fs::remove_file(&input_path);
     let _ = fs::remove_file(&output_path);
+    result
+}
 
-    // fit=inside pads to target box but does not upscale the content.
-    // Output is 4x4 with 2x2 green content centered and red padding.
+#[test]
+fn fit_inside_adds_no_padding() {
+    // A 2x2 square in a 4x4 box has the same aspect ratio, so inside fills it exactly and
+    // there is nothing to pad. The red background must not appear anywhere.
+    let result = resize_green_2x2_into_4x4("inside-nopad", &["--fit", "inside"]);
+
+    assert_eq!(result.dimensions(), (4, 4));
+    for (x, y, pixel) in result.enumerate_pixels() {
+        assert!(
+            pixel[1] > 200 && pixel[0] < 50,
+            "pixel ({x},{y}) should be green content, not padding: {pixel:?}"
+        );
+    }
+}
+
+#[test]
+fn fit_inside_with_without_enlargement_keeps_the_source_size() {
+    // Enlargement is now its own switch rather than part of the fit mode, and turning it
+    // off returns the source size rather than a padded box.
+    let result =
+        resize_green_2x2_into_4x4("inside-noup", &["--fit", "inside", "--without-enlargement"]);
+
+    assert_eq!(result.dimensions(), (2, 2));
+    let pixel = result.get_pixel(0, 0);
+    assert!(
+        pixel[1] > 200 && pixel[0] < 50,
+        "expected untouched green content, got {pixel:?}"
+    );
+}
+
+#[test]
+fn fit_contain_with_without_enlargement_pads_around_the_source() {
+    // Contain still reports the requested box, so this is the combination that produces the
+    // padded 4x4 with 2x2 content that `inside` used to give on its own.
+    let result = resize_green_2x2_into_4x4(
+        "contain-noup",
+        &["--fit", "contain", "--without-enlargement"],
+    );
+
     assert_eq!(result.dimensions(), (4, 4));
 
-    // Corner pixel (0,0) should be red padding, not green.
     let corner = result.get_pixel(0, 0);
     assert!(
         corner[0] > 200 && corner[1] < 50 && corner[2] < 50,
         "expected red padding at corner (0,0), got {corner:?}"
     );
 
-    // Center pixel should be green (content was not upscaled, placed at center).
     let center = result.get_pixel(1, 1);
     assert!(
         center[1] > 200 && center[0] < 50 && center[2] < 50,

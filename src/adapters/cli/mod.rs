@@ -109,11 +109,12 @@ OPTIONS:
       --url <URL>          Fetch input from an HTTP(S) URL
       --width <PX>         Target width in pixels
       --height <PX>        Target height in pixels
-      --fit <MODE>         How to fit into target dimensions
-                           contain: scale down to fit entirely (default)
-                           cover:   scale to fill, cropping excess
-                           fill:    stretch to exact dimensions
-                           inside:  like contain, but never upscale
+      --fit <MODE>         How to fit into target dimensions (requires --width and --height)
+                           contain: scale to fit, then pad to the exact box (default)
+                           cover:   scale to fill the box, cropping the excess
+                           fill:    stretch each axis to the box, ignoring aspect ratio
+                           inside:  scale to fit, no padding; the output is at most the
+                                    box and usually smaller on one axis
       --position <POS>     Crop anchor for cover mode (default: center)
                            center, top, right, bottom, left,
                            top-left, top-right, bottom-left, bottom-right
@@ -141,6 +142,10 @@ OPTIONS:
       --sharpen <SIGMA>    Sharpen sigma (0.1-100.0; raster-only, not supported for SVG inputs)
       --grayscale          Desaturate the image to grayscale (applied after resize, blur,
                            and sharpen, and before the watermark)
+      --without-enlargement
+                           Never scale an image up. A source already within the requested
+                           size keeps that size. Combines with any --fit; contain still
+                           pads out to the full box
       --watermark <FILE>   Watermark image to composite onto the output (raster-only, not supported for SVG inputs)
       --watermark-position <POS>  Watermark placement (default: bottom-right; raster-only)
                            center, top, right, bottom, left,
@@ -334,7 +339,7 @@ OPTIONAL:
       --width, --height, --fit, --position, --format, --quality,
       --optimize, --target-quality, --background, --rotate, --auto-orient, --no-auto-orient,
       --strip-metadata, --keep-metadata, --preserve-exif, --crop, --blur, --sharpen,
-      --grayscale
+      --grayscale, --without-enlargement
       --watermark-url <URL>          Watermark image URL to embed in the signed URL
       --watermark-position <POS>     Watermark placement (default: bottom-right)
       --watermark-opacity <1-100>    Watermark opacity (default: 50)
@@ -507,6 +512,9 @@ struct ClapConvertArgs {
     /// Desaturate the image to grayscale
     #[arg(long)]
     grayscale: bool,
+    /// Never scale an image up to reach the requested size
+    #[arg(long)]
+    without_enlargement: bool,
     /// Watermark image file path
     #[arg(long)]
     watermark: Option<PathBuf>,
@@ -695,6 +703,9 @@ struct ClapSignArgs {
     /// Desaturate the image to grayscale
     #[arg(long)]
     grayscale: bool,
+    /// Never scale an image up to reach the requested size
+    #[arg(long)]
+    without_enlargement: bool,
     /// Watermark image URL to composite onto the output
     #[arg(long, value_parser = parse_url_value)]
     watermark_url: Option<String>,
@@ -1252,6 +1263,7 @@ struct TransformFields {
     blur: Option<f32>,
     sharpen: Option<f32>,
     grayscale: bool,
+    without_enlargement: bool,
 }
 
 impl TransformFields {
@@ -1291,6 +1303,7 @@ impl TransformFields {
             blur: self.blur,
             sharpen: self.sharpen,
             grayscale: self.grayscale,
+            without_enlargement: self.without_enlargement,
             deadline: None,
         })
     }

@@ -59,6 +59,8 @@ pub struct WasmTransformOptions {
     pub sharpen: Option<f32>,
     /// Whether the image should be desaturated to grayscale.
     pub grayscale: Option<bool>,
+    /// Whether a source smaller than the requested size may be scaled up.
+    pub without_enlargement: Option<bool>,
 }
 
 /// Build-time capabilities exposed by the WASM adapter.
@@ -260,6 +262,7 @@ fn parse_wasm_options(options: WasmTransformOptions) -> Result<TransformOptions,
         blur: options.blur,
         sharpen: options.sharpen,
         grayscale: options.grayscale.unwrap_or(false),
+        without_enlargement: options.without_enlargement.unwrap_or(false),
         deadline: None,
     })
 }

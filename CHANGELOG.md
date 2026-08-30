@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- Breaking: `fit=inside` no longer pads ([#312](https://github.com/nao1215/truss/issues/312)). It now means what the same name means in sharp and imgproxy: scale to fit inside the requested box, preserve the aspect ratio, and add no padding, so the output is at most the requested size and usually smaller on one axis. A 640x427 source bounded by 200x200 is now 200x133 rather than a 200x200 letterbox. `contain` is unchanged and remains the mode that pads out to the exact box; `cover` and `fill` are unchanged.
+- Breaking: `inside` no longer implies "never enlarge". That was a second, unrelated policy folded into a fit mode, and it is now `--without-enlargement` on the CLI, `withoutEnlargement` in the HTTP API, the WASM options object, and `@nao1215/truss-url-signer`. It combines with every fit mode and with a single-axis resize, and it requires `width` or `height`. `contain` still reports the full requested box when it is set; only the content inside stops growing. To keep the old `inside` behavior, ask for `--fit contain --without-enlargement`.
+
+### Added
+
+- `TransformOptions::without_enlargement`, and `withoutEnlargement` as a query parameter, a JSON body field, a WASM option, and a signer transform. It participates in the cache key and in the signed-URL canonical string.
+
 ## v0.13.0
 
 ### Added

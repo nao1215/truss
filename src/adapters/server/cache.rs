@@ -550,6 +550,9 @@ pub(super) fn compute_cache_key(
     if options.grayscale {
         push_param(&mut canonical, "grayscale", "true");
     }
+    if options.without_enlargement {
+        push_param(&mut canonical, "withoutEnlargement", "true");
+    }
     if let Some(q) = options.quality {
         let buf = q.to_string();
         push_param(&mut canonical, "quality", &buf);
@@ -711,6 +714,26 @@ mod tests {
         assert_ne!(
             key_a, key_b,
             "blur=0.11 and blur=0.14 must produce different cache keys"
+        );
+    }
+
+    #[test]
+    fn cache_key_differs_by_without_enlargement() {
+        // The flag changes the output size for a small source, so the two variants cannot
+        // share a cache entry.
+        let base = TransformOptions {
+            width: Some(200),
+            height: Some(200),
+            ..TransformOptions::default()
+        };
+        let clamped = TransformOptions {
+            without_enlargement: true,
+            ..base.clone()
+        };
+
+        assert_ne!(
+            compute_cache_key("img.png", &base, None, None),
+            compute_cache_key("img.png", &clamped, None, None)
         );
     }
 

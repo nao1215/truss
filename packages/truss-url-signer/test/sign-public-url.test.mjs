@@ -175,6 +175,51 @@ test("normalizes any whole rotation into the signed 0..359 range", () => {
   assert.equal(rotateParam(0), null);
 });
 
+test("emits withoutEnlargement only when it is requested", () => {
+  const sign = (transforms) =>
+    new URL(
+      signPublicUrl({
+        baseUrl: "https://images.example.com",
+        source: { kind: "path", path: "image.png" },
+        transforms: { width: 200, height: 200, ...transforms },
+        keyId: "public-demo",
+        secret: "secret-value",
+        expires: 1900000000,
+      }),
+    );
+
+  assert.equal(
+    sign({ withoutEnlargement: true }).searchParams.get("withoutEnlargement"),
+    "true",
+  );
+  // false is the default, so it must stay out of the canonical query entirely.
+  assert.equal(
+    sign({ withoutEnlargement: false }).searchParams.get("withoutEnlargement"),
+    null,
+  );
+  assert.equal(sign({}).searchParams.get("withoutEnlargement"), null);
+  // It is independent of fit, so every mode can carry it.
+  for (const fit of ["contain", "cover", "fill", "inside"]) {
+    assert.equal(
+      sign({ fit, withoutEnlargement: true }).searchParams.get("withoutEnlargement"),
+      "true",
+    );
+  }
+
+  assert.throws(
+    () =>
+      signPublicUrl({
+        baseUrl: "https://images.example.com",
+        source: { kind: "path", path: "image.png" },
+        transforms: { width: 200, withoutEnlargement: "yes" },
+        keyId: "public-demo",
+        secret: "secret-value",
+        expires: 1900000000,
+      }),
+    /withoutEnlargement/,
+  );
+});
+
 test("rejects invalid base URLs and expires values", () => {
   assert.throws(
     () =>

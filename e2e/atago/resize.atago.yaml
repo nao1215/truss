@@ -1,0 +1,228 @@
+# Fit modes and the enlargement policy, for https://github.com/nao1215/truss/issues/312.
+#
+# `inside` used to mean "contain without enlargement", which conflated two independent
+# things: how an image is arranged relative to the box, and whether it may be scaled up to
+# reach it. It now means what the same name means in sharp and imgproxy — bound the image by
+# the box and add no padding — and enlargement is `--without-enlargement`, which combines
+# with every fit mode.
+#
+# The committed testdata/sample.png is 16x16, so it is the small source for the enlargement
+# cases. The landscape cases build a 32x16 image in the scenario, which bounded by 16x16
+# gives 16x8 under inside and 16x16 under contain: the whole difference between the modes.
+#
+# Run with: e2e/run.sh --filter resize
+version: "1"
+
+suite:
+  name: truss resize fit modes
+
+scenarios:
+  - name: inside bounds a landscape image without padding it
+    steps:
+      - fixture:
+          file: in.png
+          from: testdata/sample.png
+      # 32x16 from the 16x16 fixture, so the aspect ratio is 2:1.
+      - run:
+          command: truss convert in.png -o wide.png --width 32 --height 16 --fit fill
+      - assert:
+          exit_code: 0
+          image:
+            path: wide.png
+            width: 32
+            height: 16
+      - run:
+          command: truss convert wide.png -o inside.png --width 16 --height 16 --fit inside
+      - assert:
+          exit_code: 0
+          image:
+            path: inside.png
+            format: png
+            width: 16
+            height: 8
+
+  - name: contain pads the same result out to the exact box
+    steps:
+      - fixture:
+          file: in.png
+          from: testdata/sample.png
+      - run:
+          command: truss convert in.png -o wide.png --width 32 --height 16 --fit fill
+      - assert:
+          exit_code: 0
+      # Same source, same box, same scale. Only the padding differs, and the fixture is
+      # opaque, so the transparent bars contain adds are visible as an alpha channel.
+      - run:
+          command: truss convert wide.png -o contain.png --width 16 --height 16 --fit contain
+      - assert:
+          exit_code: 0
+          image:
+            path: contain.png
+            format: png
+            width: 16
+            height: 16
+            alpha: true
+      - run:
+          command: truss convert wide.png -o inside.png --width 16 --height 16 --fit inside
+      - assert:
+          exit_code: 0
+          image:
+            path: inside.png
+            alpha: false
+
+  - name: inside keeps a portrait image within both bounds
+    steps:
+      - fixture:
+          file: in.png
+          from: testdata/sample.png
+      - run:
+          command: truss convert in.png -o tall.png --width 16 --height 48 --fit fill
+      - assert:
+          exit_code: 0
+      - run:
+          command: truss convert tall.png -o inside.png --width 24 --height 24 --fit inside
+      - assert:
+          exit_code: 0
+          image:
+            path: inside.png
+            width: 8
+            height: 24
+            max_width: 24
+            max_height: 24
+
+  - name: cover and fill still produce exactly the requested box
+    steps:
+      - fixture:
+          file: in.png
+          from: testdata/sample.png
+      - run:
+          command: truss convert in.png -o wide.png --width 32 --height 16 --fit fill
+      - assert:
+          exit_code: 0
+      - run:
+          command: truss convert wide.png -o cover.png --width 16 --height 16 --fit cover
+      - assert:
+          exit_code: 0
+          image:
+            path: cover.png
+            width: 16
+            height: 16
+      - run:
+          command: truss convert wide.png -o fill.png --width 16 --height 16 --fit fill
+      - assert:
+          exit_code: 0
+          image:
+            path: fill.png
+            width: 16
+            height: 16
+
+  - name: a smaller image is enlarged by default
+    steps:
+      - fixture:
+          file: in.png
+          from: testdata/sample.png
+      - run:
+          command: truss convert in.png -o grown.png --width 64 --height 64 --fit inside
+      - assert:
+          exit_code: 0
+          image:
+            path: grown.png
+            width: 64
+            height: 64
+
+  - name: --without-enlargement leaves a smaller image alone
+    steps:
+      - fixture:
+          file: in.png
+          from: testdata/sample.png
+      - run:
+          command: truss convert in.png -o kept.png --width 64 --height 64 --fit inside --without-enlargement
+      - assert:
+          exit_code: 0
+          image:
+            path: kept.png
+            width: 16
+            height: 16
+      # Not resizing at all means the pixels are untouched, not resampled to the same size.
+      - assert:
+          image:
+            path: kept.png
+            similar_to: testdata/sample.png
+
+  - name: --without-enlargement still shrinks an image that is too large
+    steps:
+      - fixture:
+          file: in.png
+          from: testdata/sample.png
+      - run:
+          command: truss convert in.png -o small.png --width 8 --height 8 --fit inside --without-enlargement
+      - assert:
+          exit_code: 0
+          image:
+            path: small.png
+            width: 8
+            height: 8
+
+  - name: --without-enlargement combines with contain, which still fills the box
+    steps:
+      - fixture:
+          file: in.png
+          from: testdata/sample.png
+      # Contain reports the requested box whatever the enlargement policy says; only the
+      # content inside stops growing, so the rest of the canvas is padding.
+      - run:
+          command: truss convert in.png -o padded.png --width 64 --height 64 --fit contain --without-enlargement
+      - assert:
+          exit_code: 0
+          image:
+            path: padded.png
+            width: 64
+            height: 64
+            alpha: true
+
+  - name: --without-enlargement applies to a single-axis resize
+    steps:
+      - fixture:
+          file: in.png
+          from: testdata/sample.png
+      - run:
+          command: truss convert in.png -o kept.png --width 64 --without-enlargement
+      - assert:
+          exit_code: 0
+          image:
+            path: kept.png
+            width: 16
+            height: 16
+      - run:
+          command: truss convert in.png -o grown.png --width 64
+      - assert:
+          exit_code: 0
+          image:
+            path: grown.png
+            width: 64
+            height: 64
+
+  - name: --without-enlargement without any resize is rejected
+    steps:
+      # Silently ignoring a flag the caller clearly meant to have an effect is worse than
+      # saying it has nothing to act on.
+      - fixture:
+          file: in.png
+          from: testdata/sample.png
+      - run:
+          command: truss convert in.png -o out.png --without-enlargement
+      - assert:
+          exit_code: 1
+          stderr:
+            contains: "without_enlargement requires width or height"
+
+  - name: convert help documents the corrected fit modes
+    steps:
+      - run:
+          command: truss help convert
+      - assert:
+          exit_code: 0
+          stdout:
+            contains:
+              - "--without-enlargement"
+              - "inside:  scale to fit, no padding"

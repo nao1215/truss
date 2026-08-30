@@ -94,6 +94,7 @@ paths:
         - $ref: '#/components/parameters/Blur'
         - $ref: '#/components/parameters/Sharpen'
         - $ref: '#/components/parameters/Grayscale'
+        - $ref: '#/components/parameters/WithoutEnlargement'
         - $ref: '#/components/parameters/WatermarkUrl'
         - $ref: '#/components/parameters/WatermarkPosition'
         - $ref: '#/components/parameters/WatermarkOpacity'
@@ -163,6 +164,7 @@ paths:
         - $ref: '#/components/parameters/Blur'
         - $ref: '#/components/parameters/Sharpen'
         - $ref: '#/components/parameters/Grayscale'
+        - $ref: '#/components/parameters/WithoutEnlargement'
         - $ref: '#/components/parameters/WatermarkUrl'
         - $ref: '#/components/parameters/WatermarkPosition'
         - $ref: '#/components/parameters/WatermarkOpacity'
@@ -251,6 +253,7 @@ paths:
         - $ref: '#/components/parameters/Blur'
         - $ref: '#/components/parameters/Sharpen'
         - $ref: '#/components/parameters/Grayscale'
+        - $ref: '#/components/parameters/WithoutEnlargement'
         - $ref: '#/components/parameters/WatermarkUrl'
         - $ref: '#/components/parameters/WatermarkPosition'
         - $ref: '#/components/parameters/WatermarkOpacity'
@@ -320,6 +323,7 @@ paths:
         - $ref: '#/components/parameters/Blur'
         - $ref: '#/components/parameters/Sharpen'
         - $ref: '#/components/parameters/Grayscale'
+        - $ref: '#/components/parameters/WithoutEnlargement'
         - $ref: '#/components/parameters/WatermarkUrl'
         - $ref: '#/components/parameters/WatermarkPosition'
         - $ref: '#/components/parameters/WatermarkOpacity'
@@ -895,10 +899,16 @@ components:
         Resize strategy. Only meaningful when both width and height are set.
         Defaults to `contain`.
 
-        - `contain`: fit inside the box without cropping
-        - `cover`: fill the box, cropping excess
-        - `fill`: stretch to the exact box
-        - `inside`: like contain, but never upscale
+        - `contain`: fit inside the box, then pad to the exact box
+        - `cover`: fill the box, cropping the excess
+        - `fill`: stretch each axis to the box, ignoring aspect ratio
+        - `inside`: fit inside the box with no padding; the output is at most the
+          requested size and usually smaller on one axis
+
+        `contain` and `inside` scale identically and differ only in the padding, so a
+        640x427 source in a 200x200 box is 200x200 under `contain` and 200x133 under
+        `inside`. Whether a smaller source may be scaled up is `withoutEnlargement`,
+        not part of any fit mode.
       schema:
         type: string
         enum: [contain, cover, fill, inside]
@@ -1090,6 +1100,20 @@ components:
         minimum: 0.1
         maximum: 100.0
       example: 2.0
+    WithoutEnlargement:
+      name: withoutEnlargement
+      in: query
+      required: false
+      description: |
+        Never scale an image up to reach the requested size. A source already within the
+        requested bounds keeps its own size.
+        Independent of `fit`, and meaningful for a single-axis resize too. `contain` still
+        pads out to the full requested box; only the content inside it stops growing.
+        Requires `width` or `height`.
+      schema:
+        type: boolean
+        default: false
+      example: true
     Grayscale:
       name: grayscale
       in: query
@@ -1256,7 +1280,11 @@ components:
           type: string
           enum: [contain, cover, fill, inside]
           default: contain
-          description: Resize strategy used when both width and height are present.
+          description: >-
+            Resize strategy used when both width and height are present. `contain` and
+            `inside` scale identically; `contain` pads the result out to the exact box and
+            `inside` returns it unpadded, so `inside` output is usually smaller than the
+            requested size on one axis.
         position:
           type: string
           enum: [center, top, right, bottom, left, top-left, top-right, bottom-left, bottom-right]
@@ -1334,6 +1362,13 @@ components:
             Sharpen sigma (0.1–100.0). Higher values produce stronger sharpening.
             Not supported for SVG inputs; the server will reject the request
             with an error if sharpen is specified for an SVG source.
+        withoutEnlargement:
+          type: boolean
+          default: false
+          description: >-
+            Never scale an image up to reach the requested size. Independent of `fit` and
+            meaningful for a single-axis resize too; `contain` still pads out to the full
+            box. Requires width or height.
         grayscale:
           type: boolean
           default: false

@@ -45,6 +45,7 @@ const elements = {
   crop: document.querySelector("#crop"),
   autoOrient: document.querySelector("#auto-orient"),
   grayscale: document.querySelector("#grayscale"),
+  withoutEnlargement: document.querySelector("#without-enlargement"),
   transformButton: document.querySelector("#transform-button"),
   downloadLink: document.querySelector("#download-link"),
   downloadNote: document.querySelector("#download-note"),
@@ -407,6 +408,12 @@ function collectOptions() {
     blur: parseSigma(elements.blurNumber.value),
     sharpen: parseSigma(elements.sharpenNumber.value),
     grayscale: elements.grayscale.checked || null,
+    // Only send it when a resize is actually requested: truss rejects the option on its
+    // own. A single axis is enough, unlike fit and position, which need both.
+    withoutEnlargement:
+      elements.withoutEnlargement.checked && (width !== null || height !== null)
+        ? true
+        : null,
   };
 }
 
