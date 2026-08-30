@@ -12,6 +12,9 @@ use std::collections::BTreeMap;
 use subtle::ConstantTimeEq;
 use url::Url;
 
+/// The number of hex characters in a signed URL signature: HMAC-SHA256 is 32 bytes.
+const SIGNATURE_HEX_LENGTH: usize = 64;
+
 /// Extracts the Bearer token from an `Authorization` header value.
 ///
 /// Returns `Some(token)` when the value starts with `Bearer ` (case-insensitive),
@@ -96,6 +99,11 @@ pub(super) fn authorize_signed_request(
         canonical_query
     );
 
+    if !is_canonical_signature(signature) {
+        return Err(signed_url_unauthorized_response(
+            "signed URL is invalid or expired",
+        ));
+    }
     let provided_signature = hex::decode(signature)
         .map_err(|_| signed_url_unauthorized_response("signed URL is invalid or expired"))?;
     let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).map_err(|error| {
@@ -106,6 +114,20 @@ pub(super) fn authorize_signed_request(
     mac.update(canonical.as_bytes());
     mac.verify_slice(&provided_signature)
         .map_err(|_| signed_url_unauthorized_response("signed URL is invalid or expired"))
+}
+
+/// Reports whether `signature` is exactly the encoding the signers emit.
+///
+/// `docs/signed-url-spec.md` fixes the encoding at 64 lowercase hex characters, but
+/// `hex::decode` accepts any even-length input in either case. Left unchecked, one signed URL
+/// verifies under 2^64 distinct URL strings, each of which misses a CDN cache and reaches the
+/// origin for a full transform. Constraining the text is what makes the URL the single
+/// cacheable value it is meant to be.
+fn is_canonical_signature(signature: &str) -> bool {
+    signature.len() == SIGNATURE_HEX_LENGTH
+        && signature
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || byte.is_ascii_lowercase() && byte <= b'f')
 }
 
 pub(super) fn canonical_request_authority(
@@ -594,6 +616,86 @@ mod tests {
         let query = parse_query_params(&request).expect("parse fixed head vector");
 
         assert!(authorize_signed_request(&request, &query, &config).is_ok());
+    }
+
+    /// Builds a request whose signature is valid, with `mangle` applied to it first.
+    ///
+    /// Returns the result of authorizing it, so a caller only has to say what it did to the
+    /// signature text and what it expects back.
+    fn authorize_with_mangled_signature(
+        mangle: impl Fn(&str) -> String,
+    ) -> Result<(), HttpResponse> {
+        let secret = "test-secret";
+        let mut config = test_config(None).with_signed_url_credentials("k1", secret);
+        config.public_base_url = Some("https://example.com".to_string());
+
+        let path = "/images/by-path";
+        let mut params = BTreeMap::new();
+        params.insert("keyId".to_string(), "k1".to_string());
+        params.insert("expires".to_string(), "9999999999".to_string());
+        params.insert("path".to_string(), "photo.jpg".to_string());
+
+        let canonical_q = canonical_query_without_signature(&params);
+        let canonical = format!("GET\nexample.com\n{path}\n{canonical_q}");
+        let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
+        mac.update(canonical.as_bytes());
+        let signature = mangle(&hex::encode(mac.finalize().into_bytes()));
+
+        params.insert("signature".to_string(), signature.clone());
+        let request = test_request(
+            "GET",
+            &format!("{path}?keyId=k1&expires=9999999999&path=photo.jpg&signature={signature}"),
+            vec![("host", "example.com")],
+        );
+
+        authorize_signed_request(&request, &params, &config)
+    }
+
+    /// The spec fixes the encoding at lowercase hex, so any other case is a different URL
+    /// and is rejected. Accepting them turns one signed URL into 2^64 cacheable ones.
+    #[test]
+    fn test_signed_request_rejects_uppercase_signature() {
+        let error = authorize_with_mangled_signature(str::to_ascii_uppercase)
+            .expect_err("an uppercased signature is not the canonical encoding");
+        assert_eq!(error.status, "401 Unauthorized");
+    }
+
+    #[test]
+    fn test_signed_request_rejects_mixed_case_signature() {
+        let error = authorize_with_mangled_signature(|signature| {
+            signature
+                .char_indices()
+                .map(|(index, character)| {
+                    if index % 2 == 0 {
+                        character.to_ascii_uppercase()
+                    } else {
+                        character
+                    }
+                })
+                .collect()
+        })
+        .expect_err("a mixed-case signature is not the canonical encoding");
+        assert_eq!(error.status, "401 Unauthorized");
+    }
+
+    #[test]
+    fn test_signed_request_accepts_the_lowercase_signature() {
+        authorize_with_mangled_signature(str::to_string).expect("the canonical encoding verifies");
+    }
+
+    /// The length is checked at parse time rather than left to the MAC comparison: an
+    /// even-length prefix decodes cleanly and would otherwise get that far.
+    #[test]
+    fn test_signed_request_rejects_a_signature_of_the_wrong_length() {
+        for mangle in [
+            |signature: &str| signature[..62].to_string(),
+            |signature: &str| format!("{signature}00"),
+            |_: &str| String::new(),
+        ] {
+            let error = authorize_with_mangled_signature(mangle)
+                .expect_err("only 64 hex characters is a signature");
+            assert_eq!(error.status, "401 Unauthorized");
+        }
     }
 
     #[test]

@@ -115,6 +115,7 @@ pub fn transform_svg(request: TransformRequest) -> Result<TransformResult, Trans
                     frame_count: 1,
                     duration: None,
                     has_alpha: Some(true),
+                    orientation: None,
                 },
             ),
             warnings: vec![],
@@ -164,6 +165,15 @@ pub fn transform_svg(request: TransformRequest) -> Result<TransformResult, Trans
         rgba_image
     };
 
+    // Formats without an alpha channel need the transparency resolved before the encoder
+    // sees it. The raster codec owns that rule too, so both paths flatten the same way.
+    let rgba_image = crate::codecs::raster::flatten_for_opaque_output(
+        image::DynamicImage::ImageRgba8(rgba_image),
+        normalized.options.background,
+        normalized.options.format,
+    )
+    .into_rgba8();
+
     let (out_width, out_height) = (rgba_image.width(), rgba_image.height());
 
     let bytes = encode_raster_output(
@@ -187,7 +197,8 @@ pub fn transform_svg(request: TransformRequest) -> Result<TransformResult, Trans
                 height: Some(out_height),
                 frame_count: 1,
                 duration: None,
-                has_alpha: Some(format != MediaType::Jpeg),
+                has_alpha: Some(crate::codecs::raster::format_carries_alpha(format)),
+                orientation: None,
             },
         ),
         warnings: vec![],
@@ -368,10 +379,26 @@ fn local_name(name: &[u8]) -> String {
 ///
 /// Blocks elements that can execute scripts, load external content, or embed
 /// arbitrary HTML/plugin content.
+///
+/// The SMIL animation elements are here because they set attributes at render time:
+/// `<animate attributeName="href" to="javascript:...">` restores exactly what the attribute
+/// filter removes, and does so through `to`, `values`, `from`, or `by` rather than through
+/// `href`. Dropping the elements is what makes the attribute rules hold; a sanitizing image
+/// pipeline has no use for declarative animation. `handler` is SVG Tiny's script container.
 fn is_forbidden_element(local_name: &str) -> bool {
     matches!(
         local_name,
-        "script" | "foreignobject" | "iframe" | "embed" | "object"
+        "script"
+            | "foreignobject"
+            | "iframe"
+            | "embed"
+            | "object"
+            | "animate"
+            | "set"
+            | "animatetransform"
+            | "animatemotion"
+            | "animatecolor"
+            | "handler"
     )
 }
 
@@ -785,6 +812,71 @@ mod tests {
     }
 
     #[test]
+    fn sanitize_removes_animation_elements() {
+        for element in ["animate", "set", "animateTransform", "animateMotion"] {
+            let svg = format!(
+                "<svg xmlns=\"http://www.w3.org/2000/svg\"><a><{element} attributeName=\"href\" to=\"#a\"/><text>x</text></a></svg>"
+            );
+            let result = sanitize_svg(svg.as_bytes()).unwrap();
+            assert!(
+                !result
+                    .to_ascii_lowercase()
+                    .contains(&element.to_ascii_lowercase()),
+                "<{element}> should be removed, got: {result}"
+            );
+            assert!(result.contains("<text"), "<text> should be preserved");
+        }
+    }
+
+    /// SMIL sets attributes at render time, so a value the attribute filter would reject
+    /// must not survive by arriving through `to`, `values`, `from`, or `by`.
+    #[test]
+    fn sanitize_removes_javascript_uri_in_animation_values() {
+        for attribute in ["to", "values", "from", "by"] {
+            let svg = format!(
+                "<svg xmlns=\"http://www.w3.org/2000/svg\"><a><animate attributeName=\"href\" {attribute}=\"javascript:alert(1)\" begin=\"0s\"/><text>click</text></a></svg>"
+            );
+            let result = sanitize_svg(svg.as_bytes()).unwrap();
+            assert!(
+                !result.contains("javascript:"),
+                "javascript: survived through {attribute}: {result}"
+            );
+        }
+    }
+
+    /// The same mechanism restores external references, which the sanitizer also removes.
+    #[test]
+    fn sanitize_removes_external_reference_in_animation_values() {
+        let svg = br#"<svg xmlns="http://www.w3.org/2000/svg"><image x="0" y="0" width="100" height="100"><set attributeName="href" to="https://evil.example.com/track.png" begin="0s"/></image></svg>"#;
+        let result = sanitize_svg(svg).unwrap();
+        assert!(
+            !result.contains("evil.example.com"),
+            "external reference survived: {result}"
+        );
+    }
+
+    /// `xlink:href` as the animated attribute name is the same attack.
+    #[test]
+    fn sanitize_removes_animation_targeting_xlink_href() {
+        let svg = br#"<svg xmlns="http://www.w3.org/2000/svg"><a><set attributeName="xlink:href" to="javascript:alert(1)"/><text>x</text></a></svg>"#;
+        let result = sanitize_svg(svg).unwrap();
+        assert!(
+            !result.contains("javascript:"),
+            "javascript: survived: {result}"
+        );
+    }
+
+    /// `<handler>` is SVG Tiny's script container.
+    #[test]
+    fn sanitize_removes_handler_element() {
+        let svg = br#"<svg xmlns="http://www.w3.org/2000/svg"><handler type="text/javascript">alert(1)</handler><rect/></svg>"#;
+        let result = sanitize_svg(svg).unwrap();
+        assert!(!result.contains("handler"), "handler survived: {result}");
+        assert!(!result.contains("alert"), "script body survived: {result}");
+        assert!(result.contains("<rect"), "rect should be preserved");
+    }
+
+    #[test]
     fn sanitize_removes_script_element() {
         let result = sanitize_svg(&svg_with_script()).unwrap();
         assert!(
@@ -1185,6 +1277,7 @@ mod tests {
                 frame_count: 1,
                 duration: None,
                 has_alpha: Some(true),
+                orientation: None,
             },
         );
         let err = transform_svg(TransformRequest::new(

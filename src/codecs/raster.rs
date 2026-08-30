@@ -6,7 +6,6 @@ use crate::core::{
     default_lossy_target_quality,
 };
 use crate::{RawArtifact, Rgba8, sniff_artifact};
-use exif::{In, Reader, Tag, Value};
 #[cfg(feature = "avif")]
 use image::codecs::avif::AvifEncoder;
 use image::codecs::jpeg::JpegDecoder;
@@ -19,8 +18,8 @@ use image::codecs::webp::WebPEncoder;
 use image::imageops::{self, FilterType};
 use image::metadata::Orientation;
 use image::{
-    ColorType, DynamicImage, GenericImageView, ImageDecoder, ImageEncoder, ImageFormat, Rgba,
-    RgbaImage,
+    ColorType, DynamicImage, GenericImageView, ImageDecoder, ImageEncoder, ImageFormat, Pixel,
+    Rgba, RgbaImage,
 };
 #[cfg(feature = "avif")]
 use mp4parse::ParseStrictness;
@@ -264,6 +263,14 @@ pub fn transform_raster(request: TransformRequest) -> Result<TransformResult, Tr
         check_deadline_if_set!(start, deadline, "watermark");
     }
 
+    // Formats without an alpha channel need the transparency resolved before the encoder
+    // sees it, or it is truncated away rather than composited.
+    image = flatten_for_opaque_output(
+        image,
+        normalized.options.background,
+        normalized.options.format,
+    );
+
     let encoded = encode_output(
         &image,
         normalized.options.format,
@@ -289,6 +296,14 @@ pub fn transform_raster(request: TransformRequest) -> Result<TransformResult, Tr
     };
 
     let (width, height) = image.dimensions();
+    // Read the tag back out of the encoded bytes rather than predicting it: with
+    // auto-orientation off and metadata retained, the output carries the input's tag, and
+    // this is what `inspect` reports for the same file.
+    let orientation = if normalized.options.format == MediaType::Jpeg {
+        crate::core::jpeg_exif_orientation(&bytes)
+    } else {
+        None
+    };
 
     Ok(TransformResult {
         artifact: Artifact::new(
@@ -300,6 +315,7 @@ pub fn transform_raster(request: TransformRequest) -> Result<TransformResult, Tr
                 frame_count: 1,
                 duration: None,
                 has_alpha: Some(output_has_alpha(&image, normalized.options.format)),
+                orientation,
             },
         ),
         warnings,
@@ -780,8 +796,33 @@ fn check_output_pixel_limit(
     fit: Option<Fit>,
     without_enlargement: bool,
 ) -> Result<(), TransformError> {
+    let source = image.dimensions();
+
+    // `cover` scales the source until it covers the box on both axes and crops afterwards,
+    // so the buffer it materializes is larger than the size it returns, without bound as the
+    // two aspect ratios diverge. Check that buffer here, from dimensions alone, the way
+    // `check_rotated_pixel_limit` does: nothing between this point and the allocation looks
+    // at it, and the allocation is what aborts the process.
+    if let (Some(target_w), Some(target_h)) = (width, height)
+        && fit.unwrap_or(Fit::Contain) == Fit::Cover
+    {
+        let (content_w, content_h) = fit_content_size(
+            source,
+            (target_w, target_h),
+            Fit::Cover,
+            without_enlargement,
+        );
+        let pixels = u64::from(content_w) * u64::from(content_h);
+        if pixels > MAX_OUTPUT_PIXELS {
+            return Err(TransformError::LimitExceeded(format!(
+                "fit=cover scales {}x{} to {content_w}x{content_h} ({pixels} pixels) before cropping to {target_w}x{target_h}, limit is {MAX_OUTPUT_PIXELS}",
+                source.0, source.1
+            )));
+        }
+    }
+
     let (out_w, out_h) =
-        resolved_output_dimensions(image.dimensions(), width, height, fit, without_enlargement);
+        resolved_output_dimensions(source, width, height, fit, without_enlargement);
     let pixels = u64::from(out_w) * u64::from(out_h);
     if pixels > MAX_OUTPUT_PIXELS {
         return Err(TransformError::LimitExceeded(format!(
@@ -791,41 +832,29 @@ fn check_output_pixel_limit(
     Ok(())
 }
 
+/// Applies the input's EXIF orientation, reading the tag the way `inspect` reports it.
+///
+/// Both go through [`crate::core::jpeg_exif_orientation`], so what `inspect` says a file is
+/// tagged with and what `convert` does about it cannot disagree.
 fn apply_auto_orientation(image: DynamicImage, input: &Artifact) -> DynamicImage {
     if input.media_type != MediaType::Jpeg {
         return image;
     }
 
-    let mut cursor = Cursor::new(&input.bytes);
-    let Ok(exif) = Reader::new().read_from_container(&mut cursor) else {
-        return image;
-    };
-    let Some(field) = exif.get_field(Tag::Orientation, In::PRIMARY) else {
-        return image;
-    };
-    let Some(orientation) = first_orientation_value(&field.value) else {
-        return image;
-    };
-
-    apply_exif_orientation(image, orientation)
-}
-
-fn first_orientation_value(value: &Value) -> Option<u32> {
-    match value {
-        Value::Short(values) => values.first().map(|value| u32::from(*value)),
-        Value::Long(values) => values.first().copied(),
-        _ => None,
+    match crate::core::jpeg_exif_orientation(&input.bytes) {
+        Some(orientation) => apply_exif_orientation(image, orientation),
+        None => image,
     }
 }
 
-fn apply_exif_orientation(image: DynamicImage, orientation: u32) -> DynamicImage {
+fn apply_exif_orientation(image: DynamicImage, orientation: u16) -> DynamicImage {
     match orientation {
         2 => image.fliph(),
         3 => image.rotate180(),
         4 => image.flipv(),
-        5 => image.fliph().rotate90(),
+        5 => image.fliph().rotate270(),
         6 => image.rotate90(),
-        7 => image.fliph().rotate270(),
+        7 => image.fliph().rotate90(),
         8 => image.rotate270(),
         _ => image,
     }
@@ -1420,14 +1449,10 @@ fn jpeg_auto_orientation_is_noop(input: &Artifact) -> bool {
         return true;
     }
 
-    let mut cursor = Cursor::new(&input.bytes);
-    let Ok(exif) = Reader::new().read_from_container(&mut cursor) else {
-        return true;
-    };
-    let Some(field) = exif.get_field(Tag::Orientation, In::PRIMARY) else {
-        return true;
-    };
-    matches!(first_orientation_value(&field.value), None | Some(0 | 1))
+    matches!(
+        crate::core::jpeg_exif_orientation(&input.bytes),
+        None | Some(0 | 1)
+    )
 }
 
 fn optimize_jpeg_bytes_losslessly(
@@ -2854,28 +2879,70 @@ fn read_input_metadata(input: &Artifact) -> Result<RetainedMetadata, TransformEr
     }
 }
 
+/// Reports whether an encoded file in this format can carry an alpha channel at all.
+///
+/// This is a property of the format, not of the image: it answers whether transparency
+/// survives the encode, which is what decides whether the pixels have to be composited
+/// against a background first.
+pub(crate) const fn format_carries_alpha(media_type: MediaType) -> bool {
+    !matches!(media_type, MediaType::Jpeg)
+}
+
 /// Reports whether the encoded output carries an alpha channel.
 ///
 /// This mirrors the choice [`EncodeSamples::from_image`] makes, so the metadata reported by
 /// `convert` matches what `inspect` reads back from the encoded file.
 fn output_has_alpha(image: &DynamicImage, media_type: MediaType) -> bool {
-    match media_type {
-        MediaType::Jpeg => false,
-        MediaType::Png
-        | MediaType::Webp
-        | MediaType::Avif
-        | MediaType::Svg
-        | MediaType::Bmp
-        | MediaType::Tiff
-        | MediaType::Gif => image_has_transparency(image),
+    format_carries_alpha(media_type) && image_has_transparency(image)
+}
+
+/// Composites onto the background color when the output format cannot carry alpha.
+///
+/// Dropping the alpha channel keeps the color samples untouched, so a half-transparent red
+/// encodes as a fully saturated red and a fully transparent pixel encodes as whatever color
+/// sat under the zero alpha, which is usually black. Compositing first is also what makes a
+/// direct conversion agree with one that pads: `pad_to_box` already resolves transparency
+/// against this same background on its way through.
+///
+/// The background defaults to white for the formats that cannot carry alpha, which is
+/// [`background_pixel`]'s rule.
+pub(crate) fn flatten_for_opaque_output(
+    image: DynamicImage,
+    background: Option<Rgba8>,
+    output_format: MediaType,
+) -> DynamicImage {
+    if format_carries_alpha(output_format) || !image_has_transparency(&image) {
+        return image;
     }
+
+    // Composited in place rather than onto a second canvas: `into_rgba8` reuses the buffer
+    // when the image is already RGBA8, which is what a decoded image with alpha always is,
+    // so the flattening costs one pass rather than an allocation and a copy as well.
+    let fill = background_pixel(background, output_format);
+    let mut buffer = image.into_rgba8();
+    for pixel in buffer.pixels_mut() {
+        // The two ends are what `Pixel::blend` short-circuits to, written out here so the
+        // usual image — opaque almost everywhere, transparent in a corner — pays nothing
+        // for the general case. Only partial alpha reaches the blend itself.
+        match pixel.0[3] {
+            0 => *pixel = fill,
+            u8::MAX => {}
+            _ => {
+                let mut composited = fill;
+                composited.blend(pixel);
+                *pixel = composited;
+            }
+        }
+    }
+    DynamicImage::ImageRgba8(buffer)
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_exif_orientation, check_rotated_pixel_limit, optimize_jpeg_bytes_losslessly,
-        resolved_output_dimensions, rotated_bounding_box, transform_raster,
+        apply_exif_orientation, check_output_pixel_limit, check_rotated_pixel_limit,
+        optimize_jpeg_bytes_losslessly, resolved_output_dimensions, rotated_bounding_box,
+        transform_raster,
     };
     use crate::core::{
         Artifact, ArtifactMetadata, Fit, MediaType, MetadataKind, MetadataPolicy, OptimizeMode,
@@ -2924,6 +2991,7 @@ mod tests {
                 frame_count: 1,
                 duration: None,
                 has_alpha: Some(fill[3] < u8::MAX),
+                orientation: None,
             },
         )
     }
@@ -3012,6 +3080,7 @@ mod tests {
                 frame_count: 1,
                 duration: None,
                 has_alpha: Some(false),
+                orientation: None,
             },
         )
     }
@@ -3076,6 +3145,7 @@ mod tests {
                 frame_count: 1,
                 duration: None,
                 has_alpha: Some(false),
+                orientation: None,
             },
         )
     }
@@ -3140,6 +3210,7 @@ mod tests {
                 frame_count: 1,
                 duration: None,
                 has_alpha: Some(false),
+                orientation: None,
             },
         )
     }
@@ -3999,6 +4070,7 @@ mod tests {
                 frame_count: 1,
                 duration: None,
                 has_alpha: Some(false),
+                orientation: None,
             },
         );
         let err = transform_raster(TransformRequest::new(artifact, TransformOptions::default()))
@@ -4739,6 +4811,7 @@ mod tests {
                 frame_count: 1,
                 duration: None,
                 has_alpha: Some(false),
+                orientation: None,
             },
         );
 
@@ -4914,6 +4987,7 @@ mod tests {
                     frame_count: 1,
                     duration: None,
                     has_alpha: Some(false),
+                    orientation: None,
                 },
             );
             let result = transform_raster(TransformRequest::new(
@@ -4964,6 +5038,7 @@ mod tests {
                 frame_count: 1,
                 duration: None,
                 has_alpha: Some(false),
+                orientation: None,
             },
         );
 
@@ -5046,6 +5121,7 @@ mod tests {
                 frame_count: 1,
                 duration: None,
                 has_alpha: Some(false),
+                orientation: None,
             },
         );
 
@@ -5097,6 +5173,7 @@ mod tests {
                 frame_count: 1,
                 duration: None,
                 has_alpha: Some(false),
+                orientation: None,
             },
         );
 
@@ -5147,6 +5224,7 @@ mod tests {
                     frame_count: 1,
                     duration: None,
                     has_alpha: Some(false),
+                    orientation: None,
                 },
             );
             transform_raster(TransformRequest::new(
@@ -5184,6 +5262,7 @@ mod tests {
                     frame_count: 1,
                     duration: None,
                     has_alpha: Some(false),
+                    orientation: None,
                 },
             );
             transform_raster(TransformRequest::new(
@@ -5222,6 +5301,7 @@ mod tests {
                 frame_count: 1,
                 duration: None,
                 has_alpha: Some(false),
+                orientation: None,
             },
         );
 
@@ -5268,6 +5348,7 @@ mod tests {
                 frame_count: 1,
                 duration: None,
                 has_alpha: Some(true),
+                orientation: None,
             },
         );
 
@@ -5310,6 +5391,7 @@ mod tests {
                 frame_count: 1,
                 duration: None,
                 has_alpha: Some(false),
+                orientation: None,
             },
         );
 
@@ -5363,6 +5445,7 @@ mod tests {
                 frame_count: 1,
                 duration: None,
                 has_alpha: Some(false),
+                orientation: None,
             },
         );
 
@@ -5581,140 +5664,380 @@ mod tests {
         );
     }
 
+    // ── Output orientation reporting ────────────────────────────────────
+
+    /// A transform that applies the orientation reports no pending one.
+    #[test]
+    fn transform_result_reports_no_orientation_once_it_has_been_applied() {
+        let result = transform_raster(TransformRequest::new(
+            jpeg_artifact_with_metadata(4, 2, Some(6), None),
+            TransformOptions {
+                format: Some(MediaType::Jpeg),
+                ..TransformOptions::default()
+            },
+        ))
+        .expect("transform");
+
+        assert_eq!(result.artifact.metadata.orientation, None);
+        assert_eq!(result.artifact.metadata.width, Some(2));
+        assert_eq!(result.artifact.metadata.height, Some(4));
+    }
+
+    /// With auto-orientation off and the metadata retained, the output still carries the
+    /// tag, and the reported metadata says so rather than claiming there is none.
+    #[test]
+    fn transform_result_reports_the_orientation_the_output_still_carries() {
+        let result = transform_raster(TransformRequest::new(
+            jpeg_artifact_with_metadata(4, 2, Some(6), None),
+            TransformOptions {
+                format: Some(MediaType::Jpeg),
+                auto_orient: false,
+                strip_metadata: false,
+                ..TransformOptions::default()
+            },
+        ))
+        .expect("transform");
+
+        assert_eq!(result.artifact.metadata.orientation, Some(6));
+        assert_eq!(
+            result.artifact.metadata.oriented_dimensions(),
+            Some(crate::core::Dimensions::new(2, 4)),
+            "a caller reading the oriented size gets what a viewer will show"
+        );
+    }
+
+    // ── fit=cover intermediate buffer limit ─────────────────────────────
+
+    /// A cover request whose intermediate buffer is oversized is rejected, not attempted.
+    ///
+    /// The check runs on dimensions alone, so this test never allocates the buffer it is
+    /// about: a 10000x1 source scaled to cover a 3x9999 box is 99,990,000x9999 pixels.
+    #[test]
+    fn cover_rejects_an_oversized_intermediate_buffer() {
+        let image = DynamicImage::ImageRgba8(RgbaImage::new(10000, 1));
+
+        let error = check_output_pixel_limit(&image, Some(3), Some(9999), Some(Fit::Cover), false)
+            .expect_err("cover into an opposite aspect ratio should exceed the limit");
+
+        assert!(
+            matches!(error, TransformError::LimitExceeded(ref message) if message.contains("fit=cover")),
+            "unexpected error: {error}"
+        );
+    }
+
+    /// The same request succeeds under the fit modes that scale by the smaller ratio.
+    #[test]
+    fn the_other_fit_modes_accept_what_cover_rejects() {
+        let image = DynamicImage::ImageRgba8(RgbaImage::new(10000, 1));
+
+        for fit in [Fit::Contain, Fit::Inside, Fit::Fill] {
+            check_output_pixel_limit(&image, Some(3), Some(9999), Some(fit), false)
+                .unwrap_or_else(|error| panic!("{fit:?} should be within the limit: {error}"));
+        }
+    }
+
+    /// An ordinary panorama cropped to a portrait box is rejected rather than silently
+    /// allocating an intermediate buffer several times the output limit.
+    #[test]
+    fn cover_rejects_a_panorama_cropped_to_a_portrait_box() {
+        let image = DynamicImage::ImageRgba8(RgbaImage::new(4000, 100));
+
+        let error =
+            check_output_pixel_limit(&image, Some(200), Some(2000), Some(Fit::Cover), false)
+                .expect_err("80000x2000 is over the output limit");
+
+        assert!(
+            matches!(error, TransformError::LimitExceeded(_)),
+            "unexpected error: {error}"
+        );
+    }
+
+    /// A cover request that fits stays accepted.
+    #[test]
+    fn cover_accepts_an_intermediate_buffer_within_the_limit() {
+        let image = DynamicImage::ImageRgba8(RgbaImage::new(4000, 3000));
+
+        check_output_pixel_limit(&image, Some(200), Some(2000), Some(Fit::Cover), false)
+            .expect("2667x2000 is within the limit");
+    }
+
+    /// `withoutEnlargement` caps the scale at 1.0, so it cannot produce a large buffer.
+    #[test]
+    fn cover_without_enlargement_never_scales_past_the_source() {
+        let image = DynamicImage::ImageRgba8(RgbaImage::new(10000, 1));
+
+        check_output_pixel_limit(&image, Some(3), Some(9999), Some(Fit::Cover), true)
+            .expect("the scale is clamped to 1.0, so the buffer stays at the source size");
+    }
+
+    /// The whole pipeline reports the limit rather than aborting on the allocation.
+    #[test]
+    fn transform_raster_rejects_an_oversized_cover_intermediate() {
+        let error = transform_raster(TransformRequest::new(
+            png_artifact(1000, 1, Rgba([255, 0, 0, 255])),
+            TransformOptions {
+                format: Some(MediaType::Png),
+                width: Some(3),
+                height: Some(9999),
+                fit: Some(Fit::Cover),
+                ..TransformOptions::default()
+            },
+        ))
+        .expect_err("cover should be rejected before the resize");
+
+        assert!(
+            matches!(error, TransformError::LimitExceeded(ref message) if message.contains("fit=cover")),
+            "unexpected error: {error}"
+        );
+    }
+
+    // ── Alpha flattening for formats without an alpha channel ───────────
+
+    /// Decodes the single pixel at (0, 0) of an encoded image.
+    fn first_pixel(bytes: &[u8], format: ImageFormat) -> Rgba<u8> {
+        let image = image::load_from_memory_with_format(bytes, format).expect("decode output");
+        *image.to_rgba8().get_pixel(0, 0)
+    }
+
+    /// Every channel is within `tolerance` of the expected value.
+    fn assert_close(actual: Rgba<u8>, expected: [u8; 3], tolerance: i16, what: &str) {
+        for channel in 0..3 {
+            let difference = i16::from(actual[channel]) - i16::from(expected[channel]);
+            assert!(
+                difference.abs() <= tolerance,
+                "{what}: channel {channel} was {}, expected about {}",
+                actual[channel],
+                expected[channel]
+            );
+        }
+    }
+
+    fn convert_to(artifact: Artifact, options: TransformOptions) -> Artifact {
+        transform_raster(TransformRequest::new(artifact, options))
+            .expect("transform")
+            .artifact
+    }
+
+    /// Half-transparent red over the default background is a light red, not a saturated one.
+    #[test]
+    fn jpeg_output_composites_alpha_over_the_default_white_background() {
+        let output = convert_to(
+            png_artifact(8, 8, Rgba([255, 0, 0, 128])),
+            TransformOptions {
+                format: Some(MediaType::Jpeg),
+                ..TransformOptions::default()
+            },
+        );
+
+        assert_close(
+            first_pixel(&output.bytes, ImageFormat::Jpeg),
+            [255, 127, 127],
+            4,
+            "50% red on white",
+        );
+    }
+
+    /// An explicit background is honored without a padding stage in the request.
+    #[test]
+    fn jpeg_output_composites_alpha_over_an_explicit_background() {
+        let output = convert_to(
+            png_artifact(8, 8, Rgba([255, 0, 0, 128])),
+            TransformOptions {
+                format: Some(MediaType::Jpeg),
+                background: Some(Rgba8 {
+                    r: 0,
+                    g: 0,
+                    b: 0,
+                    a: 255,
+                }),
+                ..TransformOptions::default()
+            },
+        );
+
+        assert_close(
+            first_pixel(&output.bytes, ImageFormat::Jpeg),
+            [127, 0, 0],
+            4,
+            "50% red on black",
+        );
+    }
+
+    /// A fully transparent pixel is the background, not the black that sat under the alpha.
+    #[test]
+    fn jpeg_output_renders_fully_transparent_pixels_as_the_background() {
+        let source = png_artifact(8, 8, Rgba([0, 0, 0, 0]));
+
+        let default_background = convert_to(
+            source.clone(),
+            TransformOptions {
+                format: Some(MediaType::Jpeg),
+                ..TransformOptions::default()
+            },
+        );
+        assert_close(
+            first_pixel(&default_background.bytes, ImageFormat::Jpeg),
+            [255, 255, 255],
+            4,
+            "transparent with no background",
+        );
+
+        let explicit_background = convert_to(
+            source,
+            TransformOptions {
+                format: Some(MediaType::Jpeg),
+                background: Some(Rgba8 {
+                    r: 0,
+                    g: 0,
+                    b: 255,
+                    a: 255,
+                }),
+                ..TransformOptions::default()
+            },
+        );
+        assert_close(
+            first_pixel(&explicit_background.bytes, ImageFormat::Jpeg),
+            [0, 0, 255],
+            4,
+            "transparent with an explicit background",
+        );
+    }
+
+    /// The direct path and the padding path resolve transparency the same way.
+    ///
+    /// This equivalence is the property that was broken: a request that happened to include
+    /// a `contain` resize composited correctly while the same conversion without one did not.
+    #[test]
+    fn jpeg_output_agrees_with_and_without_a_padding_stage() {
+        let background = Some(Rgba8 {
+            r: 255,
+            g: 255,
+            b: 255,
+            a: 255,
+        });
+
+        let direct = convert_to(
+            png_artifact(8, 8, Rgba([0, 0, 255, 64])),
+            TransformOptions {
+                format: Some(MediaType::Jpeg),
+                background,
+                ..TransformOptions::default()
+            },
+        );
+        let padded = convert_to(
+            png_artifact(8, 8, Rgba([0, 0, 255, 64])),
+            TransformOptions {
+                format: Some(MediaType::Jpeg),
+                background,
+                width: Some(16),
+                height: Some(8),
+                fit: Some(Fit::Contain),
+                ..TransformOptions::default()
+            },
+        );
+
+        let direct_pixel = first_pixel(&direct.bytes, ImageFormat::Jpeg);
+        let padded_pixel = *image::load_from_memory_with_format(&padded.bytes, ImageFormat::Jpeg)
+            .expect("decode padded")
+            .to_rgba8()
+            .get_pixel(8, 4);
+        assert_close(
+            direct_pixel,
+            [padded_pixel[0], padded_pixel[1], padded_pixel[2]],
+            6,
+            "direct conversion versus padded conversion",
+        );
+    }
+
+    /// Formats that carry alpha keep it. Flattening is only correct where it cannot survive.
+    #[test]
+    fn alpha_capable_output_formats_keep_their_transparency() {
+        for format in [
+            MediaType::Png,
+            MediaType::Webp,
+            MediaType::Bmp,
+            MediaType::Tiff,
+        ] {
+            let output = convert_to(
+                png_artifact(8, 8, Rgba([255, 0, 0, 128])),
+                TransformOptions {
+                    format: Some(format),
+                    ..TransformOptions::default()
+                },
+            );
+            assert_eq!(
+                output.metadata.has_alpha,
+                Some(true),
+                "{} output should keep the alpha channel",
+                format.as_name()
+            );
+        }
+    }
+
     // ── Exhaustive EXIF orientation tests (issue #106) ──────────────────
 
-    /// Orientation 1: no transform — dimensions remain unchanged.
+    /// Every EXIF orientation, checked by where a single marker pixel lands.
+    ///
+    /// The expected coordinates are derived from the TIFF/EXIF definition of each value
+    /// rather than from the implementation. Orientations 5 to 8 all turn a 4x2 image into
+    /// a 2x4 one, so a dimension assertion cannot tell them apart; the marker can.
     #[test]
-    fn apply_exif_orientation_1_identity() {
-        let image = DynamicImage::ImageRgba8(RgbaImage::from_pixel(4, 2, Rgba([1, 2, 3, 255])));
-        let result = apply_exif_orientation(image, 1);
-        assert_eq!(result.dimensions(), (4, 2));
+    fn apply_exif_orientation_places_the_marker_pixel_per_the_exif_definition() {
+        // (orientation, expected dimensions, expected marker position, meaning)
+        let cases = [
+            (1, (4, 2), (0, 0), "no transform"),
+            (2, (4, 2), (3, 0), "mirror horizontal"),
+            (3, (4, 2), (3, 1), "rotate 180"),
+            (4, (4, 2), (0, 1), "mirror vertical"),
+            (5, (2, 4), (0, 0), "mirror horizontal and rotate 270 CW"),
+            (6, (2, 4), (1, 0), "rotate 90 CW"),
+            (7, (2, 4), (1, 3), "mirror horizontal and rotate 90 CW"),
+            (8, (2, 4), (0, 3), "rotate 270 CW"),
+        ];
+
+        let marker = Rgba([255, 0, 0, 255]);
+        for (orientation, dimensions, (marker_x, marker_y), meaning) in cases {
+            let mut image = RgbaImage::from_pixel(4, 2, Rgba([0, 0, 0, 255]));
+            image.put_pixel(0, 0, marker);
+            let result = apply_exif_orientation(DynamicImage::ImageRgba8(image), orientation);
+            let rgba = result.to_rgba8();
+            assert_eq!(
+                rgba.dimensions(),
+                dimensions,
+                "orientation {orientation} ({meaning}) produced the wrong dimensions"
+            );
+            assert_eq!(
+                *rgba.get_pixel(marker_x, marker_y),
+                marker,
+                "orientation {orientation} ({meaning}) put the marker somewhere else"
+            );
+        }
     }
 
-    /// Orientation 2: horizontal flip — dimensions remain unchanged.
+    /// Orientation 5 and 7 differ. They were each other's transform until this was pinned.
     #[test]
-    fn apply_exif_orientation_2_fliph() {
-        let image = DynamicImage::ImageRgba8(RgbaImage::from_pixel(4, 2, Rgba([1, 2, 3, 255])));
-        let result = apply_exif_orientation(image, 2);
-        assert_eq!(result.dimensions(), (4, 2));
+    fn apply_exif_orientation_5_and_7_differ() {
+        let mut image = RgbaImage::from_pixel(4, 2, Rgba([0, 0, 0, 255]));
+        image.put_pixel(0, 0, Rgba([255, 0, 0, 255]));
+        let source = DynamicImage::ImageRgba8(image);
+
+        let five = apply_exif_orientation(source.clone(), 5).to_rgba8();
+        let seven = apply_exif_orientation(source, 7).to_rgba8();
+
+        assert_ne!(five.into_raw(), seven.into_raw());
     }
 
-    /// Orientation 3: rotate 180 — dimensions remain unchanged.
+    /// Orientation values outside 1..=8 leave the image alone.
     #[test]
-    fn apply_exif_orientation_3_rotate180() {
-        let image = DynamicImage::ImageRgba8(RgbaImage::from_pixel(4, 2, Rgba([1, 2, 3, 255])));
-        let result = apply_exif_orientation(image, 3);
-        assert_eq!(result.dimensions(), (4, 2));
-    }
-
-    /// Orientation 4: vertical flip — dimensions remain unchanged.
-    #[test]
-    fn apply_exif_orientation_4_flipv() {
-        let image = DynamicImage::ImageRgba8(RgbaImage::from_pixel(4, 2, Rgba([1, 2, 3, 255])));
-        let result = apply_exif_orientation(image, 4);
-        assert_eq!(result.dimensions(), (4, 2));
-    }
-
-    /// Orientation 5: transpose (fliph + rotate90) — dimensions are swapped.
-    #[test]
-    fn apply_exif_orientation_5_transpose() {
-        let image = DynamicImage::ImageRgba8(RgbaImage::from_pixel(4, 2, Rgba([1, 2, 3, 255])));
-        let result = apply_exif_orientation(image, 5);
-        assert_eq!(result.dimensions(), (2, 4));
-    }
-
-    /// Orientation 6: rotate 90 CW — dimensions are swapped.
-    #[test]
-    fn apply_exif_orientation_6_rotate90() {
-        let image = DynamicImage::ImageRgba8(RgbaImage::from_pixel(4, 2, Rgba([1, 2, 3, 255])));
-        let result = apply_exif_orientation(image, 6);
-        assert_eq!(result.dimensions(), (2, 4));
-    }
-
-    /// Orientation 7: transverse (fliph + rotate270) — dimensions are swapped.
-    #[test]
-    fn apply_exif_orientation_7_transverse() {
-        let image = DynamicImage::ImageRgba8(RgbaImage::from_pixel(4, 2, Rgba([1, 2, 3, 255])));
-        let result = apply_exif_orientation(image, 7);
-        assert_eq!(result.dimensions(), (2, 4));
-    }
-
-    /// Orientation 8: rotate 270 CW — dimensions are swapped.
-    #[test]
-    fn apply_exif_orientation_8_rotate270() {
-        let image = DynamicImage::ImageRgba8(RgbaImage::from_pixel(4, 2, Rgba([1, 2, 3, 255])));
-        let result = apply_exif_orientation(image, 8);
-        assert_eq!(result.dimensions(), (2, 4));
-    }
-
-    /// Invalid orientation value (0) should leave the image unchanged.
-    #[test]
-    fn apply_exif_orientation_0_passthrough() {
-        let image = DynamicImage::ImageRgba8(RgbaImage::from_pixel(4, 2, Rgba([1, 2, 3, 255])));
-        let result = apply_exif_orientation(image, 0);
-        assert_eq!(result.dimensions(), (4, 2));
-    }
-
-    /// Out-of-range orientation value (9) should leave the image unchanged.
-    #[test]
-    fn apply_exif_orientation_9_passthrough() {
-        let image = DynamicImage::ImageRgba8(RgbaImage::from_pixel(4, 2, Rgba([1, 2, 3, 255])));
-        let result = apply_exif_orientation(image, 9);
-        assert_eq!(result.dimensions(), (4, 2));
-    }
-
-    /// Verify pixel placement for orientation 2 (horizontal flip).
-    /// Place a distinct pixel at (0,0) and check it moves to (width-1, 0).
-    #[test]
-    fn apply_exif_orientation_2_pixel_placement() {
-        let mut img = RgbaImage::from_pixel(4, 2, Rgba([0, 0, 0, 255]));
-        img.put_pixel(0, 0, Rgba([255, 0, 0, 255]));
-        let result = apply_exif_orientation(DynamicImage::ImageRgba8(img), 2);
-        assert_eq!(*result.to_rgba8().get_pixel(3, 0), Rgba([255, 0, 0, 255]));
-    }
-
-    /// Verify pixel placement for orientation 3 (rotate 180).
-    /// Pixel at (0,0) should move to (width-1, height-1).
-    #[test]
-    fn apply_exif_orientation_3_pixel_placement() {
-        let mut img = RgbaImage::from_pixel(4, 2, Rgba([0, 0, 0, 255]));
-        img.put_pixel(0, 0, Rgba([255, 0, 0, 255]));
-        let result = apply_exif_orientation(DynamicImage::ImageRgba8(img), 3);
-        assert_eq!(*result.to_rgba8().get_pixel(3, 1), Rgba([255, 0, 0, 255]));
-    }
-
-    /// Verify pixel placement for orientation 4 (vertical flip).
-    /// Pixel at (0,0) should move to (0, height-1).
-    #[test]
-    fn apply_exif_orientation_4_pixel_placement() {
-        let mut img = RgbaImage::from_pixel(4, 2, Rgba([0, 0, 0, 255]));
-        img.put_pixel(0, 0, Rgba([255, 0, 0, 255]));
-        let result = apply_exif_orientation(DynamicImage::ImageRgba8(img), 4);
-        assert_eq!(*result.to_rgba8().get_pixel(0, 1), Rgba([255, 0, 0, 255]));
-    }
-
-    /// Verify pixel placement for orientation 6 (rotate 90 CW).
-    /// Pixel at (0,0) should move to (height-1, 0) in the rotated image.
-    #[test]
-    fn apply_exif_orientation_6_pixel_placement() {
-        let mut img = RgbaImage::from_pixel(4, 2, Rgba([0, 0, 0, 255]));
-        img.put_pixel(0, 0, Rgba([255, 0, 0, 255]));
-        let result = apply_exif_orientation(DynamicImage::ImageRgba8(img), 6);
-        let rgba = result.to_rgba8();
-        assert_eq!(rgba.dimensions(), (2, 4));
-        assert_eq!(*rgba.get_pixel(1, 0), Rgba([255, 0, 0, 255]));
-    }
-
-    /// Verify pixel placement for orientation 8 (rotate 270 CW).
-    /// Pixel at (0,0) should move to (0, width-1) in the rotated image.
-    #[test]
-    fn apply_exif_orientation_8_pixel_placement() {
-        let mut img = RgbaImage::from_pixel(4, 2, Rgba([0, 0, 0, 255]));
-        img.put_pixel(0, 0, Rgba([255, 0, 0, 255]));
-        let result = apply_exif_orientation(DynamicImage::ImageRgba8(img), 8);
-        let rgba = result.to_rgba8();
-        assert_eq!(rgba.dimensions(), (2, 4));
-        assert_eq!(*rgba.get_pixel(0, 3), Rgba([255, 0, 0, 255]));
+    fn apply_exif_orientation_passes_through_out_of_range_values() {
+        for orientation in [0, 9, u16::MAX] {
+            let image = DynamicImage::ImageRgba8(RgbaImage::from_pixel(4, 2, Rgba([1, 2, 3, 255])));
+            let result = apply_exif_orientation(image, orientation);
+            assert_eq!(
+                result.dimensions(),
+                (4, 2),
+                "orientation {orientation} should be a no-op"
+            );
+        }
     }
 
     /// End-to-end test: JPEG with each EXIF orientation value is auto-corrected

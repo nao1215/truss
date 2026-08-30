@@ -90,6 +90,28 @@ image.save('$DIR/exif-rotated.jpg', exif=exif.tobytes(), quality=95)
 print('  wrote 40x20 with EXIF Orientation=6')
 "
 
+echo "[8a/14] exif-transposed-5.jpg / exif-transposed-7.jpg — orientations 5 and 7"
+# Orientations 5 to 8 all turn a 40x20 image into a 20x40 one, so dimensions alone cannot
+# tell them apart. These two are the pair that a mirrored transform gets backwards: 5 is
+# "mirror horizontal and rotate 270 CW", 7 is "mirror horizontal and rotate 90 CW". The
+# marker bars along the top and the left edge make the difference visible in the output.
+python3 -c "
+from PIL import Image
+
+for orientation in (5, 7):
+    image = Image.new('RGB', (40, 20), (255, 255, 255))
+    for x in range(12):
+        for y in range(4):
+            image.putpixel((x, y), (255, 0, 0))
+    for x in range(4):
+        for y in range(12):
+            image.putpixel((x, y), (0, 0, 255))
+    exif = image.getexif()
+    exif[274] = orientation
+    image.save(f'$DIR/exif-transposed-{orientation}.jpg', exif=exif.tobytes(), quality=95)
+    print(f'  wrote 40x20 with EXIF Orientation={orientation}')
+"
+
 # ---------------------------------------------------------------------------
 # 4b. ICC profile (needs Pillow's ImageCms; ImageMagick cannot mint a profile)
 # ---------------------------------------------------------------------------
@@ -234,6 +256,25 @@ cat > "$DIR/svg-external-ref.svg" << 'SVGEOF'
      width="100" height="100">
   <image xlink:href="https://evil.example.com/tracking.png" width="100" height="100"/>
   <use xlink:href="https://evil.example.com/shapes.svg#arrow"/>
+</svg>
+SVGEOF
+
+echo "[bonus] svg-animate-xss.svg — SMIL animation that sets href at render time"
+# The attribute filter only inspects `href`. SMIL writes it after the fact through `to`,
+# `values`, `from`, or `by`, which is how the canonical payload used to pass through a
+# sanitizer that removes `<script>` and `on*` handlers. The <set> element does the same for
+# an external reference, which the sanitizer also promises to remove.
+cat > "$DIR/svg-animate-xss.svg" << 'SVGEOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100">
+  <a>
+    <animate attributeName="href" values="javascript:alert(document.domain)" begin="0s" dur="1s" fill="freeze"/>
+    <text x="10" y="20">click me</text>
+  </a>
+  <image x="0" y="0" width="100" height="100">
+    <set attributeName="href" to="https://evil.example.com/track.png" begin="0s"/>
+  </image>
+  <handler type="text/javascript">alert('handler')</handler>
 </svg>
 SVGEOF
 

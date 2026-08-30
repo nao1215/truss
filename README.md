@@ -114,6 +114,26 @@ truss diagram.svg -o safe.svg
 truss inspect photo.jpg
 ```
 
+`inspect` reports both the dimensions stored in the file (`width`, `height`) and the ones
+`convert` produces (`orientedWidth`, `orientedHeight`). They differ when the file carries an
+EXIF orientation that transposes the axes, which is the normal case for a phone photo taken
+in portrait:
+
+```console
+$ truss inspect portrait.jpg
+{
+  "format": "jpeg",
+  "mime": "image/jpeg",
+  "width": 4032,
+  "height": 3024,
+  "orientation": 6,
+  "orientedWidth": 3024,
+  "orientedHeight": 4032,
+  "hasAlpha": false,
+  "isAnimated": false
+}
+```
+
 #### Format conversion & quality
 
 truss supports **JPEG, PNG, WebP, AVIF, BMP, TIFF, and SVG**. The output format is inferred from the file extension, or you can specify it explicitly with `--format`.
@@ -556,7 +576,7 @@ The GitHub Pages demo is intentionally built with `wasm,svg`. The official npm p
 |---------|-------------|
 | `convert` | Convert and transform an image file (can be omitted; see above) |
 | `optimize` | Optimize an image with format-aware auto/lossless/lossy modes (`truss optimize photo.jpg -o photo-optimized.jpg --mode auto`) |
-| `inspect` | Show metadata (format, dimensions, alpha, animation) of an image |
+| `inspect` | Show metadata (format, dimensions, EXIF orientation, alpha, animation) of an image |
 | `serve` | Start the HTTP image-transform server (implied when server flags are used at the top level) |
 | `validate` | Validate server configuration without starting the server (useful in CI/CD) |
 | `sign` | Generate a signed public URL for the server |

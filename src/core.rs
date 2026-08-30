@@ -156,6 +156,16 @@ impl Artifact {
 /// assert_eq!(meta.dimensions(), Some(Dimensions::new(1920, 1080)));
 /// assert_eq!(meta.frame_count, 1);
 ///
+/// // With no orientation tag, the oriented dimensions are the stored ones.
+/// assert_eq!(meta.oriented_dimensions(), Some(Dimensions::new(1920, 1080)));
+///
+/// // Orientation 6 is a quarter turn, so a transform swaps the axes.
+/// let rotated = ArtifactMetadata {
+///     orientation: Some(6),
+///     ..meta.clone()
+/// };
+/// assert_eq!(rotated.oriented_dimensions(), Some(Dimensions::new(1080, 1920)));
+///
 /// // When either dimension is unknown, dimensions() returns None
 /// let partial = ArtifactMetadata { width: Some(100), ..ArtifactMetadata::default() };
 /// assert!(partial.dimensions().is_none());
@@ -172,6 +182,14 @@ pub struct ArtifactMetadata {
     pub duration: Option<Duration>,
     /// Whether the artifact contains alpha, when known.
     pub has_alpha: Option<bool>,
+    /// The EXIF orientation tag, when the artifact carries one.
+    ///
+    /// `width` and `height` are the dimensions as stored in the container. A transform
+    /// applies this tag by default, and values 5 to 8 transpose the two, so a caller that
+    /// records dimensions at upload time and serves derivatives later needs this to know
+    /// which way round the result will be. [`ArtifactMetadata::oriented_dimensions`] does
+    /// that arithmetic.
+    pub orientation: Option<u16>,
 }
 
 impl ArtifactMetadata {
@@ -182,6 +200,28 @@ impl ArtifactMetadata {
             _ => None,
         }
     }
+
+    /// Returns the dimensions after the EXIF orientation is applied.
+    ///
+    /// These are the dimensions a transform produces with auto-orientation on, which is the
+    /// default. They equal [`ArtifactMetadata::dimensions`] whenever there is no orientation
+    /// tag or the tag does not transpose the axes, so a caller can read these unconditionally.
+    pub fn oriented_dimensions(&self) -> Option<Dimensions> {
+        let dimensions = self.dimensions()?;
+        Some(if orientation_transposes(self.orientation) {
+            Dimensions::new(dimensions.height, dimensions.width)
+        } else {
+            dimensions
+        })
+    }
+}
+
+/// Reports whether an EXIF orientation swaps the width and the height.
+///
+/// Values 5 to 8 include a quarter turn; 1 to 4 do not, and anything else is ignored the way
+/// the transform pipeline ignores it.
+pub(crate) const fn orientation_transposes(orientation: Option<u16>) -> bool {
+    matches!(orientation, Some(5..=8))
 }
 
 impl Default for ArtifactMetadata {
@@ -192,6 +232,7 @@ impl Default for ArtifactMetadata {
             frame_count: 1,
             duration: None,
             has_alpha: None,
+            orientation: None,
         }
     }
 }
@@ -1810,6 +1851,7 @@ fn sniff_svg(_bytes: &[u8]) -> ArtifactMetadata {
         frame_count: 1,
         duration: None,
         has_alpha: Some(true),
+        orientation: None,
     }
 }
 
@@ -1844,6 +1886,7 @@ fn sniff_bmp(bytes: &[u8]) -> Result<ArtifactMetadata, TransformError> {
         frame_count: 1,
         duration: None,
         has_alpha: Some(has_alpha),
+        orientation: None,
     })
 }
 
@@ -1956,6 +1999,7 @@ fn sniff_gif(bytes: &[u8]) -> Result<ArtifactMetadata, TransformError> {
         frame_count,
         duration: None,
         has_alpha: Some(has_alpha),
+        orientation: None,
     })
 }
 
@@ -2001,6 +2045,7 @@ fn sniff_tiff(bytes: &[u8]) -> Result<ArtifactMetadata, TransformError> {
         frame_count: 1,
         duration: None,
         has_alpha: Some(has_alpha),
+        orientation: None,
     })
 }
 
@@ -2032,11 +2077,80 @@ fn sniff_png(bytes: &[u8]) -> Result<ArtifactMetadata, TransformError> {
         frame_count: 1,
         duration: None,
         has_alpha,
+        orientation: None,
     })
+}
+
+/// Reads the EXIF Orientation tag out of a JPEG, when it has one.
+///
+/// The transform pipeline reads the tag through this same function, so what `inspect`
+/// reports and what `convert` applies cannot drift apart. A file with no EXIF block, no
+/// Orientation field, or an unreadable one reports `None`, which means no transform.
+///
+/// The APP1 segment is located by walking the marker headers, which is what keeps a JPEG
+/// without EXIF — the common case for `sniff_artifact` — from paying for a full container
+/// scan on every call.
+pub(crate) fn jpeg_exif_orientation(bytes: &[u8]) -> Option<u16> {
+    exif_orientation_from_payload(jpeg_exif_payload(bytes)?)
+}
+
+/// Reads the Orientation tag out of an already-located Exif TIFF block.
+fn exif_orientation_from_payload(payload: &[u8]) -> Option<u16> {
+    let exif = exif::Reader::new().read_raw(payload.to_vec()).ok()?;
+    let field = exif.get_field(exif::Tag::Orientation, exif::In::PRIMARY)?;
+    match &field.value {
+        exif::Value::Short(values) => values.first().copied(),
+        exif::Value::Long(values) => values.first().and_then(|value| u16::try_from(*value).ok()),
+        _ => None,
+    }
+}
+
+/// Returns the TIFF block of a JPEG's Exif APP1 segment, reading only segment headers.
+fn jpeg_exif_payload(bytes: &[u8]) -> Option<&[u8]> {
+    const EXIF_PREFIX: &[u8] = b"Exif\0\0";
+    const APP1: u8 = 0xE1;
+
+    let mut offset = 2;
+    while offset + 1 < bytes.len() {
+        if bytes[offset] != 0xFF {
+            return None;
+        }
+        while offset < bytes.len() && bytes[offset] == 0xFF {
+            offset += 1;
+        }
+
+        let marker = *bytes.get(offset)?;
+        offset += 1;
+
+        // Start of scan or end of image: no metadata segment follows.
+        if marker == 0xD9 || marker == 0xDA {
+            return None;
+        }
+        // Standalone markers carry no length field.
+        if (0xD0..=0xD7).contains(&marker) || marker == 0x01 {
+            continue;
+        }
+
+        let length = read_u16_be(bytes.get(offset..offset + 2)?).ok()? as usize;
+        if length < 2 || offset + length > bytes.len() {
+            return None;
+        }
+        if marker == APP1
+            && let Some(payload) = bytes[offset + 2..offset + length].strip_prefix(EXIF_PREFIX)
+        {
+            return Some(payload);
+        }
+        offset += length;
+    }
+
+    None
 }
 
 fn sniff_jpeg(bytes: &[u8]) -> Result<ArtifactMetadata, TransformError> {
     let mut offset = 2;
+    // Captured on the way past rather than by a second walk: the Exif APP1 segment always
+    // precedes the SOF this loop is looking for.
+    let mut exif_payload: Option<&[u8]> = None;
 
     while offset + 1 < bytes.len() {
         if bytes[offset] != 0xFF {
@@ -2077,6 +2191,14 @@ fn sniff_jpeg(bytes: &[u8]) -> Result<ArtifactMetadata, TransformError> {
             ));
         }
 
+        if marker == 0xE1
+            && exif_payload.is_none()
+            && let Some(payload) =
+                bytes[offset + 2..offset + segment_length].strip_prefix(b"Exif\0\0".as_slice())
+        {
+            exif_payload = Some(payload);
+        }
+
         if is_jpeg_sof_marker(marker) {
             if segment_length < 7 {
                 return Err(TransformError::DecodeFailed(
@@ -2093,6 +2215,7 @@ fn sniff_jpeg(bytes: &[u8]) -> Result<ArtifactMetadata, TransformError> {
                 frame_count: 1,
                 duration: None,
                 has_alpha: Some(false),
+                orientation: exif_payload.and_then(exif_orientation_from_payload),
             });
         }
 
@@ -2156,6 +2279,7 @@ fn sniff_webp_vp8x(bytes: &[u8]) -> Result<ArtifactMetadata, TransformError> {
         frame_count: 1,
         duration: None,
         has_alpha,
+        orientation: None,
     })
 }
 
@@ -2181,6 +2305,7 @@ fn sniff_webp_vp8(bytes: &[u8]) -> Result<ArtifactMetadata, TransformError> {
         frame_count: 1,
         duration: None,
         has_alpha: Some(false),
+        orientation: None,
     })
 }
 
@@ -2210,6 +2335,7 @@ fn sniff_webp_vp8l(bytes: &[u8]) -> Result<ArtifactMetadata, TransformError> {
         frame_count: 1,
         duration: None,
         has_alpha: Some(has_alpha),
+        orientation: None,
     })
 }
 
@@ -2234,6 +2360,7 @@ fn sniff_avif(bytes: &[u8]) -> Result<ArtifactMetadata, TransformError> {
         frame_count: 1,
         duration: None,
         has_alpha: inspection.has_alpha(),
+        orientation: None,
     })
 }
 

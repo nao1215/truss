@@ -81,6 +81,7 @@ mod tests {
                 frame_count,
                 duration: None,
                 has_alpha: Some(false),
+                orientation: None,
             },
         )
     }
