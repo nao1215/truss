@@ -1,12 +1,15 @@
 # truss
 
+<!-- ALL-CONTRIBUTORS-BADGE:START - Do not remove or modify this section -->
+[![All Contributors](https://img.shields.io/badge/all_contributors-2-orange.svg?style=flat-square)](#contributors)
+<!-- ALL-CONTRIBUTORS-BADGE:END -->
 [![Build](https://github.com/nao1215/truss/actions/workflows/rust.yml/badge.svg)](https://github.com/nao1215/truss/actions/workflows/rust.yml)
 [![CLI Integration](https://github.com/nao1215/truss/actions/workflows/integration-cli.yml/badge.svg)](https://github.com/nao1215/truss/actions/workflows/integration-cli.yml)
 [![tested with atago](https://img.shields.io/badge/tested%20with-atago-7c3aed?logo=data:image/svg%2Bxml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI%2BPHBhdGggZmlsbD0iI2ZmZiIgZD0iTTMuNiA0LjIgMTEuOSAxMmwtOC4zIDcuOC0xLjktMi4yTDcuOSAxMiAxLjcgNi40eiIvPjxyZWN0IGZpbGw9IiNmZmYiIHg9IjEyLjYiIHk9IjE3LjIiIHdpZHRoPSI5LjciIGhlaWdodD0iMi44IiByeD0iMS40Ii8%2BPC9zdmc%2B&logoColor=white)](https://github.com/nao1215/atago)
 [![API Integration](https://github.com/nao1215/truss/actions/workflows/integration.yml/badge.svg)](https://github.com/nao1215/truss/actions/workflows/integration.yml)
 [![Crates.io](https://img.shields.io/crates/v/truss-image)](https://crates.io/crates/truss-image)
-[![Crates.io Downloads](https://img.shields.io/crates/d/truss-image)](https://crates.io/crates/truss-image)
-[![GitHub Downloads (all assets, all releases)](https://img.shields.io/github/downloads/nao1215/truss/total)](https://github.com/nao1215/truss/releases)
+[![crates.io downloads](https://img.shields.io/crates/d/truss-image?label=crates.io%20downloads)](https://crates.io/crates/truss-image)
+[![release binary downloads](https://img.shields.io/github/downloads/nao1215/truss/total?label=release%20binary%20downloads)](https://github.com/nao1215/truss/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-stable-orange)](https://www.rust-lang.org/)
 
@@ -291,6 +294,8 @@ truss photo.jpg -o thumb.jpg --width 320 --grayscale
 
 Luminance uses the Rec. 601 weights, and the alpha channel is preserved. Desaturation runs
 after resize, blur, and sharpen, and before the watermark, so a watermark keeps its own colors.
+Anything `--background` filled in by then is part of the image and is desaturated with it, so
+`--fit contain --background ff0000 --grayscale` produces gray padding, not red.
 Unlike `--blur` and `--sharpen`, `--grayscale` also works for SVG input when the output is a
 raster format; SVG-to-SVG output ignores it along with the other raster-only options.
 
@@ -639,6 +644,27 @@ Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for details.
 - If the project is useful, starring the repository helps.
 - Support via [GitHub Sponsors](https://github.com/sponsors/nao1215) is also welcome.
 - Sharing the project on social media or in blog posts is appreciated.
+
+## Contributors
+
+Thanks goes to these wonderful people ([emoji key](https://allcontributors.org/docs/en/emoji-key)):
+
+<!-- ALL-CONTRIBUTORS-LIST:START - Do not remove or modify this section -->
+<!-- prettier-ignore-start -->
+<!-- markdownlint-disable -->
+<table>
+  <tbody>
+    <tr>
+      <td align="center" valign="top" width="14.28%"><a href="https://debimate.jp/"><img src="https://avatars.githubusercontent.com/u/22737008?v=4?s=75" width="75px;" alt="CHIKAMATSU Naohiro"/><br /><sub><b>CHIKAMATSU Naohiro</b></sub></a><br /><a href="https://github.com/nao1215/truss/commits?author=nao1215" title="Code">&#128187;</a> <a href="https://github.com/nao1215/truss/commits?author=nao1215" title="Documentation">&#128214;</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://mayankgupta.com"><img src="https://avatars.githubusercontent.com/u/8931305?v=4?s=75" width="75px;" alt="Mayank Gupta"/><br /><sub><b>Mayank Gupta</b></sub></a><br /><a href="https://github.com/nao1215/truss/issues?q=author%3Amayankguptadotcom" title="Ideas, Planning, &amp; Feedback">&#129300;</a></td>
+    </tr>
+  </tbody>
+</table>
+
+<!-- markdownlint-restore -->
+<!-- prettier-ignore-end -->
+
+<!-- ALL-CONTRIBUTORS-LIST:END -->
 
 ## License
 
