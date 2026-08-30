@@ -721,6 +721,7 @@ Thanks goes to these wonderful people ([emoji key](https://allcontributors.org/d
     <tr>
       <td align="center" valign="top" width="14.28%"><a href="https://debimate.jp/"><img src="https://avatars.githubusercontent.com/u/22737008?v=4?s=75" width="75px;" alt="CHIKAMATSU Naohiro"/><br /><sub><b>CHIKAMATSU Naohiro</b></sub></a><br /><a href="https://github.com/nao1215/truss/commits?author=nao1215" title="Code">&#128187;</a> <a href="https://github.com/nao1215/truss/commits?author=nao1215" title="Documentation">&#128214;</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://mayankgupta.com"><img src="https://avatars.githubusercontent.com/u/8931305?v=4?s=75" width="75px;" alt="Mayank Gupta"/><br /><sub><b>Mayank Gupta</b></sub></a><br /><a href="https://github.com/nao1215/truss/issues?q=author%3Amayankguptadotcom" title="Ideas, Planning, &amp; Feedback">&#129300;</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://rafaeldominiquini.ddns.net/"><img src="https://avatars.githubusercontent.com/u/1180808?v=4?s=75" width="75px;" alt="Rafael Baboni Dominiquini"/><br /><sub><b>Rafael Baboni Dominiquini</b></sub></a><br /><a href="#platform-Dominiquini" title="Packaging/porting to new platform">&#128230;</a></td>
     </tr>
   </tbody>
 </table>
