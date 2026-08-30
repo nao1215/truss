@@ -107,8 +107,7 @@ scenarios:
   - name: transparency survives a same-format PNG pass
     steps:
       - run:
-          shell: true
-          command: truss convert "$FIXTURES_DIR/transparent.png" -o keep.png
+          command: truss convert "${fixtures}/transparent.png" -o keep.png
       - assert:
           exit_code: 0
           image:
@@ -127,8 +126,7 @@ scenarios:
   - name: transparency survives conversion to WebP
     steps:
       - run:
-          shell: true
-          command: truss convert "$FIXTURES_DIR/transparent.png" -o keep.webp --format webp
+          command: truss convert "${fixtures}/transparent.png" -o keep.webp --format webp
       - assert:
           exit_code: 0
       - run:

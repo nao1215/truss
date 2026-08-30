@@ -7,9 +7,9 @@
 #   truss convert - -o - --format <FMT>          (stdin/stdout)
 #
 # The ShellSpec is_jpeg/is_png magic-byte helpers become atago's `image`
-# assertion, which decodes the file for real. $FIXTURES_DIR is exported by
-# e2e/run.sh (shell: true expands it); outputs use relative paths inside the
-# isolated per-scenario workdir. Run with: e2e/run.sh
+# assertion, which decodes the file for real. ${fixtures} comes from
+# atago.project.yaml and outputs use relative paths inside the isolated
+# per-scenario workdir. Run with: e2e/run.sh
 version: "1"
 
 suite:
@@ -19,8 +19,7 @@ scenarios:
   - name: converts PNG to JPEG and produces a valid JPEG
     steps:
       - run:
-          shell: true
-          command: truss convert "$FIXTURES_DIR/sample.png" -o out.jpg
+          command: truss convert "${fixtures}/sample.png" -o out.jpg
       - assert:
           exit_code: 0
           image:
@@ -30,8 +29,7 @@ scenarios:
   - name: resizes to a target width of 2
     steps:
       - run:
-          shell: true
-          command: truss convert "$FIXTURES_DIR/sample.png" -o w2.png --width 2
+          command: truss convert "${fixtures}/sample.png" -o w2.png --width 2
       - assert:
           exit_code: 0
           image:
@@ -42,8 +40,7 @@ scenarios:
   - name: optimizes PNG losslessly via the optimize subcommand
     steps:
       - run:
-          shell: true
-          command: truss optimize "$FIXTURES_DIR/sample.png" -o optimized.png --mode lossless
+          command: truss optimize "${fixtures}/sample.png" -o optimized.png --mode lossless
       - assert:
           exit_code: 0
           image:
@@ -53,8 +50,7 @@ scenarios:
   - name: converts without the convert keyword (implicit subcommand)
     steps:
       - run:
-          shell: true
-          command: truss "$FIXTURES_DIR/sample.png" -o implicit.jpg
+          command: truss "${fixtures}/sample.png" -o implicit.jpg
       - assert:
           exit_code: 0
           image:
@@ -63,9 +59,15 @@ scenarios:
 
   - name: reads from stdin (-) and writes to a file
     steps:
+      - fixture:
+          file: in.png
+          from: ${fixtures}/sample.png
+      # `stdin.file` feeds the bytes without a shell, so the pipe is the same on
+      # Linux, macOS, and Windows rather than a `cat` that only two of them have.
       - run:
-          shell: true
-          command: cat "$FIXTURES_DIR/sample.png" | truss convert - -o piped.png --format png
+          command: truss convert - -o piped.png --format png
+          stdin:
+            file: in.png
       - assert:
           exit_code: 0
           image:
@@ -74,9 +76,14 @@ scenarios:
 
   - name: reads from stdin and writes to stdout
     steps:
+      - fixture:
+          file: in.png
+          from: ${fixtures}/sample.png
       - run:
-          shell: true
-          command: cat "$FIXTURES_DIR/sample.png" | truss convert - -o - --format png > stdout.png
+          command: truss convert - -o - --format png
+          stdin:
+            file: in.png
+          stdout_to: stdout.png
       - assert:
           exit_code: 0
           image:
@@ -86,8 +93,7 @@ scenarios:
   - name: exits 1 with error, usage, and hint when --output is missing
     steps:
       - run:
-          shell: true
-          command: truss convert "$FIXTURES_DIR/sample.png"
+          command: truss convert "${fixtures}/sample.png"
       - assert:
           exit_code: 1
           stderr:
@@ -115,3 +121,51 @@ scenarios:
           exit_code: 2
           stderr:
             contains: "error:"
+
+  - name: SVG output from a raster input says which rule it broke
+    steps:
+      # `truss diagram.svg -o safe.svg` is documented and works, so "unsupported output
+      # media type: image/svg+xml" left the reader with a rule they had already seen
+      # succeed. The message now names the condition instead of the media type.
+      - run:
+          command: truss convert "${fixtures}/sample.png" -o out.svg
+      - assert:
+          exit_code: 4
+          stderr:
+            contains:
+              - "svg output requires an svg input"
+              - "png, jpeg, webp, or avif"
+      - run:
+          command: truss convert "${fixtures}/sample.png" -o out.png --format svg
+      - assert:
+          exit_code: 4
+          stderr:
+            contains: "svg output requires an svg input"
+
+  - name: --url requires an http or https URL
+    steps:
+      # A file:// URL would turn --url into an arbitrary local file read, so it is
+      # refused at the flag rather than resolved and then denied.
+      - run:
+          command: truss convert --url file:///etc/passwd -o out.png
+      - assert:
+          exit_code: 1
+          stderr:
+            contains:
+              - "requires an http:// or https:// URL"
+              - "file:///etc/passwd"
+      - run:
+          command: truss convert --url example.com/a.png -o out.png
+      - assert:
+          exit_code: 1
+          stderr:
+            contains: "is not a valid URL"
+
+  - name: --url and a file argument are not both accepted
+    steps:
+      - run:
+          command: truss convert "${fixtures}/sample.png" --url https://example.com/a.png -o out.png
+      - assert:
+          exit_code: 1
+          stderr:
+            contains: "exactly one input"

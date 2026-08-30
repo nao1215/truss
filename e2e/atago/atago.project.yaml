@@ -1,0 +1,7 @@
+# Directory manifest for the truss CLI end-to-end suite.
+#
+# `fixtures_dir` exposes the shared image fixtures as ${fixtures} to every spec in
+# this tree. atago expands it itself, so no scenario needs `shell: true` to read an
+# environment variable — which is what keeps this suite identical on Linux, macOS,
+# and Windows, where `shell: true` means cmd.exe and neither `$VAR` nor `cat` exists.
+fixtures_dir: ../../integration/fixtures

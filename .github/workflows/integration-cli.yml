@@ -29,8 +29,16 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # The suite runs on all three platforms because that is what it is for: the specs
+  # are shell-free (no `shell: true`, which would be cmd.exe on Windows), so the same
+  # scenarios execute the same way everywhere and a difference is a truss difference.
   cli-integration:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
         with:
@@ -45,9 +53,11 @@ jobs:
       - name: Install atago
         uses: nao1215/setup-atago@e4b6719aea547a68e6c15252222babab7f492a88 # v0.1.1
         with:
-          version: v0.20.0
+          version: v0.21.0
 
       # e2e/run.sh builds truss (cargo build --release --locked) and runs the
-      # atago specs in e2e/atago against the freshly built binary.
+      # atago specs in e2e/atago against the freshly built binary. `shell: bash`
+      # picks the Git Bash on the Windows runner rather than PowerShell.
       - name: Run atago CLI tests
+        shell: bash
         run: ./e2e/run.sh

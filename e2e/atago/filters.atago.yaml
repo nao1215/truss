@@ -1,0 +1,280 @@
+# --crop, --blur, and --sharpen: the raster-only stages that had no end-to-end coverage.
+#
+# Two kinds of claim are made here. The committed baselines say what the filters produce
+# and stay stable, so a stage that silently stopped running fails against the baseline
+# for the flagged run. The fixed-point scenarios say what they must NOT do: a Gaussian
+# blur and an unsharp mask both leave a uniform image alone, which no amount of
+# resampling drift changes, so those need no baseline at all.
+#
+# The 16x16 testdata/sample.png is the source; ${fixtures} supplies the SVG that the
+# raster-only stages have to refuse. Run with: e2e/run.sh --filter filters
+version: "1"
+
+suite:
+  name: truss filters
+
+scenarios:
+  - name: crop takes the requested region and nothing else
+    steps:
+      - fixture:
+          file: in.png
+          from: testdata/sample.png
+      - run:
+          command: truss convert in.png -o cropped.png --crop 4,4,8,8
+      - assert:
+          exit_code: 0
+          image:
+            path: cropped.png
+            format: png
+            width: 8
+            height: 8
+            similar_to: testdata/sample-crop-4-4-8-8.png
+
+  - name: crop runs before resize
+    steps:
+      # The order matters: cropping 8x8 out of the middle and then resizing to 4x4 is a
+      # different image from resizing first, and the documented order is crop then resize.
+      - fixture:
+          file: in.png
+          from: testdata/sample.png
+      - run:
+          command: truss convert in.png -o both.png --crop 4,4,8,8 --width 4 --height 4 --fit fill
+      - assert:
+          exit_code: 0
+          image:
+            path: both.png
+            width: 4
+            height: 4
+      - run:
+          command: truss convert in.png -o cropped.png --crop 4,4,8,8
+      - assert:
+          exit_code: 0
+      - run:
+          command: truss convert cropped.png -o staged.png --width 4 --height 4 --fit fill
+      - assert:
+          exit_code: 0
+          image:
+            path: both.png
+            similar_to: staged.png
+
+  - name: cropping the whole image leaves it unchanged
+    steps:
+      - fixture:
+          file: in.png
+          from: testdata/sample.png
+      - run:
+          command: truss convert in.png -o full.png --crop 0,0,16,16
+      - assert:
+          exit_code: 0
+          image:
+            path: full.png
+            width: 16
+            height: 16
+            similar_to: testdata/sample.png
+
+  - name: a crop region outside the image names the bounds it exceeded
+    steps:
+      - fixture:
+          file: in.png
+          from: testdata/sample.png
+      - run:
+          command: truss convert in.png -o out.png --crop 9999,9999,10,10
+      - assert:
+          exit_code: 1
+          stderr:
+            contains:
+              - "exceeds image bounds"
+              - "16x16"
+
+  - name: a crop region that extends one pixel past the edge is rejected
+    steps:
+      # 0,0,16,16 is the largest region that fits, so 0,0,17,16 is the first that does not.
+      - fixture:
+          file: in.png
+          from: testdata/sample.png
+      - run:
+          command: truss convert in.png -o out.png --crop 0,0,17,16
+      - assert:
+          exit_code: 1
+          stderr:
+            contains: "exceeds image bounds"
+
+  - name: a zero-sized crop is rejected at the flag
+    steps:
+      - fixture:
+          file: in.png
+          from: testdata/sample.png
+      - run:
+          command: truss convert in.png -o out.png --crop 0,0,0,0
+      - assert:
+          exit_code: 1
+          stderr:
+            contains: "greater than zero"
+
+  - name: a crop that is not four numbers is rejected at the flag
+    steps:
+      - fixture:
+          file: in.png
+          from: testdata/sample.png
+      - run:
+          command: truss convert in.png -o out.png --crop 1,2,3
+      - assert:
+          exit_code: 1
+          stderr:
+            contains: "error:"
+
+  - name: blur keeps the dimensions and produces its baseline
+    steps:
+      - fixture:
+          file: in.png
+          from: testdata/sample.png
+      # Without the flag the pass reproduces the source; with it, the blur baseline. The
+      # two are different images, so a --blur that parsed but did nothing fails here.
+      - run:
+          command: truss convert in.png -o plain.png
+      - assert:
+          exit_code: 0
+          image:
+            path: plain.png
+            similar_to: testdata/sample.png
+      - run:
+          command: truss convert in.png -o blurred.png --blur 3
+      - assert:
+          exit_code: 0
+          image:
+            path: blurred.png
+            format: png
+            width: 16
+            height: 16
+            similar_to: testdata/sample-blur-3.png
+
+  - name: sharpen keeps the dimensions and produces its baseline
+    steps:
+      - fixture:
+          file: in.png
+          from: testdata/sample.png
+      - run:
+          command: truss convert in.png -o sharpened.png --sharpen 3
+      - assert:
+          exit_code: 0
+          image:
+            path: sharpened.png
+            format: png
+            width: 16
+            height: 16
+            similar_to: testdata/sample-sharpen-3.png
+
+  - name: blur and sharpen leave a uniform image alone
+    steps:
+      # A constant image is a fixed point of both a Gaussian blur and an unsharp mask:
+      # every neighbourhood already has the value it is being pulled toward. This is the
+      # one property of these stages that holds exactly, with no baseline to drift.
+      - fixture:
+          file: dot.png
+          from: ${fixtures}/1px.png
+      - run:
+          command: truss convert dot.png -o flat.png --width 32 --height 32 --fit fill
+      - assert:
+          exit_code: 0
+          image:
+            path: flat.png
+            width: 32
+            height: 32
+      - run:
+          command: truss convert flat.png -o same.png
+      - assert:
+          exit_code: 0
+      - run:
+          command: truss convert flat.png -o blurred.png --blur 3
+      - assert:
+          exit_code: 0
+          file:
+            path: blurred.png
+            equals_file: same.png
+      - run:
+          command: truss convert flat.png -o sharpened.png --sharpen 3
+      - assert:
+          exit_code: 0
+          file:
+            path: sharpened.png
+            equals_file: same.png
+
+  - name: a blur sigma outside the supported range is rejected at the flag
+    steps:
+      - fixture:
+          file: in.png
+          from: testdata/sample.png
+      - run:
+          command: truss convert in.png -o out.png --blur 0.05
+      - assert:
+          exit_code: 1
+          stderr:
+            contains: "between 0.1 and 100.0"
+      - run:
+          command: truss convert in.png -o out.png --blur 1000
+      - assert:
+          exit_code: 1
+          stderr:
+            contains: "between 0.1 and 100.0"
+
+  - name: a sharpen sigma outside the supported range is rejected at the flag
+    steps:
+      - fixture:
+          file: in.png
+          from: testdata/sample.png
+      - run:
+          command: truss convert in.png -o out.png --sharpen 0.05
+      - assert:
+          exit_code: 1
+          stderr:
+            contains: "between 0.1 and 100.0"
+
+  - name: the raster-only stages are refused for an SVG input, by name
+    steps:
+      # An SVG passes through as text, so there are no pixels to filter. Saying which
+      # stage was refused is the difference between a fixable message and a puzzle.
+      - fixture:
+          file: in.svg
+          from: ${fixtures}/svg-minimal.svg
+      - run:
+          command: truss convert in.svg -o out.svg --blur 2
+      - assert:
+          exit_code: 1
+          stderr:
+            contains: "blur is not supported for SVG inputs"
+      - run:
+          command: truss convert in.svg -o out.svg --sharpen 2
+      - assert:
+          exit_code: 1
+          stderr:
+            contains: "sharpen is not supported for SVG inputs"
+      - run:
+          command: truss convert in.svg -o out.svg --crop 0,0,4,4
+      - assert:
+          exit_code: 1
+          stderr:
+            contains: "crop is not supported for SVG inputs"
+
+  - name: rasterizing an SVG first makes the raster-only stages available
+    steps:
+      - fixture:
+          file: in.svg
+          from: ${fixtures}/svg-minimal.svg
+      - run:
+          command: truss convert in.svg -o raster.png --format png --width 32 --height 32 --fit fill
+      - assert:
+          exit_code: 0
+          image:
+            path: raster.png
+            format: png
+            width: 32
+            height: 32
+      - run:
+          command: truss convert raster.png -o filtered.png --blur 2
+      - assert:
+          exit_code: 0
+          image:
+            path: filtered.png
+            format: png
+            width: 32
+            height: 32

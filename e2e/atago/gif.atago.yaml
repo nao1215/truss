@@ -18,8 +18,7 @@ scenarios:
   - name: inspect reports a static GIF87a
     steps:
       - run:
-          shell: true
-          command: truss inspect "$FIXTURES_DIR/sample.gif"
+          command: truss inspect "${fixtures}/sample.gif"
       - assert:
           exit_code: 0
           stdout:
@@ -38,8 +37,7 @@ scenarios:
   - name: inspect reports GIF transparency
     steps:
       - run:
-          shell: true
-          command: truss inspect "$FIXTURES_DIR/transparent.gif"
+          command: truss inspect "${fixtures}/transparent.gif"
       - assert:
           exit_code: 0
           stdout:
@@ -54,8 +52,7 @@ scenarios:
       # inspect is how a caller finds out an upload is animated before deciding what to
       # do with it, so it has to succeed on exactly the file convert will refuse.
       - run:
-          shell: true
-          command: truss inspect "$FIXTURES_DIR/animated.gif"
+          command: truss inspect "${fixtures}/animated.gif"
       - assert:
           exit_code: 0
           stdout:
@@ -68,8 +65,7 @@ scenarios:
   - name: converts a static GIF to PNG
     steps:
       - run:
-          shell: true
-          command: truss convert "$FIXTURES_DIR/sample.gif" -o out.png
+          command: truss convert "${fixtures}/sample.gif" -o out.png
       - assert:
           exit_code: 0
           image:
@@ -81,16 +77,14 @@ scenarios:
   - name: converts a static GIF to JPEG and WebP
     steps:
       - run:
-          shell: true
-          command: truss convert "$FIXTURES_DIR/sample.gif" -o out.jpg
+          command: truss convert "${fixtures}/sample.gif" -o out.jpg
       - assert:
           exit_code: 0
           image:
             path: out.jpg
             format: jpeg
       - run:
-          shell: true
-          command: truss convert "$FIXTURES_DIR/sample.gif" -o out.webp --format webp
+          command: truss convert "${fixtures}/sample.gif" -o out.webp --format webp
       - assert:
           exit_code: 0
           image:
@@ -100,8 +94,7 @@ scenarios:
   - name: a GIF resizes like any other raster input
     steps:
       - run:
-          shell: true
-          command: truss convert "$FIXTURES_DIR/sample.gif" -o small.png --width 2
+          command: truss convert "${fixtures}/sample.gif" -o small.png --width 2
       - assert:
           exit_code: 0
           image:
@@ -112,8 +105,7 @@ scenarios:
   - name: GIF transparency survives conversion to PNG
     steps:
       - run:
-          shell: true
-          command: truss convert "$FIXTURES_DIR/transparent.gif" -o alpha.png
+          command: truss convert "${fixtures}/transparent.gif" -o alpha.png
       - assert:
           exit_code: 0
           image:
@@ -134,8 +126,8 @@ scenarios:
       # Writing to stdout gives no extension to infer from. "Keep the input format" would
       # mean GIF, which truss cannot encode, so the default has to be something else.
       - run:
-          shell: true
-          command: truss convert "$FIXTURES_DIR/sample.gif" -o - > piped.out
+          command: truss convert "${fixtures}/sample.gif" -o -
+          stdout_to: piped.out
       - assert:
           exit_code: 0
           image:
@@ -145,8 +137,7 @@ scenarios:
   - name: "converting an animated GIF fails with exit 3 and names the frame count"
     steps:
       - run:
-          shell: true
-          command: truss convert "$FIXTURES_DIR/animated.gif" -o animated.png
+          command: truss convert "${fixtures}/animated.gif" -o animated.png
       - assert:
           exit_code: 3
           stderr:
@@ -157,8 +148,7 @@ scenarios:
   - name: optimize also refuses an animated GIF
     steps:
       - run:
-          shell: true
-          command: truss optimize "$FIXTURES_DIR/animated.gif" -o animated.png --format png
+          command: truss optimize "${fixtures}/animated.gif" -o animated.png --format png
       - assert:
           exit_code: 3
           stderr:
@@ -169,8 +159,7 @@ scenarios:
       # Catching this at parse time puts the error next to what the user typed instead of
       # surfacing it from deep in the pipeline.
       - run:
-          shell: true
-          command: truss convert "$FIXTURES_DIR/sample.png" -o out.png --format gif
+          command: truss convert "${fixtures}/sample.png" -o out.png --format gif
       - assert:
           exit_code: 1
           stderr:
@@ -178,28 +167,40 @@ scenarios:
               - "input-only format"
               - "png, jpeg, webp, or avif"
 
-  - name: a .gif output extension is rejected
+  - name: a .gif output extension is rejected the same way the flag is
+    steps:
+      # `--format gif` and `-o out.gif` ask for the same impossible thing, so they are
+      # the same usage error with the same wording. This used to surface from deep in
+      # the pipeline as exit 4 and "unsupported output media type: image/gif".
+      - run:
+          command: truss convert "${fixtures}/sample.png" -o out.gif
+      - assert:
+          exit_code: 1
+          stderr:
+            contains:
+              - "input-only format"
+              - "png, jpeg, webp, or avif"
+
+  - name: an explicit --format overrides a .gif output extension
     steps:
       - run:
-          shell: true
-          command: truss convert "$FIXTURES_DIR/sample.png" -o out.gif
+          command: truss convert "${fixtures}/sample.png" -o out.gif --format png
       - assert:
-          exit_code: 4
-          stderr:
-            contains: "unsupported output media type"
+          exit_code: 0
+          image:
+            path: out.gif
+            format: png
 
   - name: a GIF round-trips through PNG back to the same pixels
     steps:
       # GIF decodes to exact palette colors and PNG stores them losslessly, so two
       # different routes to PNG must agree to the pixel.
       - run:
-          shell: true
-          command: truss convert "$FIXTURES_DIR/sample.gif" -o direct.png
+          command: truss convert "${fixtures}/sample.gif" -o direct.png
       - assert:
           exit_code: 0
       - run:
-          shell: true
-          command: truss convert "$FIXTURES_DIR/sample.gif" -o intermediate.bmp
+          command: truss convert "${fixtures}/sample.gif" -o intermediate.bmp
       - assert:
           exit_code: 0
       - run:

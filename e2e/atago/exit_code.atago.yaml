@@ -7,6 +7,11 @@
 #   2  I/O error (file not found, permission denied, network failure)
 #   3  Input error (unsupported format, corrupt file)
 #   4  Transform error (encode failure, size limit exceeded, deadline)
+#   5  Runtime error (bind failure, stdout write failure)
+#
+# Code 5 has no scenario here: producing a failing stdout portably would mean a full
+# filesystem or a closed pipe, neither of which a spec can arrange on all three
+# platforms. It is covered by unit tests instead.
 #
 # Run with: e2e/run.sh
 version: "1"
@@ -27,16 +32,14 @@ scenarios:
   - name: "exit 0: successful conversion"
     steps:
       - run:
-          shell: true
-          command: truss convert "$FIXTURES_DIR/sample.png" -o ok.jpg
+          command: truss convert "${fixtures}/sample.png" -o ok.jpg
       - assert:
           exit_code: 0
 
   - name: "exit 0: successful inspection"
     steps:
       - run:
-          shell: true
-          command: truss inspect "$FIXTURES_DIR/sample.png"
+          command: truss inspect "${fixtures}/sample.png"
       - assert:
           exit_code: 0
           stdout:
@@ -45,8 +48,7 @@ scenarios:
   - name: "exit 1: convert is missing --output"
     steps:
       - run:
-          shell: true
-          command: truss convert "$FIXTURES_DIR/sample.png"
+          command: truss convert "${fixtures}/sample.png"
       - assert:
           exit_code: 1
           stderr:
@@ -112,8 +114,7 @@ scenarios:
   - name: "exit 3: empty file (zero bytes)"
     steps:
       - run:
-          shell: true
-          command: truss inspect "$FIXTURES_DIR/zero-bytes.bin"
+          command: truss inspect "${fixtures}/zero-bytes.bin"
       - assert:
           exit_code: 3
           stderr:
@@ -122,8 +123,7 @@ scenarios:
   - name: "exit 3: random binary data"
     steps:
       - run:
-          shell: true
-          command: truss inspect "$FIXTURES_DIR/random-noise.bin"
+          command: truss inspect "${fixtures}/random-noise.bin"
       - assert:
           exit_code: 3
           stderr:
@@ -132,8 +132,7 @@ scenarios:
   - name: "exit 4: converting a truncated JPEG"
     steps:
       - run:
-          shell: true
-          command: truss convert "$FIXTURES_DIR/truncated.jpg" -o trunc.png
+          command: truss convert "${fixtures}/truncated.jpg" -o trunc.png
       - assert:
           exit_code: 4
           stderr:

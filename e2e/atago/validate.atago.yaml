@@ -1,0 +1,154 @@
+# `truss validate`, the command whose whole job is to fail before a deploy does.
+#
+# It reads the same environment `truss serve` reads and reports what it found, so its
+# value is entirely in the messages: a configuration error has to name the setting that
+# is wrong, because the reader is looking at a container spec, not at truss. These
+# scenarios pin the naming, and pin that `serve` classifies the same faults the same way.
+#
+# The printed storage root is deliberately not compared against ${workdir}: the path is
+# canonicalized, and macOS resolves /var to /private/var, so the value differs by
+# platform while the contract ("it is reported") does not.
+#
+# Run with: e2e/run.sh --filter validate
+version: "1"
+
+suite:
+  name: truss validate
+
+scenarios:
+  - name: a readable storage root is valid and is reported
+    steps:
+      - run:
+          command: truss validate
+          env:
+            TRUSS_STORAGE_ROOT: ${workdir}
+      - assert:
+          exit_code: 0
+          stdout:
+            contains:
+              - "configuration is valid"
+              - "storage root:"
+
+  - name: a storage root that does not exist names the variable that set it
+    steps:
+      # The OS message is all this used to print, and it reads differently on each
+      # platform: "No such file or directory" against "The system cannot find the path
+      # specified". Neither says which of a dozen TRUSS_ variables to look at.
+      - run:
+          command: truss validate
+          env:
+            TRUSS_STORAGE_ROOT: ${workdir}/not-a-directory
+      - assert:
+          exit_code: 1
+          stderr:
+            contains:
+              - "invalid configuration"
+              - "TRUSS_STORAGE_ROOT"
+
+  - name: serve reports a bad configuration the same way validate does
+    steps:
+      # Exit 1 is the documented usage-error code, and a configuration fault is one
+      # whichever command notices it. serve used to exit 5 here, so a deploy script that
+      # branched on the code saw two different answers to the same question.
+      - run:
+          command: truss serve --bind 127.0.0.1:0
+          env:
+            TRUSS_STORAGE_ROOT: ${workdir}/not-a-directory
+      - assert:
+          exit_code: 1
+          stderr:
+            contains: "TRUSS_STORAGE_ROOT"
+
+  - name: half a signed-URL credential pair is refused and both halves are named
+    steps:
+      - run:
+          command: truss validate
+          env:
+            TRUSS_STORAGE_ROOT: ${workdir}
+            TRUSS_SIGNED_URL_KEY_ID: my-key
+      - assert:
+          exit_code: 1
+          stderr:
+            contains:
+              - "TRUSS_SIGNED_URL_KEY_ID"
+              - "TRUSS_SIGNED_URL_SECRET"
+              - "must be set together"
+
+  - name: a complete signed-URL credential pair is valid
+    steps:
+      - run:
+          command: truss validate
+          env:
+            TRUSS_STORAGE_ROOT: ${workdir}
+            TRUSS_SIGNED_URL_KEY_ID: my-key
+            TRUSS_SIGNED_URL_SECRET: my-secret
+            TRUSS_PUBLIC_BASE_URL: https://cdn.example.com
+      - assert:
+          exit_code: 0
+          stdout:
+            contains: "configuration is valid"
+
+  - name: signing keys without a public base URL warn about the Host header
+    steps:
+      # Valid, but behind a CDN the Host header is not the signed authority, and the
+      # symptom is every signed URL failing verification in production only.
+      - run:
+          command: truss validate
+          env:
+            TRUSS_STORAGE_ROOT: ${workdir}
+            TRUSS_SIGNED_URL_KEY_ID: my-key
+            TRUSS_SIGNED_URL_SECRET: my-secret
+      - assert:
+          exit_code: 0
+          stderr:
+            contains:
+              - "warning"
+              - "TRUSS_PUBLIC_BASE_URL"
+
+  - name: a public base URL that is not a URL names the variable
+    steps:
+      - run:
+          command: truss validate
+          env:
+            TRUSS_STORAGE_ROOT: ${workdir}
+            TRUSS_PUBLIC_BASE_URL: not-a-url
+      - assert:
+          exit_code: 1
+          stderr:
+            contains:
+              - "TRUSS_PUBLIC_BASE_URL"
+              - "valid URL"
+
+  - name: a concurrency limit outside the supported range names the variable and the range
+    steps:
+      - run:
+          command: truss validate
+          env:
+            TRUSS_STORAGE_ROOT: ${workdir}
+            TRUSS_MAX_CONCURRENT_TRANSFORMS: "0"
+      - assert:
+          exit_code: 1
+          stderr:
+            contains:
+              - "TRUSS_MAX_CONCURRENT_TRANSFORMS"
+              - "between 1 and 1024"
+      - run:
+          command: truss validate
+          env:
+            TRUSS_STORAGE_ROOT: ${workdir}
+            TRUSS_MAX_CONCURRENT_TRANSFORMS: not-a-number
+      - assert:
+          exit_code: 1
+          stderr:
+            contains: "TRUSS_MAX_CONCURRENT_TRANSFORMS"
+
+  - name: validate --help describes the command without reading the environment
+    steps:
+      - run:
+          command: truss validate --help
+          env:
+            TRUSS_STORAGE_ROOT: ${workdir}/not-a-directory
+      - assert:
+          exit_code: 0
+          stdout:
+            contains: "truss validate"

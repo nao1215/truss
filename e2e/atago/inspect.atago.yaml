@@ -16,8 +16,7 @@ scenarios:
   - name: prints JSON metadata for a PNG file
     steps:
       - run:
-          shell: true
-          command: truss inspect "$FIXTURES_DIR/sample.png"
+          command: truss inspect "${fixtures}/sample.png"
       - assert:
           exit_code: 0
           stdout:
@@ -29,8 +28,7 @@ scenarios:
   - name: reports the correct format and dimensions (png, 4x3)
     steps:
       - run:
-          shell: true
-          command: truss inspect "$FIXTURES_DIR/sample.png"
+          command: truss inspect "${fixtures}/sample.png"
       - assert:
           exit_code: 0
           stdout:
@@ -51,8 +49,7 @@ scenarios:
   - name: reports alpha channel presence
     steps:
       - run:
-          shell: true
-          command: truss inspect "$FIXTURES_DIR/sample.png"
+          command: truss inspect "${fixtures}/sample.png"
       - assert:
           exit_code: 0
           stdout:
@@ -60,9 +57,13 @@ scenarios:
 
   - name: reads from stdin when given -
     steps:
+      - fixture:
+          file: in.png
+          from: ${fixtures}/sample.png
       - run:
-          shell: true
-          command: cat "$FIXTURES_DIR/sample.png" | truss inspect -
+          command: truss inspect -
+          stdin:
+            file: in.png
       - assert:
           exit_code: 0
           stdout:
