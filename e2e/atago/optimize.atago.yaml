@@ -1,0 +1,235 @@
+# `truss optimize`, which the other specs only touched in passing.
+#
+# optimize is convert with the geometry flags removed and the encoder told to work
+# harder, so what is worth pinning is the part that is not convert: that a mode does what
+# its name says, that the output format still comes from the extension, and that the
+# pixels survive. Byte sizes are deliberately not asserted as targets — an encoder
+# upgrade is allowed to change them — except where the mode's definition depends on it.
+#
+# Run with: e2e/run.sh --filter optimize
+version: "1"
+
+suite:
+  name: truss optimize
+
+scenarios:
+  - name: lossless optimization of a JPEG returns the same bytes
+    steps:
+      # There is nothing lossless left to do to an already-encoded JPEG, so the file is
+      # passed through. A re-encode here would be a silent quality loss under a flag
+      # whose name promises there is none.
+      - fixture:
+          file: in.png
+          from: testdata/sample.png
+      - run:
+          command: truss convert in.png -o big.png --width 64 --height 64 --fit fill
+      - assert:
+          exit_code: 0
+      - run:
+          command: truss convert big.png -o photo.jpg --quality 95
+      - assert:
+          exit_code: 0
+      - run:
+          command: truss optimize photo.jpg -o same.jpg --mode lossless
+      - assert:
+          exit_code: 0
+          file:
+            path: same.jpg
+            equals_file: photo.jpg
+
+  - name: lossy optimization keeps the dimensions and the format
+    steps:
+      - fixture:
+          file: in.png
+          from: testdata/sample.png
+      - run:
+          command: truss convert in.png -o big.png --width 64 --height 64 --fit fill
+      - assert:
+          exit_code: 0
+      - run:
+          command: truss convert big.png -o photo.jpg --quality 95
+      - assert:
+          exit_code: 0
+      - run:
+          command: truss optimize photo.jpg -o smaller.jpg --mode lossy --quality 40
+      - assert:
+          exit_code: 0
+          image:
+            path: smaller.jpg
+            format: jpeg
+            width: 64
+            height: 64
+
+  - name: the output format still comes from the extension
+    steps:
+      - fixture:
+          file: in.png
+          from: testdata/sample.png
+      - run:
+          command: truss optimize in.png -o out.webp
+      - assert:
+          exit_code: 0
+          image:
+            path: out.webp
+            format: webp
+            width: 16
+            height: 16
+      - run:
+          command: truss optimize in.png -o out.jpg
+      - assert:
+          exit_code: 0
+          image:
+            path: out.jpg
+            format: jpeg
+            width: 16
+            height: 16
+
+  - name: an explicit --format wins over the extension
+    steps:
+      - fixture:
+          file: in.png
+          from: testdata/sample.png
+      - run:
+          command: truss optimize in.png -o out.bin --format png
+      - assert:
+          exit_code: 0
+          image:
+            path: out.bin
+            format: png
+
+  - name: mode none still re-encodes into the requested format
+    steps:
+      - fixture:
+          file: in.png
+          from: testdata/sample.png
+      - run:
+          command: truss optimize in.png -o none.webp --mode none
+      - assert:
+          exit_code: 0
+          image:
+            path: none.webp
+            format: webp
+            width: 16
+            height: 16
+
+  - name: lossless PNG optimization keeps the pixels
+    steps:
+      # PNG is lossless by construction, so whatever the optimizer does to the container
+      # the image that comes back out has to be the one that went in.
+      - fixture:
+          file: in.png
+          from: testdata/sample.png
+      - run:
+          command: truss optimize in.png -o out.png --mode lossless
+      - assert:
+          exit_code: 0
+          image:
+            path: out.png
+            format: png
+            similar_to: testdata/sample.png
+
+  - name: an unknown optimize mode lists nothing it cannot do
+    steps:
+      - fixture:
+          file: in.png
+          from: testdata/sample.png
+      - run:
+          command: truss optimize in.png -o out.png --mode bogus
+      - assert:
+          exit_code: 1
+          stderr:
+            contains: "unsupported optimize mode"
+
+  - name: lossy optimization names the formats that can carry it
+    steps:
+      - fixture:
+          file: in.png
+          from: testdata/sample.png
+      - run:
+          command: truss optimize in.png -o out.png --mode lossy
+      - assert:
+          exit_code: 1
+          stderr:
+            contains:
+              - "lossy optimization requires"
+              - "jpeg, webp, or avif"
+
+  - name: a perceptual target is accepted in both documented spellings
+    steps:
+      - fixture:
+          file: in.png
+          from: testdata/sample.png
+      - run:
+          command: truss convert in.png -o photo.jpg --quality 95
+      - assert:
+          exit_code: 0
+      - run:
+          command: truss optimize photo.jpg -o ssim.jpg --target-quality ssim:0.98
+      - assert:
+          exit_code: 0
+          image:
+            path: ssim.jpg
+            format: jpeg
+      - run:
+          command: truss optimize photo.jpg -o psnr.jpg --target-quality psnr:42
+      - assert:
+          exit_code: 0
+          image:
+            path: psnr.jpg
+            format: jpeg
+
+  - name: a malformed perceptual target shows the shape it wanted
+    steps:
+      - fixture:
+          file: in.png
+          from: testdata/sample.png
+      - run:
+          command: truss optimize in.png -o out.jpg --target-quality bogus
+      - assert:
+          exit_code: 1
+          stderr:
+            contains: "ssim:0.98"
+
+  - name: optimizing an SVG into an SVG has nothing to optimize and says so
+    steps:
+      - fixture:
+          file: in.svg
+          from: ${fixtures}/svg-minimal.svg
+      - run:
+          command: truss optimize in.svg -o out.svg
+      - assert:
+          exit_code: 1
+          stderr:
+            contains: "optimization is not supported for svg output"
+
+  - name: optimize reads stdin and writes stdout
+    steps:
+      - fixture:
+          file: in.png
+          from: testdata/sample.png
+      - run:
+          command: truss optimize - -o - --format webp
+          stdin:
+            file: in.png
+          stdout_to: out.webp
+      - assert:
+          exit_code: 0
+          image:
+            path: out.webp
+            format: webp
+            width: 16
+            height: 16
+
+  - name: optimize without an output says which flag is missing
+    steps:
+      - fixture:
+          file: in.png
+          from: testdata/sample.png
+      - run:
+          command: truss optimize in.png
+      - assert:
+          exit_code: 1
+          stderr:
+            contains:
+              - "requires -o <output>"
+              - "truss optimize input.jpg -o output.jpg"

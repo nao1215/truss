@@ -1401,9 +1401,22 @@ impl fmt::Display for TransformError {
             Self::UnsupportedInputMediaType(reason) => {
                 write!(f, "unsupported input media type: {reason}")
             }
-            Self::UnsupportedOutputMediaType(media_type) => {
-                write!(f, "unsupported output media type: {media_type}")
-            }
+            // Naming only the media type left the reader to guess why: `svg` is
+            // refused for a raster input yet accepted for an SVG one, and `gif` is
+            // refused for every input. Say which rule was hit and what to ask for
+            // instead, so the CLI, the server, and the WASM build all explain it the
+            // same way.
+            Self::UnsupportedOutputMediaType(media_type) => match media_type {
+                MediaType::Svg => write!(
+                    f,
+                    "svg output requires an svg input; choose a raster output format such as png, jpeg, webp, or avif"
+                ),
+                MediaType::Gif => write!(
+                    f,
+                    "gif is an input-only format; choose an output format such as png, jpeg, webp, or avif"
+                ),
+                other => write!(f, "unsupported output media type: {other}"),
+            },
             Self::DecodeFailed(reason) => write!(f, "decode failed: {reason}"),
             Self::EncodeFailed(reason) => write!(f, "encode failed: {reason}"),
             Self::CapabilityMissing(reason) => write!(f, "missing capability: {reason}"),

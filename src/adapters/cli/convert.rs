@@ -52,6 +52,10 @@ pub(super) fn convert_from_clap(args: ClapConvertArgs) -> Result<Command, CliErr
         }
     };
 
+    if args.format.is_none() {
+        reject_unencodable_output_extension(&output, convert_error)?;
+    }
+
     let watermark_path = args.watermark.clone();
     if watermark_path.is_none()
         && (args.watermark_position.is_some()
@@ -142,6 +146,10 @@ pub(super) fn optimize_from_clap(args: ClapOptimizeArgs) -> Result<Command, CliE
             });
         }
     };
+
+    if args.format.is_none() {
+        reject_unencodable_output_extension(&output, optimize_error)?;
+    }
 
     let options = TransformFields {
         width: None,
@@ -243,6 +251,28 @@ where
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Rejects an output extension that names a format truss never encodes.
+///
+/// `--format gif` is refused by the flag's value parser with the alternatives spelled
+/// out, but `-o out.gif` reached the same wall from the other side and surfaced
+/// `unsupported output media type` from deep in the pipeline with a different exit code.
+/// Both spellings ask for the same impossible thing, so both are usage errors now.
+fn reject_unencodable_output_extension<F>(output: &OutputTarget, error: F) -> Result<(), CliError>
+where
+    F: Fn(&str) -> CliError,
+{
+    let Some(media_type) = infer_output_format(output) else {
+        return Ok(());
+    };
+    if media_type.is_encodable() {
+        return Ok(());
+    }
+    Err(error(&format!(
+        "{} is an input-only format; choose an output format such as png, jpeg, webp, or avif",
+        media_type.as_name()
+    )))
+}
 
 fn infer_output_format(output: &OutputTarget) -> Option<MediaType> {
     match output {

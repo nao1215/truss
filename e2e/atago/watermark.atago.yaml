@@ -1,0 +1,231 @@
+# --watermark and its three modifier flags, which had no end-to-end coverage.
+#
+# The interesting behaviour is not the composite itself but the contract around it: the
+# modifiers are meaningless without --watermark and say so, the mark has to fit inside
+# the output once the margin is taken into account, and a vector mark is refused because
+# there is nothing to composite. Each of those is a message a user reads while their
+# build is failing, so each is pinned by its wording, not only by its exit code.
+#
+# testdata/sample.png is 16x16 and is scaled up to give the mark somewhere to sit.
+# Run with: e2e/run.sh --filter watermark
+version: "1"
+
+suite:
+  name: truss watermark
+
+scenarios:
+  - name: a watermark composites onto the output and changes it
+    steps:
+      - fixture:
+          file: mark.png
+          from: testdata/sample.png
+      - run:
+          command: truss convert mark.png -o base.png --width 64 --height 64 --fit fill
+      - assert:
+          exit_code: 0
+          image:
+            path: base.png
+            width: 64
+            height: 64
+            similar_to: testdata/sample-64.png
+      # Without the flag the pass reproduces the unmarked base; with it, the marked
+      # baseline. The two baselines are different images, so a --watermark that parsed
+      # but composited nothing could not satisfy both assertions.
+      - run:
+          command: truss convert base.png -o plain.png
+      - assert:
+          exit_code: 0
+          image:
+            path: plain.png
+            similar_to: testdata/sample-64.png
+      - run:
+          command: truss convert base.png -o marked.png --watermark mark.png
+      - assert:
+          exit_code: 0
+          image:
+            path: marked.png
+            format: png
+            width: 64
+            height: 64
+            similar_to: testdata/sample-64-watermarked.png
+      # Compositing is deterministic: the same mark in the same place twice is the
+      # same file, so a signed URL or a cache key keeps pointing at one image.
+      - run:
+          command: truss convert base.png -o marked-again.png --watermark mark.png
+      - assert:
+          exit_code: 0
+          file:
+            path: marked.png
+            equals_file: marked-again.png
+
+  - name: every documented watermark position is accepted
+    steps:
+      - fixture:
+          file: mark.png
+          from: testdata/sample.png
+      - run:
+          command: truss convert mark.png -o base.png --width 64 --height 64 --fit fill
+      - assert:
+          exit_code: 0
+      - run:
+          command: truss convert base.png -o center.png --watermark mark.png --watermark-position center
+      - assert:
+          exit_code: 0
+          image:
+            path: center.png
+            width: 64
+      - run:
+          command: truss convert base.png -o topleft.png --watermark mark.png --watermark-position top-left
+      - assert:
+          exit_code: 0
+          image:
+            path: topleft.png
+            width: 64
+      - run:
+          command: truss convert base.png -o bottomright.png --watermark mark.png --watermark-position bottom-right
+      - assert:
+          exit_code: 0
+          image:
+            path: bottomright.png
+            width: 64
+
+  - name: an unknown watermark position is rejected at the flag
+    steps:
+      - fixture:
+          file: mark.png
+          from: testdata/sample.png
+      - run:
+          command: truss convert mark.png -o out.png --watermark mark.png --watermark-position nowhere
+      - assert:
+          exit_code: 1
+          stderr:
+            contains: "unsupported position"
+
+  - name: watermark opacity is bounded to 1-100
+    steps:
+      - fixture:
+          file: mark.png
+          from: testdata/sample.png
+      - run:
+          command: truss convert mark.png -o out.png --watermark mark.png --watermark-opacity 0
+      - assert:
+          exit_code: 1
+          stderr:
+            contains: "between 1 and 100"
+      - run:
+          command: truss convert mark.png -o out.png --watermark mark.png --watermark-opacity 101
+      - assert:
+          exit_code: 1
+          stderr:
+            contains: "between 1 and 100"
+
+  - name: the modifier flags require --watermark and say which ones they are
+    steps:
+      - fixture:
+          file: in.png
+          from: testdata/sample.png
+      - run:
+          command: truss convert in.png -o out.png --watermark-opacity 50
+      - assert:
+          exit_code: 1
+          stderr:
+            contains:
+              - "require --watermark"
+              - "provide --watermark"
+      - run:
+          command: truss convert in.png -o out.png --watermark-position center
+      - assert:
+          exit_code: 1
+          stderr:
+            contains: "require --watermark"
+      - run:
+          command: truss convert in.png -o out.png --watermark-margin 4
+      - assert:
+          exit_code: 1
+          stderr:
+            contains: "require --watermark"
+
+  - name: a watermark bigger than the output reports both sizes
+    steps:
+      - fixture:
+          file: mark.png
+          from: testdata/sample.png
+      - run:
+          command: truss convert mark.png -o small.png --width 8 --height 8 --fit fill
+      - assert:
+          exit_code: 0
+      - run:
+          command: truss convert small.png -o out.png --watermark mark.png --watermark-margin 0
+      - assert:
+          exit_code: 1
+          stderr:
+            contains:
+              - "watermark 16x16"
+              - "8x8 output"
+
+  - name: a margin wider than the output blames the margin, not the image
+    steps:
+      # The mark fits; the margin is what pushes it out. This used to report "watermark
+      # image is too large for the output dimensions", which sent readers off to shrink
+      # an image that was already small enough.
+      - fixture:
+          file: mark.png
+          from: testdata/sample.png
+      - run:
+          command: truss convert mark.png -o base.png --width 64 --height 64 --fit fill
+      - assert:
+          exit_code: 0
+      - run:
+          command: truss convert base.png -o out.png --watermark mark.png --watermark-margin 1000
+      - assert:
+          exit_code: 1
+          stderr:
+            contains:
+              - "1000px margin"
+              - "64x64 output"
+
+  - name: a watermark file that is not there is an I/O error
+    steps:
+      - fixture:
+          file: in.png
+          from: testdata/sample.png
+      - run:
+          command: truss convert in.png -o out.png --watermark absent.png
+      - assert:
+          exit_code: 2
+          stderr:
+            contains: "failed to read watermark file"
+
+  - name: a vector watermark is refused because there is nothing to composite
+    steps:
+      - fixture:
+          file: mark.svg
+          from: ${fixtures}/svg-minimal.svg
+      - fixture:
+          file: in.png
+          from: testdata/sample.png
+      - run:
+          command: truss convert in.png -o base.png --width 64 --height 64 --fit fill
+      - assert:
+          exit_code: 0
+      - run:
+          command: truss convert base.png -o out.png --watermark mark.svg
+      - assert:
+          exit_code: 1
+          stderr:
+            contains: "watermark image must be a raster format"
+
+  - name: a watermark is refused for an SVG output, which has no pixels to composite onto
+    steps:
+      - fixture:
+          file: in.svg
+          from: ${fixtures}/svg-minimal.svg
+      - fixture:
+          file: mark.png
+          from: testdata/sample.png
+      - run:
+          command: truss convert in.svg -o out.svg --watermark mark.png
+      - assert:
+          exit_code: 1
+          stderr:
+            contains: "watermark is not supported for SVG inputs"

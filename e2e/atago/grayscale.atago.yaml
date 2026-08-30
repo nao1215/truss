@@ -41,22 +41,23 @@ scenarios:
       - fixture:
           file: in.png
           from: testdata/sample.png
+      # Without the flag the pass reproduces the colored source; with it the pass
+      # reproduces the gray baseline. The two baselines are different images, so a
+      # --grayscale that parsed but did nothing could not satisfy both assertions.
       - run:
           command: truss convert in.png -o color.png
       - assert:
           exit_code: 0
+          image:
+            path: color.png
+            similar_to: testdata/sample.png
       - run:
           command: truss convert in.png -o gray.png --grayscale
       - assert:
           exit_code: 0
-      # cmp exits 1 when the files differ, which is the outcome under test: a
-      # flag that parsed but did nothing would leave these two byte-identical.
-      - run:
-          shell: true
-          command: cmp -s color.png gray.png; echo "differs=$?"
-      - assert:
-          stdout:
-            contains: "differs=1"
+          image:
+            path: gray.png
+            similar_to: testdata/sample-grayscale.png
 
   - name: grayscale is idempotent
     steps:
@@ -149,8 +150,7 @@ scenarios:
   - name: grayscale applies to a rasterized SVG
     steps:
       - run:
-          shell: true
-          command: truss convert "$FIXTURES_DIR/svg-minimal.svg" -o svg-gray.png --format png --grayscale
+          command: truss convert "${fixtures}/svg-minimal.svg" -o svg-gray.png --format png --grayscale
       - assert:
           exit_code: 0
           image:

@@ -141,9 +141,12 @@ pub(super) fn execute_validate<W: Write>(stdout: &mut W) -> Result<(), CliError>
 // ---------------------------------------------------------------------------
 
 pub(super) fn resolve_server_config(command: ServeCommand) -> Result<ServerConfig, CliError> {
+    // A configuration fault exits 1, the same code `truss validate` reports for the same
+    // fault. Exit 5 is for what happens after the configuration is accepted — a port
+    // already in use, a stream that cannot be written.
     let mut config = ServerConfig::from_env().map_err(|error| {
         runtime_error(
-            EXIT_RUNTIME,
+            EXIT_USAGE,
             &format!("failed to load server configuration: {error}"),
         )
     })?;
@@ -151,7 +154,7 @@ pub(super) fn resolve_server_config(command: ServeCommand) -> Result<ServerConfi
     if let Some(storage_root) = command.storage_root {
         config.storage_root = storage_root.canonicalize().map_err(|error| {
             runtime_error(
-                EXIT_RUNTIME,
+                EXIT_USAGE,
                 &format!(
                     "failed to resolve storage root {}: {error}",
                     storage_root.display()
@@ -266,5 +269,39 @@ mod tests {
 
         assert_eq!(error.exit_code, super::EXIT_RUNTIME);
         assert!(error.message.contains("failed to write stdout"));
+    }
+
+    #[test]
+    #[serial]
+    fn a_storage_root_that_does_not_exist_is_a_usage_error_and_names_the_setting() {
+        let missing = std::env::temp_dir().join("truss-storage-root-that-does-not-exist");
+        let _storage_root_guard = EnvVarGuard::set_path("TRUSS_STORAGE_ROOT", &missing);
+
+        // `truss validate` and `truss serve` disagreed here: the same misconfiguration
+        // exited 1 from one and 5 from the other, and neither said which setting it was.
+        let validate_error =
+            execute_validate(&mut Vec::new()).expect_err("a missing storage root is invalid");
+        assert_eq!(validate_error.exit_code, super::EXIT_USAGE);
+        assert!(
+            validate_error.message.contains("TRUSS_STORAGE_ROOT"),
+            "validate should name the setting, got: {}",
+            validate_error.message
+        );
+
+        let serve_error = resolve_server_config(ServeCommand {
+            bind_addr: None,
+            storage_root: None,
+            public_base_url: None,
+            signed_url_key_id: None,
+            signed_url_secret: None,
+            allow_insecure_url_sources: false,
+        })
+        .expect_err("a missing storage root is invalid");
+        assert_eq!(serve_error.exit_code, super::EXIT_USAGE);
+        assert!(
+            serve_error.message.contains("TRUSS_STORAGE_ROOT"),
+            "serve should name the setting, got: {}",
+            serve_error.message
+        );
     }
 }

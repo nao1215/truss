@@ -1,0 +1,260 @@
+# The contract that has to read the same on Linux, macOS, and Windows.
+#
+# truss ships one binary for three platforms, and the places where they disagree are
+# not the image pipeline — they are the edges: how a path is spelled, whether the
+# filesystem folds case, what a line ending is, and whether a buffered stdout ever
+# reaches the file descriptor. Those are what this file pins, so a regression that only
+# shows up on one runner fails here rather than in a user's terminal.
+#
+# Every scenario is shell-free on purpose. `shell: true` means /bin/sh on Linux and
+# macOS but cmd.exe on Windows, where neither `$VAR` nor `cat` exists, so a suite that
+# leans on it is three different suites. ${fixtures} comes from atago.project.yaml, and
+# stdin/stdout redirection is expressed with `stdin.file` and `stdout_to`.
+#
+# Run with: e2e/run.sh --filter portability
+version: "1"
+
+suite:
+  name: truss portability
+
+scenarios:
+  - name: an uppercase output extension selects the same format as a lowercase one
+    steps:
+      # Linux is case-sensitive and macOS and Windows are not, so a camera that writes
+      # IMG_0001.JPG has to mean the same thing everywhere.
+      - fixture:
+          file: in.png
+          from: ${fixtures}/sample.png
+      - run:
+          command: truss convert in.png -o upper.JPG
+      - assert:
+          exit_code: 0
+          image:
+            path: upper.JPG
+            format: jpeg
+      - run:
+          command: truss convert in.png -o mixed.JpEg
+      - assert:
+          exit_code: 0
+          image:
+            path: mixed.JpEg
+            format: jpeg
+
+  - name: a path with spaces round-trips
+    steps:
+      - fixture:
+          file: my input.png
+          from: ${fixtures}/sample.png
+      - run:
+          command: truss convert "my input.png" -o "my output.jpg"
+      - assert:
+          exit_code: 0
+          image:
+            path: my output.jpg
+            format: jpeg
+
+  - name: a non-ASCII path round-trips
+    steps:
+      # Filenames reach the process as UTF-8 on Linux and macOS and as UTF-16 on
+      # Windows. truss never has to spell one itself, so the only requirement is that it
+      # passes them through unchanged.
+      - fixture:
+          file: 画像.png
+          from: ${fixtures}/sample.png
+      - run:
+          command: truss convert 画像.png -o 変換後.webp
+      - assert:
+          exit_code: 0
+          image:
+            path: 変換後.webp
+            format: webp
+
+  - name: an output directory that exists is written into
+    steps:
+      - fixture:
+          file: nested/deeper/in.png
+          from: ${fixtures}/sample.png
+      - run:
+          command: truss convert nested/deeper/in.png -o nested/deeper/out.jpg
+      - assert:
+          exit_code: 0
+          image:
+            path: nested/deeper/out.jpg
+            format: jpeg
+
+  - name: an output directory that does not exist is an I/O error, not a crash
+    steps:
+      # The OS text differs ("No such file or directory" against "The system cannot find
+      # the path specified"), so the exit code is the portable part of the contract.
+      - fixture:
+          file: in.png
+          from: ${fixtures}/sample.png
+      - run:
+          command: truss convert in.png -o absent/out.jpg
+      - assert:
+          exit_code: 2
+          stderr:
+            contains:
+              - "error:"
+              - "failed to write"
+
+  - name: an input that does not exist is an I/O error
+    steps:
+      - run:
+          command: truss convert absent.png -o out.jpg
+      - assert:
+          exit_code: 2
+          stderr:
+            contains:
+              - "error:"
+              - "failed to read"
+
+  - name: writing onto a directory is an I/O error
+    steps:
+      - fixture:
+          file: in.png
+          from: ${fixtures}/sample.png
+      - fixture:
+          file: adir/keep.txt
+          content: "placeholder\n"
+      - run:
+          command: truss convert in.png -o adir
+      - assert:
+          exit_code: 2
+          stderr:
+            contains: "error:"
+
+  - name: stdout carries the same bytes as a file for a payload with no newline in it
+    steps:
+      # A short WebP has no 0x0A byte, so nothing forces the buffered stdout to drain
+      # before the process exits. truss used to leave that final flush to the runtime,
+      # which discards its error, so a truncated or failed write exited 0.
+      - fixture:
+          file: in.png
+          from: ${fixtures}/1px.png
+      - run:
+          command: truss convert in.png -o file.webp --format webp --quality 50
+      - assert:
+          exit_code: 0
+      - run:
+          command: truss convert in.png -o - --format webp --quality 50
+          stdout_to: piped.webp
+      - assert:
+          exit_code: 0
+          file:
+            path: piped.webp
+            equals_file: file.webp
+
+  - name: stdin and stdout carry binary unchanged
+    steps:
+      # Windows opens standard streams in the same binary mode Rust uses on Unix. A
+      # regression here would show up as a PNG that gained 0x0D bytes in transit.
+      - fixture:
+          file: in.png
+          from: ${fixtures}/sample.png
+      - run:
+          command: truss convert - -o - --format png
+          stdin:
+            file: in.png
+          stdout_to: round.png
+      - assert:
+          exit_code: 0
+          image:
+            path: round.png
+            format: png
+      - run:
+          command: truss convert - -o direct.png --format png
+          stdin:
+            file: in.png
+      - assert:
+          exit_code: 0
+          file:
+            path: round.png
+            equals_file: direct.png
+
+  - name: help and version write LF line endings on every platform
+    steps:
+      # Rust writes the bytes it is given, so these stay LF on Windows too. Pinning it
+      # keeps a future switch to a platform-aware writer from silently breaking every
+      # consumer that greps the output.
+      - run:
+          command: truss --version
+      - assert:
+          exit_code: 0
+          stdout:
+            not_contains: "\r"
+      - run:
+          command: truss help
+      - assert:
+          exit_code: 0
+          stdout:
+            not_contains: "\r"
+
+  - name: inspect emits LF-terminated JSON on every platform
+    steps:
+      - fixture:
+          file: in.png
+          from: ${fixtures}/sample.png
+      - run:
+          command: truss inspect in.png
+      - assert:
+          exit_code: 0
+          stdout:
+            not_contains: "\r"
+      - assert:
+          stdout:
+            json:
+              path: $.format
+              equals: png
+
+  - name: the same input and options produce the same bytes twice
+    steps:
+      # Nondeterministic output passes every other assertion in this suite while making
+      # a content-addressed cache useless, so it is checked directly.
+      - fixture:
+          file: in.png
+          from: ${fixtures}/sample.png
+      - run:
+          command: truss convert in.png -o - --format webp --quality 70
+          deterministic:
+            runs: 3
+            compare: [stdout, exit_code]
+      - assert:
+          exit_code: 0
+
+  - name: an extensionless output falls back to the input format
+    steps:
+      - fixture:
+          file: in.png
+          from: ${fixtures}/sample.png
+      - run:
+          command: truss convert in.png -o noextension
+      - assert:
+          exit_code: 0
+          image:
+            path: noextension
+            format: png
+
+  - name: an extensionless existing file is an implicit convert, not an unknown subcommand
+    steps:
+      # `truss image -o out.jpg` has to reach convert even when `image` has no extension
+      # to give it away, and the only way to know is that the file is there.
+      - fixture:
+          file: photo
+          from: ${fixtures}/sample.png
+      - run:
+          command: truss photo -o out.jpg
+      - assert:
+          exit_code: 0
+          image:
+            path: out.jpg
+            format: jpeg
+
+  - name: a name that is not a file is reported as an unknown subcommand
+    steps:
+      - run:
+          command: truss notacommand -o out.jpg
+      - assert:
+          exit_code: 1
+          stderr:
+            contains: "error:"

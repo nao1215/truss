@@ -12,8 +12,7 @@ scenarios:
   - name: detects BMP format and dimensions (4x3)
     steps:
       - run:
-          shell: true
-          command: truss inspect "$FIXTURES_DIR/sample.bmp"
+          command: truss inspect "${fixtures}/sample.bmp"
       - assert:
           exit_code: 0
           stdout:
@@ -34,8 +33,7 @@ scenarios:
   - name: converts BMP to a valid PNG
     steps:
       - run:
-          shell: true
-          command: truss convert "$FIXTURES_DIR/sample.bmp" -o out.png
+          command: truss convert "${fixtures}/sample.bmp" -o out.png
       - assert:
           exit_code: 0
           image:
@@ -45,8 +43,7 @@ scenarios:
   - name: converts BMP to a valid JPEG
     steps:
       - run:
-          shell: true
-          command: truss convert "$FIXTURES_DIR/sample.bmp" -o out.jpg
+          command: truss convert "${fixtures}/sample.bmp" -o out.jpg
       - assert:
           exit_code: 0
           image:
@@ -56,8 +53,7 @@ scenarios:
   - name: converts PNG to a valid BMP
     steps:
       - run:
-          shell: true
-          command: truss convert "$FIXTURES_DIR/sample.png" -o out.bmp
+          command: truss convert "${fixtures}/sample.png" -o out.bmp
       - assert:
           exit_code: 0
           image:
@@ -67,8 +63,7 @@ scenarios:
   - name: converts JPEG to BMP with an explicit --format
     steps:
       - run:
-          shell: true
-          command: truss convert "$FIXTURES_DIR/sample.jpg" -o out.bmp --format bmp
+          command: truss convert "${fixtures}/sample.jpg" -o out.bmp --format bmp
       - assert:
           exit_code: 0
           image:
@@ -78,8 +73,7 @@ scenarios:
   - name: resizes BMP to a target width of 2
     steps:
       - run:
-          shell: true
-          command: truss convert "$FIXTURES_DIR/sample.bmp" -o w2.png --width 2
+          command: truss convert "${fixtures}/sample.bmp" -o w2.png --width 2
       - assert:
           exit_code: 0
           image:
@@ -90,8 +84,7 @@ scenarios:
   - name: round-trips PNG to BMP and back to PNG
     steps:
       - run:
-          shell: true
-          command: truss convert "$FIXTURES_DIR/sample.png" -o step1.bmp
+          command: truss convert "${fixtures}/sample.png" -o step1.bmp
       - assert:
           exit_code: 0
       - run:
@@ -105,8 +98,7 @@ scenarios:
   - name: converts BMP without the convert keyword (implicit subcommand)
     steps:
       - run:
-          shell: true
-          command: truss "$FIXTURES_DIR/sample.bmp" -o implicit.png
+          command: truss "${fixtures}/sample.bmp" -o implicit.png
       - assert:
           exit_code: 0
           image:

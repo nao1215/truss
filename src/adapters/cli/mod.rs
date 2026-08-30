@@ -858,6 +858,10 @@ fn sign_usage() -> &'static str {
 /// arguments, dispatches the selected subcommand, writes output to the process streams,
 /// and converts adapter-specific failures into the documented numeric exit codes.
 ///
+/// Standard output is flushed before returning, so a write that only fails when the
+/// buffer drains — a full disk, a quota, a reader that closed the pipe — is reported as
+/// exit code 5 instead of being discarded by the runtime's exit-time flush.
+///
 /// # Examples
 ///
 /// ```no_run
@@ -891,7 +895,30 @@ where
     let mut stdout = stdout.lock();
     let mut stderr = stderr.lock();
 
-    ExitCode::from(run_with_io(args, &mut stdin, &mut stdout, &mut stderr))
+    let code = run_with_io(args, &mut stdin, &mut stdout, &mut stderr);
+
+    ExitCode::from(flush_stdout(code, &mut stdout, &mut stderr))
+}
+
+/// Flushes standard output and folds a flush failure into the exit code.
+///
+/// `StdoutLock` buffers. A payload that ends without a newline — a small WebP or AVIF
+/// written to `-o -` — can sit entirely in that buffer, so the only write that reaches
+/// the file descriptor is the runtime's flush after `main` returns, and nothing observes
+/// its error. Flushing here turns that silent truncation into exit code 5 with a reason.
+///
+/// A command that already failed keeps its own exit code: the flush error is a
+/// consequence of the first failure, not a second, more informative one.
+fn flush_stdout<W, E>(code: u8, stdout: &mut W, stderr: &mut E) -> u8
+where
+    W: Write,
+    E: Write,
+{
+    match stdout.flush() {
+        Ok(()) => code,
+        Err(error) if code == EXIT_SUCCESS => write_error(stderr, stdout_write_error(&error)),
+        Err(_) => code,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1015,13 +1042,13 @@ where
                 HelpTopic::Version => HELP_VERSION.to_string(),
             };
             match stdout.write_all(text.as_bytes()) {
-                Ok(_) => EXIT_SUCCESS,
-                Err(_) => EXIT_RUNTIME,
+                Ok(()) => EXIT_SUCCESS,
+                Err(error) => write_error(stderr, stdout_write_error(&error)),
             }
         }
         Ok(Command::Version) => match writeln!(stdout, "truss {}", env!("CARGO_PKG_VERSION")) {
-            Ok(_) => EXIT_SUCCESS,
-            Err(_) => EXIT_RUNTIME,
+            Ok(()) => EXIT_SUCCESS,
+            Err(error) => write_error(stderr, stdout_write_error(&error)),
         },
         Ok(Command::Serve(command)) => match serve::execute_serve(command) {
             Ok(()) => EXIT_SUCCESS,
@@ -1465,10 +1492,11 @@ fn map_transform_error(error: crate::TransformError) -> CliError {
         | crate::TransformError::EncodeFailed(reason)
         | crate::TransformError::CapabilityMissing(reason)
         | crate::TransformError::LimitExceeded(reason) => runtime_error(EXIT_TRANSFORM, &reason),
-        crate::TransformError::UnsupportedOutputMediaType(media_type) => runtime_error(
-            EXIT_TRANSFORM,
-            &format!("unsupported output media type: {media_type}"),
-        ),
+        // The error's own Display names the rule that was hit (svg needs an svg input,
+        // gif is never encoded), so the CLI does not restate it in different words.
+        ref error @ crate::TransformError::UnsupportedOutputMediaType(_) => {
+            runtime_error(EXIT_TRANSFORM, &error.to_string())
+        }
     }
 }
 
@@ -1512,6 +1540,15 @@ fn runtime_error(exit_code: u8, message: &str) -> CliError {
     }
 }
 
+/// Builds the error a failed write to standard output reports.
+///
+/// `help` and `version` used to return exit code 5 with nothing on stderr, so a redirect
+/// into a full disk looked like a silent failure while every other command explained
+/// itself. They now report the same way `convert` and `inspect` do.
+fn stdout_write_error(error: &io::Error) -> CliError {
+    runtime_error(EXIT_RUNTIME, &format!("failed to write stdout: {error}"))
+}
+
 fn write_error<E>(stderr: &mut E, error: CliError) -> u8
 where
     E: Write,
@@ -1535,7 +1572,7 @@ mod tests {
     use super::serve::resolve_server_config;
     use super::{
         Command, ConvertCommand, HelpTopic, InputSource, OutputTarget, ServeCommand, SignCommand,
-        parse_args, preprocess_args, run_with_io,
+        flush_stdout, parse_args, preprocess_args, run_with_io,
     };
     use crate::{
         Fit, MediaType, OptimizeMode, RawArtifact, SignedUrlSource, TransformOptions,
@@ -1546,7 +1583,7 @@ mod tests {
     use serial_test::serial;
     use std::env;
     use std::fs;
-    use std::io::{Cursor, Read, Write};
+    use std::io::{self, Cursor, Read, Write};
     use std::net::TcpListener;
     use std::path::PathBuf;
     use std::thread;
@@ -3328,5 +3365,143 @@ mod tests {
         let hint = err.hint.unwrap();
         assert!(hint.contains("completions"), "hint should list completions");
         assert!(hint.contains("version"), "hint should list version");
+    }
+    // ===== Standard output is flushed before the process exits =====
+
+    /// A writer that accepts every write and fails only when it is flushed, which is how
+    /// a full disk or a closed pipe behaves against a buffered `StdoutLock`.
+    struct FlushFails;
+
+    impl Write for FlushFails {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Err(io::Error::new(io::ErrorKind::StorageFull, "no space left"))
+        }
+    }
+
+    #[test]
+    fn flush_stdout_turns_a_failed_flush_into_a_runtime_error() {
+        let mut stderr = Vec::new();
+        let code = flush_stdout(0, &mut FlushFails, &mut stderr);
+
+        assert_eq!(code, 5, "a lost payload must not exit 0");
+        let text = String::from_utf8(stderr).expect("utf8 stderr");
+        assert!(
+            text.contains("error: failed to write stdout"),
+            "stderr should name the failure, got: {text}"
+        );
+    }
+
+    #[test]
+    fn flush_stdout_keeps_the_original_exit_code_when_the_command_already_failed() {
+        let mut stderr = Vec::new();
+        let code = flush_stdout(2, &mut FlushFails, &mut stderr);
+
+        assert_eq!(code, 2, "the first failure is the one worth reporting");
+        assert!(stderr.is_empty(), "the flush error should not add noise");
+    }
+
+    #[test]
+    fn flush_stdout_passes_the_exit_code_through_when_the_flush_succeeds() {
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        assert_eq!(flush_stdout(0, &mut stdout, &mut stderr), 0);
+        assert_eq!(flush_stdout(3, &mut stdout, &mut stderr), 3);
+        assert!(stderr.is_empty());
+    }
+
+    // ===== help and version explain a failed write like every other command =====
+
+    /// A writer that fails on the first write, standing in for a redirect into a full disk.
+    struct WriteFails;
+
+    impl Write for WriteFails {
+        fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+            Err(io::Error::new(io::ErrorKind::StorageFull, "no space left"))
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn help_and_version_report_a_failed_write_on_stderr() {
+        for args in [vec!["truss", "--version"], vec!["truss", "help", "convert"]] {
+            let mut stdin = Cursor::new(Vec::new());
+            let mut stderr = Vec::new();
+            let code = run_with_io(
+                args.iter().map(|value| (*value).to_string()),
+                &mut stdin,
+                &mut WriteFails,
+                &mut stderr,
+            );
+
+            assert_eq!(
+                code, 5,
+                "{args:?} should exit 5 when stdout cannot be written"
+            );
+            let text = String::from_utf8(stderr).expect("utf8 stderr");
+            assert!(
+                text.contains("error: failed to write stdout"),
+                "{args:?} should explain itself, got: {text}"
+            );
+        }
+    }
+
+    // ===== An output format truss never encodes is a usage error either way =====
+
+    #[test]
+    fn a_gif_output_extension_is_rejected_like_the_gif_flag() {
+        for args in [
+            vec!["truss", "convert", "in.png", "-o", "out.gif"],
+            vec!["truss", "convert", "in.png", "-o", "out.GIF"],
+            vec!["truss", "optimize", "in.png", "-o", "out.gif"],
+            vec![
+                "truss", "convert", "in.png", "-o", "out.png", "--format", "gif",
+            ],
+        ] {
+            let error = parse_args(args.iter().map(|value| (*value).to_string()))
+                .expect_err("gif output should not parse");
+
+            assert_eq!(error.exit_code, 1, "{args:?} should be a usage error");
+            assert!(
+                error.message.contains("input-only format")
+                    && error.message.contains("png, jpeg, webp, or avif"),
+                "{args:?} should name the alternatives, got: {}",
+                error.message
+            );
+        }
+    }
+
+    #[test]
+    fn an_explicit_format_overrides_an_unencodable_output_extension() {
+        let command = parse_args(
+            [
+                "truss", "convert", "in.png", "-o", "out.gif", "--format", "png",
+            ]
+            .iter()
+            .map(|value| (*value).to_string()),
+        )
+        .expect("an explicit format decides the encoder, whatever the extension says");
+
+        match command {
+            Command::Convert(convert) => assert_eq!(convert.options.format, Some(MediaType::Png)),
+            other => panic!("expected a convert command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn svg_output_from_a_raster_input_names_the_rule_it_broke() {
+        let error = crate::TransformError::UnsupportedOutputMediaType(MediaType::Svg).to_string();
+
+        assert!(
+            error.contains("requires an svg input"),
+            "the message should say why svg was refused, got: {error}"
+        );
     }
 }

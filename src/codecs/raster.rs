@@ -1125,20 +1125,7 @@ fn apply_watermark(
         watermark.image.metadata.width,
         watermark.image.metadata.height,
     ) {
-        let margin = watermark.margin;
-        let (mx, my) = match watermark.position {
-            Position::Center => (0, 0),
-            Position::Top | Position::Bottom => (0, margin),
-            Position::Left | Position::Right => (margin, 0),
-            _ => (margin, margin),
-        };
-        if u64::from(meta_w) + u64::from(mx) > u64::from(main_w)
-            || u64::from(meta_h) + u64::from(my) > u64::from(main_h)
-        {
-            return Err(TransformError::InvalidOptions(
-                "watermark image is too large for the output dimensions".to_string(),
-            ));
-        }
+        check_watermark_fits(meta_w, meta_h, main_w, main_h, watermark)?;
     }
 
     if let (Some(w), Some(h)) = (
@@ -1182,23 +1169,7 @@ fn apply_watermark(
     let (wm_w, wm_h) = wm_rgba.dimensions();
     let margin = watermark.margin;
 
-    // Determine which axes actually use the margin based on position.
-    let (margin_x, margin_y) = match watermark.position {
-        Position::Center => (0, 0),
-        Position::Top | Position::Bottom => (0, margin),
-        Position::Left | Position::Right => (margin, 0),
-        _ => (margin, margin), // corners: TopLeft, TopRight, BottomLeft, BottomRight
-    };
-
-    // If the watermark (plus applicable margin) exceeds the main image, reject it.
-    // Use u64 arithmetic to avoid u32 overflow with large margin values.
-    if u64::from(wm_w) + u64::from(margin_x) > u64::from(main_w)
-        || u64::from(wm_h) + u64::from(margin_y) > u64::from(main_h)
-    {
-        return Err(TransformError::InvalidOptions(
-            "watermark image is too large for the output dimensions".to_string(),
-        ));
-    }
+    check_watermark_fits(wm_w, wm_h, main_w, main_h, watermark)?;
 
     let (x, y) = watermark_offset(main_w, main_h, wm_w, wm_h, watermark.position, margin);
 
@@ -1206,6 +1177,45 @@ fn apply_watermark(
     imageops::overlay(&mut canvas, &wm_rgba, i64::from(x), i64::from(y));
 
     Ok(DynamicImage::ImageRgba8(canvas))
+}
+
+/// Returns the margin the given position actually consumes on each axis.
+///
+/// A centered watermark is not pushed away from any edge, and an edge-centered one is
+/// only pushed away from the edge it sits on.
+fn watermark_margins(position: Position, margin: u32) -> (u32, u32) {
+    match position {
+        Position::Center => (0, 0),
+        Position::Top | Position::Bottom => (0, margin),
+        Position::Left | Position::Right => (margin, 0),
+        // Corners: TopLeft, TopRight, BottomLeft, BottomRight.
+        _ => (margin, margin),
+    }
+}
+
+/// Rejects a watermark that cannot be placed inside the output at the requested margin.
+///
+/// The message reports both sizes and the margin because either one can be what does not
+/// fit. Saying only "watermark image is too large" sent readers off to shrink an image
+/// that was fine, when a margin wider than the output was the real cause. u64 arithmetic
+/// keeps a large margin from wrapping a u32 into a size that appears to fit.
+fn check_watermark_fits(
+    wm_w: u32,
+    wm_h: u32,
+    main_w: u32,
+    main_h: u32,
+    watermark: &WatermarkInput,
+) -> Result<(), TransformError> {
+    let (margin_x, margin_y) = watermark_margins(watermark.position, watermark.margin);
+    if u64::from(wm_w) + u64::from(margin_x) <= u64::from(main_w)
+        && u64::from(wm_h) + u64::from(margin_y) <= u64::from(main_h)
+    {
+        return Ok(());
+    }
+    Err(TransformError::InvalidOptions(format!(
+        "watermark {wm_w}x{wm_h} with a {}px margin does not fit a {main_w}x{main_h} output",
+        watermark.margin
+    )))
 }
 
 /// Calculates the top-left offset for a watermark given the main image dimensions,
@@ -5412,6 +5422,31 @@ mod tests {
     }
 
     #[test]
+    fn a_watermark_that_only_fails_because_of_the_margin_says_so() {
+        // A 2x2 mark fits a 4x4 output; a 4px margin on each side is what pushes it out.
+        // The message used to blame the watermark image, sending the reader off to
+        // shrink something that was already small enough.
+        let main = png_artifact(4, 4, Rgba([255, 255, 255, 255]));
+        let wm = png_artifact(2, 2, Rgba([0, 0, 0, 128]));
+
+        let mut request = TransformRequest::new(main, TransformOptions::default());
+        request.watermark = Some(WatermarkInput {
+            image: wm,
+            position: Position::BottomRight,
+            opacity: 50,
+            margin: 4,
+        });
+
+        let err = transform_raster(request).expect_err("the margin does not leave room");
+        assert_eq!(
+            err,
+            TransformError::InvalidOptions(
+                "watermark 2x2 with a 4px margin does not fit a 4x4 output".to_string()
+            )
+        );
+    }
+
+    #[test]
     fn transform_raster_rejects_oversized_watermark() {
         let main = png_artifact(4, 4, Rgba([255, 255, 255, 255]));
         let wm = png_artifact(5, 5, Rgba([0, 0, 0, 128]));
@@ -5428,7 +5463,7 @@ mod tests {
         assert_eq!(
             err,
             TransformError::InvalidOptions(
-                "watermark image is too large for the output dimensions".to_string()
+                "watermark 5x5 with a 0px margin does not fit a 4x4 output".to_string()
             )
         );
     }
@@ -5494,7 +5529,7 @@ mod tests {
         // The early metadata size check rejects the watermark before decode,
         // so we may get InvalidOptions (too large) instead of LimitExceeded.
         assert!(
-            matches!(err, TransformError::InvalidOptions(ref msg) if msg.contains("too large"))
+            matches!(err, TransformError::InvalidOptions(ref msg) if msg.contains("does not fit"))
                 || matches!(err, TransformError::LimitExceeded(ref msg) if msg.contains("pixels")),
             "expected InvalidOptions or LimitExceeded, got: {err}"
         );

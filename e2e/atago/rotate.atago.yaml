@@ -161,23 +161,20 @@ scenarios:
             path: red.png
             format: png
             alpha: false
-      - run:
-          command: truss convert in.png -o clear.png --rotate 30
+      # The committed baseline was produced by this same command, so it pins the fill
+      # color itself: a --background that parsed but did nothing would leave the exposed
+      # corners transparent, which cannot match an opaque red baseline.
       - assert:
-          exit_code: 0
-      # An opaque fill and the default transparent fill cannot produce the same file.
-      - run:
-          shell: true
-          command: cmp -s red.png clear.png; echo "differs=$?"
-      - assert:
-          stdout:
-            contains: "differs=1"
+          image:
+            path: red.png
+            width: 22
+            height: 22
+            similar_to: testdata/sample-rotate-30-red.png
 
   - name: a fractional angle is rejected at the flag
     steps:
       - run:
-          shell: true
-          command: truss convert "$FIXTURES_DIR/sample.png" -o out.png --rotate 45.5
+          command: truss convert "${fixtures}/sample.png" -o out.png --rotate 45.5
       - assert:
           exit_code: 1
           stderr:
@@ -188,8 +185,7 @@ scenarios:
   - name: a non-numeric angle is rejected at the flag
     steps:
       - run:
-          shell: true
-          command: truss convert "$FIXTURES_DIR/sample.png" -o out.png --rotate sideways
+          command: truss convert "${fixtures}/sample.png" -o out.png --rotate sideways
       - assert:
           exit_code: 1
           stderr:
@@ -198,8 +194,7 @@ scenarios:
   - name: an SVG rasterizes and rotates through the same path
     steps:
       - run:
-          shell: true
-          command: truss convert "$FIXTURES_DIR/svg-minimal.svg" -o svg.png --format png --width 16 --height 16 --rotate 45
+          command: truss convert "${fixtures}/svg-minimal.svg" -o svg.png --format png --width 16 --height 16 --rotate 45
       - assert:
           exit_code: 0
           image:

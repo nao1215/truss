@@ -84,7 +84,7 @@ just integration-api   # API server tests with runn
 just integration       # Both
 ```
 
-- **CLI tests** (`e2e/atago/`): Written as plain-YAML [atago](https://github.com/nao1215/atago) specs, run by `e2e/run.sh` against a freshly built binary. These specs also serve as user-facing CLI documentation.
+- **CLI tests** (`e2e/atago/`): Written as plain-YAML [atago](https://github.com/nao1215/atago) specs, run by `e2e/run.sh` against a freshly built binary. These specs also serve as user-facing CLI documentation. CI runs them on Linux, macOS, and Windows, which is why no scenario sets `shell: true`: that is `/bin/sh` on two of those platforms and `cmd.exe` on the third. Reach the shared fixtures as `${fixtures}` (declared in `e2e/atago/atago.project.yaml`), and use `stdin.file`, `stdout_to`, and `run.env` where a shell would otherwise supply a pipe, a redirect, or a variable.
 - **API tests** (`integration/api/`): Written as [runn](https://github.com/k1LoW/runn) runbooks. These runbooks also serve as API documentation.
 - **Test fixtures**: Shared images in `integration/fixtures/`.
 
@@ -134,7 +134,10 @@ src/
 
 e2e/
 ├── run.sh                   # CLI e2e bootstrap (builds truss, runs atago)
-└── atago/*.atago.yaml       # atago CLI specs
+└── atago/
+    ├── atago.project.yaml   # fixtures_dir, exposed to the specs as ${fixtures}
+    ├── *.atago.yaml         # atago CLI specs
+    └── testdata/            # committed baselines the specs compare against
 
 integration/
 ├── fixtures/                # Shared test images
@@ -229,6 +232,10 @@ The CLI uses structured exit codes. When changing CLI error handling, keep these
 | 2 | I/O error (file not found, network failure) |
 | 3 | Input error (unsupported format, corrupt file) |
 | 4 | Transform error (encode failure, size limit) |
+| 5 | Runtime error (bind failure, stdout write failure) |
+
+A configuration fault is code 1 from both `truss validate` and `truss serve`; code 5 is
+for what fails after the configuration is accepted.
 
 ### 9. GHCR package visibility
 

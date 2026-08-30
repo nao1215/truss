@@ -3,7 +3,7 @@
 # inputs gracefully: dimension extremes, transparency, EXIF rotation, CMYK,
 # truncated/corrupted files, and non-image data.
 #
-# Fixture overview (integration/fixtures, via $FIXTURES_DIR):
+# Fixture overview (integration/fixtures, reached as ${fixtures}):
 #   1px.png             1x1 minimum-dimension PNG
 #   large.png           10000x1 extremely wide PNG
 #   tall.png            1x10000 extremely tall PNG
@@ -27,8 +27,7 @@ scenarios:
   - name: inspects a 1x1 PNG
     steps:
       - run:
-          shell: true
-          command: truss inspect "$FIXTURES_DIR/1px.png"
+          command: truss inspect "${fixtures}/1px.png"
       - assert:
           exit_code: 0
           stdout:
@@ -44,8 +43,7 @@ scenarios:
   - name: converts a 1x1 PNG to JPEG
     steps:
       - run:
-          shell: true
-          command: truss convert "$FIXTURES_DIR/1px.png" -o 1px.jpg
+          command: truss convert "${fixtures}/1px.png" -o 1px.jpg
       - assert:
           exit_code: 0
           image:
@@ -55,8 +53,7 @@ scenarios:
   - name: inspects a 10000x1 PNG
     steps:
       - run:
-          shell: true
-          command: truss inspect "$FIXTURES_DIR/large.png"
+          command: truss inspect "${fixtures}/large.png"
       - assert:
           exit_code: 0
           stdout:
@@ -72,8 +69,7 @@ scenarios:
   - name: converts a 10000x1 PNG to JPEG
     steps:
       - run:
-          shell: true
-          command: truss convert "$FIXTURES_DIR/large.png" -o large.jpg
+          command: truss convert "${fixtures}/large.png" -o large.jpg
       - assert:
           exit_code: 0
           image:
@@ -83,8 +79,7 @@ scenarios:
   - name: inspects a 1x10000 PNG
     steps:
       - run:
-          shell: true
-          command: truss inspect "$FIXTURES_DIR/tall.png"
+          command: truss inspect "${fixtures}/tall.png"
       - assert:
           exit_code: 0
           stdout:
@@ -100,8 +95,7 @@ scenarios:
   - name: converts a 1x10000 PNG to JPEG
     steps:
       - run:
-          shell: true
-          command: truss convert "$FIXTURES_DIR/tall.png" -o tall.jpg
+          command: truss convert "${fixtures}/tall.png" -o tall.jpg
       - assert:
           exit_code: 0
           image:
@@ -111,8 +105,7 @@ scenarios:
   - name: inspects a fully transparent PNG (hasAlpha true)
     steps:
       - run:
-          shell: true
-          command: truss inspect "$FIXTURES_DIR/transparent.png"
+          command: truss inspect "${fixtures}/transparent.png"
       - assert:
           exit_code: 0
           stdout:
@@ -124,8 +117,7 @@ scenarios:
     steps:
       # JPEG does not support alpha — truss should composite over a background.
       - run:
-          shell: true
-          command: truss convert "$FIXTURES_DIR/transparent.png" -o transparent.jpg
+          command: truss convert "${fixtures}/transparent.png" -o transparent.jpg
       - assert:
           exit_code: 0
           image:
@@ -138,8 +130,7 @@ scenarios:
       # no alpha channel, and the output must come out fully opaque rather than carrying
       # a channel the format cannot store.
       - run:
-          shell: true
-          command: truss inspect "$FIXTURES_DIR/semitransparent.png"
+          command: truss inspect "${fixtures}/semitransparent.png"
       - assert:
           exit_code: 0
           stdout:
@@ -147,8 +138,7 @@ scenarios:
               path: $.hasAlpha
               equals: true
       - run:
-          shell: true
-          command: truss convert "$FIXTURES_DIR/semitransparent.png" -o semi.jpg
+          command: truss convert "${fixtures}/semitransparent.png" -o semi.jpg
       - assert:
           exit_code: 0
           image:
@@ -157,8 +147,7 @@ scenarios:
             alpha: false
       # Partial alpha survives a format that can hold it.
       - run:
-          shell: true
-          command: truss convert "$FIXTURES_DIR/semitransparent.png" -o semi.png
+          command: truss convert "${fixtures}/semitransparent.png" -o semi.png
       - assert:
           exit_code: 0
           image:
@@ -171,8 +160,7 @@ scenarios:
       # inspect reads the container, so it reports what the file stores (40x20). The
       # orientation tag says how to display it; applying that is convert's job.
       - run:
-          shell: true
-          command: truss inspect "$FIXTURES_DIR/exif-rotated.jpg"
+          command: truss inspect "${fixtures}/exif-rotated.jpg"
       - assert:
           exit_code: 0
           stdout:
@@ -190,8 +178,7 @@ scenarios:
       # everyday case, and getting this wrong ships sideways images, so the dimension swap
       # is the assertion, not just that a PNG came out.
       - run:
-          shell: true
-          command: truss convert "$FIXTURES_DIR/exif-rotated.jpg" -o exif.png
+          command: truss convert "${fixtures}/exif-rotated.jpg" -o exif.png
       - assert:
           exit_code: 0
           image:
@@ -203,8 +190,7 @@ scenarios:
   - name: --no-auto-orient leaves an EXIF-rotated JPEG as stored
     steps:
       - run:
-          shell: true
-          command: truss convert "$FIXTURES_DIR/exif-rotated.jpg" -o as-stored.png --no-auto-orient
+          command: truss convert "${fixtures}/exif-rotated.jpg" -o as-stored.png --no-auto-orient
       - assert:
           exit_code: 0
           image:
@@ -216,8 +202,7 @@ scenarios:
   - name: inspects a CMYK JPEG
     steps:
       - run:
-          shell: true
-          command: truss inspect "$FIXTURES_DIR/cmyk.jpg"
+          command: truss inspect "${fixtures}/cmyk.jpg"
       - assert:
           exit_code: 0
           stdout:
@@ -228,8 +213,7 @@ scenarios:
   - name: converts a CMYK JPEG to PNG
     steps:
       - run:
-          shell: true
-          command: truss convert "$FIXTURES_DIR/cmyk.jpg" -o cmyk.png
+          command: truss convert "${fixtures}/cmyk.jpg" -o cmyk.png
       - assert:
           exit_code: 0
           image:
@@ -241,8 +225,7 @@ scenarios:
       # The JPEG header is valid so inspect can read dimensions, but the
       # image data is incomplete.
       - run:
-          shell: true
-          command: truss inspect "$FIXTURES_DIR/truncated.jpg"
+          command: truss inspect "${fixtures}/truncated.jpg"
       - assert:
           exit_code: 0
           stdout:
@@ -251,8 +234,7 @@ scenarios:
   - name: convert fails on a truncated JPEG (exit 4, transform/decode error)
     steps:
       - run:
-          shell: true
-          command: truss convert "$FIXTURES_DIR/truncated.jpg" -o trunc.png
+          command: truss convert "${fixtures}/truncated.jpg" -o trunc.png
       - assert:
           exit_code: 4
           stderr:
@@ -262,8 +244,7 @@ scenarios:
     steps:
       # The corruption is mild enough that the decoder still works.
       - run:
-          shell: true
-          command: truss inspect "$FIXTURES_DIR/corrupt-header.jpg"
+          command: truss inspect "${fixtures}/corrupt-header.jpg"
       - assert:
           exit_code: 0
           stdout:
@@ -272,16 +253,14 @@ scenarios:
   - name: converts a corrupt-header JPEG
     steps:
       - run:
-          shell: true
-          command: truss convert "$FIXTURES_DIR/corrupt-header.jpg" -o corrupt.png
+          command: truss convert "${fixtures}/corrupt-header.jpg" -o corrupt.png
       - assert:
           exit_code: 0
 
   - name: inspects a PNG with an invalid chunk (tolerant decoder)
     steps:
       - run:
-          shell: true
-          command: truss inspect "$FIXTURES_DIR/invalid-chunk.png"
+          command: truss inspect "${fixtures}/invalid-chunk.png"
       - assert:
           exit_code: 0
           stdout:
@@ -290,16 +269,14 @@ scenarios:
   - name: converts a PNG with an invalid chunk
     steps:
       - run:
-          shell: true
-          command: truss convert "$FIXTURES_DIR/invalid-chunk.png" -o badchunk.jpg
+          command: truss convert "${fixtures}/invalid-chunk.png" -o badchunk.jpg
       - assert:
           exit_code: 0
 
   - name: rejects an empty file (exit 3, unsupported format)
     steps:
       - run:
-          shell: true
-          command: truss inspect "$FIXTURES_DIR/zero-bytes.bin"
+          command: truss inspect "${fixtures}/zero-bytes.bin"
       - assert:
           exit_code: 3
           stderr:
@@ -308,8 +285,7 @@ scenarios:
   - name: rejects random binary data (exit 3, unsupported format)
     steps:
       - run:
-          shell: true
-          command: truss inspect "$FIXTURES_DIR/random-noise.bin"
+          command: truss inspect "${fixtures}/random-noise.bin"
       - assert:
           exit_code: 3
           stderr:

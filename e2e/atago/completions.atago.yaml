@@ -1,0 +1,129 @@
+# `truss completions <shell>`, which had no end-to-end coverage.
+#
+# A completion script is written once into a shell's completion directory and then
+# forgotten, so the failure mode is quiet: the script is generated, sourced, and simply
+# never offers anything. These scenarios check that each shell gets a script in its own
+# syntax, that the subcommands are actually in it, and that the whole thing goes to
+# stdout so `truss completions bash > file` writes the script and nothing else.
+#
+# The three platforms matter here directly: PowerShell is the shell a Windows user has,
+# and zsh is the default on macOS. Run with: e2e/run.sh --filter completions
+version: "1"
+
+suite:
+  name: truss completions
+
+scenarios:
+  - name: the bash script defines a completion function naming the subcommands
+    steps:
+      - run:
+          command: truss completions bash
+      - assert:
+          exit_code: 0
+          stdout:
+            contains:
+              - "_truss()"
+              - "convert"
+              - "optimize"
+              - "inspect"
+              - "serve"
+              - "sign"
+
+  - name: the zsh script starts with the compdef marker zsh requires
+    steps:
+      - run:
+          command: truss completions zsh
+      - assert:
+          exit_code: 0
+          stdout:
+            contains:
+              - "#compdef truss"
+              - "convert"
+
+  - name: the fish script uses fish complete syntax
+    steps:
+      - run:
+          command: truss completions fish
+      - assert:
+          exit_code: 0
+          stdout:
+            contains:
+              - "complete -c truss"
+              - "convert"
+
+  - name: the powershell script registers a native argument completer
+    steps:
+      # This is the one a Windows user runs, and it is generated on Linux and macOS too,
+      # so it is checked on every platform rather than only where it is used.
+      - run:
+          command: truss completions powershell
+      - assert:
+          exit_code: 0
+          stdout:
+            contains:
+              - "Register-ArgumentCompleter"
+              - "truss"
+              - "convert"
+
+  - name: the elvish script uses elvish syntax
+    steps:
+      - run:
+          command: truss completions elvish
+      - assert:
+          exit_code: 0
+          stdout:
+            contains:
+              - "edit:completion"
+              - "convert"
+
+  - name: the script goes to stdout, so a redirect captures it whole
+    steps:
+      - run:
+          command: truss completions bash
+          stdout_to: truss.bash
+      - assert:
+          exit_code: 0
+          file:
+            path: truss.bash
+            contains:
+              - "_truss()"
+              - "complete"
+      - assert:
+          stderr:
+            empty: true
+
+  - name: an unsupported shell lists the ones that are supported
+    steps:
+      - run:
+          command: truss completions nushell
+      - assert:
+          exit_code: 1
+          stderr:
+            contains:
+              - "bash"
+              - "elvish"
+              - "fish"
+              - "powershell"
+              - "zsh"
+
+  - name: completions without a shell says which argument is missing
+    steps:
+      - run:
+          command: truss completions
+      - assert:
+          exit_code: 1
+          stderr:
+            contains:
+              - "requires a shell argument"
+              - "truss completions bash"
+
+  - name: the same shell produces the same script twice
+    steps:
+      # A completion script that changes between runs churns every checked-in copy of it.
+      - run:
+          command: truss completions zsh
+          deterministic:
+            runs: 2
+            compare: [stdout, exit_code]
+      - assert:
+          exit_code: 0

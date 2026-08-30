@@ -1154,7 +1154,18 @@ impl ServerConfig {
 
         let storage_root =
             env::var("TRUSS_STORAGE_ROOT").unwrap_or_else(|_| DEFAULT_STORAGE_ROOT.to_string());
-        let storage_root = PathBuf::from(storage_root).canonicalize()?;
+        // Every other setting names itself when it is wrong. This one used to surface as
+        // the bare OS message — "No such file or directory (os error 2)" on Linux, "The
+        // system cannot find the path specified. (os error 3)" on Windows — leaving the
+        // reader to guess which of the settings it belonged to.
+        let storage_root = PathBuf::from(&storage_root)
+            .canonicalize()
+            .map_err(|error| {
+                io::Error::new(
+                    error.kind(),
+                    format!("TRUSS_STORAGE_ROOT `{storage_root}` cannot be resolved: {error}"),
+                )
+            })?;
         let bearer_token = env::var("TRUSS_BEARER_TOKEN")
             .ok()
             .filter(|value| !value.is_empty());
