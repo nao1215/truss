@@ -301,6 +301,11 @@ pub fn transform_raster(request: TransformRequest) -> Result<TransformResult, Tr
         encoded.bytes
     };
 
+    // `auto` and `lossless` both mean "no bigger than what you were handed". The input's
+    // own bytes are a candidate whenever no pixel transform was asked for, and for an image
+    // the encoder compresses worse than whatever produced the input they are the smallest.
+    let bytes = smaller_passthrough(&normalized, &bytes).unwrap_or(bytes);
+
     let (width, height) = image.dimensions();
     // Read the tag back out of the encoded bytes rather than predicting it: with
     // auto-orientation off and metadata retained, the output carries the input's tag, and
@@ -1471,6 +1476,85 @@ fn is_passthrough_lossless_request(normalized: &NormalizedTransformRequest) -> b
 /// Asked of the same function that does the copying, so the two cannot disagree.
 fn metadata_policy_retains_exif(metadata_policy: MetadataPolicy) -> bool {
     should_keep_jpeg_segment(0xE1, b"Exif\0\0", metadata_policy)
+}
+
+/// The input's own bytes, when the request may return them and they are smaller.
+///
+/// `optimize` exists to make a file smaller, so handing back more bytes than it was given is
+/// a failure of the command whatever the encoder decided. It happens: a flat-colour JPEG
+/// re-encodes larger than whatever wrote it, and an indexed-colour PNG has no encoder here
+/// at all, so it comes back as truecolour and grows by half again.
+///
+/// The input is a legal answer only when nothing about the pixels was asked to change and
+/// the metadata policy is already satisfied by the file as it stands, which is what
+/// `is_passthrough_lossless_request` and the per-format checks below decide.
+fn smaller_passthrough(normalized: &NormalizedTransformRequest, encoded: &[u8]) -> Option<Vec<u8>> {
+    if !matches!(
+        normalized.options.optimize,
+        OptimizeMode::Auto | OptimizeMode::Lossless
+    ) || !is_passthrough_lossless_request(normalized)
+    {
+        return None;
+    }
+
+    let candidate = match normalized.options.format {
+        MediaType::Jpeg => optimize_jpeg_bytes_losslessly(
+            &normalized.input.bytes,
+            normalized.options.metadata_policy,
+        )
+        .ok()?,
+        MediaType::Png => png_bytes_satisfying_metadata_policy(
+            &normalized.input.bytes,
+            normalized.options.metadata_policy,
+        )?
+        .to_vec(),
+        _ => return None,
+    };
+
+    (candidate.len() < encoded.len()).then_some(candidate)
+}
+
+/// Returns the PNG unchanged when it carries no metadata the policy would remove.
+///
+/// This never rewrites the container. Either the file already satisfies the policy and can
+/// be handed back byte for byte, or it does not and the re-encode stands: filtering chunks
+/// would mean deciding what every ancillary chunk means, and that is a larger contract than
+/// "do not make the file bigger" needs.
+fn png_bytes_satisfying_metadata_policy(
+    bytes: &[u8],
+    metadata_policy: MetadataPolicy,
+) -> Option<&[u8]> {
+    if metadata_policy == MetadataPolicy::KeepAll {
+        return Some(bytes);
+    }
+
+    // The chunks truss treats as metadata: an ICC profile, EXIF, and the three text forms
+    // that carry XMP and comments. Everything else is either critical or a rendering hint
+    // the policy says nothing about.
+    const METADATA_CHUNKS: [&[u8; 4]; 5] = [b"iCCP", b"eXIf", b"tEXt", b"zTXt", b"iTXt"];
+
+    let kept: &[u8; 4] = match metadata_policy {
+        MetadataPolicy::PreserveIcc => b"iCCP",
+        MetadataPolicy::PreserveExif => b"eXIf",
+        MetadataPolicy::StripAll | MetadataPolicy::KeepAll => b"\0\0\0\0",
+    };
+
+    // Past the 8-byte PNG signature; a shorter input never reaches here, because it would
+    // not have sniffed as a PNG.
+    let mut offset = 8;
+    while offset + 8 <= bytes.len() {
+        let length = u32::from_be_bytes(bytes.get(offset..offset + 4)?.try_into().ok()?) as usize;
+        let chunk_type: &[u8; 4] = bytes.get(offset + 4..offset + 8)?.try_into().ok()?;
+        if chunk_type != kept && METADATA_CHUNKS.contains(&chunk_type) {
+            return None;
+        }
+        if chunk_type == b"IEND" {
+            return Some(bytes);
+        }
+        offset = offset.checked_add(12)?.checked_add(length)?;
+    }
+
+    None
 }
 
 /// The message for a lossless JPEG request that cannot be served as a passthrough.
@@ -3011,8 +3095,8 @@ pub(crate) fn flatten_for_opaque_output(
 mod tests {
     use super::{
         apply_exif_orientation, check_output_pixel_limit, check_rotated_pixel_limit,
-        optimize_jpeg_bytes_losslessly, resolved_output_dimensions, rotated_bounding_box,
-        transform_raster,
+        optimize_jpeg_bytes_losslessly, png_bytes_satisfying_metadata_policy,
+        resolved_output_dimensions, rotated_bounding_box, transform_raster,
     };
     use crate::core::{
         Artifact, ArtifactMetadata, CropRegion, Fit, MediaType, MetadataKind, MetadataPolicy,
@@ -5733,6 +5817,267 @@ mod tests {
             matches!(err, TransformError::InvalidOptions(ref msg) if msg.contains("exceeds image bounds")),
             "unexpected error: {err}"
         );
+    }
+
+    // ── optimize never returns more bytes than it was given ─────────────
+
+    /// Builds a JPEG the encoder compresses worse than Pillow-style flat encoding does.
+    fn flat_jpeg_artifact(width: u32, height: u32) -> Artifact {
+        let image = image::RgbImage::from_pixel(width, height, image::Rgb([30, 80, 200]));
+        let mut bytes = Vec::new();
+        JpegEncoder::new_with_quality(&mut bytes, 85)
+            .write_image(&image, width, height, ColorType::Rgb8.into())
+            .expect("encode jpeg");
+        sniff_artifact(RawArtifact::new(bytes, None)).expect("sniff jpeg")
+    }
+
+    fn optimize_bytes(artifact: Artifact, mode: OptimizeMode) -> Vec<u8> {
+        let format = artifact.media_type;
+        transform_raster(TransformRequest::new(
+            artifact,
+            TransformOptions {
+                format: Some(format),
+                optimize: mode,
+                ..TransformOptions::default()
+            },
+        ))
+        .expect("transform")
+        .artifact
+        .bytes
+    }
+
+    /// A flat JPEG re-encodes larger than it started, so `auto` must hand back the input.
+    ///
+    /// `auto` used to compare two re-encodes and never the bytes it was given, so it
+    /// returned a bigger file than `lossless` did, having paid a generation loss for it.
+    #[test]
+    fn auto_optimization_never_returns_more_bytes_than_the_input() {
+        for size in [32, 64, 128, 256] {
+            let artifact = flat_jpeg_artifact(size, size);
+            let input_length = artifact.bytes.len();
+
+            let optimized = optimize_bytes(artifact, OptimizeMode::Auto);
+
+            assert!(
+                optimized.len() <= input_length,
+                "{size}x{size}: auto produced {} bytes from {input_length}",
+                optimized.len()
+            );
+        }
+    }
+
+    /// And never more than `lossless` would, which is the stronger statement of the same.
+    #[test]
+    fn auto_optimization_is_never_worse_than_lossless() {
+        let artifact = flat_jpeg_artifact(128, 128);
+
+        let auto = optimize_bytes(artifact.clone(), OptimizeMode::Auto);
+        let lossless = optimize_bytes(artifact, OptimizeMode::Lossless);
+
+        assert!(
+            auto.len() <= lossless.len(),
+            "auto produced {} bytes where lossless produced {}",
+            auto.len(),
+            lossless.len()
+        );
+    }
+
+    /// The fallback must not disable the optimization for images that do compress.
+    #[test]
+    fn auto_optimization_still_re_encodes_when_that_is_smaller() {
+        let image = image::RgbImage::from_fn(256, 256, |x, y| {
+            image::Rgb([(x * 4 % 256) as u8, (y * 4 % 256) as u8, 128])
+        });
+        let mut bytes = Vec::new();
+        JpegEncoder::new_with_quality(&mut bytes, 95)
+            .write_image(&image, 256, 256, ColorType::Rgb8.into())
+            .expect("encode jpeg");
+        let artifact = sniff_artifact(RawArtifact::new(bytes, None)).expect("sniff jpeg");
+        let input_length = artifact.bytes.len();
+
+        let optimized = optimize_bytes(artifact, OptimizeMode::Auto);
+
+        assert!(
+            optimized.len() < input_length,
+            "a quality-95 gradient should compress: {} from {input_length}",
+            optimized.len()
+        );
+    }
+
+    /// A request that changes pixels is not eligible, so the guard leaves it alone.
+    #[test]
+    fn the_passthrough_guard_does_not_apply_to_a_request_that_transforms() {
+        let artifact = flat_jpeg_artifact(128, 128);
+
+        let result = transform_raster(TransformRequest::new(
+            artifact,
+            TransformOptions {
+                format: Some(MediaType::Jpeg),
+                optimize: OptimizeMode::Auto,
+                width: Some(32),
+                ..TransformOptions::default()
+            },
+        ))
+        .expect("transform");
+
+        assert_eq!(result.artifact.metadata.width, Some(32));
+    }
+
+    /// An indexed PNG has no encoder here, so it comes back as truecolour and grows.
+    /// Handing back the input keeps both the size and the colour model.
+    #[test]
+    fn optimizing_an_indexed_png_returns_it_unchanged() {
+        let artifact =
+            sniff_artifact(RawArtifact::new(indexed_png_bytes(), None)).expect("sniff indexed png");
+        let input = artifact.bytes.clone();
+
+        for mode in [OptimizeMode::Auto, OptimizeMode::Lossless] {
+            let optimized = optimize_bytes(artifact.clone(), mode);
+            assert_eq!(
+                optimized, input,
+                "{mode:?} should return the indexed PNG unchanged"
+            );
+        }
+    }
+
+    /// A PNG carrying metadata the policy removes cannot be handed back verbatim.
+    #[test]
+    fn a_png_with_metadata_to_strip_is_not_passed_through() {
+        let mut bytes = indexed_png_bytes();
+        insert_png_text_chunk(&mut bytes, &vec![b'x'; 400]);
+        let artifact = sniff_artifact(RawArtifact::new(bytes.clone(), None)).expect("sniff png");
+
+        let optimized = optimize_bytes(artifact, OptimizeMode::Lossless);
+
+        assert_ne!(optimized, bytes, "the comment had to be removed");
+        assert!(
+            !optimized
+                .windows(400)
+                .any(|window| window.iter().all(|byte| *byte == b'x')),
+            "the stripped comment survived"
+        );
+    }
+
+    /// The rule the guard applies to a PNG, stated directly rather than through an encoder
+    /// size race: a file already satisfying the policy can be handed back, and one carrying
+    /// metadata the policy removes cannot.
+    #[test]
+    fn png_metadata_policy_decides_whether_the_input_can_be_handed_back() {
+        let clean = indexed_png_bytes();
+        for policy in [
+            MetadataPolicy::StripAll,
+            MetadataPolicy::KeepAll,
+            MetadataPolicy::PreserveIcc,
+            MetadataPolicy::PreserveExif,
+        ] {
+            assert_eq!(
+                png_bytes_satisfying_metadata_policy(&clean, policy),
+                Some(clean.as_slice()),
+                "a PNG with no metadata satisfies {policy:?}"
+            );
+        }
+
+        let mut with_text = indexed_png_bytes();
+        insert_png_text_chunk(&mut with_text, b"a comment");
+        assert_eq!(
+            png_bytes_satisfying_metadata_policy(&with_text, MetadataPolicy::KeepAll),
+            Some(with_text.as_slice()),
+            "keeping everything is satisfied by anything"
+        );
+        for policy in [
+            MetadataPolicy::StripAll,
+            MetadataPolicy::PreserveIcc,
+            MetadataPolicy::PreserveExif,
+        ] {
+            assert_eq!(
+                png_bytes_satisfying_metadata_policy(&with_text, policy),
+                None,
+                "{policy:?} removes the text chunk, so the file has to be re-encoded"
+            );
+        }
+    }
+
+    /// A truncated PNG never reports itself as satisfying a policy, so a malformed input
+    /// cannot be handed back in place of a re-encode that would have failed.
+    #[test]
+    fn png_metadata_policy_rejects_a_container_it_cannot_walk() {
+        let mut truncated = indexed_png_bytes();
+        truncated.truncate(truncated.len() - 20);
+
+        assert_eq!(
+            png_bytes_satisfying_metadata_policy(&truncated, MetadataPolicy::StripAll),
+            None
+        );
+    }
+
+    /// A 4-colour indexed PNG, written by hand so the test carries its own fixture.
+    fn indexed_png_bytes() -> Vec<u8> {
+        let mut bytes = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+        // IHDR: 64x64, bit depth 8, colour type 3 (indexed).
+        let mut ihdr = Vec::new();
+        ihdr.extend_from_slice(&64u32.to_be_bytes());
+        ihdr.extend_from_slice(&64u32.to_be_bytes());
+        ihdr.extend_from_slice(&[8, 3, 0, 0, 0]);
+        push_png_chunk(&mut bytes, b"IHDR", &ihdr);
+        push_png_chunk(
+            &mut bytes,
+            b"PLTE",
+            &[255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255],
+        );
+
+        // One scanline filter byte plus 64 indices, per row.
+        let mut raw = Vec::new();
+        for y in 0..64u32 {
+            raw.push(0);
+            for x in 0..64u32 {
+                raw.push(((x / 16 + y / 16) % 4) as u8);
+            }
+        }
+        // Best compression, the way a design tool's PNG-8 export is written: the point of
+        // the fixture is a file the re-encode cannot beat.
+        let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::best());
+        std::io::Write::write_all(&mut encoder, &raw).expect("deflate");
+        push_png_chunk(
+            &mut bytes,
+            b"IDAT",
+            &encoder.finish().expect("finish deflate"),
+        );
+        push_png_chunk(&mut bytes, b"IEND", &[]);
+        bytes
+    }
+
+    fn push_png_chunk(bytes: &mut Vec<u8>, chunk_type: &[u8; 4], data: &[u8]) {
+        bytes.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        bytes.extend_from_slice(chunk_type);
+        bytes.extend_from_slice(data);
+        let mut crc_input = chunk_type.to_vec();
+        crc_input.extend_from_slice(data);
+        bytes.extend_from_slice(&png_crc32(&crc_input).to_be_bytes());
+    }
+
+    /// Inserts a `tEXt` chunk just before `IEND`.
+    fn insert_png_text_chunk(bytes: &mut Vec<u8>, text: &[u8]) {
+        let iend = bytes.len() - 12;
+        let mut data = b"Comment\0".to_vec();
+        data.extend_from_slice(text);
+        let mut chunk = Vec::new();
+        push_png_chunk(&mut chunk, b"tEXt", &data);
+        bytes.splice(iend..iend, chunk);
+    }
+
+    fn png_crc32(data: &[u8]) -> u32 {
+        let mut crc = 0xFFFF_FFFFu32;
+        for byte in data {
+            crc ^= u32::from(*byte);
+            for _ in 0..8 {
+                crc = if crc & 1 == 1 {
+                    (crc >> 1) ^ 0xEDB8_8320
+                } else {
+                    crc >> 1
+                };
+            }
+        }
+        !crc
     }
 
     // ── Lossless optimization and the EXIF orientation tag ──────────────
