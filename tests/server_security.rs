@@ -10,6 +10,9 @@ use common::{
     png_bytes, send_transform_request, spawn_fixture_server, spawn_server, split_response, temp_dir,
 };
 use std::fs;
+use std::io::{Read, Write};
+use std::net::TcpStream;
+use std::time::{Duration, Instant};
 use truss::ServerConfig;
 
 // ---------------------------------------------------------------------------
@@ -404,4 +407,71 @@ fn remote_upstream_403_returns_502() {
         "upstream 403 should map to 502, got: {header}"
     );
     assert!(body.contains("upstream HTTP 403"));
+}
+
+// ---------------------------------------------------------------------------
+// Slow-header denial of service
+// ---------------------------------------------------------------------------
+
+/// A client that trickles header bytes is answered rather than held.
+///
+/// The socket read timeout is an inactivity timeout and resets on every byte, so a client
+/// sending a header line every few seconds used to hold its worker forever. With a pool of
+/// `max(max_concurrent_transforms, 8)` threads and a worker dedicated to a connection from
+/// accept to close, that many trickling connections took the whole server down — the
+/// liveness probe with it — for a few bytes a minute. The header phase now has a wall-clock
+/// budget, so the connection ends whatever the client does.
+///
+/// The test trickles for longer than the budget and asserts the server answered first.
+#[test]
+fn slow_header_client_is_answered_rather_than_held() {
+    let storage_root = temp_dir("slow-headers");
+    fs::write(storage_root.join("image.png"), png_bytes()).expect("write source fixture");
+    let (addr, handle) = spawn_server(ServerConfig::new(storage_root, Some("secret".to_string())));
+
+    let started = Instant::now();
+    let mut stream = TcpStream::connect(addr).expect("connect to test server");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(60)))
+        .expect("set read timeout");
+    stream
+        .write_all(b"GET /health HTTP/1.1\r\n")
+        .expect("write the request line");
+    stream.flush().expect("flush");
+
+    // Keep the socket busy without ever finishing the headers, for longer than the budget.
+    // Each write resets an inactivity timeout; only a budget for the phase as a whole ends
+    // this, and the server has to answer before the trickle stops.
+    let trickle_until = Instant::now() + Duration::from_secs(25);
+    while Instant::now() < trickle_until {
+        if stream.write_all(b"X-Pad: y\r\n").is_err() || stream.flush().is_err() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+
+    let mut response = Vec::new();
+    let mut chunk = [0_u8; 1024];
+    while let Ok(read) = stream.read(&mut chunk) {
+        if read == 0 {
+            break;
+        }
+        response.extend_from_slice(&chunk[..read]);
+    }
+
+    handle
+        .join()
+        .expect("join server thread")
+        .expect("serve one request");
+
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < Duration::from_secs(45),
+        "the connection was held for {elapsed:?}"
+    );
+    let response = String::from_utf8_lossy(&response);
+    assert!(
+        response.starts_with("HTTP/1.1 408 Request Timeout"),
+        "unexpected response: {response}"
+    );
 }

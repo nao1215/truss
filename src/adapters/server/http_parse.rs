@@ -1,9 +1,10 @@
 use super::response::{
     HttpResponse, bad_request_response, internal_error_response, not_implemented_response,
-    payload_too_large_response,
+    payload_too_large_response, request_timeout_response,
 };
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
+use std::time::Instant;
 
 pub(super) const MAX_HEADER_BYTES: usize = 16 * 1024;
 pub(super) const MAX_REQUEST_BODY_BYTES: usize = 1024 * 1024;
@@ -74,6 +75,7 @@ impl PartialHttpRequest {
 pub(super) fn read_request_headers<R>(
     stream: &mut R,
     max_upload_bytes: usize,
+    deadline: Option<Instant>,
 ) -> Result<PartialHttpRequest, HttpResponse>
 where
     R: Read,
@@ -81,8 +83,26 @@ where
     let mut buffer = Vec::new();
     let mut chunk = [0_u8; CHUNK_READ_SIZE];
     let header_end = loop {
+        // Checked before every read as well as after: the budget is for the header phase
+        // as a whole, so a client that keeps the socket's own timeout alive by trickling
+        // bytes still runs out of it.
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            return Err(request_timeout_response(
+                "the HTTP headers were not delivered in time",
+            ));
+        }
+
         let read = stream.read(&mut chunk).map_err(|error| {
-            internal_error_response(&format!("failed to read request: {error}"))
+            // A read that times out while the headers are still incomplete is the client
+            // being slow, not the server failing, and 500 said the opposite.
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+            ) {
+                request_timeout_response("the HTTP headers were not delivered in time")
+            } else {
+                internal_error_response(&format!("failed to read request: {error}"))
+            }
         })?;
         if read == 0 {
             return Err(bad_request_response(
@@ -1099,7 +1119,8 @@ mod tests {
         let raw = b"POST /upload HTTP/1.1\r\nContent-Length: 5\r\nHost: localhost\r\n\r\nhello";
         let mut cursor = std::io::Cursor::new(raw.to_vec());
 
-        let partial = read_request_headers(&mut cursor, DEFAULT_MAX_UPLOAD_BODY_BYTES).unwrap();
+        let partial =
+            read_request_headers(&mut cursor, DEFAULT_MAX_UPLOAD_BODY_BYTES, None).unwrap();
         assert_eq!(partial.method, "POST");
         assert_eq!(partial.target, "/upload");
         assert_eq!(partial.content_length, 5);
@@ -1113,7 +1134,8 @@ mod tests {
         let raw = b"GET /health HTTP/1.1\r\nHost: localhost\r\n\r\n";
         let mut cursor = std::io::Cursor::new(raw.to_vec());
 
-        let partial = read_request_headers(&mut cursor, DEFAULT_MAX_UPLOAD_BODY_BYTES).unwrap();
+        let partial =
+            read_request_headers(&mut cursor, DEFAULT_MAX_UPLOAD_BODY_BYTES, None).unwrap();
         assert_eq!(partial.method, "GET");
         assert_eq!(partial.content_length, 0);
     }
@@ -1122,8 +1144,64 @@ mod tests {
     fn test_read_request_headers_truncated_stream() {
         let raw = b"GET /health HTTP/1.1\r\nHost: loc";
         let mut cursor = std::io::Cursor::new(raw.to_vec());
-        let err = read_request_headers(&mut cursor, DEFAULT_MAX_UPLOAD_BODY_BYTES).unwrap_err();
+        let err =
+            read_request_headers(&mut cursor, DEFAULT_MAX_UPLOAD_BODY_BYTES, None).unwrap_err();
         assert_eq!(err.status, "400 Bad Request");
+    }
+
+    /// A reader that hands back one byte at a time and never finishes the headers.
+    ///
+    /// This is the shape of the attack: every read succeeds, so a socket read timeout —
+    /// which is an inactivity timeout and resets on each byte — never fires.
+    struct Trickle {
+        remaining: usize,
+    }
+
+    impl Read for Trickle {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            self.remaining = self.remaining.saturating_sub(1);
+            buf[0] = b'X';
+            Ok(1)
+        }
+    }
+
+    /// The header phase ends even when the client keeps sending bytes.
+    #[test]
+    fn test_read_request_headers_gives_up_on_a_trickling_client() {
+        let mut trickle = Trickle { remaining: 0 };
+        let deadline = Instant::now();
+
+        let error =
+            read_request_headers(&mut trickle, DEFAULT_MAX_UPLOAD_BODY_BYTES, Some(deadline))
+                .expect_err("a deadline in the past must end the read");
+
+        assert_eq!(error.status, "408 Request Timeout");
+    }
+
+    /// A deadline that has not passed does not interfere with a complete request.
+    #[test]
+    fn test_read_request_headers_accepts_a_request_within_the_deadline() {
+        let raw = b"GET /health HTTP/1.1\r\nHost: localhost\r\n\r\n";
+        let mut cursor = std::io::Cursor::new(raw.to_vec());
+
+        let partial = read_request_headers(
+            &mut cursor,
+            DEFAULT_MAX_UPLOAD_BODY_BYTES,
+            Some(Instant::now() + std::time::Duration::from_secs(60)),
+        )
+        .expect("a request that arrives in time is read");
+
+        assert_eq!(partial.method, "GET");
+    }
+
+    /// Without a deadline the read runs to completion, which is what the in-process
+    /// callers that hand it a finished buffer rely on.
+    #[test]
+    fn test_read_request_headers_without_a_deadline_is_unbounded() {
+        let raw = b"GET /health HTTP/1.1\r\nHost: localhost\r\n\r\n";
+        let mut cursor = std::io::Cursor::new(raw.to_vec());
+
+        assert!(read_request_headers(&mut cursor, DEFAULT_MAX_UPLOAD_BODY_BYTES, None).is_ok());
     }
 
     // ── accepts_encoding ──────────────────────────────────────────

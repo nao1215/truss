@@ -12,6 +12,15 @@ use super::stderr_write;
 
 pub(super) const SOCKET_READ_TIMEOUT: Duration = Duration::from_secs(60);
 pub(super) const SOCKET_WRITE_TIMEOUT: Duration = Duration::from_secs(60);
+/// How long a connection may take to deliver a complete set of request headers.
+///
+/// This is a wall-clock budget for the whole header phase, not an inactivity timeout. A
+/// socket read timeout resets on every byte, so a client sending one header line every
+/// thirty seconds holds its worker forever: with a pool of `max(max_concurrent_transforms,
+/// WORKER_THREADS)` threads and a worker dedicated to a connection from accept to close,
+/// that many trickling connections take the whole server down, `/health/live` included,
+/// for the cost of a few bytes a minute. The budget is what makes the header phase end.
+pub(super) const HEADER_READ_DEADLINE: Duration = Duration::from_secs(15);
 /// Number of worker threads for handling incoming connections concurrently.
 const WORKER_THREADS: usize = 8;
 
