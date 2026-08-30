@@ -68,6 +68,16 @@ Need S3, GCS, or Azure storage backend support at install time? See the [Deploym
 
 Prebuilt binaries are available on the [GitHub Releases](https://github.com/nao1215/truss/releases) page. See [Deployment Guide](docs/deployment.md) for all targets and Docker images.
 
+#### Downloading release binaries from a program
+
+Every release attaches `release-manifest.json` next to the archives. For each published target it records the Rust target triple, OS, architecture, archive name, download URL, archive SHA-256 and byte size, the SHA-256 and byte size of the `truss` executable inside the archive, and the Cargo features that binary was built with. The document carries a `schemaVersion`; fields may be added within a version, so ignore keys you do not recognise.
+
+Check the SHA-256 of a downloaded archive against the manifest before extracting it, and check the extracted executable against `binary.sha256`. `checksums.txt` lists the same archive digests and is generated from the manifest.
+
+The `features` array tells you which optional features a given binary was built with, such as `avif` or `svg`.
+
+Pin a tag rather than following the latest release. Archive names, URLs and digests are all specific to one tag.
+
 ### JavaScript Packages
 
 Install only the package you need:

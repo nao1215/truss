@@ -42,8 +42,8 @@ doc:
 audit:
     cargo audit
 
-# Run all CI checks locally (test + lint + fmt + doc + audit)
-ci: test lint fmt-check doc audit
+# Run all CI checks locally (test + lint + fmt + doc + audit + release tooling)
+ci: test lint fmt-check doc audit release-test
 
 # Run criterion benchmarks (use `just bench -- <filter>` to run a subset)
 bench *ARGS:
@@ -104,6 +104,19 @@ integration-s3-clean:
 
 # Run all integration tests
 integration: integration-cli integration-api integration-s3
+
+# ---------------------------------------------------------------------------
+# Release tooling
+# ---------------------------------------------------------------------------
+
+# Test the release manifest generator, verifier, and archive normalization
+release-test:
+    node --test scripts/lib/release-manifest.test.mjs scripts/release-artifacts.test.mjs
+
+# Check the release workflow's pinned Rust toolchain against Cargo.toml rust-version
+release-toolchain-check:
+    node ./scripts/check-rust-toolchain-pin.mjs \
+        --toolchain "$(grep -oP '^\s*RUST_TOOLCHAIN:\s*"\K[^"]+' .github/workflows/release.yml)"
 
 # ---------------------------------------------------------------------------
 # JavaScript Packages

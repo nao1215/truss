@@ -13,6 +13,8 @@ on:
       - "justfile"
       - "Cargo.toml"
       - "Cargo.lock"
+      - ".github/release-targets.json"
+      - ".github/workflows/release.yml"
       - ".github/workflows/rust.yml"
   pull_request:
     paths:
@@ -24,6 +26,8 @@ on:
       - "justfile"
       - "Cargo.toml"
       - "Cargo.lock"
+      - ".github/release-targets.json"
+      - ".github/workflows/release.yml"
       - ".github/workflows/rust.yml"
 
 concurrency:
@@ -170,6 +174,37 @@ jobs:
       - name: Run Vite example runtime smoke test
         if: runner.os == 'Linux'
         run: node ./scripts/run-wasm-vite-example-runtime-smoke.mjs
+
+  # ── Release distribution tooling ───────────────────────────────────
+  # Covers the release manifest generator and verifier without needing a tag:
+  # the end-to-end test packs stand-in executables with the same script the
+  # release workflow uses, then generates and verifies a manifest over them.
+  release-scripts:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      # Run on all three runner families: the packing script takes a different
+      # branch for GNU tar, bsdtar and ZIP, and each release job exercises only
+      # the branch its own runner has.
+      - name: Test release manifest tooling
+        run: node --test scripts/lib/release-manifest.test.mjs scripts/release-artifacts.test.mjs
+
+      - name: Check the pinned release toolchain against rust-version
+        if: runner.os == 'Linux'
+        run: |
+          toolchain="$(grep -oP '^\s*RUST_TOOLCHAIN:\s*"\K[^"]+' .github/workflows/release.yml)"
+          node ./scripts/check-rust-toolchain-pin.mjs --toolchain "${toolchain}"
 
   # ── Next.js example smoke test ─────────────────────────────────────
   nextjs-example:

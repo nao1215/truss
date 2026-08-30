@@ -4,7 +4,7 @@ This page covers Docker setup, prebuilt binaries, cloud storage backends, and pr
 
 ## Prebuilt Binaries
 
-Download a prebuilt binary from the [GitHub Releases](https://github.com/nao1215/truss/releases) page. Archives and SHA256 checksums are published for each release.
+Download a prebuilt binary from the [GitHub Releases](https://github.com/nao1215/truss/releases) page. Archives and SHA256 checksums are published for each release, along with `release-manifest.json`; see [Downloading release binaries from a program](../README.md#downloading-release-binaries-from-a-program) for reading it from code.
 
 ### Homebrew
 
