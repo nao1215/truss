@@ -167,6 +167,26 @@ Use `--optimize auto|lossless|lossy` on `truss convert`, or the dedicated `truss
 |---|---|---|
 | ![q90](./docs/img/sample-bee-q90.jpg) | ![original](./docs/img/sample-bee.jpg) | ![q30](./docs/img/sample-bee-q30.jpg) |
 
+#### Driving truss from another program
+
+`truss capabilities` prints what the binary in front of you can do, so a wrapper does not
+have to hardcode it. A release build is not one thing: AVIF, SVG, lossy WebP, and each
+storage backend are compile-time choices, and the pixel stages run in a fixed order
+whatever order the flags were given in.
+
+```console
+$ truss capabilities | jq '{outputFormats, pipeline, features}'
+{
+  "outputFormats": ["jpeg", "png", "webp", "avif", "svg", "bmp", "tiff"],
+  "pipeline": ["autoOrient", "rotate", "crop", "resize", "blur", "sharpen", "grayscale", "watermark", "flatten", "encode"],
+  "features": {"avif": true, "svg": true, "webpLossy": true, "server": true, "s3": false, "gcs": false, "azure": false}
+}
+```
+
+`pipeline` is the order a transform applies its options in. A caller that composes its own
+operation chain needs it: a chain whose order differs — a resize before a rotate, say — has
+to be split across two invocations, and `pipeline` is how to know where to split.
+
 #### GIF input
 
 GIF is a decode-only format: truss reads it and writes one of the formats it can encode.
@@ -577,6 +597,7 @@ The GitHub Pages demo is intentionally built with `wasm,svg`. The official npm p
 | `convert` | Convert and transform an image file (can be omitted; see above) |
 | `optimize` | Optimize an image with format-aware auto/lossless/lossy modes (`truss optimize photo.jpg -o photo-optimized.jpg --mode auto`) |
 | `inspect` | Show metadata (format, dimensions, EXIF orientation, alpha, animation) of an image |
+| `capabilities` | Print what this build can do (formats, pipeline order, features, limits) as JSON |
 | `serve` | Start the HTTP image-transform server (implied when server flags are used at the top level) |
 | `validate` | Validate server configuration without starting the server (useful in CI/CD) |
 | `sign` | Generate a signed public URL for the server |

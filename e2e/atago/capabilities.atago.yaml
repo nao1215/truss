@@ -1,0 +1,328 @@
+# `truss capabilities` prints what this build of the binary can do, as JSON.
+#
+# The command exists because a caller that drives truss as a subprocess otherwise
+# has to hardcode the answers: which formats it reads and writes, which pixel
+# stages run and in what order, which optional features were compiled in. A
+# release binary is not one thing — AVIF, SVG, lossy WebP, and each storage
+# backend are compile-time choices — so hardcoding it goes wrong silently.
+#
+# The lists are asserted element by element rather than by substring: their
+# order is part of the contract, and a caller that renders a format menu from
+# them sees exactly this. Each claim is then checked against what convert
+# actually does, because a capability report that is not true is worse than none.
+#
+# Run with: e2e/run.sh
+version: "1"
+
+suite:
+  name: truss capabilities
+
+scenarios:
+  - name: reports a semantic version
+    steps:
+      - run:
+          command: truss capabilities
+      - assert:
+          exit_code: 0
+          stdout:
+            json:
+              path: $.version
+              matches: "^[0-9]+\\.[0-9]+\\.[0-9]+"
+
+  - name: reports the formats this build decodes
+    steps:
+      - run:
+          command: truss capabilities
+      - assert:
+          exit_code: 0
+          stdout:
+            json:
+              - path: $.inputFormats
+                length: 8
+              - path: $.inputFormats[0]
+                equals: jpeg
+              - path: $.inputFormats[1]
+                equals: png
+              - path: $.inputFormats[2]
+                equals: webp
+              - path: $.inputFormats[3]
+                equals: avif
+              - path: $.inputFormats[4]
+                equals: svg
+              - path: $.inputFormats[5]
+                equals: bmp
+              - path: $.inputFormats[6]
+                equals: tiff
+              - path: $.inputFormats[7]
+                equals: gif
+
+  - name: reports the formats this build encodes
+    steps:
+      # GIF is absent: truss decodes it and never encodes it. A caller reading this
+      # list and offering GIF would produce requests truss refuses.
+      - run:
+          command: truss capabilities
+      - assert:
+          exit_code: 0
+          stdout:
+            json:
+              - path: $.outputFormats
+                length: 7
+              - path: $.outputFormats[0]
+                equals: jpeg
+              - path: $.outputFormats[1]
+                equals: png
+              - path: $.outputFormats[2]
+                equals: webp
+              - path: $.outputFormats[3]
+                equals: avif
+              - path: $.outputFormats[4]
+                equals: svg
+              - path: $.outputFormats[5]
+                equals: bmp
+              - path: $.outputFormats[6]
+                equals: tiff
+
+  - name: the GIF asymmetry holds when it is acted on
+    steps:
+      - run:
+          command: truss inspect "${fixtures}/sample.gif"
+      - assert:
+          exit_code: 0
+          stdout:
+            json:
+              path: $.format
+              equals: gif
+      - run:
+          command: truss convert "${fixtures}/sample.png" -o out.gif
+      - assert:
+          exit_code: 1
+          stderr:
+            contains: "error:"
+
+  - name: every raster output format it reports actually converts
+    steps:
+      - run:
+          command: truss convert "${fixtures}/sample.png" -o out.jpeg --format jpeg
+      - assert:
+          exit_code: 0
+          image:
+            path: out.jpeg
+            format: jpeg
+      - run:
+          command: truss convert "${fixtures}/sample.png" -o out.png --format png
+      - assert:
+          exit_code: 0
+          image:
+            path: out.png
+            format: png
+      - run:
+          command: truss convert "${fixtures}/sample.png" -o out.webp --format webp
+      - assert:
+          exit_code: 0
+          image:
+            path: out.webp
+            format: webp
+      - run:
+          command: truss convert "${fixtures}/sample.png" -o out.avif --format avif
+      - assert:
+          exit_code: 0
+          image:
+            path: out.avif
+            format: avif
+      - run:
+          command: truss convert "${fixtures}/sample.png" -o out.bmp --format bmp
+      - assert:
+          exit_code: 0
+          image:
+            path: out.bmp
+            format: bmp
+      - run:
+          command: truss convert "${fixtures}/sample.png" -o out.tiff --format tiff
+      - assert:
+          exit_code: 0
+          image:
+            path: out.tiff
+            format: tiff
+
+  - name: reports the pixel stages in the order they run
+    steps:
+      # truss applies its options in a fixed order whatever order they were given in,
+      # so a caller composing an operation chain of its own has to split the chain
+      # across invocations when its order differs. Declaring the order is what lets it
+      # work that out instead of discovering it by experiment.
+      - run:
+          command: truss capabilities
+      - assert:
+          exit_code: 0
+          stdout:
+            json:
+              - path: $.pipeline
+                length: 10
+              - path: $.pipeline[0]
+                equals: autoOrient
+              - path: $.pipeline[1]
+                equals: rotate
+              - path: $.pipeline[2]
+                equals: crop
+              - path: $.pipeline[3]
+                equals: resize
+              - path: $.pipeline[4]
+                equals: blur
+              - path: $.pipeline[5]
+                equals: sharpen
+              - path: $.pipeline[6]
+                equals: grayscale
+              - path: $.pipeline[7]
+                equals: watermark
+              - path: $.pipeline[8]
+                equals: flatten
+              - path: $.pipeline[9]
+                equals: encode
+
+  - name: the declared order is the order convert applies
+    steps:
+      # exif-rotated.jpg is stored 40x20 with orientation 6, so auto-orientation makes
+      # it 20x40 before anything else runs. A 20x20 crop fits only after that has
+      # happened, which is autoOrient before crop. The crop then feeds the resize:
+      # 20x20 widened to 40 is 40x40, where a resize running first would not be.
+      - run:
+          command: truss convert "${fixtures}/exif-rotated.jpg" -o ordered.png --crop 0,0,20,20 --width 40
+      - assert:
+          exit_code: 0
+          image:
+            path: ordered.png
+            format: png
+            width: 40
+            height: 40
+
+  - name: a crop that only fits the stored orientation is rejected
+    steps:
+      # The mirror image of the scenario above: 40x20 is the stored size, and the crop
+      # is checked after auto-orientation, so this one does not fit.
+      - run:
+          command: truss convert "${fixtures}/exif-rotated.jpg" -o wrong.png --crop 0,0,40,20
+      - assert:
+          exit_code: 1
+          stderr:
+            contains: "crop region 40x20+0+0 exceeds image bounds 20x40"
+
+  - name: reports the optional features this build was compiled with
+    steps:
+      # AVIF, SVG, and lossy WebP are cargo features. Asking for one that is absent
+      # fails at transform time, so a caller that can read this refuses the work first.
+      - run:
+          command: truss capabilities
+      - assert:
+          exit_code: 0
+          stdout:
+            json:
+              - path: $.features.avif
+                equals: true
+              - path: $.features.svg
+                equals: true
+              - path: $.features.webpLossy
+                equals: true
+              - path: $.features.server
+                equals: true
+
+  - name: reports the pixel limits it enforces
+    steps:
+      - run:
+          command: truss capabilities
+      - assert:
+          exit_code: 0
+          stdout:
+            json:
+              - path: $.limits.maxInputPixels
+                equals: 100000000
+              - path: $.limits.maxOutputPixels
+                equals: 67108864
+
+  - name: reports the option vocabularies a caller would otherwise hardcode
+    steps:
+      - run:
+          command: truss capabilities
+      - assert:
+          exit_code: 0
+          stdout:
+            json:
+              - path: $.fitModes
+                length: 4
+              - path: $.fitModes[0]
+                equals: contain
+              - path: $.fitModes[1]
+                equals: cover
+              - path: $.fitModes[2]
+                equals: fill
+              - path: $.fitModes[3]
+                equals: inside
+              - path: $.optimizeModes
+                length: 4
+              - path: $.positions
+                length: 9
+              - path: $.positions[8]
+                equals: bottom-right
+
+  - name: every fit mode it reports is accepted
+    steps:
+      - run:
+          command: truss convert "${fixtures}/sample.png" -o contain.png --width 8 --height 8 --fit contain
+      - assert:
+          exit_code: 0
+          image:
+            path: contain.png
+            width: 8
+            height: 8
+      - run:
+          command: truss convert "${fixtures}/sample.png" -o cover.png --width 8 --height 8 --fit cover
+      - assert:
+          exit_code: 0
+          image:
+            path: cover.png
+            width: 8
+            height: 8
+      - run:
+          command: truss convert "${fixtures}/sample.png" -o fill.png --width 8 --height 8 --fit fill
+      - assert:
+          exit_code: 0
+          image:
+            path: fill.png
+            width: 8
+            height: 8
+      - run:
+          command: truss convert "${fixtures}/sample.png" -o inside.png --width 8 --height 8 --fit inside
+      - assert:
+          exit_code: 0
+          image:
+            path: inside.png
+            format: png
+
+  - name: shows help with --help
+    steps:
+      - run:
+          command: truss capabilities --help
+      - assert:
+          exit_code: 0
+          stdout:
+            contains:
+              - "truss capabilities"
+              - "USAGE:"
+
+  - name: help capabilities shows the same topic
+    steps:
+      - run:
+          command: truss help capabilities
+      - assert:
+          exit_code: 0
+          stdout:
+            contains: "truss capabilities"
+
+  - name: the top-level help lists the command
+    steps:
+      - run:
+          command: truss --help
+      - assert:
+          exit_code: 0
+          stdout:
+            contains: "capabilities"
