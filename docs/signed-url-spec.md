@@ -35,7 +35,7 @@ The following parts of the signed-URL format are part of the compatibility contr
   - `optimize`, `targetQuality`
   - `background`, `rotate`
   - `autoOrient`, `stripMetadata`, `preserveExif`
-  - `crop`, `blur`, `sharpen`
+  - `crop`, `blur`, `sharpen`, `grayscale`
   - `watermarkUrl`, `watermarkPosition`, `watermarkOpacity`, `watermarkMargin`
   - `preset`
 - Signature algorithm: HMAC-SHA256 over the canonical UTF-8 request string

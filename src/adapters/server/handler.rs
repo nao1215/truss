@@ -289,6 +289,7 @@ pub struct TransformOptionsPayload {
     pub crop: Option<String>,
     pub blur: Option<f32>,
     pub sharpen: Option<f32>,
+    pub grayscale: Option<bool>,
 }
 
 impl TransformOptionsPayload {
@@ -312,6 +313,7 @@ impl TransformOptionsPayload {
             crop: overrides.crop.clone().or(self.crop),
             blur: overrides.blur.or(self.blur),
             sharpen: overrides.sharpen.or(self.sharpen),
+            grayscale: overrides.grayscale.or(self.grayscale),
         }
     }
 
@@ -355,6 +357,7 @@ impl TransformOptionsPayload {
             crop: parse_optional_named(self.crop.as_deref(), "crop", CropRegion::from_str)?,
             blur: self.blur,
             sharpen: self.sharpen,
+            grayscale: self.grayscale.unwrap_or(defaults.grayscale),
             deadline: defaults.deadline,
         })
     }
@@ -1248,6 +1251,7 @@ pub(super) fn parse_public_get_request(
         crop: query.get("crop").cloned(),
         blur: parse_optional_float_query(query, "blur")?,
         sharpen: parse_optional_float_query(query, "sharpen")?,
+        grayscale: parse_optional_bool_query(query, "grayscale")?,
     };
 
     // Resolve preset and merge with per-request overrides.

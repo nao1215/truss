@@ -307,6 +307,7 @@ type WasmTransformOptions = {
   crop?: string;
   blur?: number;
   sharpen?: number;
+  grayscale?: boolean;
 };
 ```
 
@@ -325,6 +326,7 @@ Notes:
 - `crop` is `x,y,width,height`.
 - Crop width and height must be greater than zero.
 - `blur` and `sharpen` must each be between `0.1` and `100.0`.
+- `grayscale` defaults to `false`, and preserves the alpha channel when enabled.
 - `keepMetadata` and `preserveExif` are mutually exclusive.
 - `autoOrient` defaults to `true`.
 

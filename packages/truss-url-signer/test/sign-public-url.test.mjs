@@ -117,6 +117,38 @@ test("matches the Rust canonicalization for HEAD requests with preset and waterm
   );
 });
 
+test("emits grayscale only when it is requested", () => {
+  const sign = (transforms) =>
+    new URL(
+      signPublicUrl({
+        baseUrl: "https://images.example.com",
+        source: { kind: "path", path: "image.png" },
+        transforms,
+        keyId: "public-demo",
+        secret: "secret-value",
+        expires: 1900000000,
+      }),
+    );
+
+  assert.equal(sign({ grayscale: true }).searchParams.get("grayscale"), "true");
+  // false is the default, so it must stay out of the canonical query entirely.
+  assert.equal(sign({ grayscale: false }).searchParams.get("grayscale"), null);
+  assert.equal(sign({}).searchParams.get("grayscale"), null);
+
+  assert.throws(
+    () =>
+      signPublicUrl({
+        baseUrl: "https://images.example.com",
+        source: { kind: "path", path: "image.png" },
+        transforms: { grayscale: "yes" },
+        keyId: "public-demo",
+        secret: "secret-value",
+        expires: 1900000000,
+      }),
+    /grayscale/,
+  );
+});
+
 test("rejects invalid base URLs and expires values", () => {
   assert.throws(
     () =>

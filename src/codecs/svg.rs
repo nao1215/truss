@@ -21,7 +21,7 @@
 //!   *starting* an expensive rasterization, not abort one in progress.
 //! - System fonts are not loaded; SVGs with text will render with missing glyphs in
 //!   environments without fonts (e.g., distroless containers).
-//! - SVG-to-SVG mode silently ignores resize/rotate/fit options since those are raster
+//! - SVG-to-SVG mode silently ignores resize/rotate/fit/grayscale options since those are raster
 //!   operations.
 
 use crate::core::{
@@ -151,6 +151,15 @@ pub fn transform_svg(request: TransformRequest) -> Result<TransformResult, Trans
             Rotation::Deg0 => dynamic,
         };
         rotated.into_rgba8()
+    } else {
+        rgba_image
+    };
+
+    // Desaturate after rotation so the operation order matches the raster pipeline.
+    let rgba_image = if normalized.options.grayscale {
+        image::DynamicImage::ImageRgba8(rgba_image)
+            .grayscale()
+            .into_rgba8()
     } else {
         rgba_image
     };
@@ -1095,6 +1104,33 @@ mod tests {
             Some(20),
             "height should be swapped after 90 degree rotation"
         );
+    }
+
+    #[test]
+    fn transform_svg_to_png_with_grayscale() {
+        // simple_svg() is a solid blue rect, so every rasterized pixel must come out
+        // neutral once desaturated.
+        let input = sniff_artifact(RawArtifact::new(simple_svg(), None)).unwrap();
+        let result = transform_svg(TransformRequest::new(
+            input,
+            TransformOptions {
+                format: Some(MediaType::Png),
+                grayscale: true,
+                ..TransformOptions::default()
+            },
+        ))
+        .expect("SVG to PNG with grayscale should succeed");
+
+        let output =
+            image::load_from_memory_with_format(&result.artifact.bytes, image::ImageFormat::Png)
+                .expect("decode rasterized output")
+                .to_rgba8();
+        for (x, y, pixel) in output.enumerate_pixels() {
+            assert!(
+                pixel[0] == pixel[1] && pixel[1] == pixel[2],
+                "pixel ({x},{y}) is not neutral gray: {pixel:?}"
+            );
+        }
     }
 
     #[test]

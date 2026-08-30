@@ -204,6 +204,7 @@ fn typescript_signer_matches_rust_head_canonicalization_with_preset_and_watermar
         strip_metadata: false,
         crop: Some("0,0,1200,628".parse().expect("parse crop")),
         sharpen: Some(1.25),
+        grayscale: true,
         ..TransformOptions::default()
     };
     let watermark = SignedWatermarkParams {
@@ -248,6 +249,7 @@ fn typescript_signer_matches_rust_head_canonicalization_with_preset_and_watermar
             "stripMetadata": false,
             "crop": "0,0,1200,628",
             "sharpen": 1.25,
+            "grayscale": true,
         },
         "watermark": {
             "url": "https://cdn.example.com/logo.png",

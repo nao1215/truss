@@ -93,6 +93,7 @@ paths:
         - $ref: '#/components/parameters/Crop'
         - $ref: '#/components/parameters/Blur'
         - $ref: '#/components/parameters/Sharpen'
+        - $ref: '#/components/parameters/Grayscale'
         - $ref: '#/components/parameters/WatermarkUrl'
         - $ref: '#/components/parameters/WatermarkPosition'
         - $ref: '#/components/parameters/WatermarkOpacity'
@@ -161,6 +162,7 @@ paths:
         - $ref: '#/components/parameters/Crop'
         - $ref: '#/components/parameters/Blur'
         - $ref: '#/components/parameters/Sharpen'
+        - $ref: '#/components/parameters/Grayscale'
         - $ref: '#/components/parameters/WatermarkUrl'
         - $ref: '#/components/parameters/WatermarkPosition'
         - $ref: '#/components/parameters/WatermarkOpacity'
@@ -248,6 +250,7 @@ paths:
         - $ref: '#/components/parameters/Crop'
         - $ref: '#/components/parameters/Blur'
         - $ref: '#/components/parameters/Sharpen'
+        - $ref: '#/components/parameters/Grayscale'
         - $ref: '#/components/parameters/WatermarkUrl'
         - $ref: '#/components/parameters/WatermarkPosition'
         - $ref: '#/components/parameters/WatermarkOpacity'
@@ -316,6 +319,7 @@ paths:
         - $ref: '#/components/parameters/Crop'
         - $ref: '#/components/parameters/Blur'
         - $ref: '#/components/parameters/Sharpen'
+        - $ref: '#/components/parameters/Grayscale'
         - $ref: '#/components/parameters/WatermarkUrl'
         - $ref: '#/components/parameters/WatermarkPosition'
         - $ref: '#/components/parameters/WatermarkOpacity'
@@ -1076,6 +1080,19 @@ components:
         minimum: 0.1
         maximum: 100.0
       example: 2.0
+    Grayscale:
+      name: grayscale
+      in: query
+      required: false
+      description: |
+        Desaturate the image to grayscale. Luminance uses the Rec. 601 weights and the
+        alpha channel is preserved. Applied after resize, blur, and sharpen, and before
+        the watermark, so a watermark keeps its own colors.
+        For SVG sources it applies to the rasterized output; SVG-to-SVG output ignores it.
+      schema:
+        type: boolean
+        default: false
+      example: true
     WatermarkUrl:
       name: watermarkUrl
       in: query
@@ -1304,6 +1321,13 @@ components:
             Sharpen sigma (0.1–100.0). Higher values produce stronger sharpening.
             Not supported for SVG inputs; the server will reject the request
             with an error if sharpen is specified for an SVG source.
+        grayscale:
+          type: boolean
+          default: false
+          description: >-
+            Desaturate the image to grayscale using Rec. 601 luminance weights, preserving
+            alpha. Applied after resize, blur, and sharpen, and before the watermark.
+            For SVG sources it applies to the rasterized output; SVG-to-SVG output ignores it.
         preset:
           type: string
           minLength: 1

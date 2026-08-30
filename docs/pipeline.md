@@ -5,7 +5,7 @@ This document describes the image transformation pipeline that `transform_raster
 ## Pipeline stages
 
 ```text
-decode → auto-orient → rotate → crop → resize → blur → sharpen → watermark → encode
+decode → auto-orient → rotate → crop → resize → blur → sharpen → grayscale → watermark → encode
 ```
 
 | # | Stage | Guard | Description |
@@ -17,15 +17,18 @@ decode → auto-orient → rotate → crop → resize → blur → sharpen → w
 | 5 | **Resize** | `width` and/or `height` set | Scale the image according to `fit` (contain / cover / fill / inside) and `position`. |
 | 6 | **Blur** | `blur` set | Gaussian blur with the given sigma (0.1–100.0). |
 | 7 | **Sharpen** | `sharpen` set | Unsharp mask with the given sigma (0.1–100.0). |
-| 8 | **Watermark** | `watermark` provided | Alpha-composite a watermark image at the specified position, opacity, and margin. |
-| 9 | **Encode** | — | Encode to the output format (JPEG, PNG, WebP, AVIF, BMP, TIFF) with optional quality and metadata injection. |
+| 8 | **Grayscale** | `grayscale == true` | Collapse the color channels to luminance (Rec. 601 weights), preserving alpha. Runs before the watermark so an overlay keeps its own colors. |
+| 9 | **Watermark** | `watermark` provided | Alpha-composite a watermark image at the specified position, opacity, and margin. |
+| 10 | **Encode** | — | Encode to the output format (JPEG, PNG, WebP, AVIF, BMP, TIFF) with optional quality and metadata injection. |
 
 Each stage checks the optional deadline (server: 30 s) and returns `TransformError::LimitExceeded` if exceeded.
 
 ## Deadline checkpoints
 
-The server adapter injects a 30-second deadline. The pipeline checks elapsed time after decode, rotate, crop, resize, blur, sharpen, watermark, and encode. The CLI does not set a deadline.
+The server adapter injects a 30-second deadline. The pipeline checks elapsed time after decode, rotate, crop, resize, blur, sharpen, grayscale, watermark, and encode. The CLI does not set a deadline.
 
 ## SVG path
 
 SVG inputs are handled by `transform_svg()`, not by this pipeline. If `crop`, `blur`, `sharpen`, or `watermark` is requested for an SVG input, the request is rejected with `InvalidOptions`.
+
+`grayscale` is accepted for SVG input when the output is a raster format: it is applied to the rasterized pixels, after rotation, in the same position it occupies in the raster pipeline. SVG-to-SVG output ignores it, along with the other raster-only options.

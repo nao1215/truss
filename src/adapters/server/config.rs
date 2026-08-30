@@ -1986,6 +1986,7 @@ mod tests {
                 crop: None,
                 blur: None,
                 sharpen: None,
+                grayscale: None,
             },
         );
         let config = ServerConfig::new(PathBuf::from("."), None).with_presets(map);

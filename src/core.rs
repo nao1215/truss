@@ -690,6 +690,13 @@ pub struct TransformOptions {
     /// and before encoding. Valid range is 0.1–100.0. The sharpening threshold
     /// is fixed at 1.
     pub sharpen: Option<f32>,
+    /// Whether the image should be desaturated to grayscale.
+    ///
+    /// When true, the image is converted to grayscale after resizing, blur, and
+    /// sharpening, and before any watermark is composited, so a watermark keeps
+    /// its own colors. Luminance is computed with the Rec. 601 weights the
+    /// `image` crate uses, and the alpha channel is preserved.
+    pub grayscale: bool,
     /// Optional explicit crop region applied before resize.
     ///
     /// When set, the image is cropped to the specified rectangle before any resize
@@ -723,6 +730,7 @@ impl Default for TransformOptions {
             preserve_exif: false,
             blur: None,
             sharpen: None,
+            grayscale: false,
             crop: None,
             deadline: None,
         }
@@ -844,6 +852,7 @@ impl TransformOptions {
             ),
             blur: self.blur,
             sharpen: self.sharpen,
+            grayscale: self.grayscale,
             crop: self.crop,
             deadline: self.deadline,
         })
@@ -881,6 +890,8 @@ pub struct NormalizedTransformOptions {
     pub blur: Option<f32>,
     /// Unsharp-mask (sharpen) sigma, when requested.
     pub sharpen: Option<f32>,
+    /// Whether the image should be desaturated to grayscale.
+    pub grayscale: bool,
     /// Optional explicit crop region applied before resize.
     pub crop: Option<CropRegion>,
     /// Optional wall-clock deadline for the transform pipeline.

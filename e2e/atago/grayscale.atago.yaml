@@ -1,0 +1,167 @@
+# Grayscale / desaturate coverage for https://github.com/nao1215/truss/issues/302.
+#
+# Drupal core ships a Desaturate image effect, so a CMS using truss as its image
+# backend reaches this flag with configuration a site builder made through a UI.
+# That makes three things worth pinning, not just "the flag is accepted":
+#
+#   1. the exact pixels, against a committed grayscale snapshot;
+#   2. that the operation is a real transform, not a silent no-op;
+#   3. the algebraic properties a desaturation has to satisfy — it is idempotent
+#      and it commutes with rotation, both of which are exact for a per-pixel
+#      channel collapse and would break under a rounding or ordering bug.
+#
+# Run with: e2e/run.sh --filter grayscale
+version: "1"
+
+suite:
+  name: truss grayscale
+
+scenarios:
+  - name: grayscale output matches the committed snapshot exactly
+    steps:
+      - fixture:
+          file: in.png
+          from: testdata/sample.png
+      - run:
+          command: truss convert in.png -o gray.png --grayscale
+      - assert:
+          exit_code: 0
+          image:
+            path: gray.png
+            format: png
+            width: 16
+            height: 16
+      - assert:
+          image:
+            path: gray.png
+            similar_to: testdata/sample-grayscale.png
+
+  - name: grayscale actually changes a colored image
+    steps:
+      - fixture:
+          file: in.png
+          from: testdata/sample.png
+      - run:
+          command: truss convert in.png -o color.png
+      - assert:
+          exit_code: 0
+      - run:
+          command: truss convert in.png -o gray.png --grayscale
+      - assert:
+          exit_code: 0
+      # cmp exits 1 when the files differ, which is the outcome under test: a
+      # flag that parsed but did nothing would leave these two byte-identical.
+      - run:
+          shell: true
+          command: cmp -s color.png gray.png; echo "differs=$?"
+      - assert:
+          stdout:
+            contains: "differs=1"
+
+  - name: grayscale is idempotent
+    steps:
+      - fixture:
+          file: in.png
+          from: testdata/sample.png
+      - run:
+          command: truss convert in.png -o once.png --grayscale
+      - assert:
+          exit_code: 0
+      - run:
+          command: truss convert once.png -o twice.png --grayscale
+      - assert:
+          exit_code: 0
+          image:
+            path: twice.png
+            similar_to: once.png
+
+  - name: grayscale commutes with rotation
+    steps:
+      - fixture:
+          file: in.png
+          from: testdata/sample.png
+      # Rotation only permutes pixels and desaturation only rewrites them in
+      # place, so the two orderings must agree to the byte.
+      - run:
+          command: truss convert in.png -o gray-then-rotate.png --grayscale --rotate 180
+      - assert:
+          exit_code: 0
+      - run:
+          command: truss convert in.png -o rotated.png --rotate 180
+      - assert:
+          exit_code: 0
+      - run:
+          command: truss convert rotated.png -o rotate-then-gray.png --grayscale
+      - assert:
+          exit_code: 0
+          image:
+            path: rotate-then-gray.png
+            similar_to: gray-then-rotate.png
+
+  - name: grayscale survives a lossless optimize that would otherwise pass through
+    steps:
+      - fixture:
+          file: in.png
+          from: testdata/sample.png
+      # A same-format lossless request with no other operation short-circuits the
+      # pipeline. grayscale has to defeat that shortcut or it is silently dropped.
+      - run:
+          command: truss convert in.png -o optimized.png --format png --optimize lossless --grayscale
+      - assert:
+          exit_code: 0
+      - assert:
+          image:
+            path: optimized.png
+            similar_to: testdata/sample-grayscale.png
+
+  - name: grayscale preserves transparency
+    steps:
+      - fixture:
+          file: in.png
+          from: testdata/sample.png
+      # Build the alpha here rather than reaching for a fixture: fit=contain
+      # letterboxes with the default transparent background, so padded.png is an
+      # opaque image that genuinely needs an alpha channel.
+      - run:
+          command: truss convert in.png -o padded.png --width 32 --height 16 --fit contain
+      - assert:
+          exit_code: 0
+          image:
+            path: padded.png
+            alpha: true
+      - run:
+          command: truss convert padded.png -o gray-alpha.png --grayscale
+      - assert:
+          exit_code: 0
+          image:
+            path: gray-alpha.png
+            format: png
+            alpha: true
+      - run:
+          command: truss inspect gray-alpha.png
+      - assert:
+          exit_code: 0
+          stdout:
+            json:
+              path: $.hasAlpha
+              equals: true
+
+  - name: grayscale applies to a rasterized SVG
+    steps:
+      - run:
+          shell: true
+          command: truss convert "$FIXTURES_DIR/svg-minimal.svg" -o svg-gray.png --format png --grayscale
+      - assert:
+          exit_code: 0
+          image:
+            path: svg-gray.png
+            format: png
+
+  - name: convert help documents the grayscale flag
+    steps:
+      - run:
+          command: truss help convert
+      - assert:
+          exit_code: 0
+          stdout:
+            contains: "--grayscale"

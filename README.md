@@ -229,6 +229,25 @@ Watermark positions are the same as cover positions: `center`, `top`, `right`, `
 
 > **Note:** `--blur`, `--sharpen`, and `--watermark` are raster-only and not supported for SVG inputs.
 
+#### Grayscale
+
+| Original | Grayscale (`--grayscale`) |
+|---|---|
+| ![original](./docs/img/sample-bee.jpg) | ![grayscale](./docs/img/sample-bee-grayscale.jpg) |
+
+```sh
+# Desaturate to grayscale
+truss photo.jpg -o gray.jpg --grayscale
+
+# Combine with other operations
+truss photo.jpg -o thumb.jpg --width 320 --grayscale
+```
+
+Luminance uses the Rec. 601 weights, and the alpha channel is preserved. Desaturation runs
+after resize, blur, and sharpen, and before the watermark, so a watermark keeps its own colors.
+Unlike `--blur` and `--sharpen`, `--grayscale` also works for SVG input when the output is a
+raster format; SVG-to-SVG output ignores it along with the other raster-only options.
+
 #### Metadata control
 
 By default, truss strips all metadata for smaller and safer output.

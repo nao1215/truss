@@ -102,6 +102,8 @@ export interface TransformQuery {
   blur?: number | undefined;
   /** Sharpening sigma. */
   sharpen?: number | undefined;
+  /** Desaturate the image to grayscale. */
+  grayscale?: boolean | undefined;
 }
 
 /**
