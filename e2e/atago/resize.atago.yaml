@@ -214,7 +214,9 @@ scenarios:
       - assert:
           exit_code: 1
           stderr:
-            contains: "without_enlargement requires width or height"
+            # The message spells the option the way callers do. It used to say
+            # `without_enlargement`, a Rust field name no adapter exposes.
+            contains: "withoutEnlargement requires width or height"
 
   - name: convert help documents the corrected fit modes
     steps:

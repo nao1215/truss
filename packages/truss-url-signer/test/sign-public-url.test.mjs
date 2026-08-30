@@ -316,10 +316,6 @@ test("rejects transform combinations that truss would reject", () => {
       pattern: /position requires both width and height/,
     },
     {
-      options: { transforms: { preserveExif: true } },
-      pattern: /preserveExif requires stripMetadata to be false/,
-    },
-    {
       options: {
         transforms: { format: "jpeg", quality: 80, optimize: "lossless" },
       },
@@ -423,4 +419,48 @@ test("accepts the inclusive upper blur boundary", () => {
       expires: 1900000000,
     }),
   );
+});
+
+test("preserveExif implies stripMetadata=false, matching `truss sign --preserve-exif`", () => {
+  // The package used to throw unless the caller also passed `stripMetadata: false`,
+  // refusing a transform the CLI and the server both accept. truss resolves the pair in
+  // `resolve_metadata_flags`, so the two spellings have to produce one URL - this is the
+  // exact string `truss sign --base-url https://cdn.example.com --path /hero.jpg
+  // --key-id k1 --secret s3cret --expires 1700000000 --preserve-exif` prints.
+  const expected =
+    "https://cdn.example.com/images/by-path?expires=1700000000&keyId=k1&path=%2Fhero.jpg" +
+    "&preserveExif=true&signature=" +
+    "f41b0c7cfa83b3f4981a1011f700f4174e3177ef3bd4e4ed0098a158faf0f85d&stripMetadata=false";
+
+  const implied = signPublicUrl({
+    baseUrl: "https://cdn.example.com",
+    source: { kind: "path", path: "/hero.jpg" },
+    transforms: { preserveExif: true },
+    keyId: "k1",
+    secret: "s3cret",
+    expires: 1700000000,
+  });
+  assert.equal(implied, expected);
+
+  const spelledOut = signPublicUrl({
+    baseUrl: "https://cdn.example.com",
+    source: { kind: "path", path: "/hero.jpg" },
+    transforms: { preserveExif: true, stripMetadata: false },
+    keyId: "k1",
+    secret: "s3cret",
+    expires: 1700000000,
+  });
+  assert.equal(spelledOut, expected, "both spellings sign the same request");
+
+  // truss resolves the contradictory pair rather than refusing it, and
+  // `truss sign --strip-metadata --preserve-exif` prints this same string.
+  const contradictory = signPublicUrl({
+    baseUrl: "https://cdn.example.com",
+    source: { kind: "path", path: "/hero.jpg" },
+    transforms: { preserveExif: true, stripMetadata: true },
+    keyId: "k1",
+    secret: "s3cret",
+    expires: 1700000000,
+  });
+  assert.equal(contradictory, expected, "preserveExif wins over an explicit strip");
 });

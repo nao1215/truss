@@ -55,3 +55,57 @@ scenarios:
             contains:
               - "https://"
               - "640"
+
+  - name: the signed URL is byte-identical to the one the TypeScript signer produces
+    steps:
+      # packages/truss-url-signer signs the same request in JavaScript, and its test suite
+      # pins this exact string. Two signers that drift produce URLs the server rejects, so
+      # the constant is asserted from both sides.
+      - run:
+          command: truss sign --base-url "https://cdn.example.com" --path "/hero.jpg" --key-id "k1" --secret "s3cret" --expires 1700000000
+      - assert:
+          exit_code: 0
+          stdout:
+            equals: "https://cdn.example.com/images/by-path?expires=1700000000&keyId=k1&path=%2Fhero.jpg&signature=dab916051280ac685f656e44884e6a87f2822d0a5de48b657e95616a86a364eb"
+
+  - name: --preserve-exif signs both the flag and the stripping it implies
+    steps:
+      # preserveExif means "do not strip", so the signed query carries stripMetadata=false
+      # as well. Signing only one of the pair would produce a URL the server resolves
+      # differently from what the caller asked for.
+      - run:
+          command: truss sign --base-url "https://cdn.example.com" --path "/hero.jpg" --key-id "k1" --secret "s3cret" --expires 1700000000 --preserve-exif
+      - assert:
+          exit_code: 0
+          stdout:
+            contains:
+              - "preserveExif=true"
+              - "stripMetadata=false"
+
+  - name: an expiry in the past still signs, because expiry is the server's to check
+    steps:
+      - run:
+          command: truss sign --base-url "https://cdn.example.com" --path "/hero.jpg" --key-id "k1" --secret "s3cret" --expires 1
+      - assert:
+          exit_code: 0
+          stdout:
+            contains: "expires=1"
+
+  - name: --path and --url are mutually exclusive
+    steps:
+      - run:
+          command: truss sign --base-url "https://cdn.example.com" --path "/hero.jpg" --url "https://example.com/a.png" --key-id "k1" --secret "s3cret" --expires 1700000000
+      - assert:
+          exit_code: 1
+          stderr:
+            contains: "error:"
+
+  - name: the same request signs to the same URL every time
+    steps:
+      - run:
+          command: truss sign --base-url "https://cdn.example.com" --path "/hero.jpg" --key-id "k1" --secret "s3cret" --expires 1700000000 --width 640 --format webp --grayscale
+          deterministic:
+            runs: 2
+            compare: [stdout, exit_code]
+      - assert:
+          exit_code: 0

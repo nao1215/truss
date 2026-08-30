@@ -1039,7 +1039,8 @@ components:
       in: query
       required: false
       description: |
-        Preserve EXIF data only. Requires `stripMetadata=false`.
+        Preserve EXIF data only. Implies `stripMetadata=false`, so it does not have to be
+        sent alongside; an explicit `stripMetadata=true` is overridden rather than refused.
         When `stripMetadata=false` and `preserveExif=false`, the server keeps all metadata
         that the selected output encoder supports.
         Returns 400 when output format is SVG.
@@ -1337,7 +1338,7 @@ components:
         preserveExif:
           type: boolean
           default: false
-          description: Preserve EXIF only. Requires `stripMetadata=false`.
+          description: Preserve EXIF only. Implies `stripMetadata=false`.
         crop:
           type: string
           pattern: '^\d+,\d+,[1-9]\d*,[1-9]\d*$'

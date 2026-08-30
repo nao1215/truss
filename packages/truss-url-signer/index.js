@@ -259,11 +259,11 @@ function normalizeTransforms(transforms) {
   const background = normalizeOptionalBackground(transforms.background);
   const rotate = normalizeOptionalRotation(transforms.rotate);
   const autoOrient = normalizeOptionalBoolean("autoOrient", transforms.autoOrient);
-  const stripMetadata = normalizeOptionalBoolean(
+  let stripMetadata = normalizeOptionalBoolean(
     "stripMetadata",
     transforms.stripMetadata,
   );
-  const preserveExif = normalizeOptionalBoolean(
+  let preserveExif = normalizeOptionalBoolean(
     "preserveExif",
     transforms.preserveExif,
   );
@@ -288,6 +288,16 @@ function normalizeTransforms(transforms) {
     stripMetadata,
     preserveExif,
   });
+
+  // `preserveExif` implies "do not strip", the rule truss applies in its own
+  // `resolve_metadata_flags`: it resolves the pair rather than refusing it, so an
+  // explicit `stripMetadata: true` beside it loses. Throwing here instead - which is
+  // what this package used to do, for `{preserveExif: true}` on its own as well as for
+  // the pair - made it refuse transforms the CLI and the server both accept, and left
+  // it as the one adapter that answered differently.
+  if (preserveExif === true) {
+    stripMetadata = false;
+  }
 
   return {
     width,
@@ -354,9 +364,6 @@ function validateTransformMatrix(transforms) {
     throw new TypeError("position requires both width and height");
   }
 
-  if (transforms.preserveExif === true && transforms.stripMetadata !== false) {
-    throw new TypeError("preserveExif requires stripMetadata to be false");
-  }
 
   if (
     transforms.optimize !== null &&

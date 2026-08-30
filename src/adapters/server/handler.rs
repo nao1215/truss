@@ -322,6 +322,18 @@ impl TransformOptionsPayload {
     pub(super) fn into_options(self) -> Result<TransformOptions, HttpResponse> {
         let defaults = TransformOptions::default();
 
+        // `preserveExif` implies "do not strip", the same way it does on the CLI and in
+        // the WASM build. Reading the two fields independently made this adapter the one
+        // that answered 400 for `preserveExif=true` on its own — including when a
+        // server-side preset was the thing that set it — while every other caller of
+        // `resolve_metadata_flags` accepted it.
+        let (strip_metadata, preserve_exif) = crate::resolve_metadata_flags(
+            self.strip_metadata,
+            None,
+            self.preserve_exif.or(Some(defaults.preserve_exif)),
+        )
+        .map_err(|error| bad_request_response(&error.to_string()))?;
+
         Ok(TransformOptions {
             width: self.width,
             height: self.height,
@@ -354,8 +366,8 @@ impl TransformOptionsPayload {
                 None => defaults.rotate,
             },
             auto_orient: self.auto_orient.unwrap_or(defaults.auto_orient),
-            strip_metadata: self.strip_metadata.unwrap_or(defaults.strip_metadata),
-            preserve_exif: self.preserve_exif.unwrap_or(defaults.preserve_exif),
+            strip_metadata,
+            preserve_exif,
             crop: parse_optional_named(self.crop.as_deref(), "crop", CropRegion::from_str)?,
             blur: self.blur,
             sharpen: self.sharpen,
@@ -1713,5 +1725,80 @@ mod tests {
         assert!(check(&c, &c.rss_state, 500, 1000, HigherIsWorse).0);
         assert_eq!(c.disk_state.load(Ordering::Relaxed), 1);
         assert_eq!(c.rss_state.load(Ordering::Relaxed), 0);
+    }
+
+    // -- Metadata flags resolve the way every other adapter resolves them --
+
+    #[test]
+    fn preserve_exif_alone_implies_not_stripping() {
+        // `?preserveExif=true` on its own used to be a 400 from this adapter alone,
+        // because the two fields were read independently instead of through
+        // `resolve_metadata_flags`, whose contract is that every adapter agrees.
+        let options = TransformOptionsPayload {
+            preserve_exif: Some(true),
+            ..TransformOptionsPayload::default()
+        }
+        .into_options()
+        .expect("preserveExif on its own is a complete request");
+
+        assert!(options.preserve_exif);
+        assert!(!options.strip_metadata);
+    }
+
+    #[test]
+    fn preserve_exif_wins_over_an_explicit_strip_metadata() {
+        // The CLI resolves `--strip-metadata --preserve-exif` the same way: the more
+        // specific request decides, rather than the pair being refused.
+        let options = TransformOptionsPayload {
+            preserve_exif: Some(true),
+            strip_metadata: Some(true),
+            ..TransformOptionsPayload::default()
+        }
+        .into_options()
+        .expect("the pair resolves rather than failing");
+
+        assert!(options.preserve_exif);
+        assert!(!options.strip_metadata);
+    }
+
+    #[test]
+    fn metadata_flags_keep_their_defaults_when_nothing_asks_for_them() {
+        let options = TransformOptionsPayload::default()
+            .into_options()
+            .expect("an empty payload is valid");
+
+        assert!(!options.preserve_exif);
+        assert!(options.strip_metadata, "stripping stays the default");
+
+        let kept = TransformOptionsPayload {
+            strip_metadata: Some(false),
+            ..TransformOptionsPayload::default()
+        }
+        .into_options()
+        .expect("stripMetadata=false is valid on its own");
+
+        assert!(!kept.preserve_exif);
+        assert!(!kept.strip_metadata);
+    }
+
+    #[test]
+    fn a_preset_that_sets_preserve_exif_is_usable_without_a_second_field() {
+        // The 400 also reached operators: a preset naming only `preserveExif` was
+        // unusable until `stripMetadata: false` was written beside it.
+        let preset = TransformOptionsPayload {
+            preserve_exif: Some(true),
+            ..TransformOptionsPayload::default()
+        };
+        let options = preset
+            .with_overrides(&TransformOptionsPayload {
+                width: Some(64),
+                ..TransformOptionsPayload::default()
+            })
+            .into_options()
+            .expect("a preset may set preserveExif on its own");
+
+        assert!(options.preserve_exif);
+        assert!(!options.strip_metadata);
+        assert_eq!(options.width, Some(64));
     }
 }
