@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- `truss convert in.png -o - --format webp` could write nothing and still exit 0. Standard output is a buffered `LineWriter`, and a short payload with no `0x0A` byte in it — which a small WebP or AVIF thumbnail routinely is — sat entirely in that buffer until the runtime flushed it after `main` returned, where nothing observes the error. A full disk, a quota, or a reader that closed the pipe therefore lost the image silently. The CLI now flushes standard output itself and reports a failure as exit code 5 with the reason on stderr; a command that had already failed keeps its own exit code, since the flush error is a consequence of the first failure rather than a second one.
+- `truss --version` and `truss help <topic>` exited 5 with nothing on stderr when standard output could not be written, while every other command printed `error: ...` and said why. They now report the failure the same way.
+- A configuration fault that `truss validate` reports as exit 1 was reported by `truss serve` as exit 5, so a deploy script that ran one and then the other saw two different codes for one fault. Configuration errors are exit 1 from both; exit 5 stays for what fails after the configuration is accepted, such as a port already in use.
+- A storage root that cannot be resolved now names the setting that chose it. `TRUSS_STORAGE_ROOT` was the only setting in `ServerConfig::from_env` whose error was the bare operating-system message, which reads "No such file or directory (os error 2)" on Linux and macOS and "The system cannot find the path specified. (os error 3)" on Windows, and names neither the variable nor the path. It now reports ``TRUSS_STORAGE_ROOT `<path>` cannot be resolved: <reason>``.
+- A watermark that does not fit reports both sizes and the margin instead of "watermark image is too large for the output dimensions". Either the image or the margin can be what does not fit, and the old wording blamed the image in both cases, sending readers off to shrink something that was already small enough. It now reads `watermark 16x16 with a 1000px margin does not fit a 64x64 output`. The check itself is one function now rather than the same condition written twice.
+
+### Changed
+
+- An output format truss never encodes is a usage error whichever way it is asked for. `--format gif` was refused by the flag's value parser with exit 1 and the alternatives spelled out, while `-o out.gif` reached the same wall from the other side and surfaced `unsupported output media type: image/gif` with exit 4 from deep in the pipeline. The output extension is now checked at parse time when `--format` is absent, so both spellings give the same message and the same exit code. An explicit `--format` still wins over the extension, so `-o out.gif --format png` writes a PNG.
+- `UnsupportedOutputMediaType` says which rule was broken rather than naming the media type. `svg` output is refused for a raster input and accepted for an SVG one, and `gif` is refused for every input; the old message, `unsupported output media type: image/svg+xml`, left the reader to work that out after having seen `truss diagram.svg -o safe.svg` succeed. The CLI, the HTTP server's 415 detail, and the WASM error all read from the same wording now: `svg output requires an svg input; choose a raster output format such as png, jpeg, webp, or avif`.
+
+### Added
+
+- The end-to-end suite runs on Linux, macOS, and Windows rather than on Linux alone. Every scenario was rewritten to be shell-free: `shell: true` means `/bin/sh` on Linux and macOS but `cmd.exe` on Windows, where neither `$FIXTURES_DIR` nor `cat` nor `cmp` exists, so a suite built on it is three different suites and only one of them ever ran. The shared fixtures now reach the specs as `${fixtures}` through a new `e2e/atago/atago.project.yaml`, pipes and redirects are `stdin.file` and `stdout_to`, and the two scenarios that shelled out to `cmp` to prove two files differ compare against committed baselines instead, which pins what the flag produced rather than only that it produced something.
+- End-to-end coverage for the surfaces that had none: `e2e/atago/portability.atago.yaml` (case-folded output extensions, paths with spaces and non-ASCII names, missing and non-directory output paths, stdin/stdout binary integrity for a payload with no newline in it, LF line endings on every platform, and repeat-run determinism), `filters.atago.yaml` (`--crop`, `--blur`, `--sharpen`, including the fixed point that a uniform image is for both filters), `watermark.atago.yaml`, `completions.atago.yaml` (every supported shell, PowerShell included), `optimize.atago.yaml`, and `validate.atago.yaml`. The suite goes from 157 scenarios to 231.
+
 ## v0.14.0
 
 ### Changed
