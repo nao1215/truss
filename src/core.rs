@@ -5,6 +5,11 @@ use std::fmt;
 use std::str::FromStr;
 use std::time::Duration;
 
+// The shared failure vocabulary is only read by the adapters, so a build with none of them
+// (`--no-default-features`) leaves it out rather than carrying an unused table.
+#[cfg(any(feature = "server", feature = "wasm"))]
+pub(crate) mod error_class;
+
 /// Maximum number of pixels in the output image (width × height).
 ///
 /// This limit prevents resize operations from producing excessively large

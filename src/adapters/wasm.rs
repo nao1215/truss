@@ -362,18 +362,12 @@ fn output_extension(media_type: MediaType) -> &'static str {
     }
 }
 
-#[cfg(feature = "wasm")]
+/// The `kind` the Wasm error payload reports: the camelCase spelling of the failure's
+/// class, which the HTTP server puts in its RFC 9457 `type` and the CLI prints in
+/// parentheses. All three come from the one table in `core::error_class`.
+#[cfg(any(feature = "wasm", test))]
 fn error_kind(error: &TransformError) -> &'static str {
-    match error {
-        TransformError::InvalidInput(_) => "invalidInput",
-        TransformError::InvalidOptions(_) => "invalidOptions",
-        TransformError::UnsupportedInputMediaType(_) => "unsupportedInputMediaType",
-        TransformError::UnsupportedOutputMediaType(_) => "unsupportedOutputMediaType",
-        TransformError::DecodeFailed(_) => "decodeFailed",
-        TransformError::EncodeFailed(_) => "encodeFailed",
-        TransformError::CapabilityMissing(_) => "capabilityMissing",
-        TransformError::LimitExceeded(_) => "limitExceeded",
-    }
+    error.class().camel_case_name()
 }
 
 #[cfg(feature = "wasm")]
@@ -1035,6 +1029,70 @@ mod tests {
             assert!(
                 WASM_DOCS.contains(export_name),
                 "docs/wasm.md should mention {export_name}"
+            );
+        }
+    }
+
+    /// The eight classes a transform can fail with, the anchor `docs/problems.md` gives
+    /// each one, and the `kind` the browser sees. The kind is the camelCase spelling of the
+    /// slug, so this table is the join between the three adapters: respell a class in one
+    /// of them and the other two are wrong here.
+    #[test]
+    fn wasm_kinds_are_the_camel_case_problem_slugs() {
+        const PROBLEM_DOCS: &str = include_str!("../../docs/problems.md");
+        let cases: [(TransformError, &str, &str); 8] = [
+            (
+                TransformError::InvalidOptions("x".into()),
+                "invalid-options",
+                "invalidOptions",
+            ),
+            (
+                TransformError::InvalidInput("x".into()),
+                "invalid-input",
+                "invalidInput",
+            ),
+            (
+                TransformError::DecodeFailed("x".into()),
+                "decode-failed",
+                "decodeFailed",
+            ),
+            (
+                TransformError::UnsupportedInputMediaType("x".into()),
+                "unsupported-input-media-type",
+                "unsupportedInputMediaType",
+            ),
+            (
+                TransformError::UnsupportedOutputMediaType(MediaType::Gif),
+                "unsupported-output-media-type",
+                "unsupportedOutputMediaType",
+            ),
+            (
+                TransformError::EncodeFailed("x".into()),
+                "encode-failed",
+                "encodeFailed",
+            ),
+            (
+                TransformError::CapabilityMissing("x".into()),
+                "capability-missing",
+                "capabilityMissing",
+            ),
+            (
+                TransformError::LimitExceeded("x".into()),
+                "limit-exceeded",
+                "limitExceeded",
+            ),
+        ];
+
+        for (error, slug, kind) in cases {
+            assert_eq!(error.class().slug(), slug, "{error:?}");
+            assert_eq!(error_kind(&error), kind, "{error:?}");
+            assert!(
+                PROBLEM_DOCS.contains(&format!("### {slug}\n")),
+                "docs/problems.md should document the {slug} class"
+            );
+            assert!(
+                WASM_DOCS.contains(kind),
+                "docs/wasm.md should document the {kind} kind"
             );
         }
     }
