@@ -1864,7 +1864,12 @@ fn encode_auto_output(
         _ => return Ok(baseline),
     };
 
-    if optimized.bytes.len() < baseline.bytes.len() {
+    // A target the caller named is a requirement, and the baseline never looked at it, so
+    // the size comparison is only for the default target `auto` picks on its own. When the
+    // baseline would have met the named target the search lands at or below its quality
+    // and is no larger, so the comparison only ever changed the answer when the baseline
+    // missed the target, which is exactly when it must not win.
+    if options.target_quality.is_some() || optimized.bytes.len() < baseline.bytes.len() {
         warnings.append(&mut attempt_warnings);
         Ok(optimized)
     } else {
@@ -6220,6 +6225,44 @@ mod tests {
             "achieved {achieved} should be below the target"
         );
         assert_eq!(quality, 100);
+    }
+
+    /// `auto` keeps a named target even when meeting it costs more than the default encode:
+    /// the baseline never looked at the target, so it may only win when no target was named.
+    #[test]
+    fn auto_optimization_keeps_a_named_target_over_a_smaller_baseline() {
+        let encode = |optimize: OptimizeMode, target: Option<&str>| {
+            transform_raster(TransformRequest::new(
+                noisy_png_artifact(64),
+                TransformOptions {
+                    format: Some(MediaType::Jpeg),
+                    optimize,
+                    width: Some(32),
+                    target_quality: target.map(|value| value.parse().expect("target")),
+                    ..TransformOptions::default()
+                },
+            ))
+            .expect("transform")
+        };
+
+        let untargeted = encode(OptimizeMode::Auto, None);
+        let lossy = encode(OptimizeMode::Lossy, Some("psnr:45"));
+        let auto = encode(OptimizeMode::Auto, Some("psnr:45"));
+
+        assert!(
+            lossy.artifact.bytes.len() > untargeted.artifact.bytes.len(),
+            "the target must cost more than the default encode for this to say anything"
+        );
+        assert_eq!(
+            auto.artifact.bytes.len(),
+            lossy.artifact.bytes.len(),
+            "auto with a named target should return the targeted encode"
+        );
+        assert!(
+            target_shortfall(&auto.warnings).is_none(),
+            "{:?}",
+            auto.warnings
+        );
     }
 
     /// A target the search does reach, the default target `auto` picks on its own, and a

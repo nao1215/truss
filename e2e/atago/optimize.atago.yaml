@@ -458,3 +458,22 @@ scenarios:
           image:
             path: reached.jpg
             format: jpeg
+
+  - name: auto keeps a named target even when meeting it costs more than the default encode
+    steps:
+      # The 64x64 gradient resized to 32 wide comes out of an untargeted auto at about 670
+      # bytes and needs about 880 to reach 50 dB. auto used to keep whichever was smaller,
+      # which threw the target away; the untargeted size is the floor this pins above.
+      - run:
+          command: truss convert "${fixtures}/icc-profile.jpg" -o targeted.jpg --width 32 --optimize auto --target-quality psnr:50
+      - assert:
+          exit_code: 0
+          stderr:
+            not_contains: "warning:"
+          image:
+            path: targeted.jpg
+            format: jpeg
+            width: 32
+          file:
+            path: targeted.jpg
+            min_size: 800
