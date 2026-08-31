@@ -1510,11 +1510,19 @@ fn metadata_policy_retains_exif(metadata_policy: MetadataPolicy) -> bool {
 /// The input is a legal answer only when nothing about the pixels was asked to change and
 /// the metadata policy is already satisfied by the file as it stands, which is what
 /// `is_passthrough_lossless_request` and the per-format checks below decide.
+///
+/// This holds for `lossy` as much as for the other two. Asking for a lossy optimization is
+/// asking for the smallest acceptable file, not for a re-encode at any price, and a caller
+/// who does want a particular encode names a `quality` — which `is_passthrough_lossless_request`
+/// already treats as disqualifying. A `targetQuality` does not disqualify it: the input
+/// scores perfectly against itself and is smaller than any re-encode that also meets the
+/// target, so it is the best answer to the question that was asked.
+///
+/// `none` is the one mode that never passes through, because it is the mode that says no
+/// optimization was requested at all.
 fn smaller_passthrough(normalized: &NormalizedTransformRequest, encoded: &[u8]) -> Option<Vec<u8>> {
-    if !matches!(
-        normalized.options.optimize,
-        OptimizeMode::Auto | OptimizeMode::Lossless
-    ) || !is_passthrough_lossless_request(normalized)
+    if matches!(normalized.options.optimize, OptimizeMode::None)
+        || !is_passthrough_lossless_request(normalized)
     {
         return None;
     }
@@ -5930,6 +5938,7 @@ mod tests {
     // ── optimize never returns more bytes than it was given ─────────────
 
     /// Builds a JPEG the encoder compresses worse than Pillow-style flat encoding does.
+    /// A flat-colour JPEG produced by this crate's own encoder.
     fn flat_jpeg_artifact(width: u32, height: u32) -> Artifact {
         let image = image::RgbImage::from_pixel(width, height, image::Rgb([30, 80, 200]));
         let mut bytes = Vec::new();
@@ -5954,24 +5963,63 @@ mod tests {
         .bytes
     }
 
-    /// A flat JPEG re-encodes larger than it started, so `auto` must hand back the input.
+    /// A flat JPEG re-encodes larger than it started, so every mode must hand back the input.
     ///
     /// `auto` used to compare two re-encodes and never the bytes it was given, so it
     /// returned a bigger file than `lossless` did, having paid a generation loss for it.
-    #[test]
-    fn auto_optimization_never_returns_more_bytes_than_the_input() {
+    /// `lossy` kept doing that after `auto` and `lossless` stopped, which made the command's
+    /// name wrong for the mode a caller reaches for when they want the largest reduction.
+    #[rstest]
+    #[case(OptimizeMode::Auto)]
+    #[case(OptimizeMode::Lossless)]
+    #[case(OptimizeMode::Lossy)]
+    fn optimization_never_returns_more_bytes_than_the_input(#[case] mode: OptimizeMode) {
+        // The synthetic images are encoded by the same encoder that would re-encode them,
+        // which is the easy half of the property. `flat.jpg` came from a different encoder
+        // with optimized Huffman tables, which is what a file arriving from a design tool
+        // or a phone looks like, and is where a re-encode costs more than it saves.
+        let mut inputs = vec![
+            sniff_artifact(RawArtifact::new(FLAT_JPEG.to_vec(), None)).expect("sniff flat.jpg"),
+        ];
         for size in [32, 64, 128, 256] {
-            let artifact = flat_jpeg_artifact(size, size);
+            inputs.push(flat_jpeg_artifact(size, size));
+        }
+
+        for artifact in inputs {
+            let dimensions = artifact.metadata.dimensions();
             let input_length = artifact.bytes.len();
 
-            let optimized = optimize_bytes(artifact, OptimizeMode::Auto);
+            let optimized = optimize_bytes(artifact, mode);
 
             assert!(
                 optimized.len() <= input_length,
-                "{size}x{size}: auto produced {} bytes from {input_length}",
+                "{dimensions:?}: {mode:?} produced {} bytes from {input_length}",
                 optimized.len()
             );
         }
+    }
+
+    /// Naming a quality is asking for that encode, so the passthrough stands aside.
+    #[test]
+    fn lossy_optimization_still_re_encodes_when_a_quality_is_named() {
+        let artifact = flat_jpeg_artifact(128, 128);
+        let input_length = artifact.bytes.len();
+
+        let result = transform_raster(TransformRequest::new(
+            artifact,
+            TransformOptions {
+                format: Some(MediaType::Jpeg),
+                optimize: OptimizeMode::Lossy,
+                quality: Some(98),
+                ..TransformOptions::default()
+            },
+        ))
+        .expect("transform");
+
+        assert!(
+            result.artifact.bytes.len() > input_length,
+            "a named quality must produce the encoder's output, not the input"
+        );
     }
 
     /// And never more than `lossless` would, which is the stronger statement of the same.
