@@ -216,12 +216,21 @@ const MAX_SVG_NESTING_DEPTH: usize = 256;
 /// Sanitizes an SVG document by removing dangerous elements and attributes.
 ///
 /// Removes:
-/// - `<script>` elements and their contents
-/// - `<foreignObject>` elements and their contents
-/// - Event handler attributes (`onclick`, `onload`, etc.)
+/// - `<script>`, `<foreignObject>`, `<iframe>`, `<embed>`, `<object>`, `<handler>`,
+///   and the SMIL animation elements, along with their contents
+/// - Event handler attributes (`onclick`, `onload`, etc.), under any namespace prefix
 /// - External references in `href`/`xlink:href` (keeps internal `#fragment` refs)
 /// - `data:` URLs containing scripts (allows `data:image/*`)
-/// - External `url()` references inside `<style>` text (keeps local `url(#id)` refs)
+/// - External `url()` references wherever they appear: `<style>` text, the `style`
+///   attribute, and the presentation attributes that take a `<funciri>`
+/// - At-rules outside [`ALLOWED_AT_RULES`], which is what removes `@import` however
+///   its at-keyword is spelled
+/// - Processing instructions, which a browser honours and which can load an external
+///   stylesheet; the XML declaration is kept
+///
+/// Refuses a document whose doctype declares an external entity or nests one entity
+/// inside another, because removing only the declarations would leave the references
+/// to them dangling.
 fn sanitize_svg(bytes: &[u8]) -> Result<String, TransformError> {
     let input = std::str::from_utf8(bytes)
         .map_err(|e| TransformError::DecodeFailed(format!("SVG is not valid UTF-8: {e}")))?;
@@ -345,6 +354,33 @@ fn sanitize_svg(bytes: &[u8]) -> Result<String, TransformError> {
                         })?;
                 }
             }
+            // A processing instruction is honoured by a browser rendering the
+            // document, and `<?xml-stylesheet?>` loads an external stylesheet —
+            // an XSLT one generates arbitrary markup, which defeats every element
+            // and attribute rule at once. Declarative styling from outside the
+            // document is not something a sanitizing image pipeline preserves.
+            // The XML declaration is a separate event and is kept.
+            Ok(Event::PI(_)) => {}
+            // The doctype itself is inert in every renderer, and an editor's
+            // literal entity declarations have to survive or the references to
+            // them dangle. A subset that declares an external entity or nests one
+            // entity inside another is an XXE or billion-laughs payload; the
+            // document is refused rather than stripped, because the content
+            // references those entities and removing only the declarations would
+            // emit a document that is no longer well-formed.
+            Ok(Event::DocType(ref e)) => {
+                if skip_depth > 0 {
+                    continue;
+                }
+                if doctype_carries_unsafe_declarations(e.as_ref()) {
+                    return Err(TransformError::DecodeFailed(
+                        "SVG doctype declares external or nested entities".to_string(),
+                    ));
+                }
+                writer
+                    .write_event(Event::DocType(e.to_owned()))
+                    .map_err(|e| TransformError::DecodeFailed(format!("SVG write error: {e}")))?;
+            }
             Ok(event) => {
                 if skip_depth > 0 {
                     continue;
@@ -364,6 +400,29 @@ fn sanitize_svg(bytes: &[u8]) -> Result<String, TransformError> {
     let result = writer.into_inner().into_inner();
     String::from_utf8(result)
         .map_err(|e| TransformError::DecodeFailed(format!("SVG output is not valid UTF-8: {e}")))
+}
+
+/// Returns `true` when a doctype's internal subset declares something a
+/// sanitized document should not carry.
+///
+/// Two shapes qualify. An external identifier (`SYSTEM` or `PUBLIC`) inside the
+/// subset declares an external entity, which is an XXE payload; XML keeps those
+/// keywords uppercase, so the search is exact. An `&` inside the subset means one
+/// entity's replacement text references another, which is the billion-laughs
+/// shape — truss never expands entities, but a consumer of the sanitized document
+/// might. An editor's declarations are flat literals and contain neither.
+///
+/// A `SYSTEM` or `PUBLIC` identifier on the doctype itself, outside the subset,
+/// points at a DTD that no renderer fetches and is left alone.
+fn doctype_carries_unsafe_declarations(doctype: &[u8]) -> bool {
+    let Ok(text) = std::str::from_utf8(doctype) else {
+        // A doctype that is not valid UTF-8 cannot be inspected, so it is not kept.
+        return true;
+    };
+    let Some(subset) = text.split_once('[').map(|(_, rest)| rest) else {
+        return false;
+    };
+    subset.contains("SYSTEM") || subset.contains("PUBLIC") || subset.contains('&')
 }
 
 /// Returns the local name of an XML element (strips namespace prefix).
@@ -462,15 +521,17 @@ fn sanitize_attributes<'a>(element: &'a BytesStart<'a>) -> BytesStart<'a> {
             continue;
         };
 
-        // Remove event handler attributes.
-        if is_event_handler(key) {
-            continue;
-        }
-
         let key_lower = key.to_ascii_lowercase();
         let key_local = key_lower
             .rsplit_once(':')
             .map_or(key_lower.as_str(), |(_, local)| local);
+
+        // Remove event handler attributes. The local name is what the href and
+        // style rules below already match on, and having two notions of an
+        // attribute's name inside one function is how the next gap gets in.
+        if is_event_handler(key_local) {
+            continue;
+        }
 
         // Block xml:base which can redirect relative references externally.
         if key_lower == "xml:base" {
@@ -482,8 +543,13 @@ fn sanitize_attributes<'a>(element: &'a BytesStart<'a>) -> BytesStart<'a> {
             continue;
         }
 
-        // Sanitize inline style attributes to remove external url() references.
-        if key_local == "style" {
+        // A `url()` means the same thing wherever it is written, so `style` is not
+        // the only attribute that carries one: every presentation attribute taking
+        // a <funciri> — `fill`, `stroke`, `filter`, `mask`, `clip-path`, the
+        // `marker-*` family, `cursor` — is another spelling of the same
+        // declaration. Deciding from the value rather than from a list of names does
+        // not need revisiting when SVG grows another such attribute.
+        if key_local == "style" || contains_css_url(value) {
             let sanitized_value = sanitize_css_urls(value);
             sanitized.push_attribute((key, sanitized_value.as_str()));
             continue;
@@ -495,37 +561,193 @@ fn sanitize_attributes<'a>(element: &'a BytesStart<'a>) -> BytesStart<'a> {
     sanitized
 }
 
-/// Removes external `url()` references and `@import` rules from CSS text.
+/// Returns `true` when the value contains a CSS `url(` token, ignoring case.
+///
+/// Avoids allocating a lowercased copy of every attribute value just to answer
+/// whether the value is worth rewriting.
+fn contains_css_url(value: &str) -> bool {
+    value
+        .as_bytes()
+        .windows(4)
+        .any(|window| window.eq_ignore_ascii_case(b"url("))
+}
+
+/// At-rules kept in sanitized CSS.
+///
+/// Everything not listed is dropped whole, which is what makes the rule hold
+/// however the at-keyword is spelled: `@import` is the one at-rule that fetches
+/// a stylesheet by itself, and CSS identifiers admit escapes, so `@\69 mport`
+/// and `@\import` are the same rule to a renderer and match no literal search.
+/// Removing the class rather than the spelling is the same move that removing
+/// the SMIL elements made for the attribute rules.
+const ALLOWED_AT_RULES: &[&str] = &[
+    "charset",
+    "container",
+    "counter-style",
+    "font-face",
+    "font-feature-values",
+    "keyframes",
+    "layer",
+    "media",
+    "page",
+    "property",
+    "scope",
+    "starting-style",
+    "supports",
+];
+
+/// Reads a CSS identifier starting at `s`, decoding escapes.
+///
+/// Returns the lowercased identifier and the number of bytes it occupies in the
+/// input. An escape is a backslash followed by one to six hex digits and at most
+/// one trailing whitespace character, or a backslash followed by any other
+/// character, which stands for that character.
+fn read_css_identifier(s: &str) -> (String, usize) {
+    let bytes = s.as_bytes();
+    let mut name = String::new();
+    let mut index = 0;
+
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if byte == b'\\' {
+            index += 1;
+            let mut hex = String::new();
+            while index < bytes.len() && hex.len() < 6 && bytes[index].is_ascii_hexdigit() {
+                hex.push(bytes[index] as char);
+                index += 1;
+            }
+            if hex.is_empty() {
+                // A backslash before a non-hex character stands for that character.
+                if index < bytes.len() {
+                    let ch = s[index..].chars().next().unwrap_or('\u{FFFD}');
+                    name.push(ch);
+                    index += ch.len_utf8();
+                }
+            } else {
+                // One whitespace character after the hex digits terminates the
+                // escape and is consumed rather than being part of the name.
+                if index < bytes.len() && bytes[index].is_ascii_whitespace() {
+                    index += 1;
+                }
+                if let Some(ch) = u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32) {
+                    name.push(ch);
+                }
+            }
+            continue;
+        }
+
+        if byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_' || byte >= 0x80 {
+            let ch = s[index..].chars().next().unwrap_or('\u{FFFD}');
+            name.push(ch);
+            index += ch.len_utf8();
+            continue;
+        }
+
+        break;
+    }
+
+    (name.to_ascii_lowercase(), index)
+}
+
+/// Returns the byte offset just past an at-rule, where `s` starts just after its at-keyword.
+///
+/// A statement at-rule ends at the first top-level `;`; a block at-rule ends at
+/// the matching `}`. Quoted strings are skipped so a `;` or `}` inside one does
+/// not end the rule early.
+fn end_of_at_rule(s: &str) -> usize {
+    let bytes = s.as_bytes();
+    let mut index = 0;
+    let mut depth = 0usize;
+    let mut quote: Option<u8> = None;
+
+    while index < bytes.len() {
+        let byte = bytes[index];
+        match quote {
+            Some(open) => {
+                if byte == b'\\' {
+                    index += 2;
+                    continue;
+                }
+                if byte == open {
+                    quote = None;
+                }
+            }
+            None => match byte {
+                b'"' | b'\'' => quote = Some(byte),
+                b'{' => depth += 1,
+                b'}' => {
+                    if depth <= 1 {
+                        return index + 1;
+                    }
+                    depth -= 1;
+                }
+                b';' if depth == 0 => return index + 1,
+                _ => {}
+            },
+        }
+        index += 1;
+    }
+
+    bytes.len()
+}
+
+/// Removes at-rules outside [`ALLOWED_AT_RULES`] from CSS text.
+fn strip_disallowed_at_rules(css: &str) -> String {
+    let bytes = css.as_bytes();
+    let mut result = String::with_capacity(css.len());
+    let mut index = 0;
+    let mut quote: Option<u8> = None;
+
+    while index < bytes.len() {
+        let byte = bytes[index];
+
+        if let Some(open) = quote {
+            result.push(byte as char);
+            if byte == b'\\' && index + 1 < bytes.len() {
+                result.push(bytes[index + 1] as char);
+                index += 2;
+                continue;
+            }
+            if byte == open {
+                quote = None;
+            }
+            index += 1;
+            continue;
+        }
+
+        if byte == b'"' || byte == b'\'' {
+            quote = Some(byte);
+            result.push(byte as char);
+            index += 1;
+            continue;
+        }
+
+        if byte == b'@' {
+            let (name, consumed) = read_css_identifier(&css[index + 1..]);
+            if !name.is_empty() && !ALLOWED_AT_RULES.contains(&name.as_str()) {
+                let after_keyword = index + 1 + consumed;
+                index = after_keyword + end_of_at_rule(&css[after_keyword..]);
+                continue;
+            }
+        }
+
+        let ch = css[index..].chars().next().unwrap_or('\u{FFFD}');
+        result.push(ch);
+        index += ch.len_utf8();
+    }
+
+    result
+}
+
+/// Removes external `url()` references and disallowed at-rules from CSS text.
 ///
 /// Keeps local references like `url(#gradientId)` and `url(data:image/...)`, but removes
 /// external URLs (`url(http://...)`, `url(https://...)`, `url(//)`) and non-image data URLs
 /// by replacing them with `url()` (empty, which CSS treats as invalid and ignores).
-/// Also removes `@import` rules which can load external stylesheets.
+/// At-rules outside [`ALLOWED_AT_RULES`] are dropped whole, which is what removes
+/// `@import` and anything else that could load a stylesheet.
 fn sanitize_css_urls(css: &str) -> String {
-    // Lowercase once upfront to avoid O(N*k) repeated allocations.
-    let lower = css.to_ascii_lowercase();
-
-    // First remove @import rules (external stylesheet loading).
-    let mut result = String::with_capacity(css.len());
-    let mut offset = 0;
-
-    // Remove @import rules. They can appear as:
-    //   @import url("...");
-    //   @import "...";
-    while let Some(pos) = lower[offset..].find("@import") {
-        result.push_str(&css[offset..offset + pos]);
-        // Skip everything until the next semicolon or end of string.
-        let after_import = offset + pos + 7;
-        if let Some(semi) = css[after_import..].find(';') {
-            offset = after_import + semi + 1;
-        } else {
-            offset = css.len();
-        }
-    }
-    result.push_str(&css[offset..]);
-
-    // Then sanitize url() references.
-    let css_after_import = result;
+    let css_after_import = strip_disallowed_at_rules(css);
     let lower_after_import = css_after_import.to_ascii_lowercase();
     let mut result = String::with_capacity(css_after_import.len());
     let mut offset = 0;
@@ -786,6 +1008,7 @@ fn encode_raster_output(
 mod tests {
     use super::*;
     use crate::core::{RawArtifact, Rotation, TransformOptions, sniff_artifact};
+    use rstest::rstest;
 
     fn svg_with_script() -> Vec<u8> {
         b"<svg xmlns=\"http://www.w3.org/2000/svg\"><script>alert('xss')</script><rect width=\"10\" height=\"10\"/></svg>".to_vec()
@@ -1373,6 +1596,227 @@ mod tests {
         assert!(
             result.contains("#gradient1"),
             "local fragment url() should be preserved"
+        );
+    }
+
+    // --- Prolog constructs ---
+
+    /// A processing instruction is honoured by a browser rendering the document.
+    /// `xml-stylesheet` loads an external stylesheet, and an XSLT one generates
+    /// arbitrary markup, so it defeats every element and attribute rule at once.
+    #[rstest]
+    #[case::xslt_stylesheet(
+        "<?xml-stylesheet type=\"text/xsl\" href=\"https://evil.example/x.xsl\"?>"
+    )]
+    #[case::css_stylesheet(
+        "<?xml-stylesheet type=\"text/css\" href=\"https://evil.example/x.css\"?>"
+    )]
+    #[case::unknown_target("<?evil-target data=\"https://evil.example/x\"?>")]
+    fn sanitize_removes_processing_instructions(#[case] instruction: &str) {
+        let svg = format!(
+            "<?xml version=\"1.0\"?>\n{instruction}\n<svg xmlns=\"http://www.w3.org/2000/svg\"><rect/></svg>"
+        );
+        let result = sanitize_svg(svg.as_bytes()).unwrap();
+        assert!(
+            !result.contains("evil.example") && !result.contains("<?xml-stylesheet"),
+            "processing instruction should be removed, got: {result}"
+        );
+    }
+
+    /// The href and style rules match on the namespace-stripped local name, so
+    /// the event handler rule has to as well.
+    #[rstest]
+    #[case::plain("onload")]
+    #[case::mixed_case("oNlOaD")]
+    #[case::uppercase("ONCLICK")]
+    #[case::namespaced("xlink:onload")]
+    #[case::namespaced_unknown_prefix("evil:onclick")]
+    fn sanitize_removes_event_handlers_under_any_prefix(#[case] attribute: &str) {
+        let svg = format!(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" xmlns:xlink=\"http://www.w3.org/1999/xlink\" xmlns:evil=\"urn:e\"><rect {attribute}=\"alert(1)\"/></svg>"
+        );
+        let result = sanitize_svg(svg.as_bytes()).unwrap();
+        assert!(
+            !result.contains("alert(1)"),
+            "`{attribute}` should be removed, got: {result}"
+        );
+    }
+
+    /// The rule is `on` followed by a letter, so an attribute that only shares a
+    /// prefix with that shape is left alone.
+    #[rstest]
+    #[case::opacity("opacity")]
+    #[case::offset("offset")]
+    #[case::on_alone("on")]
+    fn sanitize_keeps_attributes_that_are_not_event_handlers(#[case] attribute: &str) {
+        let svg =
+            format!("<svg xmlns=\"http://www.w3.org/2000/svg\"><rect {attribute}=\"1\"/></svg>");
+        let result = sanitize_svg(svg.as_bytes()).unwrap();
+        assert!(
+            result.contains(attribute),
+            "`{attribute}` is not an event handler and should survive: {result}"
+        );
+    }
+
+    #[test]
+    fn sanitize_keeps_the_xml_declaration() {
+        let svg = b"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<svg xmlns=\"http://www.w3.org/2000/svg\"><rect/></svg>";
+        let result = sanitize_svg(svg).unwrap();
+        assert!(
+            result.contains("<?xml version="),
+            "the declaration is not a processing instruction to strip: {result}"
+        );
+    }
+
+    /// An internal subset declaring an external entity is an XXE payload being
+    /// carried through a document truss has called safe. Removing only the
+    /// declarations would leave the references to them dangling and the output no
+    /// longer well-formed, so the document is refused instead.
+    #[rstest]
+    #[case::external_entity(
+        "<!DOCTYPE svg [<!ENTITY xxe SYSTEM \"file:///etc/passwd\">]>\n<svg xmlns=\"http://www.w3.org/2000/svg\"><text>&xxe;</text></svg>"
+    )]
+    #[case::nested_entities(
+        "<!DOCTYPE svg [<!ENTITY a \"aaaa\"><!ENTITY b \"&a;&a;&a;&a;\">]>\n<svg xmlns=\"http://www.w3.org/2000/svg\"><text>&b;</text></svg>"
+    )]
+    fn sanitize_rejects_a_doctype_declaring_external_or_nested_entities(#[case] document: &str) {
+        let err = sanitize_svg(document.as_bytes())
+            .expect_err("document should be refused, not laundered");
+        assert!(
+            matches!(err, TransformError::DecodeFailed(ref msg) if msg.contains("external or nested entities")),
+            "expected a doctype refusal, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn sanitize_keeps_a_doctype_declaring_literal_entities() {
+        let svg = b"<!DOCTYPE svg PUBLIC \"-//W3C//DTD SVG 1.1//EN\" \"http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd\" [<!ENTITY ns_extend \"http://ns.adobe.com/Extensibility/1.0/\">]>\n<svg xmlns=\"http://www.w3.org/2000/svg\"><rect/></svg>";
+        let result = sanitize_svg(svg).unwrap();
+        assert!(
+            result.contains("ns_extend"),
+            "an editor's literal entity declarations must survive so references to them resolve: {result}"
+        );
+    }
+
+    // --- Presentation attributes carry the same url() as `style` ---
+
+    /// Every SVG presentation attribute that takes a `<funciri>` is another
+    /// spelling of the same CSS declaration, so the sanitizer has to give the
+    /// two spellings the same answer.
+    #[rstest]
+    #[case::fill("fill")]
+    #[case::stroke("stroke")]
+    #[case::filter("filter")]
+    #[case::mask("mask")]
+    #[case::clip_path("clip-path")]
+    #[case::marker_start("marker-start")]
+    #[case::marker_mid("marker-mid")]
+    #[case::marker_end("marker-end")]
+    #[case::cursor("cursor")]
+    fn sanitize_removes_external_url_from_presentation_attributes(#[case] attribute: &str) {
+        let svg = format!(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"><rect {attribute}=\"url(https://evil.example/x.svg#r)\"/></svg>"
+        );
+        let result = sanitize_svg(svg.as_bytes()).unwrap();
+        assert!(
+            !result.contains("evil.example"),
+            "external url() in `{attribute}` should be removed, got: {result}"
+        );
+
+        let styled = format!(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"><rect style=\"{attribute}:url(https://evil.example/x.svg#r)\"/></svg>"
+        );
+        let styled_result = sanitize_svg(styled.as_bytes()).unwrap();
+        assert!(
+            !styled_result.contains("evil.example"),
+            "the `style` spelling was already handled and must stay handled: {styled_result}"
+        );
+    }
+
+    /// Internal references are what these attributes are normally for; removing
+    /// them would break every gradient, clip path, and filter in the document
+    /// without closing anything.
+    #[rstest]
+    #[case::fill("fill", "url(#gradient1)", "#gradient1")]
+    #[case::filter("filter", "url(#blur)", "#blur")]
+    #[case::clip_path("clip-path", "url(#clip)", "#clip")]
+    #[case::plain_colour("fill", "red", "red")]
+    #[case::data_image("fill", "url(data:image/png;base64,iVBORw0KGgo=)", "data:image/png")]
+    fn sanitize_keeps_safe_presentation_attribute_values(
+        #[case] attribute: &str,
+        #[case] value: &str,
+        #[case] expected: &str,
+    ) {
+        let svg = format!(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"><rect {attribute}=\"{value}\"/></svg>"
+        );
+        let result = sanitize_svg(svg.as_bytes()).unwrap();
+        assert!(
+            result.contains(expected),
+            "`{attribute}=\"{value}\"` should survive, got: {result}"
+        );
+    }
+
+    #[test]
+    fn sanitize_removes_embedded_svg_data_url_from_a_presentation_attribute() {
+        let svg = b"<svg xmlns=\"http://www.w3.org/2000/svg\"><rect fill=\"url(data:image/svg+xml,%3Csvg%3E)\"/></svg>";
+        let result = sanitize_svg(svg).unwrap();
+        assert!(
+            !result.contains("image/svg"),
+            "a data: URL that smuggles another SVG should be removed: {result}"
+        );
+    }
+
+    // --- @import survives however the at-keyword is spelled ---
+
+    /// CSS identifiers admit escapes, so `@\\69 mport` and `@\\import` are the same
+    /// at-rule as `@import`. The string form carries no `url()`, so the separate
+    /// url() pass does not catch what the at-rule search misses.
+    #[rstest]
+    #[case::plain("@import \"https://evil.example/x.css\";")]
+    #[case::plain_url("@import url(\"https://evil.example/x.css\");")]
+    #[case::uppercase("@IMPORT \"https://evil.example/x.css\";")]
+    #[case::hex_escape("@\\69 mport \"https://evil.example/x.css\";")]
+    #[case::hex_escape_padded("@\\000069 mport \"https://evil.example/x.css\";")]
+    #[case::backslash_escape("@\\import \"https://evil.example/x.css\";")]
+    #[case::escape_mid_keyword("@im\\70 ort \"https://evil.example/x.css\";")]
+    fn sanitize_removes_at_import_however_it_is_spelled(#[case] css: &str) {
+        let svg = format!("<svg xmlns=\"http://www.w3.org/2000/svg\"><style>{css}</style></svg>");
+        let result = sanitize_svg(svg.as_bytes()).unwrap();
+        assert!(
+            !result.contains("evil.example"),
+            "external stylesheet should be removed from `{css}`, got: {result}"
+        );
+    }
+
+    /// The fix must not empty every `<style>` element it does not understand.
+    #[rstest]
+    #[case::plain_rule("rect { fill: red }", "fill: red")]
+    #[case::media_query("@media screen { rect { fill: red } }", "fill: red")]
+    #[case::local_url("rect { fill: url(#gradient1) }", "#gradient1")]
+    #[case::at_in_a_string("rect::after { content: \"a@import b\" }", "rect::after")]
+    fn sanitize_keeps_stylesheets_with_no_external_reference(
+        #[case] css: &str,
+        #[case] expected: &str,
+    ) {
+        let svg = format!("<svg xmlns=\"http://www.w3.org/2000/svg\"><style>{css}</style></svg>");
+        let result = sanitize_svg(svg.as_bytes()).unwrap();
+        assert!(
+            result.contains(expected),
+            "`{css}` should keep `{expected}`, got: {result}"
+        );
+    }
+
+    /// The url() rule allowlists `#fragment` and `data:image/*`, so a scheme
+    /// written with an escape is already rejected for not being on the list; pin
+    /// that, so this path stays closed whichever way the at-rule search is fixed.
+    #[test]
+    fn sanitize_removes_an_escaped_scheme_from_a_css_url() {
+        let svg = b"<svg xmlns=\"http://www.w3.org/2000/svg\"><style>rect { fill: url(\\68 ttps://evil.example/x.png) }</style></svg>";
+        let result = sanitize_svg(svg).unwrap();
+        assert!(
+            !result.contains("evil.example"),
+            "escaped scheme in url() should be removed: {result}"
         );
     }
 
