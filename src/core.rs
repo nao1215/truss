@@ -1803,45 +1803,54 @@ fn is_avif(bytes: &[u8]) -> bool {
     bytes.len() >= 16 && &bytes[4..8] == b"ftyp" && has_avif_brand(&bytes[8..])
 }
 
-/// Detects SVG by scanning for a `<svg` root element, skipping XML declarations,
-/// doctypes, comments, and whitespace.
+/// Detects SVG by consuming the XML prolog and checking that the root element is
+/// `<svg`.
+///
+/// XML 1.0 defines the prolog as `XMLDecl? Misc* (doctypedecl Misc*)?` with
+/// `Misc ::= Comment | PI | S`, so comments and processing instructions are legal
+/// on either side of the doctype and in any number. Walking a fixed sequence
+/// instead rejects documents real editors produce: Adobe Illustrator writes the
+/// declaration, a generator comment, and then a doctype with an internal subset.
 fn is_svg(bytes: &[u8]) -> bool {
-    let text = match std::str::from_utf8(bytes) {
-        Ok(s) => s,
-        Err(_) => return false,
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        return false;
     };
 
-    let mut remaining = text.trim_start();
-
     // Skip UTF-8 BOM if present.
-    remaining = remaining.strip_prefix('\u{FEFF}').unwrap_or(remaining);
-    remaining = remaining.trim_start();
+    let mut remaining = text.strip_prefix('\u{FEFF}').unwrap_or(text);
+    let mut seen_doctype = false;
 
-    // Skip XML declaration: <?xml ... ?>
-    if let Some(rest) = remaining.strip_prefix("<?xml") {
-        if let Some(end) = rest.find("?>") {
-            remaining = rest[end + 2..].trim_start();
-        } else {
-            return false;
-        }
-    }
+    loop {
+        remaining = remaining.trim_start();
 
-    // Skip DOCTYPE: <!DOCTYPE ... >
-    if let Some(rest) = remaining.strip_prefix("<!DOCTYPE") {
-        if let Some(end) = rest.find('>') {
-            remaining = rest[end + 1..].trim_start();
-        } else {
-            return false;
+        if let Some(rest) = remaining.strip_prefix("<!--") {
+            let Some(end) = rest.find("-->") else {
+                return false;
+            };
+            remaining = &rest[end + 3..];
+            continue;
         }
-    }
 
-    // Skip comments: <!-- ... -->
-    while let Some(rest) = remaining.strip_prefix("<!--") {
-        if let Some(end) = rest.find("-->") {
-            remaining = rest[end + 3..].trim_start();
-        } else {
-            return false;
+        // Any processing instruction, including the XML declaration, which is
+        // just the one whose target is `xml`.
+        if let Some(rest) = remaining.strip_prefix("<?") {
+            let Some(end) = rest.find("?>") else {
+                return false;
+            };
+            remaining = &rest[end + 2..];
+            continue;
         }
+
+        if !seen_doctype && let Some(rest) = remaining.strip_prefix("<!DOCTYPE") {
+            let Some(after) = skip_doctype(rest) else {
+                return false;
+            };
+            seen_doctype = true;
+            remaining = after;
+            continue;
+        }
+
+        break;
     }
 
     remaining.starts_with("<svg")
@@ -1849,6 +1858,37 @@ fn is_svg(bytes: &[u8]) -> bool {
             .as_bytes()
             .get(4)
             .is_some_and(|&b| b == b' ' || b == b'\t' || b == b'\n' || b == b'\r' || b == b'>')
+}
+
+/// Returns the text after a doctype declaration, or `None` when it is unterminated.
+///
+/// The terminating `>` is not simply the first one: an internal subset is
+/// delimited by `[` and `]` and declares entities whose replacement text may
+/// contain `>`, and a system identifier is a quoted string that may contain one
+/// too.
+fn skip_doctype(rest: &str) -> Option<&str> {
+    let bytes = rest.as_bytes();
+    let mut quote: Option<u8> = None;
+    let mut in_subset = false;
+
+    for (index, &byte) in bytes.iter().enumerate() {
+        match quote {
+            Some(open) => {
+                if byte == open {
+                    quote = None;
+                }
+            }
+            None => match byte {
+                b'"' | b'\'' => quote = Some(byte),
+                b'[' => in_subset = true,
+                b']' => in_subset = false,
+                b'>' if !in_subset => return Some(&rest[index + 1..]),
+                _ => {}
+            },
+        }
+    }
+
+    None
 }
 
 /// Extracts basic SVG metadata. SVGs inherently support transparency.
@@ -2606,6 +2646,7 @@ mod tests {
     #[cfg(feature = "avif")]
     use image::codecs::avif::AvifEncoder;
     use image::{ColorType, ImageEncoder, Rgba, RgbaImage};
+    use rstest::rstest;
 
     fn jpeg_artifact() -> Artifact {
         Artifact::new(vec![1, 2, 3], MediaType::Jpeg, ArtifactMetadata::default())
@@ -3470,6 +3511,68 @@ mod tests {
         assert!(
             msg.contains("01 02 03 04"),
             "should include hex preview: {msg}"
+        );
+    }
+
+    /// The XML prolog is `XMLDecl? Misc* (doctypedecl Misc*)?` with
+    /// `Misc ::= Comment | PI | S`, so comments and processing instructions are
+    /// legal on both sides of the DOCTYPE and in any number, and a DOCTYPE may
+    /// carry an internal subset whose `>` characters are not its terminator.
+    /// Every shape below is a valid SVG document.
+    #[rstest]
+    #[case::no_prolog(r#"<svg xmlns="http://www.w3.org/2000/svg"><rect/></svg>"#)]
+    #[case::declaration(
+        "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<svg xmlns=\"http://www.w3.org/2000/svg\"><rect/></svg>"
+    )]
+    #[case::declaration_and_doctype(
+        "<?xml version=\"1.0\"?>\n<!DOCTYPE svg PUBLIC \"-//W3C//DTD SVG 1.1//EN\" \"http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd\">\n<svg xmlns=\"http://www.w3.org/2000/svg\"><rect/></svg>"
+    )]
+    #[case::comment_before_doctype(
+        "<?xml version=\"1.0\"?>\n<!-- Generator: Adobe Illustrator 27.0.0 -->\n<!DOCTYPE svg PUBLIC \"-//W3C//DTD SVG 1.1//EN\" \"http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd\">\n<svg xmlns=\"http://www.w3.org/2000/svg\"><rect/></svg>"
+    )]
+    #[case::doctype_with_internal_subset(
+        "<?xml version=\"1.0\"?>\n<!DOCTYPE svg [<!ENTITY a \"b\">]>\n<svg xmlns=\"http://www.w3.org/2000/svg\"><rect/></svg>"
+    )]
+    #[case::illustrator_export(
+        "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<!-- Generator: Adobe Illustrator 27.0.0, SVG Export Plug-In -->\n<!DOCTYPE svg PUBLIC \"-//W3C//DTD SVG 1.1//EN\" \"http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd\" [\n\t<!ENTITY ns_extend \"http://ns.adobe.com/Extensibility/1.0/\">\n]>\n<svg xmlns=\"http://www.w3.org/2000/svg\"><rect/></svg>"
+    )]
+    #[case::internal_subset_with_angle_bracket_in_a_string(
+        "<?xml version=\"1.0\"?>\n<!DOCTYPE svg [<!ENTITY gt \"a > b\">]>\n<svg xmlns=\"http://www.w3.org/2000/svg\"><rect/></svg>"
+    )]
+    #[case::stylesheet_processing_instruction(
+        "<?xml version=\"1.0\"?>\n<?xml-stylesheet type=\"text/css\" href=\"a.css\"?>\n<svg xmlns=\"http://www.w3.org/2000/svg\"><rect/></svg>"
+    )]
+    #[case::processing_instruction_between_comments(
+        "<?xml version=\"1.0\"?>\n<!-- one -->\n<?foo bar?>\n<!-- two -->\n<svg xmlns=\"http://www.w3.org/2000/svg\"><rect/></svg>"
+    )]
+    #[case::comment_on_both_sides_of_the_doctype(
+        "<!-- before -->\n<!DOCTYPE svg>\n<!-- after -->\n<svg xmlns=\"http://www.w3.org/2000/svg\"><rect/></svg>"
+    )]
+    #[case::bom_then_declaration(
+        "\u{FEFF}<?xml version=\"1.0\"?>\n<svg xmlns=\"http://www.w3.org/2000/svg\"><rect/></svg>"
+    )]
+    fn sniff_artifact_accepts_every_legal_svg_prolog(#[case] document: &str) {
+        let artifact = sniff_artifact(RawArtifact::new(document.as_bytes().to_vec(), None))
+            .unwrap_or_else(|err| panic!("prolog should be recognized as SVG, got: {err}"));
+        assert_eq!(artifact.media_type, MediaType::Svg);
+    }
+
+    /// Reading the prolog must not turn the sniffer into something that claims
+    /// any XML document, or any document that merely starts with `<svg`.
+    #[rstest]
+    #[case::xhtml_root(
+        "<?xml version=\"1.0\"?>\n<html xmlns=\"http://www.w3.org/1999/xhtml\"><body/></html>"
+    )]
+    #[case::element_with_an_svg_prefix("<?xml version=\"1.0\"?>\n<svgfoo/>")]
+    #[case::prolog_with_no_root("<?xml version=\"1.0\"?>\n<!-- only a comment -->")]
+    #[case::unterminated_declaration("<?xml version=\"1.0\"\n<svg/>")]
+    #[case::unterminated_comment("<!-- never closed\n<svg/>")]
+    #[case::unterminated_internal_subset("<!DOCTYPE svg [<!ENTITY a \"b\">\n<svg/>")]
+    fn sniff_artifact_does_not_claim_non_svg_documents(#[case] document: &str) {
+        let result = sniff_artifact(RawArtifact::new(document.as_bytes().to_vec(), None));
+        assert!(
+            result.is_err(),
+            "should not be claimed as SVG: {document:?} produced {result:?}"
         );
     }
 

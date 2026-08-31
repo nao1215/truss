@@ -4,11 +4,13 @@
 # neutralize these threats when converting SVG to raster.
 #
 # Fixtures (integration/fixtures, reached as ${fixtures}):
-#   svg-entity-bomb.svg    XML entity expansion (<!ENTITY> nesting)
-#   svg-script.svg         <script>, onclick, onload attributes
-#   svg-external-ref.svg   External xlink:href references
-#   svg-minimal.svg        Smallest valid SVG (1x1, no content)
-#   svg-animate-xss.svg    SMIL <animate>/<set> setting href, plus <handler>
+#   svg-entity-bomb.svg         XML entity expansion (<!ENTITY> nesting)
+#   svg-script.svg              <script>, onclick, onload attributes
+#   svg-external-ref.svg        External xlink:href references
+#   svg-minimal.svg             Smallest valid SVG (1x1, no content)
+#   svg-animate-xss.svg         SMIL <animate>/<set> setting href, plus <handler>
+#   svg-external-css.svg        xml-stylesheet PI, presentation-attribute url(), escaped @import
+#   svg-illustrator-prolog.svg  The XML prolog Adobe Illustrator writes
 #
 # Run with: e2e/run.sh
 version: "1"
@@ -79,6 +81,57 @@ scenarios:
           exit_code: 0
           image:
             path: animated.png
+            format: png
+
+  - name: strips external references that are neither an element nor an href
+    steps:
+      # A stylesheet processing instruction, a url() written as a presentation
+      # attribute rather than in `style`, and an @import whose at-keyword carries a
+      # CSS escape. None of the three is an element or an href, so the element and
+      # href rules never saw them. `convert` to SVG is the sanitize-only path, so
+      # the output is the sanitizer's own answer.
+      - run:
+          command: truss convert "${fixtures}/svg-external-css.svg" -o external-css.svg --format svg
+      - assert:
+          exit_code: 0
+      - assert:
+          file:
+            path: external-css.svg
+            not_contains:
+              - "evil.example.com"
+              - "xml-stylesheet"
+              - "mport"
+
+  - name: rasterizes the external-reference payload without fetching anything
+    steps:
+      - run:
+          command: truss convert "${fixtures}/svg-external-css.svg" -o external-css.png --format png
+      - assert:
+          exit_code: 0
+          image:
+            path: external-css.png
+            format: png
+
+  - name: reads an SVG carrying the prolog Adobe Illustrator writes
+    steps:
+      # A generator comment before the doctype and a doctype with an internal subset
+      # are both legal prolog. Detection used to walk a fixed sequence instead of the
+      # grammar and refused the file as an unknown signature.
+      - run:
+          command: truss inspect "${fixtures}/svg-illustrator-prolog.svg"
+      - assert:
+          exit_code: 0
+          stdout:
+            contains: '"svg"'
+
+  - name: converts an SVG carrying the Illustrator prolog to PNG
+    steps:
+      - run:
+          command: truss convert "${fixtures}/svg-illustrator-prolog.svg" -o illustrator.png --format png
+      - assert:
+          exit_code: 0
+          image:
+            path: illustrator.png
             format: png
 
   - name: inspects a minimal SVG
