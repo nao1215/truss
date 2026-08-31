@@ -155,6 +155,21 @@ for orientation in (5, 7):
     print(f'  wrote 40x20 with EXIF Orientation={orientation}')
 "
 
+echo "[8c/14] irot-rotated.avif / imir-transposed-5.avif — the same orientations as AVIF item properties"
+# AVIF has no EXIF orientation of its own: an encoder writes the transform as the irot and
+# imir item properties of the primary item, and browsers apply those and ignore any Exif
+# item. `-orient` sets ImageMagick's orientation without minting an EXIF profile, so
+# libheif writes the properties and nothing else, which is what proves truss reads the
+# properties rather than a tag. Same pictures as exif-rotated.jpg and exif-transposed-5.jpg,
+# so the same assertions and the same baseline apply. `-alpha off` keeps the drawing from
+# growing an alpha plane, which would be a second item with its own properties, and
+# `-depth 8` keeps these about orientation: a 16-bit canvas would otherwise come out as a
+# 12-bit AVIF, which is what the deep fixtures below are for.
+magick -size 40x20 xc:red -fill blue -draw 'rectangle 0,0 9,19' \
+  -alpha off -depth 8 -orient right-top "$DIR/irot-rotated.avif"
+magick -size 40x20 xc:white -fill red -draw 'rectangle 0,0 11,3' -fill blue -draw 'rectangle 0,0 3,11' \
+  -alpha off -depth 8 -orient left-top "$DIR/imir-transposed-5.avif"
+
 # ---------------------------------------------------------------------------
 # 4b. ICC profile (needs Pillow's ImageCms; ImageMagick cannot mint a profile)
 # ---------------------------------------------------------------------------

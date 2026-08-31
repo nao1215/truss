@@ -11,7 +11,7 @@ decode → auto-orient → rotate → crop → resize → blur → sharpen → g
 | # | Stage | Guard | Description |
 |---|-------|-------|-------------|
 | 1 | **Decode** | — | Parse input bytes into a `DynamicImage` using the detected codec (JPEG, PNG, WebP, AVIF, BMP, TIFF, GIF). |
-| 2 | **Auto-orient** | `auto_orient == true` | Apply the EXIF orientation tag, tags 2–8. Read from a JPEG APP1 segment, a PNG `eXIf` chunk, a WebP `EXIF` chunk, or a TIFF IFD entry; BMP and GIF cannot carry one, and an AVIF one is not read. When the metadata is retained, the tag is reset so the viewer does not turn the pixels again. |
+| 2 | **Auto-orient** | `auto_orient == true` | Apply the EXIF orientation tag, tags 2–8. Read from a JPEG APP1 segment, a PNG `eXIf` chunk, a WebP `EXIF` chunk, a TIFF IFD entry, or an AVIF's `irot` and `imir` item properties, which name the same eight transforms; BMP and GIF cannot carry one, and an Exif item inside an AVIF is ignored, as browsers ignore it. When the metadata is retained, the tag is reset so the viewer does not turn the pixels again. With auto-orient off, a tag the output does not record — because the input's metadata is not read, or the output format cannot carry it, or it was stripped — is reported as a warning. |
 | 3 | **Rotate** | `rotate != 0` | Clockwise rotation by any whole number of degrees. A multiple of 90 permutes pixels exactly; any other angle resamples bilinearly, grows the canvas to the rotated bounding box, and fills the exposed corners with `background`. |
 | 4 | **Crop** | `crop` set | Extract a sub-region defined by `(x, y, width, height)`. |
 | 5 | **Resize** | `width` and/or `height` set | Scale the image according to `fit` and `position`, honouring `without_enlargement`. See [Resize](#resize). |

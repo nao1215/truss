@@ -7035,4 +7035,61 @@ mod tests {
             result.warnings
         );
     }
+
+    /// The two fixtures are what libheif writes for a phone photo: the transform as `irot`
+    /// and `imir` item properties, with no Exif block. The transposed one is the pair a
+    /// mirror in the wrong order gets backwards, so the marker bars are checked and not
+    /// only the dimensions, which are 20x40 for every orientation from 5 to 8.
+    #[cfg(feature = "avif")]
+    #[rstest]
+    #[case::rotated(
+        include_bytes!("../../integration/fixtures/irot-rotated.avif"),
+        6,
+        [((10, 2), [0, 0, 255]), ((10, 30), [255, 0, 0])]
+    )]
+    #[case::transposed(
+        include_bytes!("../../integration/fixtures/imir-transposed-5.avif"),
+        5,
+        [((8, 1), [0, 0, 255]), ((1, 8), [255, 0, 0])]
+    )]
+    fn transform_raster_auto_orients_an_avif_by_its_item_properties(
+        #[case] bytes: &[u8],
+        #[case] orientation: u16,
+        #[case] markers: [((u32, u32), [u8; 3]); 2],
+    ) {
+        let artifact = sniff_artifact(RawArtifact::new(bytes.to_vec(), None)).expect("sniff avif");
+        assert_eq!(artifact.metadata.orientation, Some(orientation));
+
+        let result = transform_raster(TransformRequest::new(
+            artifact,
+            TransformOptions {
+                format: Some(MediaType::Png),
+                ..TransformOptions::default()
+            },
+        ))
+        .expect("transform avif");
+
+        assert_eq!(
+            (
+                result.artifact.metadata.width,
+                result.artifact.metadata.height
+            ),
+            (Some(20), Some(40))
+        );
+        assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+
+        let image = image::load_from_memory(&result.artifact.bytes)
+            .expect("decode png")
+            .to_rgb8();
+        for ((x, y), expected) in markers {
+            let pixel = image.get_pixel(x, y).0;
+            assert!(
+                pixel
+                    .iter()
+                    .zip(expected)
+                    .all(|(got, want)| got.abs_diff(want) < 40),
+                "pixel ({x}, {y}) should be near {expected:?}, got {pixel:?}"
+            );
+        }
+    }
 }

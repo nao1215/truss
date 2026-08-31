@@ -114,6 +114,60 @@ scenarios:
             width: 20
             height: 40
 
+  - name: an AVIF signals the same transform as item properties, and those are honoured too
+    steps:
+      # AVIF has no EXIF orientation of its own: the encoder writes irot and imir item
+      # properties instead, and browsers apply those. Both fixtures come from libheif, the
+      # encoder behind ImageMagick, and carry no Exif block at all. The transposed one is
+      # the same picture as exif-transposed-5.jpg, so the same baseline tells 5 from 7.
+      - run:
+          command: truss inspect "${fixtures}/irot-rotated.avif"
+      - assert:
+          exit_code: 0
+          stdout:
+            json:
+              - path: $.orientation
+                equals: 6
+              - path: $.orientedWidth
+                equals: 20
+              - path: $.orientedHeight
+                equals: 40
+      - run:
+          command: truss convert "${fixtures}/irot-rotated.avif" -o avif-applied.png
+      - assert:
+          exit_code: 0
+          stderr:
+            not_contains: "warning:"
+          image:
+            path: avif-applied.png
+            width: 20
+            height: 40
+      - run:
+          command: truss convert "${fixtures}/imir-transposed-5.avif" -o avif5.png
+      - assert:
+          exit_code: 0
+          image:
+            path: avif5.png
+            width: 20
+            height: 40
+      - assert:
+          image:
+            path: avif5.png
+            similar_to: testdata/exif-orientation-5.png
+            max_diff: 0.01
+      - run:
+          command: truss convert "${fixtures}/irot-rotated.avif" -o avif-unturned.png --no-auto-orient
+      - assert:
+          exit_code: 0
+          stderr:
+            contains:
+              - "warning:"
+              - "EXIF orientation 6"
+          image:
+            path: avif-unturned.png
+            width: 40
+            height: 20
+
   - name: dropping a PNG orientation with the pixels as stored warns like a JPEG does
     steps:
       - run:
