@@ -1040,6 +1040,9 @@ mod tests {
     #[test]
     fn wasm_kinds_are_the_camel_case_problem_slugs() {
         const PROBLEM_DOCS: &str = include_str!("../../docs/problems.md");
+        // A Windows checkout has CRLF line endings, so the anchors are matched against
+        // the text with the carriage returns taken out.
+        let problem_docs = PROBLEM_DOCS.replace('\r', "");
         let cases: [(TransformError, &str, &str); 8] = [
             (
                 TransformError::InvalidOptions("x".into()),
@@ -1087,7 +1090,7 @@ mod tests {
             assert_eq!(error.class().slug(), slug, "{error:?}");
             assert_eq!(error_kind(&error), kind, "{error:?}");
             assert!(
-                PROBLEM_DOCS.contains(&format!("### {slug}\n")),
+                problem_docs.contains(&format!("### {slug}\n")),
                 "docs/problems.md should document the {slug} class"
             );
             assert!(

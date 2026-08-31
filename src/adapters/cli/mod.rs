@@ -2153,6 +2153,9 @@ mod tests {
     #[test]
     fn map_transform_error_matches_the_class_table() {
         const PROBLEM_DOCS: &str = include_str!("../../../docs/problems.md");
+        // A Windows checkout has CRLF line endings, so the anchors are matched against
+        // the text with the carriage returns taken out.
+        let problem_docs = PROBLEM_DOCS.replace('\r', "");
         let cases: [(crate::TransformError, &str, u8); 8] = [
             (
                 crate::TransformError::InvalidOptions("x".into()),
@@ -2201,7 +2204,7 @@ mod tests {
             assert_eq!(mapped.class.slug(), slug, "{error:?}");
             assert_eq!(mapped.exit_code, exit_code, "{error:?}");
             assert!(
-                PROBLEM_DOCS.contains(&format!("### {slug}\n")),
+                problem_docs.contains(&format!("### {slug}\n")),
                 "docs/problems.md should document the {slug} class"
             );
         }
