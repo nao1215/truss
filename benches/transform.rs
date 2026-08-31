@@ -1,13 +1,78 @@
 use std::fs;
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+use image::codecs::jpeg::JpegEncoder;
+use image::codecs::png::PngEncoder;
+use image::{ColorType, ImageEncoder, Rgba, RgbaImage};
 use truss::{
     Artifact, Fit, MediaType, Position, RawArtifact, TransformOptions, TransformRequest,
     sniff_artifact, transform,
 };
 
+/// The size every case that touches pixels runs at, and the size its label names.
+const BENCH_WIDTH: u32 = 640;
+const BENCH_HEIGHT: u32 = 427;
+const BENCH_LABEL: &str = "640x427";
+
 fn fixture(name: &str) -> Vec<u8> {
     fs::read(format!("integration/fixtures/{name}")).expect("fixture file must exist")
+}
+
+/// An image with something in it, at the size the caller asks for.
+///
+/// The fixtures under `integration/fixtures` are 4 by 3 pixels, which is what the tests that
+/// read them are about: whether the bytes are a valid file. A benchmark is about the pixels,
+/// and twelve of them measure per-call setup rather than the work. The content is a gradient
+/// with a fine texture over it, because the encoders are content-sensitive and a flat or
+/// perfectly smooth image is the cheapest thing they will ever be handed.
+fn bench_image(width: u32, height: u32) -> RgbaImage {
+    let mut image = RgbaImage::new(width, height);
+    for (x, y, pixel) in image.enumerate_pixels_mut() {
+        let fx = f32::from(u16::try_from(x).unwrap_or(u16::MAX)) / width as f32;
+        let fy = f32::from(u16::try_from(y).unwrap_or(u16::MAX)) / height as f32;
+        let texture = ((x * 7 + y * 13) % 32) as f32;
+        let r = (40.0 + 180.0 * fx * fx + texture).min(255.0) as u8;
+        let g = (30.0 + 200.0 * fy + texture * 0.5).min(255.0) as u8;
+        let b = (200.0 - 150.0 * (fx + fy) * 0.5 + texture * 0.25).clamp(0.0, 255.0) as u8;
+        *pixel = Rgba([r, g, b, 255]);
+    }
+    image
+}
+
+/// The benchmark's JPEG source, encoded once outside the measured loop.
+fn bench_jpeg(width: u32, height: u32) -> Vec<u8> {
+    let image = bench_image(width, height);
+    let mut bytes = Vec::new();
+    JpegEncoder::new_with_quality(&mut bytes, 90)
+        .encode_image(&image)
+        .expect("encode benchmark jpeg");
+    assert_dimensions(&bytes, Some(MediaType::Jpeg), width, height);
+    bytes
+}
+
+/// The benchmark's PNG source, used where a case needs a second image such as a watermark.
+fn bench_png(width: u32, height: u32) -> Vec<u8> {
+    let image = bench_image(width, height);
+    let mut bytes = Vec::new();
+    PngEncoder::new(&mut bytes)
+        .write_image(&image, width, height, ColorType::Rgba8.into())
+        .expect("encode benchmark png");
+    assert_dimensions(&bytes, Some(MediaType::Png), width, height);
+    bytes
+}
+
+/// Holds a case's label to the image it actually runs on.
+///
+/// Every size in a `BenchmarkId` used to be written out by hand next to a fixture of a
+/// different size, so the suite reported microseconds for what it called a 640x427 encode.
+/// Reading the size back out of the encoded bytes is what keeps the two from drifting again.
+fn assert_dimensions(bytes: &[u8], media_type: Option<MediaType>, width: u32, height: u32) {
+    let artifact = make_artifact(bytes.to_vec(), media_type);
+    assert_eq!(
+        (artifact.metadata.width, artifact.metadata.height),
+        (Some(width), Some(height)),
+        "benchmark source must be the size its label names"
+    );
 }
 
 fn make_artifact(bytes: Vec<u8>, media_type: Option<MediaType>) -> Artifact {
@@ -18,7 +83,7 @@ fn make_artifact(bytes: Vec<u8>, media_type: Option<MediaType>) -> Artifact {
 // Format conversion: JPEG -> various output formats
 // ---------------------------------------------------------------------------
 fn bench_format_conversion(c: &mut Criterion) {
-    let jpeg_bytes = fixture("sample.jpg");
+    let jpeg_bytes = bench_jpeg(BENCH_WIDTH, BENCH_HEIGHT);
     let targets: &[(&str, MediaType, Option<u8>)] = &[
         ("jpeg_to_png", MediaType::Png, None),
         ("jpeg_to_webp", MediaType::Webp, Some(80)),
@@ -27,9 +92,12 @@ fn bench_format_conversion(c: &mut Criterion) {
     ];
 
     let mut group = c.benchmark_group("format_conversion");
+    // An AVIF encode of this size is measured in tenths of a second, so the default hundred
+    // samples would put the group into the minutes on its own.
+    group.sample_size(20);
     for (label, target_format, quality) in targets {
         group.bench_with_input(
-            BenchmarkId::new(*label, "640x427"),
+            BenchmarkId::new(*label, BENCH_LABEL),
             &jpeg_bytes,
             |b, data| {
                 b.iter(|| {
@@ -51,7 +119,7 @@ fn bench_format_conversion(c: &mut Criterion) {
 // Resize: different dimensions with cover fit
 // ---------------------------------------------------------------------------
 fn bench_resize(c: &mut Criterion) {
-    let jpeg_bytes = fixture("sample.jpg");
+    let jpeg_bytes = bench_jpeg(BENCH_WIDTH, BENCH_HEIGHT);
     let sizes: &[(u32, u32)] = &[(100, 100), (400, 300), (800, 600), (1920, 1080)];
 
     let mut group = c.benchmark_group("resize");
@@ -79,7 +147,7 @@ fn bench_resize(c: &mut Criterion) {
 // Fit modes: contain, cover, fill, inside at the same target size
 // ---------------------------------------------------------------------------
 fn bench_fit_modes(c: &mut Criterion) {
-    let jpeg_bytes = fixture("sample.jpg");
+    let jpeg_bytes = bench_jpeg(BENCH_WIDTH, BENCH_HEIGHT);
     let modes: &[(&str, Fit)] = &[
         ("contain", Fit::Contain),
         ("cover", Fit::Cover),
@@ -115,7 +183,7 @@ fn bench_fit_modes(c: &mut Criterion) {
 // Filters: blur and sharpen
 // ---------------------------------------------------------------------------
 fn bench_filters(c: &mut Criterion) {
-    let jpeg_bytes = fixture("sample.jpg");
+    let jpeg_bytes = bench_jpeg(BENCH_WIDTH, BENCH_HEIGHT);
 
     let mut group = c.benchmark_group("filters");
     group.bench_with_input(
@@ -158,8 +226,10 @@ fn bench_filters(c: &mut Criterion) {
 // Watermark: overlay a small image onto the main image
 // ---------------------------------------------------------------------------
 fn bench_watermark(c: &mut Criterion) {
-    let jpeg_bytes = fixture("sample.jpg");
-    let watermark_bytes = fixture("sample.png");
+    let jpeg_bytes = bench_jpeg(BENCH_WIDTH, BENCH_HEIGHT);
+    // A watermark is a small image over a large one; sizing it to the source would measure
+    // a composite that no caller asks for.
+    let watermark_bytes = bench_png(BENCH_WIDTH / 8, BENCH_HEIGHT / 8);
 
     let mut group = c.benchmark_group("watermark");
     group.bench_function("bottom_right", |b| {
