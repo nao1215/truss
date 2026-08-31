@@ -68,6 +68,8 @@ A transform that succeeds but is not quite what was asked for answers 200 with o
 | `POST /images:transform` | Transform an image from storage or remote URL |
 | `POST /images` | Upload and transform an image via multipart form |
 
+Both private endpoints take their transform options from the request body: the `options` object in the JSON body, and the `options` form part in the multipart body. Neither reads the query string, and a request that carries one is answered with `400 Bad Request` naming the parameters, rather than dropping them and returning an image nobody asked for.
+
 ### Infrastructure Endpoints
 
 | Endpoint | Description |
@@ -101,6 +103,14 @@ GIF has no output column: truss decodes it but never encodes it, so `format=gif`
 rather than echoing the input format back. An animated GIF is rejected with `415`, naming the
 frame count, instead of being reduced to its first frame; the CLI `truss inspect` still reads
 animated GIFs and reports `isAnimated`.
+
+## Choosing the Output Format
+
+When a request names `format`, that is the output format. When it does not, the server reads `Accept` and picks the format it prefers among the ones the header names, falling back to the input's own format when the header names none.
+
+A header that only says `*/*` names none. RFC 9110 section 12.5.1 makes `Accept: */*` and a missing `Accept` the same request, so truss answers both the same way and returns the input's format rather than transcoding. This is what a caller using a default HTTP client gets, `curl` included. A browser fetching an `<img>` sends `image/avif,image/webp,image/apng,*/*;q=0.8`, which names AVIF and WebP, and is negotiated as before.
+
+`TRUSS_FORMAT_PREFERENCE` orders the formats a request asked for. It does not apply to a request that asked for none.
 
 ## CDN / Reverse-Proxy Integration
 

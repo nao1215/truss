@@ -39,6 +39,40 @@ steps:
     test: |
       current.res.status == 200
       && current.res.headers['Content-Type'][0] contains 'image/'
+  transform_rejects_a_query_string:
+    desc: "A query string on the JSON endpoint is refused rather than dropped"
+    req:
+      /images:transform?width=2&format=png:
+        post:
+          headers:
+            Authorization: "Bearer {{ vars.token }}"
+            Content-Type: "application/json"
+          body:
+            application/json:
+              source:
+                kind: path
+                path: /sample.png
+    test: |
+      current.res.status == 400
+      && current.res.headers['Content-Type'][0] == 'application/problem+json'
+  transform_keeps_the_input_format_for_a_wildcard_accept:
+    desc: "Accept: */* states no preference, so a PNG source comes back as PNG"
+    req:
+      /images:transform:
+        post:
+          headers:
+            Authorization: "Bearer {{ vars.token }}"
+            Content-Type: "application/json"
+            Accept: "*/*"
+          body:
+            application/json:
+              source:
+                kind: path
+                path: /sample.png
+              options: {}
+    test: |
+      current.res.status == 200
+      && current.res.headers['Content-Type'][0] == 'image/png'
   transform_no_auth:
     desc: "Request without Bearer token returns 401 Unauthorized"
     req:
