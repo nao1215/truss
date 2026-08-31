@@ -736,13 +736,42 @@ fn fit_content_size(
     scale_both(source, scale)
 }
 
+/// The size the content is scaled to, before any padding or cropping the fit mode adds.
+///
+/// This is the buffer a resize materializes, which is not the size it returns: `contain`
+/// pads the content out to the box afterwards and `cover` crops it back to the box, so for
+/// those two the content and the output differ. [`resolved_output_dimensions`] answers the
+/// other half. The SVG codec rasterizes at this size so a vector source is drawn once, at
+/// one uniform scale, and then goes through the same padding and cropping as a raster one.
+pub(crate) fn resize_content_size(
+    source: (u32, u32),
+    width: Option<u32>,
+    height: Option<u32>,
+    fit: Option<Fit>,
+    without_enlargement: bool,
+) -> (u32, u32) {
+    match (width, height) {
+        (None, None) => source,
+        // A single axis is a scale request, so the content is the whole output.
+        (Some(_), None) | (None, Some(_)) => {
+            resolved_output_dimensions(source, width, height, fit, without_enlargement)
+        }
+        (Some(target_width), Some(target_height)) => fit_content_size(
+            source,
+            (target_width, target_height),
+            fit.unwrap_or(Fit::Contain),
+            without_enlargement,
+        ),
+    }
+}
+
 /// The final output size of a resize request, canvas included.
 ///
 /// This is what [`check_output_pixel_limit`] measures and what [`apply_resize`] produces, so
 /// the limit is always applied to the size that actually gets allocated. `contain` reports
 /// the requested box because it pads out to it; `inside` reports the scaled content, which is
 /// the whole difference between the two modes.
-fn resolved_output_dimensions(
+pub(crate) fn resolved_output_dimensions(
     current: (u32, u32),
     width: Option<u32>,
     height: Option<u32>,
@@ -1084,7 +1113,7 @@ fn apply_crop(image: DynamicImage, crop: CropRegion) -> Result<DynamicImage, Tra
 /// the parameters into a struct would only move the same fields somewhere else while adding
 /// a type that nothing outside this function would use.
 #[allow(clippy::too_many_arguments)]
-fn apply_resize(
+pub(crate) fn apply_resize(
     image: DynamicImage,
     width: Option<u32>,
     height: Option<u32>,
@@ -1109,10 +1138,9 @@ fn apply_resize(
             image.resize_exact(target_width, target_height, FilterType::Lanczos3)
         }
         (Some(target_width), Some(target_height)) => {
-            let target = (target_width, target_height);
             let fit = fit.unwrap_or(Fit::Contain);
             let (content_width, content_height) =
-                fit_content_size(source, target, fit, without_enlargement);
+                resize_content_size(source, width, height, Some(fit), without_enlargement);
 
             match fit {
                 Fit::Fill | Fit::Inside => {

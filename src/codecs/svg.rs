@@ -126,21 +126,58 @@ pub fn transform_svg(request: TransformRequest) -> Result<TransformResult, Trans
     let tree = resvg::usvg::Tree::from_str(&sanitized, &resvg::usvg::Options::default())
         .map_err(|e| TransformError::DecodeFailed(format!("SVG parse error: {e}")))?;
 
-    let (width, height) =
-        determine_render_size(&tree, normalized.options.width, normalized.options.height);
+    // The drawing is rasterized at the size the fit mode scales the content to, not at the
+    // requested box, so the scale stays uniform on both axes and the padding or cropping the
+    // mode calls for is done afterwards by the same helpers the raster codec uses. Drawing
+    // straight into the box would be `fill` whatever was asked for.
+    let intrinsic = intrinsic_render_size(&tree);
+    let render = crate::codecs::raster::resize_content_size(
+        intrinsic,
+        normalized.options.width,
+        normalized.options.height,
+        normalized.options.fit,
+        normalized.options.without_enlargement,
+    );
+    let canvas = crate::codecs::raster::resolved_output_dimensions(
+        intrinsic,
+        normalized.options.width,
+        normalized.options.height,
+        normalized.options.fit,
+        normalized.options.without_enlargement,
+    );
 
-    let pixel_count = width as u64 * height as u64;
-    if pixel_count > MAX_OUTPUT_PIXELS {
-        return Err(TransformError::LimitExceeded(format!(
-            "requested SVG rasterization size {width}x{height} ({pixel_count} pixels) exceeds limit of {MAX_OUTPUT_PIXELS}"
-        )));
+    // Both are checked from dimensions alone, before anything is allocated: `cover` scales
+    // the content past the box it returns, so the buffer it materializes is not the size of
+    // the output. That is the shape of #316, on the other codec.
+    for (label, (width, height)) in [("rasterization", render), ("output", canvas)] {
+        let pixel_count = u64::from(width) * u64::from(height);
+        if pixel_count > MAX_OUTPUT_PIXELS {
+            return Err(TransformError::LimitExceeded(format!(
+                "requested SVG {label} size {width}x{height} ({pixel_count} pixels) exceeds limit of {MAX_OUTPUT_PIXELS}"
+            )));
+        }
     }
 
-    let rgba_image = rasterize_svg(&tree, width, height)?;
+    let rgba_image = rasterize_svg(&tree, render.0, render.1)?;
 
     if let (Some(start), Some(limit)) = (start, deadline) {
         crate::codecs::raster::check_deadline(start.elapsed(), limit, "rasterize")?;
     }
+
+    // The buffer is already the content size, so every resize inside this call is a no-op and
+    // what it contributes is the padding for `contain` and the crop for `cover`, with the
+    // requested anchor and background.
+    let rgba_image = crate::codecs::raster::apply_resize(
+        image::DynamicImage::ImageRgba8(rgba_image),
+        normalized.options.width,
+        normalized.options.height,
+        normalized.options.fit,
+        normalized.options.position,
+        normalized.options.background,
+        normalized.options.format,
+        normalized.options.without_enlargement,
+    )
+    .into_rgba8();
 
     // Apply rotation if requested. The raster codec owns the arbitrary-angle path, so a
     // rasterized SVG rotates through exactly the same code and the same background rule.
@@ -839,50 +876,24 @@ fn is_dangerous_css_url(value: &str) -> bool {
     true
 }
 
-/// Determines the render size for SVG rasterization from a pre-parsed tree.
+/// The size a pre-parsed SVG tree describes, which is where a resize starts from.
 ///
-/// If explicit width and height are provided, uses those. Otherwise, uses the
-/// tree's intrinsic dimensions. Falls back to a default of 300x150 if
-/// the SVG has no explicit dimensions (matching the HTML spec default).
-fn determine_render_size(
-    tree: &resvg::usvg::Tree,
-    requested_width: Option<u32>,
-    requested_height: Option<u32>,
-) -> (u32, u32) {
-    if let (Some(w), Some(h)) = (requested_width, requested_height) {
-        return (w, h);
-    }
-
+/// This is the equivalent of a raster source's stored dimensions: the fit mode, the
+/// enlargement policy, and the requested box are applied to it by the shared resize
+/// helpers, so a vector source and a raster source of the same size answer alike.
+fn intrinsic_render_size(tree: &resvg::usvg::Tree) -> (u32, u32) {
     let size = tree.size();
-    let intrinsic_w = size.width() as u32;
-    let intrinsic_h = size.height() as u32;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let width = size.width() as u32;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let height = size.height() as u32;
 
-    let (w, h) = match (requested_width, requested_height) {
-        (Some(w), None) => {
-            let h = if intrinsic_w > 0 {
-                (w as f64 * intrinsic_h as f64 / intrinsic_w as f64).round() as u32
-            } else {
-                intrinsic_h
-            };
-            (w, h.max(1))
-        }
-        (None, Some(h)) => {
-            let w = if intrinsic_h > 0 {
-                (h as f64 * intrinsic_w as f64 / intrinsic_h as f64).round() as u32
-            } else {
-                intrinsic_w
-            };
-            (w.max(1), h)
-        }
-        (None, None) => {
-            let w = if intrinsic_w > 0 { intrinsic_w } else { 300 };
-            let h = if intrinsic_h > 0 { intrinsic_h } else { 150 };
-            (w, h)
-        }
-        _ => unreachable!(),
-    };
-
-    (w.max(1u32), h.max(1u32))
+    // A document that resolves to no size still has to be drawn somewhere. 300x150 is the
+    // replaced-element default a browser uses for the same situation.
+    (
+        if width > 0 { width } else { 300 },
+        if height > 0 { height } else { 150 },
+    )
 }
 
 /// Rasterizes a pre-parsed SVG tree into an RGBA pixel buffer using `resvg`.
@@ -1021,7 +1032,7 @@ fn encode_raster_output(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::{RawArtifact, Rotation, TransformOptions, sniff_artifact};
+    use crate::core::{Fit, Position, RawArtifact, Rotation, TransformOptions, sniff_artifact};
     use rstest::rstest;
 
     fn svg_with_script() -> Vec<u8> {
@@ -1339,6 +1350,229 @@ mod tests {
         let artifact =
             sniff_artifact(RawArtifact::new(svg.to_vec(), None)).expect("should detect SVG");
         assert_eq!(artifact.media_type, MediaType::Svg);
+    }
+
+    /// A 100x50 drawing with a red disc that touches the top and bottom edges. The disc is
+    /// what makes a stretch visible: under any aspect-preserving fit its extent is equal on
+    /// both axes, and under a stretch it is not.
+    fn disc_svg() -> Vec<u8> {
+        b"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"50\" viewBox=\"0 0 100 50\"><circle cx=\"50\" cy=\"25\" r=\"25\" fill=\"#ff0000\"/></svg>".to_vec()
+    }
+
+    fn render_svg(bytes: Vec<u8>, options: TransformOptions) -> image::RgbaImage {
+        let input = sniff_artifact(RawArtifact::new(bytes, None)).expect("sniff svg");
+        let result =
+            transform_svg(TransformRequest::new(input, options)).expect("rasterize should succeed");
+        image::load_from_memory(&result.artifact.bytes)
+            .expect("decode output")
+            .to_rgba8()
+    }
+
+    /// Returns the inclusive extent of the opaque red pixels along the middle row and the
+    /// middle column, as a count of pixels on each axis.
+    fn red_extent(image: &image::RgbaImage) -> (u32, u32) {
+        let (width, height) = (image.width(), image.height());
+        let horizontal = (0..width)
+            .filter(|&x| is_red(image.get_pixel(x, height / 2)))
+            .count() as u32;
+        let vertical = (0..height)
+            .filter(|&y| is_red(image.get_pixel(width / 2, y)))
+            .count() as u32;
+        (horizontal, vertical)
+    }
+
+    fn is_red(pixel: &image::Rgba<u8>) -> bool {
+        pixel[3] > 128 && pixel[0] > 150 && pixel[1] < 100 && pixel[2] < 100
+    }
+
+    #[rstest]
+    #[case(Fit::Contain, 100, 100)]
+    #[case(Fit::Cover, 100, 100)]
+    #[case(Fit::Fill, 100, 100)]
+    #[case(Fit::Inside, 100, 50)]
+    fn svg_rasterization_honours_the_fit_mode_dimensions(
+        #[case] fit: Fit,
+        #[case] expected_width: u32,
+        #[case] expected_height: u32,
+    ) {
+        let image = render_svg(
+            disc_svg(),
+            TransformOptions {
+                format: Some(MediaType::Png),
+                width: Some(100),
+                height: Some(100),
+                fit: Some(fit),
+                ..TransformOptions::default()
+            },
+        );
+
+        assert_eq!(
+            (image.width(), image.height()),
+            (expected_width, expected_height),
+            "{fit:?} produced the wrong canvas"
+        );
+    }
+
+    /// Dimensions alone cannot separate contain, cover, and fill: all three return the
+    /// requested box. What separates them is where the drawing lands inside it, which is why
+    /// this measures the disc rather than the canvas.
+    #[test]
+    fn svg_contain_preserves_the_aspect_ratio_and_pads_the_rest() {
+        let image = render_svg(
+            disc_svg(),
+            TransformOptions {
+                format: Some(MediaType::Png),
+                width: Some(200),
+                height: Some(200),
+                ..TransformOptions::default()
+            },
+        );
+
+        let (horizontal, vertical) = red_extent(&image);
+        assert_eq!(
+            horizontal, vertical,
+            "contain stretched the disc: {horizontal}x{vertical}"
+        );
+        assert_eq!(
+            image.get_pixel(0, 0)[3],
+            0,
+            "contain should leave the padding transparent"
+        );
+    }
+
+    #[test]
+    fn svg_fill_stretches_each_axis_on_its_own() {
+        let image = render_svg(
+            disc_svg(),
+            TransformOptions {
+                format: Some(MediaType::Png),
+                width: Some(200),
+                height: Some(200),
+                fit: Some(Fit::Fill),
+                ..TransformOptions::default()
+            },
+        );
+
+        let (horizontal, vertical) = red_extent(&image);
+        assert!(
+            vertical > horizontal + 40,
+            "fill should stretch the disc, got {horizontal}x{vertical}"
+        );
+    }
+
+    #[test]
+    fn svg_without_enlargement_keeps_the_intrinsic_scale() {
+        let image = render_svg(
+            disc_svg(),
+            TransformOptions {
+                format: Some(MediaType::Png),
+                width: Some(200),
+                height: Some(200),
+                without_enlargement: true,
+                ..TransformOptions::default()
+            },
+        );
+
+        let (horizontal, vertical) = red_extent(&image);
+        assert_eq!((image.width(), image.height()), (200, 200));
+        assert!(
+            (45..=51).contains(&horizontal) && (45..=51).contains(&vertical),
+            "the disc should stay at its intrinsic 50 pixels, got {horizontal}x{vertical}"
+        );
+    }
+
+    /// Cover crops, so the anchor decides which part survives. The disc sits in the middle of
+    /// a 100x50 drawing, so cropping to a tall box from the left edge loses it and cropping
+    /// from the centre keeps it.
+    #[test]
+    fn svg_cover_crops_at_the_requested_position() {
+        let options = |position| TransformOptions {
+            format: Some(MediaType::Png),
+            width: Some(20),
+            height: Some(50),
+            fit: Some(Fit::Cover),
+            position,
+            ..TransformOptions::default()
+        };
+
+        let centred = render_svg(disc_svg(), options(Some(Position::Center)));
+        let left = render_svg(disc_svg(), options(Some(Position::Left)));
+
+        assert_eq!((centred.width(), centred.height()), (20, 50));
+        assert!(
+            red_extent(&centred).0 > 0,
+            "the centre crop should hold the disc"
+        );
+        assert_eq!(
+            red_extent(&left).0,
+            0,
+            "the left crop should not hold the disc"
+        );
+    }
+
+    /// The intermediate buffer cover materializes is larger than the box it returns, which is
+    /// the shape of #316. The raster path checks it from dimensions alone; so must this one.
+    #[test]
+    fn svg_cover_checks_the_pre_crop_buffer_against_the_limit() {
+        let input = sniff_artifact(RawArtifact::new(
+            b"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"10000\" height=\"1\"><rect width=\"10000\" height=\"1\" fill=\"blue\"/></svg>".to_vec(),
+            None,
+        ))
+        .expect("sniff svg");
+        let err = transform_svg(TransformRequest::new(
+            input,
+            TransformOptions {
+                format: Some(MediaType::Png),
+                width: Some(3),
+                height: Some(9999),
+                fit: Some(Fit::Cover),
+                ..TransformOptions::default()
+            },
+        ))
+        .expect_err("the pre-crop buffer exceeds the output pixel limit");
+
+        assert!(
+            matches!(err, TransformError::LimitExceeded(_)),
+            "expected LimitExceeded, got: {err}"
+        );
+    }
+
+    /// `inspect` reads the size through `sniff_artifact` and `convert` reads it through
+    /// `usvg`, so the two can drift. Issue #322 closed that gap for EXIF orientation by
+    /// having one function answer for both; here the two readers stay separate on purpose —
+    /// parsing a whole tree at sniff time would run before the sanitizer — so the agreement
+    /// is asserted instead.
+    #[rstest]
+    #[case(r#"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="50"/>"#)]
+    #[case(r#"<svg xmlns="http://www.w3.org/2000/svg" width="1in" height="2in"/>"#)]
+    #[case(r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 60"/>"#)]
+    #[case(r#"<svg xmlns="http://www.w3.org/2000/svg" width="100%" height="100%" viewBox="0 0 30 20"/>"#)]
+    #[case(r#"<svg xmlns="http://www.w3.org/2000/svg" width="100" viewBox="0 0 30 20"/>"#)]
+    fn sniffed_svg_dimensions_match_the_size_it_rasterizes_at(#[case] document: &str) {
+        let input = sniff_artifact(RawArtifact::new(document.as_bytes().to_vec(), None))
+            .expect("sniff svg");
+        let sniffed = input
+            .metadata
+            .width
+            .zip(input.metadata.height)
+            .expect("these documents declare an absolute size");
+
+        let result = transform_svg(TransformRequest::new(
+            input,
+            TransformOptions {
+                format: Some(MediaType::Png),
+                ..TransformOptions::default()
+            },
+        ))
+        .expect("rasterize at the intrinsic size");
+
+        assert_eq!(
+            (
+                result.artifact.metadata.width,
+                result.artifact.metadata.height
+            ),
+            (Some(sniffed.0), Some(sniffed.1))
+        );
     }
 
     #[test]
