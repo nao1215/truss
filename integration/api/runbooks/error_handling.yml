@@ -76,3 +76,41 @@ steps:
       && current.res.body.type == 'https://github.com/nao1215/truss/blob/main/docs/problems.md#invalid-options'
       && current.res.body.title == 'Invalid transform options'
       && current.res.body.requestId == current.res.headers['X-Request-Id'][0]
+  transform_decode_only_output_format:
+    desc: "a format truss reads but cannot write is refused from the options, not by the encoder"
+    req:
+      /images:transform:
+        post:
+          headers:
+            Authorization: "Bearer {{ vars.token }}"
+            Content-Type: "application/json"
+          body:
+            application/json:
+              source:
+                kind: path
+                path: /no-such-file.png
+              options:
+                format: gif
+    test: |
+      current.res.status == 415
+      && current.res.body.type == 'https://github.com/nao1215/truss/blob/main/docs/problems.md#unsupported-output-media-type'
+      && current.res.body.title == 'Unsupported output media type'
+  transform_counter_clockwise_rotation:
+    desc: "a negative rotate is the counter-clockwise turn the CLI and the Wasm package take"
+    req:
+      /images:transform:
+        post:
+          headers:
+            Authorization: "Bearer {{ vars.token }}"
+            Content-Type: "application/json"
+          body:
+            application/json:
+              source:
+                kind: path
+                path: /sample.png
+              options:
+                format: png
+                rotate: -90
+    test: |
+      current.res.status == 200
+      && current.res.headers['Content-Type'][0] == 'image/png'
