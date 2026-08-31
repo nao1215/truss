@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- `@nao1215/truss-wasm` no longer prints `using deprecated parameters for the initialization function` on every import ([#375](https://github.com/nao1215/truss/issues/375)). The package entry initializes the Wasm module at import time and handed the bytes or URL to the generated `init` as a bare argument, which wasm-bindgen has treated as the deprecated form since 0.2.93 and warns about on the console; every application that imported the package saw the line at startup, in Node and in the browser, and the next wasm-bindgen release that removes the old form would have broken initialization outright. The entry now passes `{ module_or_path }`, and the consumer smoke that installs the packed tarball into a throwaway Node project fails if importing it prints a deprecation warning, so the wrapper cannot regress silently. Nothing about the exported functions or their behaviour changes.
+
 ## v0.18.0
 
 ### Fixed
