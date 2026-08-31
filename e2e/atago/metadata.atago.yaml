@@ -183,6 +183,23 @@ scenarios:
             width: 40
             height: 20
 
+  - name: keeping the metadata does not silence the warning when the output cannot hold the tag
+    steps:
+      # BMP has nowhere to put an Exif block, so --keep-metadata keeps nothing here and the
+      # picture comes out turned all the same. The warning asks the output, not the flag.
+      - run:
+          command: truss convert "${fixtures}/exif-rotated.jpg" -o kept.bmp --no-auto-orient --keep-metadata
+      - assert:
+          exit_code: 0
+          stderr:
+            contains:
+              - "warning:"
+              - "EXIF orientation 6"
+          image:
+            path: kept.bmp
+            width: 40
+            height: 20
+
   - name: an input with no orientation to drop does not warn
     steps:
       - run:

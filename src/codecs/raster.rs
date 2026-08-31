@@ -209,12 +209,6 @@ pub fn transform_raster(request: TransformRequest) -> Result<TransformResult, Tr
 
     if normalized.options.auto_orient {
         image = apply_auto_orientation(image, &normalized.input);
-    } else if let Some(warning) = dropped_orientation_warning(
-        &normalized.input,
-        normalized.options.auto_orient,
-        normalized.options.metadata_policy,
-    ) {
-        warnings.push(warning);
     }
 
     image = apply_rotation(
@@ -312,6 +306,13 @@ pub fn transform_raster(request: TransformRequest) -> Result<TransformResult, Tr
     // this is what `inspect` reports for the same file. Asked of the output's own format,
     // because every container that can carry the tag can carry it into the output too.
     let orientation = crate::core::exif_orientation(normalized.options.format, &bytes);
+    if let Some(warning) = dropped_orientation_warning(
+        &normalized.input,
+        normalized.options.auto_orient,
+        orientation,
+    ) {
+        warnings.push(warning);
+    }
 
     Ok(TransformResult {
         artifact: Artifact::new(
@@ -1446,11 +1447,14 @@ fn try_passthrough_lossless_optimization(
                 normalized.options.metadata_policy,
             )?;
 
+            // Read back rather than copied from the input: the policy may have dropped the
+            // segment that carried it, and this is what `inspect` reports for the output.
+            let orientation = crate::core::exif_orientation(MediaType::Jpeg, &bytes);
             let mut warnings = Vec::new();
             if let Some(warning) = dropped_orientation_warning(
                 &normalized.input,
                 normalized.options.auto_orient,
-                normalized.options.metadata_policy,
+                orientation,
             ) {
                 warnings.push(warning);
             }
@@ -1459,7 +1463,10 @@ fn try_passthrough_lossless_optimization(
                 artifact: Artifact::new(
                     bytes,
                     normalized.options.format,
-                    normalized.input.metadata.clone(),
+                    ArtifactMetadata {
+                        orientation,
+                        ..normalized.input.metadata.clone()
+                    },
                 ),
                 warnings,
             }))
@@ -1608,15 +1615,20 @@ fn lossless_jpeg_refusal(normalized: &NormalizedTransformRequest) -> String {
 
 /// The warning for an input whose EXIF orientation the output records nowhere.
 ///
-/// With auto-orientation off the pixels stay as stored, and with the metadata stripped the
-/// tag that said how to display them is gone, so the output displays rotated. Each flag on
-/// its own is honest; the combination is a rotation, and nothing else says so.
+/// With auto-orientation off the pixels stay as stored, and when the tag that said how to
+/// display them is gone too, the output displays rotated. Each flag on its own is honest;
+/// the combination is a rotation, and nothing else says so.
+///
+/// Whether the tag is gone is asked of the output bytes, not of the metadata policy. A
+/// policy that keeps Exif keeps nothing from a container whose metadata is never read, and
+/// keeps it nowhere in an output format that cannot carry it, and both used to pass for
+/// retained; what the output actually says is the one answer that covers every pair.
 fn dropped_orientation_warning(
     input: &Artifact,
     auto_orient: bool,
-    metadata_policy: MetadataPolicy,
+    output_orientation: Option<u16>,
 ) -> Option<TransformWarning> {
-    if auto_orient || metadata_policy_retains_exif(metadata_policy) {
+    if auto_orient || matches!(output_orientation, Some(2..=8)) {
         return None;
     }
 
@@ -7008,6 +7020,70 @@ mod tests {
             (Some(2), Some(4)),
             "{media_type:?}: a quarter turn should have been applied"
         );
+    }
+
+    /// Whether the tag survives is a fact about the bytes, not about the policy: a TIFF's
+    /// metadata is never read, and BMP and TIFF outputs carry none, so keeping the metadata
+    /// keeps nothing in those cases and the drop has to be said.
+    #[rstest]
+    #[case::tiff_input_to_png(MediaType::Tiff, MediaType::Png)]
+    #[case::jpeg_input_to_bmp(MediaType::Jpeg, MediaType::Bmp)]
+    #[case::jpeg_input_to_tiff(MediaType::Jpeg, MediaType::Tiff)]
+    fn transform_raster_warns_when_a_kept_orientation_never_reaches_the_output(
+        #[case] input: MediaType,
+        #[case] output: MediaType,
+    ) {
+        let bytes = match input {
+            MediaType::Tiff => tiff_bytes_with_orientation(4, 2, 6),
+            MediaType::Jpeg => jpeg_artifact_with_metadata(4, 2, Some(6), None).bytes,
+            other => unreachable!("{other:?}"),
+        };
+        let artifact = sniff_artifact(RawArtifact::new(bytes, None)).expect("sniff");
+
+        let result = transform_raster(TransformRequest::new(
+            artifact,
+            TransformOptions {
+                format: Some(output),
+                auto_orient: false,
+                strip_metadata: false,
+                ..TransformOptions::default()
+            },
+        ))
+        .unwrap_or_else(|error| panic!("{input:?} to {output:?} should transform: {error}"));
+
+        assert_eq!(
+            result.artifact.metadata.orientation, None,
+            "{input:?} to {output:?}: the tag should not have survived"
+        );
+        assert!(
+            result.warnings.iter().any(|warning| matches!(
+                warning,
+                TransformWarning::OrientationDropped { orientation: 6 }
+            )),
+            "{input:?} to {output:?}: expected an OrientationDropped warning, got {:?}",
+            result.warnings
+        );
+    }
+
+    /// The negative: when the tag does reach the output there is nothing to warn about, and
+    /// the output's metadata reports the tag `inspect` will find in it.
+    #[test]
+    fn transform_raster_does_not_warn_when_the_kept_orientation_reaches_the_output() {
+        let artifact = jpeg_artifact_with_metadata(4, 2, Some(6), None);
+
+        let result = transform_raster(TransformRequest::new(
+            artifact,
+            TransformOptions {
+                format: Some(MediaType::Jpeg),
+                auto_orient: false,
+                strip_metadata: false,
+                ..TransformOptions::default()
+            },
+        ))
+        .expect("transform");
+
+        assert_eq!(result.artifact.metadata.orientation, Some(6));
+        assert!(result.warnings.is_empty(), "{:?}", result.warnings);
     }
 
     /// The #331 warning is about the combination, not about the container.
