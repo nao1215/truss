@@ -777,7 +777,13 @@ pub(super) fn handle_health_ready(config: &ServerConfig) -> HttpResponse {
         }))
         .expect("serialize readiness");
         body.push(b'\n');
-        return HttpResponse::json("503 Service Unavailable", body);
+        let mut response = HttpResponse::json("503 Service Unavailable", body);
+        // The process is going away, not momentarily busy, so tell the client
+        // and any intermediary not to come straight back.
+        response
+            .headers
+            .push(("Retry-After".to_string(), "5".to_string()));
+        return response;
     }
 
     let (checks, all_ok) = collect_resource_checks(config);

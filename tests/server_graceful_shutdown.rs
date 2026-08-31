@@ -206,3 +206,103 @@ fn in_flight_request_completes_during_drain() {
         .expect("server thread")
         .expect("serve_with_config");
 }
+
+/// Reads one response with a bounded wait, returning `None` when the server
+/// accepted the connection but wrote nothing before the deadline. A plain
+/// `read_to_end` cannot tell that case apart from a slow answer, and it is
+/// exactly the case these tests exist to catch.
+fn probe_with_deadline(addr: SocketAddr, path: &str, wait: Duration) -> Option<String> {
+    let mut stream = TcpStream::connect(addr).ok()?;
+    stream.set_read_timeout(Some(wait)).expect("set timeout");
+    stream
+        .write_all(
+            format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+                .as_bytes(),
+        )
+        .ok()?;
+    stream.flush().ok()?;
+
+    let mut response = Vec::new();
+    let mut buf = [0u8; 1024];
+    loop {
+        match stream.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => response.extend_from_slice(&buf[..n]),
+            Err(_) => break,
+        }
+    }
+    if response.is_empty() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&response).into_owned())
+}
+
+/// A load balancer probes readiness over a new connection, so the drain period
+/// is only useful if new connections are still served while it runs.
+#[cfg(unix)]
+#[test]
+#[serial]
+fn health_ready_answers_503_on_a_new_connection_during_the_drain_window() {
+    let storage = temp_dir("drain-ready-503");
+    let mut config = ServerConfig::new(storage, None);
+    config.shutdown_drain_secs = 4;
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let handle = thread::spawn(move || serve_with_config(listener, config));
+
+    thread::sleep(Duration::from_millis(200));
+    unsafe {
+        libc::kill(libc::getpid(), libc::SIGTERM);
+    }
+    thread::sleep(Duration::from_millis(300));
+
+    let ready = probe_with_deadline(addr, "/health/ready", Duration::from_secs(1))
+        .expect("readiness probe during the drain window must be answered, not left hanging");
+    assert!(
+        ready.starts_with("HTTP/1.1 503"),
+        "expected 503 while draining, got: {ready}"
+    );
+
+    let live = probe_with_deadline(addr, "/health/live", Duration::from_secs(1))
+        .expect("liveness probe during the drain window must be answered");
+    assert!(
+        live.starts_with("HTTP/1.1 200"),
+        "expected 200 for liveness while draining, got: {live}"
+    );
+
+    handle
+        .join()
+        .expect("server thread")
+        .expect("serve_with_config");
+}
+
+/// The drain window has to end. Once the listener is gone a new connection is
+/// refused outright, which is what tells a client to fail over immediately.
+#[cfg(unix)]
+#[test]
+#[serial]
+fn connections_are_refused_once_the_drain_window_has_elapsed() {
+    let storage = temp_dir("drain-window-ends");
+    let mut config = ServerConfig::new(storage, None);
+    config.shutdown_drain_secs = 1;
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let handle = thread::spawn(move || serve_with_config(listener, config));
+
+    thread::sleep(Duration::from_millis(200));
+    unsafe {
+        libc::kill(libc::getpid(), libc::SIGTERM);
+    }
+
+    handle
+        .join()
+        .expect("server thread")
+        .expect("serve_with_config");
+
+    assert!(
+        TcpStream::connect(addr).is_err(),
+        "the listener must be closed once the drain window has elapsed"
+    );
+}
