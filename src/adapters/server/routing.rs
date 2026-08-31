@@ -33,18 +33,25 @@ pub(super) struct AccessLogEntry<'a> {
     pub(super) watermark: bool,
 }
 
-/// Extracts the `X-Request-Id` header value from request headers.
-/// Returns `None` if the header is absent, empty, or contains
-/// characters unsafe for HTTP headers (CR, LF, NUL).
+/// Longest client-supplied request id echoed back. A UUID is 36 characters and a
+/// W3C `traceparent` is 55, so this is generous for every identifier a caller
+/// would realistically forward, and it bounds what one header can add to every
+/// response and every access log line for a request.
+pub(super) const MAX_REQUEST_ID_LEN: usize = 128;
+
+/// Returns the client-supplied request id when it is safe to echo verbatim.
+///
+/// The value is reflected into a response header, so it has to satisfy the field
+/// value grammar of RFC 9110 section 5.5 rather than merely avoid breaking out of
+/// its own line: control characters and DEL are not `field-vchar`, and `obs-text`
+/// is deprecated, so anything outside printable ASCII is rejected here and the
+/// caller generates an id instead.
 pub(super) fn extract_request_id(headers: &[(String, String)]) -> Option<String> {
     headers.iter().find_map(|(name, value)| {
-        if name != "x-request-id" || value.is_empty() {
+        if name != "x-request-id" || value.is_empty() || value.len() > MAX_REQUEST_ID_LEN {
             return None;
         }
-        if value
-            .bytes()
-            .any(|b| b == b'\r' || b == b'\n' || b == b'\0')
-        {
+        if !value.bytes().all(|b| (0x20..=0x7e).contains(&b)) {
             return None;
         }
         Some(value.clone())

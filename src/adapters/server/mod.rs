@@ -131,8 +131,8 @@ mod tests {
         build_image_response_headers, negotiate_output_format,
     };
     use super::routing::{
-        AccessLogEntry, classify_route, emit_access_log, extract_cache_status, extract_request_id,
-        extract_watermark_flag, resolve_client_ip, route_request,
+        AccessLogEntry, MAX_REQUEST_ID_LEN, classify_route, emit_access_log, extract_cache_status,
+        extract_request_id, extract_watermark_flag, resolve_client_ip, route_request,
     };
     use super::{config, metrics::RouteMetric};
     use crate::{
@@ -142,6 +142,7 @@ mod tests {
     use hmac::{Hmac, KeyInit, Mac};
     use image::codecs::png::PngEncoder;
     use image::{ColorType, ImageEncoder, Rgba, RgbaImage};
+    use rstest::rstest;
     use sha2::Sha256;
     use std::collections::{BTreeMap, HashMap};
     use std::env;
@@ -4344,6 +4345,38 @@ mod tests {
     fn extract_request_id_rejects_nul() {
         let headers = vec![h("x-request-id", "abc\x00123")];
         assert_eq!(extract_request_id(&headers), None);
+    }
+
+    #[rstest]
+    #[case::uuid("6b94bb02-edca-4ba4-8bc6-825c4d067dd9", true)]
+    #[case::traceparent("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01", true)]
+    #[case::printable_punctuation("req_id.42:7/x+y=", true)]
+    #[case::vertical_tab("ab\x0bcd", false)]
+    #[case::form_feed("ab\x0ccd", false)]
+    #[case::escape("ab\x1bcd", false)]
+    #[case::delete("ab\x7fcd", false)]
+    #[case::high_byte("ab\u{e9}cd", false)]
+    #[case::tab("ab\tcd", false)]
+    fn extract_request_id_accepts_only_printable_ascii(#[case] value: &str, #[case] kept: bool) {
+        let headers = vec![h("x-request-id", value)];
+        let extracted = extract_request_id(&headers);
+        assert_eq!(
+            extracted.is_some(),
+            kept,
+            "value {value:?} should {} be echoed, got {extracted:?}",
+            if kept { "" } else { "not" }
+        );
+    }
+
+    #[test]
+    fn extract_request_id_rejects_an_over_long_value() {
+        let at_limit = "a".repeat(MAX_REQUEST_ID_LEN);
+        let over_limit = "a".repeat(MAX_REQUEST_ID_LEN + 1);
+        assert_eq!(
+            extract_request_id(&[h("x-request-id", &at_limit)]),
+            Some(at_limit)
+        );
+        assert_eq!(extract_request_id(&[h("x-request-id", &over_limit)]), None);
     }
 
     // --- extract_cache_status tests ---

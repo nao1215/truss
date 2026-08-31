@@ -103,7 +103,7 @@ Every request emits a JSON access log line through the server's log handler (std
 | Field | Description |
 |-------|-------------|
 | `kind` | Always `"access_log"` -- distinguishes access logs from diagnostic messages |
-| `request_id` | UUID v4 generated per request, or the incoming `X-Request-Id` header value when present |
+| `request_id` | UUID v4 generated per request, or the incoming `X-Request-Id` header value when it is usable (see below) |
 | `method` | HTTP method (`GET`, `POST`, `HEAD`) |
 | `path` | Request path without query string |
 | `route` | Matched route label (e.g. `/images/by-path`, `/images:transform`) |
@@ -111,4 +111,4 @@ Every request emits a JSON access log line through the server's log handler (std
 | `latency_ms` | Total request processing time in milliseconds |
 | `cache_status` | `"hit"`, `"miss"`, or `null` (for non-transform endpoints) |
 
-The server echoes the request ID back in the `X-Request-Id` response header, making it easy to correlate client-side logs with server-side entries. To propagate your own trace context, send an `X-Request-Id` header with your request and the server will reuse it.
+The server echoes the request ID back in the `X-Request-Id` response header, making it easy to correlate client-side logs with server-side entries. To propagate your own trace context, send an `X-Request-Id` header with your request and the server will reuse it. An incoming value is reused only when it is printable ASCII (0x20-0x7E) and at most 128 characters, which covers UUIDs and W3C `traceparent`; anything else is replaced by a generated UUID, because the value is reflected into a response header and has to satisfy the field value grammar of RFC 9110.
