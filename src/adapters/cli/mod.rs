@@ -8,6 +8,8 @@ use std::fs;
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
+
+use crate::core::error_class::ErrorClass;
 use std::str::FromStr;
 
 mod convert;
@@ -1028,9 +1030,16 @@ enum OutputTarget {
 // Structured error
 // ---------------------------------------------------------------------------
 
+/// A failure on its way to standard error, carrying both halves of how the CLI reports one.
+///
+/// `exit_code` is the coarse signal a shell branches on, one of the five in CONTRIBUTING.md.
+/// `class` is the same failure named the way the HTTP server and the Wasm package name it,
+/// so a caller who moves a transform between the three adapters keeps one classification;
+/// it is what `write_error` prints in parentheses.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CliError {
     exit_code: u8,
+    class: ErrorClass,
     message: String,
     usage: Option<String>,
     hint: Option<String>,
@@ -1230,6 +1239,7 @@ where
             help: false,
         }) => Err(CliError {
             exit_code: EXIT_USAGE,
+            class: ErrorClass::InvalidRequest,
             message: "'completions' requires a shell argument".to_string(),
             usage: None,
             hint: Some("try 'truss completions bash'".to_string()),
@@ -1255,6 +1265,7 @@ fn map_clap_error(err: clap::Error) -> CliError {
 
     CliError {
         exit_code: EXIT_USAGE,
+        class: ErrorClass::InvalidRequest,
         message,
         usage: None,
         hint: Some("run 'truss --help' for available commands".to_string()),
@@ -1274,6 +1285,7 @@ fn parse_help_topic(topic: Option<String>) -> Result<Command, CliError> {
         Some("version") => Ok(Command::Help(HelpTopic::Version)),
         Some(other) => Err(CliError {
             exit_code: EXIT_USAGE,
+            class: ErrorClass::InvalidRequest,
             message: format!("unknown help topic '{other}'"),
             usage: None,
             hint: Some(
@@ -1358,6 +1370,7 @@ impl TransformFields {
 fn validate_url(url: &str, flag: &str) -> Result<(), CliError> {
     let parsed = url::Url::parse(url).map_err(|e| CliError {
         exit_code: EXIT_USAGE,
+        class: ErrorClass::InvalidRequest,
         message: format!("'{flag}' is not a valid URL: {e}"),
         usage: None,
         hint: Some(format!("got '{url}'")),
@@ -1366,6 +1379,7 @@ fn validate_url(url: &str, flag: &str) -> Result<(), CliError> {
         "http" | "https" => Ok(()),
         _ => Err(CliError {
             exit_code: EXIT_USAGE,
+            class: ErrorClass::InvalidRequest,
             message: format!("'{flag}' requires an http:// or https:// URL"),
             usage: None,
             hint: Some(format!("got '{url}'")),
@@ -1429,7 +1443,15 @@ where
             Ok(bytes)
         }
         InputSource::Path(path) => fs::read(&path).map_err(|error| {
-            runtime_error(
+            // A source that is not there is `not-found`, the class the server gives the
+            // same miss; anything else about the file system is `internal-error`.
+            let class = if error.kind() == io::ErrorKind::NotFound {
+                ErrorClass::NotFound
+            } else {
+                ErrorClass::InternalError
+            };
+            classified_error(
+                class,
                 EXIT_IO,
                 &format!("failed to read {}: {error}", path.display()),
             )
@@ -1443,7 +1465,13 @@ const CLI_FETCH_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from
 /// Timeout for receiving the full response body from a remote source.
 const CLI_FETCH_BODY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// Fetches `--url` input.
+///
+/// Every failure here is the remote end's, which the server names `bad-gateway`; the CLI
+/// keeps its I/O exit code (2) and adds that class.
 fn read_url_bytes(url: &str) -> Result<Vec<u8>, CliError> {
+    let fetch_failed =
+        |message: String| classified_error(ErrorClass::BadGateway, EXIT_IO, &message);
     let config = ureq::config::Config::builder()
         .timeout_connect(Some(CLI_FETCH_CONNECT_TIMEOUT))
         .timeout_recv_body(Some(CLI_FETCH_BODY_TIMEOUT))
@@ -1453,14 +1481,13 @@ fn read_url_bytes(url: &str) -> Result<Vec<u8>, CliError> {
     let response = agent
         .get(url)
         .call()
-        .map_err(|error| runtime_error(EXIT_IO, &format!("failed to fetch {url}: {error}")))?;
+        .map_err(|error| fetch_failed(format!("failed to fetch {url}: {error}")))?;
 
     let status = response.status().as_u16();
     if status >= 400 {
-        return Err(runtime_error(
-            EXIT_IO,
-            &format!("failed to fetch {url}: HTTP {status}"),
-        ));
+        return Err(fetch_failed(format!(
+            "failed to fetch {url}: HTTP {status}"
+        )));
     }
 
     if response
@@ -1470,10 +1497,9 @@ fn read_url_bytes(url: &str) -> Result<Vec<u8>, CliError> {
         .and_then(|value: &str| value.parse::<u64>().ok())
         .is_some_and(|len| len > MAX_REMOTE_BYTES)
     {
-        return Err(runtime_error(
-            EXIT_IO,
-            &format!("failed to fetch {url}: response exceeds {MAX_REMOTE_BYTES} bytes"),
-        ));
+        return Err(fetch_failed(format!(
+            "failed to fetch {url}: response exceeds {MAX_REMOTE_BYTES} bytes"
+        )));
     }
 
     let mut reader = response
@@ -1483,40 +1509,43 @@ fn read_url_bytes(url: &str) -> Result<Vec<u8>, CliError> {
     let mut bytes = Vec::new();
     reader
         .read_to_end(&mut bytes)
-        .map_err(|error| runtime_error(EXIT_IO, &format!("failed to fetch {url}: {error}")))?;
+        .map_err(|error| fetch_failed(format!("failed to fetch {url}: {error}")))?;
 
     if bytes.len() as u64 > MAX_REMOTE_BYTES {
-        return Err(runtime_error(
-            EXIT_IO,
-            &format!("failed to fetch {url}: response exceeds {MAX_REMOTE_BYTES} bytes"),
-        ));
+        return Err(fetch_failed(format!(
+            "failed to fetch {url}: response exceeds {MAX_REMOTE_BYTES} bytes"
+        )));
     }
 
     Ok(bytes)
 }
 
+/// Maps a transform failure onto the exit code and the class that name it.
+///
+/// The class is [`crate::TransformError::class`], the table the HTTP server and the Wasm
+/// package read too, so the three adapters classify one failure the same way. The exit code
+/// is the CLI's own column of that table and `map_transform_error_matches_the_class_table`
+/// is what keeps the two in step with `docs/problems.md`.
 fn map_transform_error(error: crate::TransformError) -> CliError {
-    match error {
-        crate::TransformError::InvalidOptions(reason) => runtime_error(EXIT_USAGE, &reason),
-        crate::TransformError::InvalidInput(reason) => runtime_error(EXIT_INPUT, &reason),
+    let class = error.class();
+    let (exit_code, message) = match error {
+        crate::TransformError::InvalidOptions(reason) => (EXIT_USAGE, reason),
+        crate::TransformError::InvalidInput(reason) => (EXIT_INPUT, reason),
         // An input truss cannot process is an input error (3), the same class the
         // documented exit-code table gives an unsupported format, not a transform
-        // failure (4). The sniff in `execute_convert` already reports unreadable bytes
-        // that way; this arm covers the inputs that are readable but unsupported, such
-        // as an animated GIF.
-        crate::TransformError::UnsupportedInputMediaType(reason) => {
-            runtime_error(EXIT_INPUT, &reason)
-        }
+        // failure (4).
+        crate::TransformError::UnsupportedInputMediaType(reason) => (EXIT_INPUT, reason),
         crate::TransformError::DecodeFailed(reason)
         | crate::TransformError::EncodeFailed(reason)
         | crate::TransformError::CapabilityMissing(reason)
-        | crate::TransformError::LimitExceeded(reason) => runtime_error(EXIT_TRANSFORM, &reason),
+        | crate::TransformError::LimitExceeded(reason) => (EXIT_TRANSFORM, reason),
         // The error's own Display names the rule that was hit (svg needs an svg input,
         // gif is never encoded), so the CLI does not restate it in different words.
         ref error @ crate::TransformError::UnsupportedOutputMediaType(_) => {
-            runtime_error(EXIT_TRANSFORM, &error.to_string())
+            (EXIT_TRANSFORM, error.to_string())
         }
-    }
+    };
+    classified_error(class, exit_code, &message)
 }
 
 // ---------------------------------------------------------------------------
@@ -1526,6 +1555,7 @@ fn map_transform_error(error: crate::TransformError) -> CliError {
 fn convert_error(message: &str) -> CliError {
     CliError {
         exit_code: EXIT_USAGE,
+        class: ErrorClass::InvalidRequest,
         message: message.to_string(),
         usage: Some(convert_usage().to_string()),
         hint: Some("run 'truss convert --help' for convert options".to_string()),
@@ -1535,6 +1565,7 @@ fn convert_error(message: &str) -> CliError {
 fn optimize_error(message: &str) -> CliError {
     CliError {
         exit_code: EXIT_USAGE,
+        class: ErrorClass::InvalidRequest,
         message: message.to_string(),
         usage: Some(optimize_usage().to_string()),
         hint: Some("run 'truss optimize --help' for optimize options".to_string()),
@@ -1544,15 +1575,34 @@ fn optimize_error(message: &str) -> CliError {
 fn sign_error(message: &str) -> CliError {
     CliError {
         exit_code: EXIT_USAGE,
+        class: ErrorClass::InvalidRequest,
         message: message.to_string(),
         usage: Some(sign_usage().to_string()),
         hint: Some("run 'truss sign --help' for sign options".to_string()),
     }
 }
 
+/// A command line that could not be understood or is contradictory: exit 1, the
+/// `invalid-request` class, with no usage block of its own.
+fn usage_error(message: &str) -> CliError {
+    classified_error(ErrorClass::InvalidRequest, EXIT_USAGE, message)
+}
+
+/// A failure the process could not avoid: an I/O fault (exit 2) or a runtime fault such as
+/// a port already in use or a closed standard output (exit 5).
+///
+/// Both are the `internal-error` class, which is what the server reports for the same
+/// faults. The I/O paths that know more than that — a source that is not there, a fetch the
+/// remote end refused — say so with [`classified_error`] instead.
 fn runtime_error(exit_code: u8, message: &str) -> CliError {
+    classified_error(ErrorClass::InternalError, exit_code, message)
+}
+
+/// Builds an error whose class the caller names.
+fn classified_error(class: ErrorClass, exit_code: u8, message: &str) -> CliError {
     CliError {
         exit_code,
+        class,
         message: message.to_string(),
         usage: None,
         hint: None,
@@ -1572,7 +1622,7 @@ fn write_error<E>(stderr: &mut E, error: CliError) -> u8
 where
     E: Write,
 {
-    let _ = writeln!(stderr, "error: {}", error.message);
+    let _ = writeln!(stderr, "error: {} ({})", error.message, error.class.slug());
     if let Some(usage) = &error.usage {
         let _ = writeln!(stderr, "{usage}");
     }
@@ -1590,8 +1640,9 @@ where
 mod tests {
     use super::serve::resolve_server_config;
     use super::{
-        Command, ConvertCommand, HelpTopic, InputSource, OutputTarget, ServeCommand, SignCommand,
-        flush_stdout, parse_args, preprocess_args, run_with_io,
+        Command, ConvertCommand, EXIT_INPUT, EXIT_TRANSFORM, EXIT_USAGE, HelpTopic, InputSource,
+        OutputTarget, ServeCommand, SignCommand, flush_stdout, parse_args, preprocess_args,
+        run_with_io,
     };
     use crate::{
         Fit, MediaType, OptimizeMode, RawArtifact, SignedUrlSource, TransformOptions,
@@ -2093,6 +2144,157 @@ mod tests {
             &mut stderr,
         );
         assert_eq!(code, 3);
+    }
+
+    /// The class the CLI names alongside each exit code, and the anchor
+    /// `docs/problems.md` gives it. The exit codes are the CLI's column of that page's
+    /// table, so this is what keeps the page honest: a class that changes exit code, or an
+    /// exit code that changes class, fails here.
+    #[test]
+    fn map_transform_error_matches_the_class_table() {
+        const PROBLEM_DOCS: &str = include_str!("../../../docs/problems.md");
+        // A Windows checkout has CRLF line endings, so the anchors are matched against
+        // the text with the carriage returns taken out.
+        let problem_docs = PROBLEM_DOCS.replace('\r', "");
+        let cases: [(crate::TransformError, &str, u8); 8] = [
+            (
+                crate::TransformError::InvalidOptions("x".into()),
+                "invalid-options",
+                EXIT_USAGE,
+            ),
+            (
+                crate::TransformError::InvalidInput("x".into()),
+                "invalid-input",
+                EXIT_INPUT,
+            ),
+            (
+                crate::TransformError::UnsupportedInputMediaType("x".into()),
+                "unsupported-input-media-type",
+                EXIT_INPUT,
+            ),
+            (
+                crate::TransformError::DecodeFailed("x".into()),
+                "decode-failed",
+                EXIT_TRANSFORM,
+            ),
+            (
+                crate::TransformError::EncodeFailed("x".into()),
+                "encode-failed",
+                EXIT_TRANSFORM,
+            ),
+            (
+                crate::TransformError::CapabilityMissing("x".into()),
+                "capability-missing",
+                EXIT_TRANSFORM,
+            ),
+            (
+                crate::TransformError::LimitExceeded("x".into()),
+                "limit-exceeded",
+                EXIT_TRANSFORM,
+            ),
+            (
+                crate::TransformError::UnsupportedOutputMediaType(MediaType::Gif),
+                "unsupported-output-media-type",
+                EXIT_TRANSFORM,
+            ),
+        ];
+
+        for (error, slug, exit_code) in cases {
+            let mapped = super::map_transform_error(error.clone());
+            assert_eq!(mapped.class.slug(), slug, "{error:?}");
+            assert_eq!(mapped.exit_code, exit_code, "{error:?}");
+            assert!(
+                problem_docs.contains(&format!("### {slug}\n")),
+                "docs/problems.md should document the {slug} class"
+            );
+        }
+    }
+
+    /// stderr carries the class in parentheses after the message, which is how a caller
+    /// reads the same classification the server puts in `type` and the browser in `kind`.
+    #[test]
+    fn stderr_names_the_class_after_the_message() {
+        let mut stderr = Vec::new();
+        let code = super::write_error(
+            &mut stderr,
+            super::map_transform_error(crate::TransformError::LimitExceeded(
+                "output image would have 400000000 pixels, limit is 67108864".to_string(),
+            )),
+        );
+
+        assert_eq!(code, EXIT_TRANSFORM);
+        assert_eq!(
+            String::from_utf8(stderr).expect("utf-8 stderr"),
+            "error: output image would have 400000000 pixels, limit is 67108864 (limit-exceeded)\n"
+        );
+    }
+
+    /// A usage fault names the request, not the transform, and keeps its usage and hint
+    /// lines below the classified first line.
+    #[test]
+    fn stderr_names_the_class_on_a_usage_error() {
+        let mut stderr = Vec::new();
+        let code = super::write_error(&mut stderr, super::sign_error("'sign' requires --key-id"));
+
+        assert_eq!(code, EXIT_USAGE);
+        let rendered = String::from_utf8(stderr).expect("utf-8 stderr");
+        assert!(
+            rendered.starts_with("error: 'sign' requires --key-id (invalid-request)\n"),
+            "{rendered}"
+        );
+        assert!(rendered.ends_with("hint: run 'truss sign --help' for sign options\n"));
+    }
+
+    /// A source that is not there is `not-found`, the class the server gives the same miss,
+    /// while the exit code stays 2.
+    #[test]
+    fn missing_input_reports_the_not_found_class() {
+        let mut stdin = Cursor::new(Vec::<u8>::new());
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let code = run_with_io(
+            vec![
+                "truss".to_string(),
+                "inspect".to_string(),
+                "missing-file.png".to_string(),
+            ],
+            &mut stdin,
+            &mut stdout,
+            &mut stderr,
+        );
+
+        assert_eq!(code, 2);
+        let rendered = String::from_utf8(stderr).expect("utf-8 stderr");
+        assert!(rendered.contains("(not-found)"), "{rendered}");
+    }
+
+    /// A decode failure is exit 4 wherever it is raised. The sniff that runs before the
+    /// transform used to report it as an input error (3), so one truncated file was a
+    /// transform error to `convert` and an input error to `inspect`.
+    #[test]
+    fn a_decode_failure_from_the_sniff_is_a_transform_error() {
+        // A PNG signature with nothing after it: recognised as PNG, too short to decode.
+        let truncated = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+        for command in ["inspect", "convert"] {
+            let mut stdin = Cursor::new(truncated.clone());
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+
+            let mut args = vec!["truss".to_string(), command.to_string(), "-".to_string()];
+            if command == "convert" {
+                args.push("--output".to_string());
+                args.push("-".to_string());
+            }
+            let code = run_with_io(args, &mut stdin, &mut stdout, &mut stderr);
+
+            let rendered = String::from_utf8(stderr).expect("utf-8 stderr");
+            assert_eq!(code, EXIT_TRANSFORM, "{command}: {rendered}");
+            assert!(
+                rendered.contains("(decode-failed)"),
+                "{command}: {rendered}"
+            );
+        }
     }
 
     // ===== Additional test: unknown subcommand =====

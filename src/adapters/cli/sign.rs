@@ -2,8 +2,8 @@ use crate::adapters::server::{self, SignedUrlSource, sign_public_url};
 use std::io::Write;
 
 use super::{
-    ClapSignArgs, CliError, Command, EXIT_RUNTIME, EXIT_TRANSFORM, EXIT_USAGE, HelpTopic,
-    SignCommand, TransformFields, map_transform_error, runtime_error, sign_error,
+    ClapSignArgs, CliError, Command, EXIT_RUNTIME, HelpTopic, SignCommand, TransformFields,
+    map_transform_error, runtime_error, sign_error, usage_error,
 };
 
 // ---------------------------------------------------------------------------
@@ -99,8 +99,7 @@ where
             || command.watermark_opacity.is_some()
             || command.watermark_margin.is_some())
     {
-        return Err(runtime_error(
-            EXIT_USAGE,
+        return Err(usage_error(
             "--watermark-position, --watermark-opacity, and --watermark-margin require --watermark-url",
         ));
     }
@@ -125,7 +124,9 @@ where
         watermark_params.as_ref(),
         command.preset.as_deref(),
     )
-    .map_err(|reason| runtime_error(EXIT_TRANSFORM, &reason))?;
+    // Clap has already refused a base URL that is not http(s), so what is left here is the
+    // signer failing on its own: a runtime fault (5), not a transform one (4).
+    .map_err(|reason| runtime_error(EXIT_RUNTIME, &reason))?;
 
     writeln!(stdout, "{url}").map_err(|error| {
         runtime_error(EXIT_RUNTIME, &format!("failed to write output: {error}"))
@@ -183,7 +184,7 @@ mod tests {
         )
         .expect_err("watermark position without URL should fail");
 
-        assert_eq!(error.exit_code, super::EXIT_USAGE);
+        assert_eq!(error.exit_code, crate::adapters::cli::EXIT_USAGE);
         assert!(error.message.contains("require --watermark-url"));
     }
 

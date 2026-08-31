@@ -1,4 +1,5 @@
 use crate::TransformError;
+use crate::core::error_class::ErrorClass;
 use serde_json::json;
 use std::io::{self, Write};
 use std::net::TcpStream;
@@ -259,77 +260,18 @@ pub(super) fn push_warning_headers(headers: &mut Vec<(String, String)>, warnings
     }
 }
 
-/// Where the problem types are described. Each [`ProblemType`] is an anchor on this page.
+/// Where the problem types are described. Each [`ErrorClass`] is an anchor on this page.
 pub(super) const PROBLEM_TYPES_URL: &str =
     "https://github.com/nao1215/truss/blob/main/docs/problems.md";
 
-/// A class of failure, the way RFC 9457 names one: `type` is a URI identifying the class,
-/// `title` is its fixed short name, and `detail` describes the one occurrence.
+/// How RFC 9457 names a failure: `type` is a URI identifying the class, `title` is its fixed
+/// short name, and `detail` describes the one occurrence. The class itself is
+/// [`ErrorClass`], which the CLI and the Wasm adapter read from the same table, so a client
+/// sees one classification whichever adapter it talks to.
 ///
-/// The transform classes are the `TransformError` variants under the names the Wasm package
-/// reports as `kind`, so a client sees one classification whichever adapter it talks to; the
-/// rest are the server's own. A variant added here needs its row in `docs/problems.md`, which
-/// is what the `type` URI resolves to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum ProblemType {
-    /// The request itself could not be understood: a malformed body, query, or header.
-    InvalidRequest,
-    InvalidOptions,
-    InvalidInput,
-    DecodeFailed,
-    /// The request's own media type, as opposed to the image's: a body that is not JSON
-    /// where JSON is required, or a multipart part of the wrong kind.
-    UnsupportedMediaType,
-    UnsupportedInputMediaType,
-    UnsupportedOutputMediaType,
-    EncodeFailed,
-    CapabilityMissing,
-    LimitExceeded,
-    Unauthorized,
-    Forbidden,
-    NotFound,
-    NotAcceptable,
-    RequestTimeout,
-    PayloadTooLarge,
-    UnprocessableEntity,
-    TooManyRequests,
-    InternalError,
-    NotImplemented,
-    BadGateway,
-    ServiceUnavailable,
-    LoopDetected,
-}
-
-impl ProblemType {
-    /// The anchor on the problem types page, which is also the class's name in the docs.
-    pub(super) const fn slug(self) -> &'static str {
-        match self {
-            Self::InvalidRequest => "invalid-request",
-            Self::InvalidOptions => "invalid-options",
-            Self::InvalidInput => "invalid-input",
-            Self::DecodeFailed => "decode-failed",
-            Self::UnsupportedMediaType => "unsupported-media-type",
-            Self::UnsupportedInputMediaType => "unsupported-input-media-type",
-            Self::UnsupportedOutputMediaType => "unsupported-output-media-type",
-            Self::EncodeFailed => "encode-failed",
-            Self::CapabilityMissing => "capability-missing",
-            Self::LimitExceeded => "limit-exceeded",
-            Self::Unauthorized => "unauthorized",
-            Self::Forbidden => "forbidden",
-            Self::NotFound => "not-found",
-            Self::NotAcceptable => "not-acceptable",
-            Self::RequestTimeout => "request-timeout",
-            Self::PayloadTooLarge => "payload-too-large",
-            Self::UnprocessableEntity => "unprocessable-entity",
-            Self::TooManyRequests => "too-many-requests",
-            Self::InternalError => "internal-error",
-            Self::NotImplemented => "not-implemented",
-            Self::BadGateway => "bad-gateway",
-            Self::ServiceUnavailable => "service-unavailable",
-            Self::LoopDetected => "loop-detected",
-        }
-    }
-
+/// A class added to [`ErrorClass`] needs its row in `docs/problems.md`, which is what the
+/// `type` URI resolves to, and its `title` below.
+impl ErrorClass {
     /// The fixed `title` of the class. RFC 9457 asks that it not change from one occurrence
     /// to the next, so nothing about the request goes in here; that is what `detail` is for.
     pub(super) const fn title(self) -> &'static str {
@@ -367,34 +309,34 @@ impl ProblemType {
 }
 
 pub(super) fn bad_request_response(message: &str) -> HttpResponse {
-    problem_response("400 Bad Request", 400, ProblemType::InvalidRequest, message)
+    problem_response("400 Bad Request", 400, ErrorClass::InvalidRequest, message)
 }
 
 pub(super) fn auth_required_response(message: &str) -> HttpResponse {
     HttpResponse::problem_with_headers(
         "401 Unauthorized",
         vec![("WWW-Authenticate".to_string(), "Bearer".to_string())],
-        problem_detail_body(ProblemType::Unauthorized, 401, message),
+        problem_detail_body(ErrorClass::Unauthorized, 401, message),
     )
 }
 
 pub(super) fn signed_url_unauthorized_response(message: &str) -> HttpResponse {
-    problem_response("401 Unauthorized", 401, ProblemType::Unauthorized, message)
+    problem_response("401 Unauthorized", 401, ErrorClass::Unauthorized, message)
 }
 
 pub(super) fn not_found_response(message: &str) -> HttpResponse {
-    problem_response("404 Not Found", 404, ProblemType::NotFound, message)
+    problem_response("404 Not Found", 404, ErrorClass::NotFound, message)
 }
 
 pub(super) fn forbidden_response(message: &str) -> HttpResponse {
-    problem_response("403 Forbidden", 403, ProblemType::Forbidden, message)
+    problem_response("403 Forbidden", 403, ErrorClass::Forbidden, message)
 }
 
 pub(super) fn unsupported_media_type_response(message: &str) -> HttpResponse {
     problem_response(
         "415 Unsupported Media Type",
         415,
-        ProblemType::UnsupportedMediaType,
+        ErrorClass::UnsupportedMediaType,
         message,
     )
 }
@@ -403,7 +345,7 @@ pub(super) fn not_acceptable_response(message: &str) -> HttpResponse {
     problem_response(
         "406 Not Acceptable",
         406,
-        ProblemType::NotAcceptable,
+        ErrorClass::NotAcceptable,
         message,
     )
 }
@@ -412,7 +354,7 @@ pub(super) fn unprocessable_entity_response(message: &str) -> HttpResponse {
     problem_response(
         "422 Unprocessable Entity",
         422,
-        ProblemType::UnprocessableEntity,
+        ErrorClass::UnprocessableEntity,
         message,
     )
 }
@@ -421,7 +363,7 @@ pub(super) fn payload_too_large_response(message: &str) -> HttpResponse {
     problem_response(
         "413 Payload Too Large",
         413,
-        ProblemType::PayloadTooLarge,
+        ErrorClass::PayloadTooLarge,
         message,
     )
 }
@@ -430,7 +372,7 @@ pub(super) fn request_timeout_response(message: &str) -> HttpResponse {
     problem_response(
         "408 Request Timeout",
         408,
-        ProblemType::RequestTimeout,
+        ErrorClass::RequestTimeout,
         message,
     )
 }
@@ -439,20 +381,20 @@ pub(super) fn internal_error_response(message: &str) -> HttpResponse {
     problem_response(
         "500 Internal Server Error",
         500,
-        ProblemType::InternalError,
+        ErrorClass::InternalError,
         message,
     )
 }
 
 pub(super) fn bad_gateway_response(message: &str) -> HttpResponse {
-    problem_response("502 Bad Gateway", 502, ProblemType::BadGateway, message)
+    problem_response("502 Bad Gateway", 502, ErrorClass::BadGateway, message)
 }
 
 pub(super) fn service_unavailable_response(message: &str) -> HttpResponse {
     problem_response(
         "503 Service Unavailable",
         503,
-        ProblemType::ServiceUnavailable,
+        ErrorClass::ServiceUnavailable,
         message,
     )
 }
@@ -461,7 +403,7 @@ pub(super) fn too_many_requests_response(message: &str) -> HttpResponse {
     let mut resp = problem_response(
         "429 Too Many Requests",
         429,
-        ProblemType::TooManyRequests,
+        ErrorClass::TooManyRequests,
         message,
     );
     // RFC 6585 §4: include Retry-After so well-behaved clients back off.
@@ -471,14 +413,14 @@ pub(super) fn too_many_requests_response(message: &str) -> HttpResponse {
 }
 
 pub(super) fn too_many_redirects_response(message: &str) -> HttpResponse {
-    problem_response("508 Loop Detected", 508, ProblemType::LoopDetected, message)
+    problem_response("508 Loop Detected", 508, ErrorClass::LoopDetected, message)
 }
 
 pub(super) fn not_implemented_response(message: &str) -> HttpResponse {
     problem_response(
         "501 Not Implemented",
         501,
-        ProblemType::NotImplemented,
+        ErrorClass::NotImplemented,
         message,
     )
 }
@@ -492,14 +434,14 @@ pub(super) fn not_implemented_response(message: &str) -> HttpResponse {
 pub(super) fn problem_response(
     status: &'static str,
     status_code: u16,
-    kind: ProblemType,
+    kind: ErrorClass,
     detail: &str,
 ) -> HttpResponse {
     HttpResponse::problem(status, problem_detail_body(kind, status_code, detail))
 }
 
 /// Serializes an RFC 9457 Problem Details JSON body.
-pub(super) fn problem_detail_body(kind: ProblemType, status: u16, detail: &str) -> Vec<u8> {
+pub(super) fn problem_detail_body(kind: ErrorClass, status: u16, detail: &str) -> Vec<u8> {
     let mut body = serde_json::to_vec(&json!({
         "type": kind.uri(),
         "title": kind.title(),
@@ -511,52 +453,32 @@ pub(super) fn problem_detail_body(kind: ProblemType, status: u16, detail: &str) 
     body
 }
 
-/// Maps a transform failure onto the status and problem type that name it.
+/// Maps a transform failure onto the status and detail that present it.
 ///
-/// The classes are the ones `@nao1215/truss-wasm` reports as `kind`, so the two adapters
-/// classify a failure the same way; the statuses are unchanged from what each class always got.
+/// The class comes from [`TransformError::class`], the one table the CLI and
+/// `@nao1215/truss-wasm` also read, so the three adapters name a failure the same way. Only
+/// the status and the wording of `detail` are the server's own.
 pub(super) fn transform_error_response(error: TransformError) -> HttpResponse {
-    match error {
-        TransformError::InvalidOptions(reason) => {
-            problem_response("400 Bad Request", 400, ProblemType::InvalidOptions, &reason)
+    let class = error.class();
+    let (status_line, status, detail) = match error {
+        TransformError::InvalidOptions(reason) => ("400 Bad Request", 400, reason),
+        TransformError::InvalidInput(reason) => ("400 Bad Request", 400, reason),
+        TransformError::DecodeFailed(reason) => ("400 Bad Request", 400, reason),
+        TransformError::UnsupportedInputMediaType(reason) => {
+            ("415 Unsupported Media Type", 415, reason)
         }
-        TransformError::InvalidInput(reason) => {
-            problem_response("400 Bad Request", 400, ProblemType::InvalidInput, &reason)
+        ref error @ TransformError::UnsupportedOutputMediaType(_) => {
+            ("415 Unsupported Media Type", 415, error.to_string())
         }
-        TransformError::DecodeFailed(reason) => {
-            problem_response("400 Bad Request", 400, ProblemType::DecodeFailed, &reason)
-        }
-        TransformError::UnsupportedInputMediaType(reason) => problem_response(
-            "415 Unsupported Media Type",
-            415,
-            ProblemType::UnsupportedInputMediaType,
-            &reason,
-        ),
-        ref error @ TransformError::UnsupportedOutputMediaType(_) => problem_response(
-            "415 Unsupported Media Type",
-            415,
-            ProblemType::UnsupportedOutputMediaType,
-            &error.to_string(),
-        ),
-        TransformError::EncodeFailed(reason) => problem_response(
+        TransformError::EncodeFailed(reason) => (
             "500 Internal Server Error",
             500,
-            ProblemType::EncodeFailed,
-            &format!("failed to encode transformed artifact: {reason}"),
+            format!("failed to encode transformed artifact: {reason}"),
         ),
-        TransformError::CapabilityMissing(reason) => problem_response(
-            "501 Not Implemented",
-            501,
-            ProblemType::CapabilityMissing,
-            &reason,
-        ),
-        TransformError::LimitExceeded(reason) => problem_response(
-            "413 Payload Too Large",
-            413,
-            ProblemType::LimitExceeded,
-            &reason,
-        ),
-    }
+        TransformError::CapabilityMissing(reason) => ("501 Not Implemented", 501, reason),
+        TransformError::LimitExceeded(reason) => ("413 Payload Too Large", 413, reason),
+    };
+    problem_response(status_line, status, class, &detail)
 }
 
 pub(super) fn map_source_io_error(error: io::Error) -> HttpResponse {
@@ -583,7 +505,7 @@ mod tests {
 
     #[test]
     fn test_problem_detail_body_contains_required_fields() {
-        let body = problem_detail_body(ProblemType::NotFound, 404, "resource missing");
+        let body = problem_detail_body(ErrorClass::NotFound, 404, "resource missing");
         let v: Value = serde_json::from_slice(&body).expect("valid JSON");
 
         assert_eq!(v["type"], format!("{PROBLEM_TYPES_URL}#not-found"));
@@ -594,14 +516,14 @@ mod tests {
 
     #[test]
     fn test_problem_detail_body_ends_with_newline() {
-        let body = problem_detail_body(ProblemType::InternalError, 500, "boom");
+        let body = problem_detail_body(ErrorClass::InternalError, 500, "boom");
         assert_eq!(*body.last().unwrap(), b'\n');
     }
 
     #[test]
     fn test_problem_detail_body_special_characters_in_detail() {
         let body = problem_detail_body(
-            ProblemType::InvalidRequest,
+            ErrorClass::InvalidRequest,
             400,
             "invalid <script>alert(1)</script>",
         );
@@ -1115,8 +1037,8 @@ mod tests {
         }
     }
 
-    /// The transform classes are the ones the Wasm package reports as `kind`, one per
-    /// variant, so the two adapters classify a failure the same way.
+    /// The transform classes are the ones the CLI prints and the Wasm package reports as
+    /// `kind`, one per variant, so the three adapters classify a failure the same way.
     #[test]
     fn transform_errors_map_onto_their_own_problem_types() {
         let cases = vec![
@@ -1163,6 +1085,9 @@ mod tests {
         ];
 
         for (error, slug, status) in cases {
+            // The `type` is the class the error itself carries, not a second table the
+            // server keeps: the CLI and the Wasm adapter read the same one.
+            assert_eq!(error.class().slug(), slug, "{slug}");
             let resp = transform_error_response(error);
             assert_eq!(resp.status, status, "{slug}");
             let v = parse_body(&resp);

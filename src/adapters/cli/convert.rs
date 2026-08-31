@@ -3,9 +3,11 @@ use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
+use crate::core::error_class::ErrorClass;
+
 use super::{
-    ClapConvertArgs, ClapOptimizeArgs, CliError, Command, ConvertCommand, EXIT_INPUT, EXIT_IO,
-    EXIT_RUNTIME, EXIT_USAGE, HelpTopic, InputSource, OutputTarget, TransformFields, convert_error,
+    ClapConvertArgs, ClapOptimizeArgs, CliError, Command, ConvertCommand, EXIT_IO, EXIT_RUNTIME,
+    EXIT_USAGE, HelpTopic, InputSource, OutputTarget, TransformFields, convert_error,
     convert_usage, map_transform_error, optimize_error, optimize_usage, read_input_bytes,
     runtime_error, validate_url,
 };
@@ -29,6 +31,7 @@ pub(super) fn convert_from_clap(args: ClapConvertArgs) -> Result<Command, CliErr
         (None, None) => {
             return Err(CliError {
                 exit_code: EXIT_USAGE,
+                class: ErrorClass::InvalidRequest,
                 message: "'convert' requires an input file, URL, or -".to_string(),
                 usage: Some(convert_usage().to_string()),
                 hint: Some("try 'truss convert input.png -o output.jpg'".to_string()),
@@ -45,6 +48,7 @@ pub(super) fn convert_from_clap(args: ClapConvertArgs) -> Result<Command, CliErr
         None => {
             return Err(CliError {
                 exit_code: EXIT_USAGE,
+                class: ErrorClass::InvalidRequest,
                 message: "'convert' requires -o <output>".to_string(),
                 usage: Some(convert_usage().to_string()),
                 hint: Some("try 'truss convert input.png -o output.jpg'".to_string()),
@@ -64,6 +68,7 @@ pub(super) fn convert_from_clap(args: ClapConvertArgs) -> Result<Command, CliErr
     {
         return Err(CliError {
             exit_code: EXIT_USAGE,
+            class: ErrorClass::InvalidRequest,
             message: "--watermark-position, --watermark-opacity, and --watermark-margin require --watermark".to_string(),
             usage: Some(convert_usage().to_string()),
             hint: Some("provide --watermark <path> when using watermark options".to_string()),
@@ -124,6 +129,7 @@ pub(super) fn optimize_from_clap(args: ClapOptimizeArgs) -> Result<Command, CliE
         (None, None) => {
             return Err(CliError {
                 exit_code: EXIT_USAGE,
+                class: ErrorClass::InvalidRequest,
                 message: "'optimize' requires an input file, URL, or -".to_string(),
                 usage: Some(optimize_usage().to_string()),
                 hint: Some("try 'truss optimize input.jpg -o output.jpg'".to_string()),
@@ -140,6 +146,7 @@ pub(super) fn optimize_from_clap(args: ClapOptimizeArgs) -> Result<Command, CliE
         None => {
             return Err(CliError {
                 exit_code: EXIT_USAGE,
+                class: ErrorClass::InvalidRequest,
                 message: "'optimize' requires -o <output>".to_string(),
                 usage: Some(optimize_usage().to_string()),
                 hint: Some("try 'truss optimize input.jpg -o output.jpg'".to_string()),
@@ -201,8 +208,10 @@ where
     W: Write,
 {
     let bytes = read_input_bytes(command.input, stdin)?;
-    let input = sniff_artifact(RawArtifact::new(bytes, None))
-        .map_err(|error| runtime_error(EXIT_INPUT, &error.to_string()))?;
+    // The sniff fails with the same classes the transform does, so it reports them the
+    // same way: `decode-failed` is exit 4 here as it is there, not exit 3 because this
+    // call site happens to come first.
+    let input = sniff_artifact(RawArtifact::new(bytes, None)).map_err(map_transform_error)?;
 
     let mut options = command.options;
     if options.format.is_none() {
@@ -220,13 +229,13 @@ where
             )
         })?;
         let wm_artifact = sniff_artifact(RawArtifact::new(wm_bytes, None)).map_err(|error| {
-            runtime_error(
-                EXIT_INPUT,
-                &format!(
-                    "failed to decode watermark '{}': {error}",
-                    wm_path.display()
-                ),
-            )
+            let mut failure = map_transform_error(error);
+            failure.message = format!(
+                "failed to decode watermark '{}': {}",
+                wm_path.display(),
+                failure.message
+            );
+            failure
         })?;
         Some(WatermarkInput {
             image: wm_artifact,

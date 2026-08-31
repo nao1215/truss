@@ -3,9 +3,12 @@ use serde::Serialize;
 use std::io::{Read, Write};
 use std::path::PathBuf;
 
+use crate::core::error_class::ErrorClass;
+
 use super::{
-    ClapInspectArgs, CliError, Command, EXIT_INPUT, EXIT_RUNTIME, EXIT_USAGE, HelpTopic,
-    InputSource, InspectCommand, inspect_usage, read_input_bytes, runtime_error, validate_url,
+    ClapInspectArgs, CliError, Command, EXIT_RUNTIME, EXIT_USAGE, HelpTopic, InputSource,
+    InspectCommand, inspect_usage, map_transform_error, read_input_bytes, runtime_error,
+    validate_url,
 };
 
 // ---------------------------------------------------------------------------
@@ -27,6 +30,7 @@ pub(super) fn inspect_from_clap(args: ClapInspectArgs) -> Result<Command, CliErr
         (None, None) => {
             return Err(CliError {
                 exit_code: EXIT_USAGE,
+                class: ErrorClass::InvalidRequest,
                 message: "'inspect' requires an input file, URL, or -".to_string(),
                 usage: Some(inspect_usage().to_string()),
                 hint: Some(
@@ -38,6 +42,7 @@ pub(super) fn inspect_from_clap(args: ClapInspectArgs) -> Result<Command, CliErr
         (Some(_), Some(_)) => {
             return Err(CliError {
                 exit_code: EXIT_USAGE,
+                class: ErrorClass::InvalidRequest,
                 message: "'inspect' accepts exactly one input".to_string(),
                 usage: Some(inspect_usage().to_string()),
                 hint: Some("run 'truss inspect --help' for inspect options".to_string()),
@@ -62,8 +67,9 @@ where
     W: Write,
 {
     let bytes = read_input_bytes(command.input, stdin)?;
-    let artifact = sniff_artifact(RawArtifact::new(bytes, None))
-        .map_err(|error| runtime_error(EXIT_INPUT, &error.to_string()))?;
+    // `inspect` reads the artifact the same way `convert` does, so it reports a failure
+    // with the same class and the same exit code.
+    let artifact = sniff_artifact(RawArtifact::new(bytes, None)).map_err(map_transform_error)?;
     let json = render_inspection_json(&artifact);
 
     stdout.write_all(json.as_bytes()).map_err(|error| {

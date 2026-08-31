@@ -385,7 +385,15 @@ type WasmErrorPayload = {
 };
 ```
 
-Typical cases:
+The `kind` is the camelCase spelling of the failure's class, and the class is the same one the
+HTTP server names in its RFC 9457 `type` and the CLI prints in parentheses after its message.
+`kebab-case` in [problems.md](problems.md), `camelCase` here: `invalid-options` is
+`invalidOptions`, `unsupported-input-media-type` is `unsupportedInputMediaType`. An app that
+talks to a truss server and runs this package in the browser branches on one classification,
+and [problems.md](problems.md) describes each class once for both.
+
+The eight above are all of them: the browser reaches only the classes a transform can fail
+with, never the server's own.
 
 | `kind` | Meaning |
 |------|------|

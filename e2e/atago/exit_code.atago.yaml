@@ -9,6 +9,12 @@
 #   4  Transform error (encode failure, size limit exceeded, deadline)
 #   5  Runtime error (bind failure, stdout write failure)
 #
+# Every message also names the class of the failure in parentheses, one of the slugs in
+# docs/problems.md, which is the same class the HTTP server puts in its RFC 9457 `type` and
+# @nao1215/truss-wasm reports as `kind`. The scenarios below assert the class alongside the
+# exit code, because the exit code alone is coarser: exit 1 is both a command line that does
+# not parse (invalid-request) and transform options the pipeline refuses (invalid-options).
+#
 # Code 5 has no scenario here: producing a failing stdout portably would mean a full
 # filesystem or a closed pipe, neither of which a spec can arrange on all three
 # platforms. It is covered by unit tests instead.
@@ -61,7 +67,9 @@ scenarios:
       - assert:
           exit_code: 1
           stderr:
-            contains: "error:"
+            contains:
+              - "error:"
+              - "(invalid-request)"
 
   - name: "exit 1: inspect has no input"
     steps:
@@ -97,7 +105,10 @@ scenarios:
       - assert:
           exit_code: 2
           stderr:
-            contains: "error:"
+            contains:
+              - "error:"
+              # A source that is not there is the class the server answers 404 with.
+              - "(not-found)"
 
   - name: "exit 3: corrupt image data"
     steps:
@@ -118,7 +129,9 @@ scenarios:
       - assert:
           exit_code: 3
           stderr:
-            contains: "error:"
+            contains:
+              - "error:"
+              - "(unsupported-input-media-type)"
 
   - name: "exit 3: random binary data"
     steps:
@@ -136,4 +149,43 @@ scenarios:
       - assert:
           exit_code: 4
           stderr:
-            contains: "error:"
+            contains:
+              - "error:"
+              - "(decode-failed)"
+
+  # Exit 1 covers two classes, and the class is what tells them apart: a command line that
+  # does not parse is invalid-request, options the pipeline refuses are invalid-options.
+  - name: "exit 1: transform options the pipeline refuses"
+    steps:
+      - run:
+          command: truss convert "${fixtures}/sample.png" -o out.png --width 10 --fit cover
+      - assert:
+          exit_code: 1
+          stderr:
+            contains:
+              - "fit requires both width and height"
+              - "(invalid-options)"
+
+  # An animated GIF is readable but not transformable, which is a different class from a
+  # file truss cannot decode at all, and a different exit code.
+  - name: "exit 3: an input truss reads but cannot transform"
+    steps:
+      - run:
+          command: truss convert "${fixtures}/animated.gif" -o out.png
+      - assert:
+          exit_code: 3
+          stderr:
+            contains:
+              - "animated GIF is not supported"
+              - "(unsupported-input-media-type)"
+
+  - name: "exit 4: an output larger than the pixel budget"
+    steps:
+      - run:
+          command: truss convert "${fixtures}/1px.png" -o huge.png --width 20000 --height 20000
+      - assert:
+          exit_code: 4
+          stderr:
+            contains:
+              - "limit is 67108864"
+              - "(limit-exceeded)"

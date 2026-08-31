@@ -20,102 +20,134 @@ Every error the HTTP server returns is an RFC 9457 problem details body, `applic
 }
 ```
 
-The transform classes carry the same names `@nao1215/truss-wasm` reports as `kind`, in kebab case, so a client that talks to the server and runs the package in the browser sees one classification. The CLI maps the same classes onto its exit codes: 1 for the request and the options, 3 for the input, 4 for the transform.
+## One class, three spellings
+
+The class is the same failure whichever adapter reports it, so the three adapters spell one name three ways and truss reads all three from one table. The server puts the slug in `type`. `@nao1215/truss-wasm` reports the slug in camel case as `kind`. The CLI prints the slug in parentheses after its message, `error: fit requires both width and height (invalid-options)`, and exits with the code below.
+
+A dash means the adapter cannot reach the class: the CLI has no `Accept` header to refuse and no rate limit, and the Wasm adapter runs no server, so only the transform classes reach the browser.
+
+| Class | CLI exit code | HTTP status | Wasm `kind` |
+|---|---|---|---|
+| [invalid-options](#invalid-options) | 1 | 400 | `invalidOptions` |
+| [invalid-input](#invalid-input) | 3 | 400 | `invalidInput` |
+| [decode-failed](#decode-failed) | 4 | 400 | `decodeFailed` |
+| [unsupported-input-media-type](#unsupported-input-media-type) | 3 | 415 | `unsupportedInputMediaType` |
+| [unsupported-output-media-type](#unsupported-output-media-type) | 4 | 415 | `unsupportedOutputMediaType` |
+| [encode-failed](#encode-failed) | 4 | 500 | `encodeFailed` |
+| [capability-missing](#capability-missing) | 4 | 501 | `capabilityMissing` |
+| [limit-exceeded](#limit-exceeded) | 4 | 413 | `limitExceeded` |
+| [invalid-request](#invalid-request) | 1 | 400 | — |
+| [unsupported-media-type](#unsupported-media-type) | — | 415 | — |
+| [unauthorized](#unauthorized) | — | 401 | — |
+| [forbidden](#forbidden) | — | 403 | — |
+| [not-found](#not-found) | 2 | 404 | — |
+| [not-acceptable](#not-acceptable) | — | 406 | — |
+| [request-timeout](#request-timeout) | — | 408 | — |
+| [payload-too-large](#payload-too-large) | — | 413 | — |
+| [unprocessable-entity](#unprocessable-entity) | — | 422 | — |
+| [too-many-requests](#too-many-requests) | — | 429 | — |
+| [internal-error](#internal-error) | 2 or 5 | 500 | — |
+| [not-implemented](#not-implemented) | — | 501 | — |
+| [bad-gateway](#bad-gateway) | 2 | 502 | — |
+| [service-unavailable](#service-unavailable) | — | 503 | — |
+| [loop-detected](#loop-detected) | — | 508 | — |
+
+The CLI's five exit codes are coarser than the classes, so a class determines an exit code but an exit code does not determine a class. `internal-error` is the one class on two of them: the CLI separates a fault while reading or writing (2) from one after that (5), and both are the same class to the server.
 
 ## Transform classes
 
 ### invalid-options
 
-Status 400. The transform options are not a request the pipeline can carry out: a `fit` without both `width` and `height`, a `quality` on a lossless format, a `crop` outside the picture, an SVG passthrough that also asks for a different picture. The Wasm package reports it as `invalidOptions`; the CLI exits 1.
+The transform options are not a request the pipeline can carry out: a `fit` without both `width` and `height`, a `quality` on a lossless format, a `crop` outside the picture, an SVG passthrough that also asks for a different picture.
 
 ### invalid-input
 
-Status 400. The input bytes were recognised but are not what was declared, such as a `declaredMediaType` that does not match the file's signature. Wasm `invalidInput`; CLI exit 3.
+The input bytes were recognised but are not what was declared, such as a `declaredMediaType` that does not match the file's signature.
 
 ### decode-failed
 
-Status 400. The input is a supported format but could not be decoded: a truncated file, a corrupt container, a clean aperture that does not fall on whole pixels. Wasm `decodeFailed`; CLI exit 4.
+The input is a supported format but could not be decoded: a truncated file, a corrupt container, a clean aperture that does not fall on whole pixels. The CLI reports it as a transform failure wherever it is raised, including the media sniff that runs before the transform.
 
 ### unsupported-input-media-type
 
-Status 415. The input is not a format the server decodes, or is one it decodes only in part, such as an animated GIF. Wasm `unsupportedInputMediaType`; CLI exit 3.
+The input is not a format truss decodes, or is one it decodes only in part, such as an animated GIF.
 
 ### unsupported-output-media-type
 
-Status 415. The requested `format` is not one the server encodes, such as `gif`, or is not valid for this input, such as `svg` for a raster picture. Wasm `unsupportedOutputMediaType`; CLI exit 4.
+The requested `format` is not one truss encodes, such as `gif`, or is not valid for this input, such as `svg` for a raster picture.
 
 ### encode-failed
 
-Status 500. The transform ran but the output could not be encoded. Wasm `encodeFailed`; CLI exit 4.
+The transform ran but the output could not be encoded.
 
 ### capability-missing
 
-Status 501. The request needs a codec or feature this build was compiled without, such as lossy WebP or AVIF. Wasm `capabilityMissing`; CLI exit 4.
+The request needs a codec or feature this build was compiled without, such as lossy WebP or AVIF.
 
 ### limit-exceeded
 
-Status 413. The transform would exceed a pixel, size, or time limit of the pipeline: an output larger than the output pixel budget, a rotation whose canvas would be, a watermark that does not fit. Wasm `limitExceeded`; CLI exit 4. The server's own limits on what it accepts are `payload-too-large` and `unprocessable-entity`.
+The transform would exceed a pixel, size, or time limit of the pipeline: an output larger than the output pixel budget, a rotation whose canvas would be, a watermark that does not fit. The server's own limits on what it accepts are `payload-too-large` and `unprocessable-entity`.
 
 ## Request classes
 
 ### invalid-request
 
-Status 400. The request could not be understood before the transform was considered: a body that is not valid JSON, a missing required parameter, a query value that does not parse, a source of an unknown kind.
+The request could not be understood before the transform was considered: a body that is not valid JSON, a missing required parameter, a query value that does not parse, a source of an unknown kind. On the CLI it is the command line that could not be understood: an unknown subcommand, a missing flag, a value clap refuses.
 
 ### unsupported-media-type
 
-Status 415. The request's own media type, as opposed to the image's: a `Content-Type` other than `application/json` on the JSON endpoint, or a multipart part of the wrong kind.
+The request's own media type, as opposed to the image's: a `Content-Type` other than `application/json` on the JSON endpoint, or a multipart part of the wrong kind.
 
 ### unauthorized
 
-Status 401. The bearer token is missing or wrong, or the signed URL's signature, key id, or expiry does not verify. The bearer endpoints also send `WWW-Authenticate: Bearer`.
+The bearer token is missing or wrong, or the signed URL's signature, key id, or expiry does not verify. The bearer endpoints also send `WWW-Authenticate: Bearer`.
 
 ### forbidden
 
-Status 403. The credentials verified but do not allow this request, such as a source outside the storage root or a URL source the server's policy refuses.
+The credentials verified but do not allow this request, such as a source outside the storage root or a URL source the server's policy refuses.
 
 ### not-found
 
-Status 404. The source the request named does not exist. A route that does not exist also answers 404, with `type` `about:blank`.
+The source the request named does not exist, which on the CLI is an input file that is not there. A route that does not exist also answers 404, with `type` `about:blank`.
 
 ### not-acceptable
 
-Status 406. The `Accept` header allows none of the output formats the server can produce.
+The `Accept` header allows none of the output formats the server can produce.
 
 ### request-timeout
 
-Status 408. The client stopped sending before the request line, headers, or body were complete.
+The client stopped sending before the request line, headers, or body were complete.
 
 ### payload-too-large
 
-Status 413. The request, its headers, its body, or the source it named is larger than the server accepts (`TRUSS_MAX_UPLOAD_BYTES`, `TRUSS_MAX_SOURCE_BYTES`, and the header limits).
+The request, its headers, its body, or the source it named is larger than the server accepts (`TRUSS_MAX_UPLOAD_BYTES`, `TRUSS_MAX_SOURCE_BYTES`, and the header limits).
 
 ### unprocessable-entity
 
-Status 422. The input was read but exceeds what the server will process, such as `TRUSS_MAX_INPUT_PIXELS`.
+The input was read but exceeds what the server will process, such as `TRUSS_MAX_INPUT_PIXELS`.
 
 ### too-many-requests
 
-Status 429. The rate limit for the client's address was reached. `Retry-After` says when to try again.
+The rate limit for the client's address was reached. `Retry-After` says when to try again.
 
 ## Server classes
 
 ### internal-error
 
-Status 500. The server failed in a way that is not the request's doing, such as a source it could not read.
+truss failed in a way that is not the request's doing, such as a source it could not read. On the CLI this is every I/O fault other than a missing source or a refused fetch (exit 2), and every fault after the input is read: a port already in use, a standard output that cannot be written (exit 5).
 
 ### not-implemented
 
-Status 501. The request names something the server knows of but does not do, such as a storage backend this binary was built without.
+The request names something the server knows of but does not do, such as a storage backend this binary was built without.
 
 ### bad-gateway
 
-Status 502. A remote source or storage backend answered with an error, timed out, or could not be reached, including an upstream 401 that means the server's own credentials are wrong.
+A remote source or storage backend answered with an error, timed out, or could not be reached, including an upstream 401 that means the server's own credentials are wrong. On the CLI it is a `--url` input the remote end did not deliver.
 
 ### service-unavailable
 
-Status 503. The server is draining for shutdown, has no free transform slot, or failed its readiness check.
+The server is draining for shutdown, has no free transform slot, or failed its readiness check.
 
 ### loop-detected
 
-Status 508. A remote source redirected more times than `TRUSS_MAX_REMOTE_REDIRECTS` allows.
+A remote source redirected more times than `TRUSS_MAX_REMOTE_REDIRECTS` allows.
