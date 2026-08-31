@@ -1642,6 +1642,16 @@ components:
           description: Seconds since the response was cached (only on cache hits)
           schema:
             type: integer
+        Truss-Warning:
+          description: |
+            One header per transform warning: a result that is not quite what was asked
+            for, such as an EXIF orientation dropped with `autoOrient=false`, a
+            `targetQuality` the encode could not reach, or metadata the output format
+            cannot carry. The text is the same the CLI prints after `warning:` and the Wasm
+            package returns in `warnings`. A cache hit repeats the headers the original
+            transform produced; a 304 carries none.
+          schema:
+            type: string
         X-Content-Type-Options:
           description: Always set to `nosniff`
           schema:

@@ -361,3 +361,80 @@ fn walk_files(root: &std::path::Path) -> usize {
         })
         .sum()
 }
+
+/// A warning the transform raises rides on the response as a `Truss-Warning` header, on the
+/// miss that produced it and on the hit that replays the entry, and is absent when there
+/// is nothing to warn about. The fixture carries EXIF orientation 6, and `autoOrient=false`
+/// with the default strip is the combination that drops it.
+#[test]
+fn serve_once_carries_transform_warnings_as_headers_on_miss_and_hit() {
+    let storage_root = temp_dir("warning-header");
+    fs::write(
+        storage_root.join("tagged.jpg"),
+        include_bytes!("../integration/fixtures/exif-rotated.jpg"),
+    )
+    .expect("write source fixture");
+    let cache_root = temp_dir("warning-header-cache");
+    let config = ServerConfig::new(storage_root, Some("secret".to_string()))
+        .with_signed_url_credentials("public-dev", "secret-value")
+        .with_cache_root(cache_root);
+    let params = |auto_orient: Option<&str>| {
+        let mut params = BTreeMap::from([
+            ("path".to_string(), "/tagged.jpg".to_string()),
+            ("format".to_string(), "png".to_string()),
+            ("keyId".to_string(), "public-dev".to_string()),
+            ("expires".to_string(), "4102444800".to_string()),
+        ]);
+        if let Some(value) = auto_orient {
+            params.insert("autoOrient".to_string(), value.to_string());
+        }
+        signed_target("/images/by-path", params, "cdn.example.com", "secret-value")
+    };
+    let warning_lines = |header: &str| -> Vec<String> {
+        header
+            .lines()
+            .filter(|line| line.starts_with("Truss-Warning: "))
+            .map(str::to_string)
+            .collect()
+    };
+
+    let dropped = params(Some("false"));
+    let (addr, handle) = spawn_server(config.clone());
+    let first = send_public_get_request(addr, &dropped, "cdn.example.com");
+    handle.join().expect("join").expect("serve");
+    let (first_header, _, _) = split_response(&first);
+    assert!(first_header.contains("Cache-Status: \"truss\"; fwd=miss"));
+    let first_warnings = warning_lines(&first_header);
+    assert_eq!(first_warnings.len(), 1, "{first_header}");
+    assert!(
+        first_warnings[0].contains("EXIF orientation 6"),
+        "{first_warnings:?}"
+    );
+
+    let (addr, handle) = spawn_server(config.clone());
+    let second = send_public_get_request(addr, &dropped, "cdn.example.com");
+    handle.join().expect("join").expect("serve");
+    let (second_header, _, _) = split_response(&second);
+    assert!(
+        second_header.contains("Cache-Status: \"truss\"; hit"),
+        "{second_header}"
+    );
+    assert_eq!(
+        warning_lines(&second_header),
+        first_warnings,
+        "the hit should repeat the warning the miss produced"
+    );
+
+    let (addr, handle) = spawn_server(config);
+    let applied = send_public_get_request(addr, &params(None), "cdn.example.com");
+    handle.join().expect("join").expect("serve");
+    let (applied_header, _, _) = split_response(&applied);
+    assert!(
+        applied_header.starts_with("HTTP/1.1 200"),
+        "{applied_header}"
+    );
+    assert!(
+        warning_lines(&applied_header).is_empty(),
+        "nothing to warn about: {applied_header}"
+    );
+}

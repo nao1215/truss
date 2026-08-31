@@ -229,6 +229,36 @@ fn gzip_compress(data: &[u8], level: u32) -> io::Result<Vec<u8>> {
     encoder.finish()
 }
 
+/// The response header that carries a transform warning, one header per warning.
+///
+/// It is the same text the CLI prints after `warning:` and the Wasm package returns in
+/// `warnings`. The HTTP `Warning` field is deprecated by RFC 9111, and RFC 6648 retired the
+/// `X-` prefix for new fields, which is how the name came to be this one.
+pub(super) const WARNING_HEADER: &str = "Truss-Warning";
+
+/// A warning's text as a header value: one line of visible ASCII.
+///
+/// A header cannot carry a line break, and the cache entry keeps the text on its first
+/// line with a tab between warnings, so a tab, a carriage return, and a newline become a
+/// space, and anything outside visible ASCII becomes `?`. The warnings truss raises are
+/// ASCII already; this is what keeps a future one from breaking the framing.
+pub(super) fn warning_header_value(text: &str) -> String {
+    text.chars()
+        .map(|c| match c {
+            '\t' | '\r' | '\n' => ' ',
+            ' '..='~' => c,
+            _ => '?',
+        })
+        .collect()
+}
+
+/// Appends one [`WARNING_HEADER`] per warning.
+pub(super) fn push_warning_headers(headers: &mut Vec<(String, String)>, warnings: &[String]) {
+    for warning in warnings {
+        headers.push((WARNING_HEADER.to_string(), warning_header_value(warning)));
+    }
+}
+
 /// Where the problem types are described. Each [`ProblemType`] is an anchor on this page.
 pub(super) const PROBLEM_TYPES_URL: &str =
     "https://github.com/nao1215/truss/blob/main/docs/problems.md";
@@ -1146,6 +1176,23 @@ mod tests {
     fn only_the_unknown_route_keeps_about_blank() {
         let v: Value = serde_json::from_str(NOT_FOUND_BODY).expect("valid JSON");
         assert_eq!(v["type"], "about:blank");
+    }
+
+    #[test]
+    fn warning_header_value_is_one_line_of_visible_ascii() {
+        assert_eq!(warning_header_value("plain text"), "plain text");
+        assert_eq!(warning_header_value("a\tb\r\nc"), "a b  c");
+        assert_eq!(warning_header_value("caf\u{e9} \u{7f}"), "caf? ?");
+
+        let mut headers = Vec::new();
+        push_warning_headers(&mut headers, &["one".to_string(), "two".to_string()]);
+        assert_eq!(
+            headers,
+            vec![
+                (WARNING_HEADER.to_string(), "one".to_string()),
+                (WARNING_HEADER.to_string(), "two".to_string()),
+            ]
+        );
     }
 
     #[test]
