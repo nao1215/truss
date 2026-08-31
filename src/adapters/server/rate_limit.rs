@@ -118,9 +118,16 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
+    /// A rate slow enough that nothing refills while a test runs.
+    ///
+    /// The bucket refills from the wall clock, so a test whose subject is the burst has to
+    /// pick a rate at which its own assertions cannot hand a token back. At one token every
+    /// thousand seconds, no scheduling delay a CI runner can produce changes the answer.
+    const NO_REFILL: f64 = 0.001;
+
     #[test]
     fn allows_requests_within_burst() {
-        let limiter = RateLimiter::new(10.0, 5.0);
+        let limiter = RateLimiter::new(NO_REFILL, 5.0);
         let ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
 
         // First 5 requests should be allowed (burst = 5).
@@ -150,7 +157,7 @@ mod tests {
 
     #[test]
     fn independent_per_ip() {
-        let limiter = RateLimiter::new(10.0, 1.0);
+        let limiter = RateLimiter::new(NO_REFILL, 1.0);
         let ip_a = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
         let ip_b = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
 
@@ -163,7 +170,7 @@ mod tests {
 
     #[test]
     fn ipv6_addresses_work() {
-        let limiter = RateLimiter::new(10.0, 1.0);
+        let limiter = RateLimiter::new(NO_REFILL, 1.0);
         let ip = IpAddr::V6(Ipv6Addr::LOCALHOST);
 
         assert!(limiter.check(ip));
@@ -172,17 +179,31 @@ mod tests {
 
     #[test]
     fn tokens_cap_at_burst() {
-        let limiter = RateLimiter::new(1000.0, 3.0);
+        let burst = 3.0;
+        let limiter = RateLimiter::new(1000.0, burst);
         let ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
 
-        // Wait a bit to ensure tokens would exceed burst if uncapped.
+        // Fifty milliseconds at a thousand tokens a second is fifty tokens' worth of
+        // refill, which the cap has to throw away rather than bank. The count is read from
+        // the bucket rather than inferred from a run of calls, because at this rate a call
+        // that arrives a millisecond late is answered from a token that refilled in the
+        // meantime, and the claim here is about the cap rather than about how fast a test
+        // can make four calls.
+        assert!(limiter.check(ip));
         thread::sleep(Duration::from_millis(50));
+        assert!(limiter.check(ip));
 
-        // Should only get 3 (burst cap), not 50+ (rate * elapsed).
-        assert!(limiter.check(ip));
-        assert!(limiter.check(ip));
-        assert!(limiter.check(ip));
-        assert!(!limiter.check(ip));
+        let shard = limiter.shards[shard_index(ip)]
+            .lock()
+            .expect("shard lock is not poisoned");
+        let tokens = shard
+            .get(&ip)
+            .expect("the checks above created the bucket")
+            .tokens;
+        assert!(
+            tokens <= burst - 1.0,
+            "the idle period banked {tokens} tokens over a burst of {burst}"
+        );
     }
 
     #[test]
