@@ -170,6 +170,17 @@ magick -size 40x20 xc:red -fill blue -draw 'rectangle 0,0 9,19' \
 magick -size 40x20 xc:white -fill red -draw 'rectangle 0,0 11,3' -fill blue -draw 'rectangle 0,0 3,11' \
   -alpha off -depth 8 -orient left-top "$DIR/imir-transposed-5.avif"
 
+echo "[8d/14] deep-10bit.avif / deep-12bit.avif — high bit depth AVIF with saturated samples"
+# The image crate writes 8-bit AVIF only, so nothing in the test suite reached the 10/12-bit
+# decode path until these. A blue left half, a red right half, and a white bar along the
+# top put a sample at the top of its range in U, in V, and in Y, which is what rounded past
+# 8 bits and wrapped to zero. The 8-bit baseline of the same picture lives in
+# e2e/atago/testdata/deep-avif.png.
+for depth in 10 12; do
+  magick -size 40x20 xc:red -fill blue -draw 'rectangle 0,0 19,19' -fill white -draw 'rectangle 0,0 39,3' \
+    -alpha off -depth "$depth" "$DIR/deep-${depth}bit.avif"
+done
+
 # ---------------------------------------------------------------------------
 # 4b. ICC profile (needs Pillow's ImageCms; ImageMagick cannot mint a profile)
 # ---------------------------------------------------------------------------

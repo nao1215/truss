@@ -491,21 +491,19 @@ fn yuv_frame_to_rgba(
             )?;
         }
         Planes::Depth16(planes) => {
-            let bit_depth = frame.bit_depth();
-            let shift = bit_depth - 8;
-            let round = 1u16 << (shift - 1);
+            let shift = frame.bit_depth() - 8;
             let y8: Vec<u8> = planes
                 .y()
                 .as_slice()
                 .iter()
-                .map(|&v| ((v.saturating_add(round)) >> shift) as u8)
+                .map(|&v| narrow_sample(v, shift))
                 .collect();
             let y_stride = planes.y().stride();
             let u8s: Option<(Vec<u8>, usize)> = planes.u().as_ref().map(|p| {
                 let data: Vec<u8> = p
                     .as_slice()
                     .iter()
-                    .map(|&v| ((v.saturating_add(round)) >> shift) as u8)
+                    .map(|&v| narrow_sample(v, shift))
                     .collect();
                 (data, p.stride())
             });
@@ -513,7 +511,7 @@ fn yuv_frame_to_rgba(
                 let data: Vec<u8> = p
                     .as_slice()
                     .iter()
-                    .map(|&v| ((v.saturating_add(round)) >> shift) as u8)
+                    .map(|&v| narrow_sample(v, shift))
                     .collect();
                 (data, p.stride())
             });
@@ -534,6 +532,17 @@ fn yuv_frame_to_rgba(
     }
 
     Ok(rgba)
+}
+
+/// Narrows a 10- or 12-bit sample to 8 bits, rounding to nearest.
+///
+/// `shift` is the depth minus eight. The rounding is clamped: a sample at the top of its
+/// range rounds past 255 otherwise, and a cast would wrap it to 0, which turned white into
+/// black and a saturated primary into green in every deep AVIF.
+#[cfg(feature = "avif")]
+fn narrow_sample(value: u16, shift: u8) -> u8 {
+    let round = 1u16 << shift.saturating_sub(1);
+    u8::try_from((u32::from(value) + u32::from(round)) >> shift).unwrap_or(u8::MAX)
 }
 
 /// Converts 8-bit YUV plane data to RGBA, dispatching by pixel layout.
@@ -631,7 +640,7 @@ fn merge_alpha_plane(alpha_frame: &rav1d_safe::Frame, rgba: &mut [u8], width: u3
                 for (col, &alpha) in row.iter().enumerate().take(w) {
                     let idx = row_start + col * 4 + 3;
                     if idx < rgba.len() {
-                        rgba[idx] = (alpha >> shift) as u8;
+                        rgba[idx] = narrow_sample(alpha, shift);
                     }
                 }
             }
@@ -4311,6 +4320,60 @@ mod tests {
         assert_eq!(png_result.artifact.media_type, MediaType::Png);
         assert_eq!(png_result.artifact.metadata.width, Some(4));
         assert_eq!(png_result.artifact.metadata.height, Some(3));
+    }
+
+    /// A sample at the top of its range must round to 255, not past it.
+    #[cfg(feature = "avif")]
+    #[rstest]
+    #[case::ten_bit_max(1023, 2, 255)]
+    #[case::twelve_bit_max(4095, 4, 255)]
+    #[case::ten_bit_rounds_down(117, 2, 29)]
+    #[case::ten_bit_rounds_up(118, 2, 30)]
+    #[case::twelve_bit_zero(0, 4, 0)]
+    fn narrow_sample_rounds_to_nearest_within_eight_bits(
+        #[case] value: u16,
+        #[case] shift: u8,
+        #[case] expected: u8,
+    ) {
+        assert_eq!(super::narrow_sample(value, shift), expected);
+    }
+
+    /// The `image` crate writes 8-bit AVIF only, so the deep path is exercised by two files
+    /// ImageMagick wrote: a blue left half, a red right half, and a white bar along the top,
+    /// which are the three saturated samples that used to wrap to zero.
+    #[cfg(feature = "avif")]
+    #[rstest]
+    #[case::ten_bit(include_bytes!("../../integration/fixtures/deep-10bit.avif"))]
+    #[case::twelve_bit(include_bytes!("../../integration/fixtures/deep-12bit.avif"))]
+    fn transform_raster_decodes_deep_avif_without_wrapping_saturated_samples(#[case] bytes: &[u8]) {
+        let artifact = sniff_artifact(RawArtifact::new(bytes.to_vec(), None)).expect("sniff avif");
+
+        let result = transform_raster(TransformRequest::new(
+            artifact,
+            TransformOptions {
+                format: Some(MediaType::Png),
+                ..TransformOptions::default()
+            },
+        ))
+        .expect("decode deep avif");
+
+        let image = image::load_from_memory(&result.artifact.bytes)
+            .expect("decode png")
+            .to_rgb8();
+        for ((x, y), expected) in [
+            ((2, 10), [0, 0, 255]),
+            ((30, 10), [255, 0, 0]),
+            ((20, 1), [255, 255, 255]),
+        ] {
+            let pixel = image.get_pixel(x, y).0;
+            assert!(
+                pixel
+                    .iter()
+                    .zip(expected)
+                    .all(|(got, want)| got.abs_diff(want) < 16),
+                "pixel ({x}, {y}) should be near {expected:?}, got {pixel:?}"
+            );
+        }
     }
 
     #[cfg(feature = "avif")]
