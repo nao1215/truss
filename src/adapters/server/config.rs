@@ -2438,33 +2438,41 @@ mod tests {
         assert!(ServerConfig::from_env().is_err());
     }
 
-    /// Every setting the server reads from the environment has to appear in the
-    /// reference an operator actually reads. Rustdoc on the corresponding field
-    /// is not a substitute: someone deploying the container never opens it.
+    /// Every `TRUSS_*` name in the modules that read the environment has to appear
+    /// in the reference an operator actually reads. Rustdoc on the corresponding
+    /// field is not a substitute, because someone deploying the container reads the
+    /// docs, not the crate.
     #[test]
     fn every_environment_variable_is_documented() {
-        let source = include_str!("config.rs");
+        let sources = [
+            include_str!("config.rs"),
+            include_str!("s3.rs"),
+            include_str!("gcs.rs"),
+            include_str!("azure.rs"),
+        ];
         let reference = include_str!("../../../docs/configuration.md");
 
         let mut undocumented: Vec<&str> = Vec::new();
-        for (index, _) in source.match_indices("TRUSS_") {
-            let name: &str = source[index..]
-                .split(|c: char| !(c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_'))
-                .next()
-                .unwrap_or("");
-            // `TRUSS_` on its own is a prefix fragment in a format string, and the
-            // name has to be a whole word in the reference, not part of a longer one.
-            if name == "TRUSS_" || reference.contains(&format!("`{name}`")) {
-                continue;
-            }
-            if !undocumented.contains(&name) {
-                undocumented.push(name);
+        for source in sources {
+            for (index, _) in source.match_indices("TRUSS_") {
+                let name: &str = source[index..]
+                    .split(|c: char| !(c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_'))
+                    .next()
+                    .unwrap_or("");
+                // `TRUSS_` on its own is a prefix fragment in a format string, and the
+                // name has to be a whole word in the reference, not part of a longer one.
+                if name == "TRUSS_" || reference.contains(&format!("`{name}`")) {
+                    continue;
+                }
+                if !undocumented.contains(&name) {
+                    undocumented.push(name);
+                }
             }
         }
 
         assert!(
             undocumented.is_empty(),
-            "these environment variables are read by config.rs but have no row in docs/configuration.md: {undocumented:?}"
+            "these environment variables are read by the server but have no row in docs/configuration.md: {undocumented:?}"
         );
     }
 

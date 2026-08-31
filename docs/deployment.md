@@ -121,7 +121,7 @@ In production, place a CDN such as CloudFront (or a reverse proxy like nginx / E
 
 ## Graceful Shutdown
 
-truss supports graceful shutdown for zero-downtime deployments. The `TRUSS_SHUTDOWN_DRAIN_SECS` variable controls the drain period (default: 10 seconds). During this period the server keeps accepting and answering requests, and `/health/ready` returns 503 to every one of them so that load balancers stop sending new traffic while in-flight requests complete. The listener is closed once the drain period ends, so a connection attempted after it is refused rather than left waiting.
+truss supports graceful shutdown for zero-downtime deployments. The `TRUSS_SHUTDOWN_DRAIN_SECS` variable controls the drain period (default: 10 seconds). During this period the server keeps accepting and answering requests, and `/health/ready` returns 503 to every probe so that load balancers stop sending new traffic while in-flight requests complete. The listener is closed as soon as the drain period ends, before in-flight requests are given their remaining time, so a connection attempted after it is refused rather than left waiting.
 
 On Kubernetes, set `terminationGracePeriodSeconds` >= drain + 20 (e.g. `35` for the default 10 s drain).
 

@@ -41,11 +41,12 @@ pub(super) const MAX_REQUEST_ID_LEN: usize = 128;
 
 /// Returns the client-supplied request id when it is safe to echo verbatim.
 ///
-/// The value is reflected into a response header, so it has to satisfy the field
-/// value grammar of RFC 9110 section 5.5 rather than merely avoid breaking out of
-/// its own line: control characters and DEL are not `field-vchar`, and `obs-text`
-/// is deprecated, so anything outside printable ASCII is rejected here and the
-/// caller generates an id instead.
+/// The value is reflected into a response header, so rejecting only CR, LF, and
+/// NUL is not enough: control characters and DEL are not `field-vchar` and
+/// `obs-text` is deprecated under RFC 9110 section 5.5, so a proxy in front of
+/// truss is entitled to reject whatever gets through. The rule here is
+/// deliberately narrower than that grammar — printable ASCII only — and anything
+/// else falls back to a generated id.
 pub(super) fn extract_request_id(headers: &[(String, String)]) -> Option<String> {
     headers.iter().find_map(|(name, value)| {
         if name != "x-request-id" || value.is_empty() || value.len() > MAX_REQUEST_ID_LEN {
