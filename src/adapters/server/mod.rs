@@ -234,9 +234,10 @@ mod tests {
                 }
                 Err(error) => panic!("read fixture request headers: {error}"),
             };
-            if read == 0 {
-                panic!("fixture request ended before headers were complete");
-            }
+            assert!(
+                read > 0,
+                "fixture request ended before headers were complete"
+            );
             buffer.extend_from_slice(&chunk[..read]);
             if let Some(index) = find_header_terminator(&buffer) {
                 break index;
@@ -252,12 +253,11 @@ mod tests {
                     .eq_ignore_ascii_case("content-length")
                     .then_some(value.trim())
             })
-            .map(|value| {
+            .map_or(0, |value| {
                 value
                     .parse::<usize>()
                     .expect("fixture content-length should be numeric")
-            })
-            .unwrap_or(0);
+            });
 
         let mut body = buffer.len().saturating_sub(header_end + 4);
         while body < content_length {
@@ -274,9 +274,7 @@ mod tests {
                 }
                 Err(error) => panic!("read fixture request body: {error}"),
             };
-            if read == 0 {
-                panic!("fixture request body was truncated");
-            }
+            assert!(read > 0, "fixture request body was truncated");
             body += read;
         }
     }
@@ -315,7 +313,8 @@ mod tests {
                     body.len()
                 );
                 for (name, value) in headers {
-                    header.push_str(&format!("{name}: {value}\r\n"));
+                    use std::fmt::Write as FmtWrite;
+                    let _ = write!(header, "{name}: {value}\r\n");
                 }
                 header.push_str("\r\n");
                 stream
@@ -2175,7 +2174,9 @@ mod tests {
     /// Save current values, run `f`, then restore originals regardless of
     /// panics. Holds `FROM_ENV_MUTEX` for the duration.
     fn with_env<F: FnOnce()>(vars: &[(&str, Option<&str>)], f: F) {
-        let _guard = FROM_ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = FROM_ENV_MUTEX
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         for &(key, _) in vars {
             debug_assert!(
                 ENV_VARS.contains(&key),
@@ -3298,7 +3299,7 @@ mod tests {
 
     #[test]
     fn x_request_id_not_extracted_when_empty() {
-        let headers = vec![("x-request-id".to_string(), "".to_string())];
+        let headers = vec![("x-request-id".to_string(), String::new())];
         assert!(extract_request_id(&headers).is_none());
     }
 

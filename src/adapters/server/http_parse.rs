@@ -745,7 +745,7 @@ mod tests {
         let err = resolve_storage_path(dir.path(), "/escape/passwd").unwrap_err();
         // Could be 400 (escapes root) or 404 (file not found) depending on OS,
         // but it must NOT succeed
-        assert!(err.status.starts_with("4") || err.status.starts_with("5"));
+        assert!(err.status.starts_with('4') || err.status.starts_with('5'));
     }
 
     #[test]
@@ -753,7 +753,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let err = resolve_storage_path(dir.path(), "/no_such_file.png").unwrap_err();
         // canonicalize fails -> error response (404 from map_source_io_error)
-        assert!(err.status.starts_with("4") || err.status.starts_with("5"));
+        assert!(err.status.starts_with('4') || err.status.starts_with('5'));
     }
 
     // ── Additional path traversal tests ─────────────────────────────
@@ -802,7 +802,7 @@ mod tests {
         let err = resolve_storage_path(dir.path(), "/image\x00.png").unwrap_err();
         // Should fail during canonicalize or component parsing
         assert!(
-            err.status.starts_with("4") || err.status.starts_with("5"),
+            err.status.starts_with('4') || err.status.starts_with('5'),
             "null byte in path should be rejected, got: {}",
             err.status
         );

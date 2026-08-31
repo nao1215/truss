@@ -273,7 +273,7 @@ impl ureq::unversioned::resolver::Resolver for PinnedResolver {
             // ResolvedSocketAddrs is ArrayVec<SocketAddr, 16>. Push from our validated addrs,
             // capping at 16 (the ArrayVec capacity).
             let mut result = ureq::unversioned::resolver::ResolvedSocketAddrs::from_fn(|_| {
-                SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 0)
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0)
             });
             for addr in self.addrs.iter().take(16) {
                 result.push(*addr);
@@ -436,7 +436,7 @@ pub(super) fn validate_remote_url(
     if !config.allow_insecure_url_sources
         && addrs
             .iter()
-            .map(|addr| addr.ip())
+            .map(SocketAddr::ip)
             .any(is_disallowed_remote_ip)
     {
         return Err(forbidden_response(
@@ -589,7 +589,7 @@ fn is_cloud_metadata_host(url: &Url) -> bool {
     // therefore caught here.  Alibaba's 100.100.100.200 falls in the
     // CGNAT range (100.64.0.0/10) and is rejected by `is_disallowed_ipv4`.
     match url.host_str() {
-        Some("169.254.169.254") | Some("metadata.google.internal") => true,
+        Some("169.254.169.254" | "metadata.google.internal") => true,
         _ => match url.host() {
             // AWS IMDSv2 IPv6 literal
             Some(url::Host::Ipv6(addr))
@@ -791,7 +791,7 @@ mod redirect_tests {
     /// Helper to construct an `http::Response<ureq::Body>` for tests that only
     /// inspect headers. The body is an empty byte vector.
     fn build_response(builder: http::response::Builder) -> http::Response<ureq::Body> {
-        let (parts, _) = builder.body(()).unwrap().into_parts();
+        let (parts, ()) = builder.body(()).unwrap().into_parts();
         let body = ureq::Body::builder().data(vec![]);
         http::Response::from_parts(parts, body)
     }
@@ -835,7 +835,7 @@ mod redirect_tests {
 
     #[test]
     fn disallowed_ipv4_blocks_loopback() {
-        assert!(is_disallowed_ipv4(Ipv4Addr::new(127, 0, 0, 1)));
+        assert!(is_disallowed_ipv4(Ipv4Addr::LOCALHOST));
     }
 
     #[test]
@@ -954,12 +954,12 @@ mod redirect_tests {
 
     #[test]
     fn disallowed_ipv4_blocks_broadcast() {
-        assert!(is_disallowed_ipv4(Ipv4Addr::new(255, 255, 255, 255)));
+        assert!(is_disallowed_ipv4(Ipv4Addr::BROADCAST));
     }
 
     #[test]
     fn disallowed_ipv4_blocks_unspecified() {
-        assert!(is_disallowed_ipv4(Ipv4Addr::new(0, 0, 0, 0)));
+        assert!(is_disallowed_ipv4(Ipv4Addr::UNSPECIFIED));
     }
 
     #[test]

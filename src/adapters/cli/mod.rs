@@ -269,6 +269,8 @@ ENVIRONMENT VARIABLES:
 
     // Build the TRUSS_STORAGE_BACKEND description dynamically based on enabled features.
     {
+        use std::fmt::Write as FmtWrite;
+
         #[allow(unused_mut, clippy::useless_vec)]
         let mut backends = vec!["filesystem (default)"];
         #[cfg(feature = "s3")]
@@ -277,10 +279,11 @@ ENVIRONMENT VARIABLES:
         backends.push("gcs");
         #[cfg(feature = "azure")]
         backends.push("azure");
-        s.push_str(&format!(
-            "  TRUSS_STORAGE_BACKEND               Source for public by-path resolution: {}\n",
+        let _ = writeln!(
+            s,
+            "  TRUSS_STORAGE_BACKEND               Source for public by-path resolution: {}",
             backends.join(", ")
-        ));
+        );
     }
 
     #[cfg(feature = "s3")]

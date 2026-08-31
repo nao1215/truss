@@ -1029,7 +1029,9 @@ pub(super) fn handle_transform_request(
         Ok(wm) => wm,
         Err(response) => return response,
     };
-    let watermark_id = validated_wm.as_ref().map(|v| v.cache_identity());
+    let watermark_id = validated_wm
+        .as_ref()
+        .map(ValidatedWatermarkPayload::cache_identity);
 
     if let Some(response) = try_versioned_cache_lookup(
         versioned_hash.as_deref(),
@@ -1113,7 +1115,9 @@ fn handle_public_get_request(
         Ok(wm) => wm,
         Err(response) => return response,
     };
-    let watermark_id = validated_wm.as_ref().map(|v| v.cache_identity());
+    let watermark_id = validated_wm
+        .as_ref()
+        .map(ValidatedWatermarkPayload::cache_identity);
 
     // When the storage backend is object storage (S3 or GCS), convert Path
     // sources to Storage sources so that the `path` query parameter is
@@ -1350,12 +1354,11 @@ pub(super) fn transform_source_bytes(
         }
     }
 
-    let _slot = match TransformSlot::try_acquire(
+    let Some(_slot) = TransformSlot::try_acquire(
         &config.transforms_in_flight,
         config.max_concurrent_transforms,
-    ) {
-        Some(slot) => slot,
-        None => return service_unavailable_response("too many concurrent transforms; retry later"),
+    ) else {
+        return service_unavailable_response("too many concurrent transforms; retry later");
     };
     transform_source_bytes_inner(
         source_bytes,

@@ -224,8 +224,7 @@ mod tests {
             assert_eq!(
                 class.camel_case_name(),
                 camel_case(class.slug()),
-                "{:?} spells its slug and its camelCase name differently",
-                class
+                "{class:?} spells its slug and its camelCase name differently"
             );
         }
     }

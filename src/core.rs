@@ -1727,7 +1727,7 @@ fn validate_dimension(name: &str, value: Option<u32>) -> Result<(), TransformErr
 }
 
 fn validate_quality(value: Option<u8>) -> Result<(), TransformError> {
-    if matches!(value, Some(0) | Some(101..=u8::MAX)) {
+    if matches!(value, Some(0 | 101..=u8::MAX)) {
         return Err(TransformError::InvalidOptions(
             "quality must be between 1 and 100".to_string(),
         ));
@@ -4172,7 +4172,7 @@ mod tests {
     #[case::points(r#"<svg xmlns="http://www.w3.org/2000/svg" width="72pt" height="36pt"/>"#, Some((96, 48)))]
     #[case::picas(r#"<svg xmlns="http://www.w3.org/2000/svg" width="1pc" height="2pc"/>"#, Some((16, 32)))]
     #[case::whitespace_around_the_value(r#"<svg xmlns="http://www.w3.org/2000/svg" width=" 100 " height=" 50 "/>"#, Some((100, 50)))]
-    #[case::single_quoted(r#"<svg xmlns='http://www.w3.org/2000/svg' width='100' height='50'/>"#, Some((100, 50)))]
+    #[case::single_quoted(r"<svg xmlns='http://www.w3.org/2000/svg' width='100' height='50'/>", Some((100, 50)))]
     #[case::view_box_only(r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 60"/>"#, Some((120, 60)))]
     #[case::view_box_with_commas(r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0,0,120,60"/>"#, Some((120, 60)))]
     #[case::percentages_fall_back_to_the_view_box(r#"<svg xmlns="http://www.w3.org/2000/svg" width="100%" height="100%" viewBox="0 0 30 20"/>"#, Some((30, 20)))]

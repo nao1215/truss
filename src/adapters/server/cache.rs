@@ -201,19 +201,17 @@ impl TransformCache {
         let path = self.entry_path(key);
 
         // Open a single file handle to avoid TOCTOU between read and metadata.
-        let file = match fs::File::open(&path) {
-            Ok(f) => f,
-            Err(_) => return CacheLookup::Miss,
+        let Ok(file) = fs::File::open(&path) else {
+            return CacheLookup::Miss;
         };
 
         // Check staleness via mtime on the same file handle.
-        let age = match file
+        let Ok(age) = file
             .metadata()
             .and_then(|m| m.modified())
             .and_then(|mtime| mtime.elapsed().map_err(io::Error::other))
-        {
-            Ok(age) => age,
-            Err(_) => return CacheLookup::Miss,
+        else {
+            return CacheLookup::Miss;
         };
 
         if age > self.ttl {
@@ -228,27 +226,18 @@ impl TransformCache {
 
         // Parse the header line: "<media_type>[\t<warning>]*\n<body>". An entry written
         // before warnings were kept has no tab and reads as warning-free.
-        let newline_pos = match data.iter().position(|&b| b == b'\n') {
-            Some(pos) => pos,
-            None => {
-                self.remove_corrupted(&path, "missing header newline");
-                return CacheLookup::Miss;
-            }
+        let Some(newline_pos) = data.iter().position(|&b| b == b'\n') else {
+            self.remove_corrupted(&path, "missing header newline");
+            return CacheLookup::Miss;
         };
-        let header = match std::str::from_utf8(&data[..newline_pos]) {
-            Ok(s) => s,
-            Err(_) => {
-                self.remove_corrupted(&path, "invalid UTF-8 in header");
-                return CacheLookup::Miss;
-            }
+        let Ok(header) = std::str::from_utf8(&data[..newline_pos]) else {
+            self.remove_corrupted(&path, "invalid UTF-8 in header");
+            return CacheLookup::Miss;
         };
         let mut fields = header.split('\t');
-        let media_type = match fields.next().map(MediaType::from_str) {
-            Some(Ok(mt)) => mt,
-            _ => {
-                self.remove_corrupted(&path, "unrecognized media type");
-                return CacheLookup::Miss;
-            }
+        let Some(Ok(media_type)) = fields.next().map(MediaType::from_str) else {
+            self.remove_corrupted(&path, "unrecognized media type");
+            return CacheLookup::Miss;
         };
         let warnings: Vec<String> = fields.map(str::to_string).collect();
 
@@ -404,9 +393,8 @@ fn collect_cache_entries(root: &Path) -> io::Result<Vec<CacheEntry>> {
 }
 
 fn collect_entries_recursive(dir: &Path, entries: &mut Vec<CacheEntry>) {
-    let read_dir = match fs::read_dir(dir) {
-        Ok(rd) => rd,
-        Err(_) => return,
+    let Ok(read_dir) = fs::read_dir(dir) else {
+        return;
     };
     for entry in read_dir.flatten() {
         let path = entry.path();
