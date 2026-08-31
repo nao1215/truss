@@ -833,6 +833,30 @@ impl Default for TransformOptions {
 
 impl TransformOptions {
     /// Normalizes and validates the options against the input media type.
+    /// The first option set on this request that an SVG passthrough cannot honour.
+    ///
+    /// `fit`, `position`, and `withoutEnlargement` are absent from the list because the rules
+    /// above already require a width or a height alongside each of them, so naming the axis
+    /// covers those too and names the option the caller has to drop.
+    fn svg_passthrough_unsupported_option(&self) -> Option<&'static str> {
+        if self.width.is_some() {
+            return Some("width");
+        }
+        if self.height.is_some() {
+            return Some("height");
+        }
+        if !self.rotate.is_identity() {
+            return Some("rotate");
+        }
+        if self.grayscale {
+            return Some("grayscale");
+        }
+        if self.background.is_some() {
+            return Some("background");
+        }
+        None
+    }
+
     pub fn normalize(
         self,
         input_media_type: MediaType,
@@ -905,6 +929,20 @@ impl TransformOptions {
             return Err(TransformError::InvalidOptions(
                 "preserveExif is not supported with SVG output".to_string(),
             ));
+        }
+
+        // SVG in and SVG out is a sanitize-only passthrough: the document is returned as its
+        // author wrote it, so an option that asks for a different picture cannot be honoured.
+        // Refusing it is what the rule above already does, and what `transform_svg` does for
+        // blur, sharpen, crop, and watermark; the alternative is a caller who asked for a
+        // 64-pixel icon getting the original back with exit code 0.
+        if input_media_type == MediaType::Svg
+            && format == MediaType::Svg
+            && let Some(option) = self.svg_passthrough_unsupported_option()
+        {
+            return Err(TransformError::InvalidOptions(format!(
+                "{option} is not supported with SVG output; choose a raster output format such as png"
+            )));
         }
 
         if self.quality.is_some() && !format.is_lossy() {
@@ -3352,6 +3390,97 @@ mod tests {
                     ..TransformOptions::default()
                 },
                 expected_error: Some("preserveExif is not supported with SVG output"),
+            },
+            // SVG output is a sanitize-only passthrough: the document comes back as written,
+            // so an option asking for a different picture cannot be honoured. Refusing it is
+            // what the rules above already do for the options they cover.
+            Case {
+                name: "width unsupported for svg output",
+                input_media_type: MediaType::Svg,
+                options: TransformOptions {
+                    format: Some(MediaType::Svg),
+                    width: Some(100),
+                    ..TransformOptions::default()
+                },
+                expected_error: Some(
+                    "width is not supported with SVG output; choose a raster output format such as png",
+                ),
+            },
+            Case {
+                name: "height unsupported for svg output",
+                input_media_type: MediaType::Svg,
+                options: TransformOptions {
+                    format: Some(MediaType::Svg),
+                    height: Some(100),
+                    ..TransformOptions::default()
+                },
+                expected_error: Some(
+                    "height is not supported with SVG output; choose a raster output format such as png",
+                ),
+            },
+            Case {
+                name: "rotate unsupported for svg output",
+                input_media_type: MediaType::Svg,
+                options: TransformOptions {
+                    format: Some(MediaType::Svg),
+                    rotate: Rotation::DEG_90,
+                    ..TransformOptions::default()
+                },
+                expected_error: Some(
+                    "rotate is not supported with SVG output; choose a raster output format such as png",
+                ),
+            },
+            Case {
+                name: "grayscale unsupported for svg output",
+                input_media_type: MediaType::Svg,
+                options: TransformOptions {
+                    format: Some(MediaType::Svg),
+                    grayscale: true,
+                    ..TransformOptions::default()
+                },
+                expected_error: Some(
+                    "grayscale is not supported with SVG output; choose a raster output format such as png",
+                ),
+            },
+            Case {
+                name: "background unsupported for svg output",
+                input_media_type: MediaType::Svg,
+                options: TransformOptions {
+                    format: Some(MediaType::Svg),
+                    background: Some(Rgba8 {
+                        r: 255,
+                        g: 0,
+                        b: 0,
+                        a: 255,
+                    }),
+                    ..TransformOptions::default()
+                },
+                expected_error: Some(
+                    "background is not supported with SVG output; choose a raster output format such as png",
+                ),
+            },
+            Case {
+                name: "svg passthrough with no transform options is accepted",
+                input_media_type: MediaType::Svg,
+                options: TransformOptions {
+                    format: Some(MediaType::Svg),
+                    rotate: Rotation::DEG_0,
+                    ..TransformOptions::default()
+                },
+                expected_error: None,
+            },
+            Case {
+                name: "svg input rasterized to png accepts the same options",
+                input_media_type: MediaType::Svg,
+                options: TransformOptions {
+                    format: Some(MediaType::Png),
+                    width: Some(100),
+                    height: Some(100),
+                    rotate: Rotation::DEG_90,
+                    grayscale: true,
+                    ..TransformOptions::default()
+                },
+                expected_error: None,
             },
             Case {
                 name: "auto optimize accepts lossy target quality",
