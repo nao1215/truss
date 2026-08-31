@@ -303,6 +303,37 @@ cat > "$DIR/svg-animate-xss.svg" << 'SVGEOF'
 </svg>
 SVGEOF
 
+echo "[bonus] svg-illustrator-prolog.svg — the XML prolog Adobe Illustrator writes"
+# A generator comment before the doctype and a doctype carrying an internal subset are
+# both legal prolog, and both are what a real editor emits. Detection walked a fixed
+# sequence instead of the grammar and refused the file as an unknown signature.
+cat > "$DIR/svg-illustrator-prolog.svg" << 'SVGEOF'
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Generator: Adobe Illustrator 27.0.0, SVG Export Plug-In . SVG Version: 6.00 Build 0)  -->
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd" [
+	<!ENTITY ns_extend "http://ns.adobe.com/Extensibility/1.0/">
+	<!ENTITY ns_ai "http://ns.adobe.com/AdobeIllustrator/10.0/">
+]>
+<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100">
+  <rect width="100" height="100" fill="green"/>
+</svg>
+SVGEOF
+
+echo "[bonus] svg-external-css.svg — external references the element and href rules do not see"
+# Three spellings of the same idea, none of which is an element or an href: a stylesheet
+# processing instruction the browser honours, a presentation attribute carrying the url()
+# that would have been stripped from `style`, and an @import whose at-keyword is written
+# with a CSS escape so a literal search for "@import" misses it.
+cat > "$DIR/svg-external-css.svg" << 'SVGEOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<?xml-stylesheet type="text/xsl" href="https://evil.example.com/x.xsl"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100">
+  <style>@\69 mport "https://evil.example.com/x.css";</style>
+  <rect width="100" height="100" fill="url(https://evil.example.com/paint.svg#g)"
+        filter="url(https://evil.example.com/filter.svg#f)"/>
+</svg>
+SVGEOF
+
 echo "[bonus] svg-minimal.svg — smallest valid SVG"
 cat > "$DIR/svg-minimal.svg" << 'SVGEOF'
 <svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"/>
