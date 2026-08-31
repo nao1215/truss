@@ -211,6 +211,7 @@ fn in_flight_request_completes_during_drain() {
 /// accepted the connection but wrote nothing before the deadline. A plain
 /// `read_to_end` cannot tell that case apart from a slow answer, and it is
 /// exactly the case these tests exist to catch.
+#[cfg(unix)]
 fn probe_with_deadline(addr: SocketAddr, path: &str, wait: Duration) -> Option<String> {
     let mut stream = TcpStream::connect(addr).ok()?;
     stream.set_read_timeout(Some(wait)).expect("set timeout");
@@ -277,8 +278,10 @@ fn health_ready_answers_503_on_a_new_connection_during_the_drain_window() {
         .expect("serve_with_config");
 }
 
-/// The drain window has to end. Once the listener is gone a new connection is
-/// refused outright, which is what tells a client to fail over immediately.
+/// The drain window has to end, and the listener with it. The assertion runs after
+/// `serve_with_config` has returned, so what it pins is that the listener is gone by
+/// then rather than left bound — a refused connection is what tells a client to fail
+/// over instead of waiting.
 #[cfg(unix)]
 #[test]
 #[serial]

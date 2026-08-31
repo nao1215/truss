@@ -124,7 +124,7 @@ pub fn serve_with_config(listener: TcpListener, config: ServerConfig) -> io::Res
     // The drain deadline, set once the shutdown signal is observed. Until it
     // elapses the loop keeps accepting: a load balancer probes readiness over a
     // new connection, so a drain period that stops accepting cannot deliver the
-    // 503 it exists to deliver, and every request that arrives in the window is
+    // 503 it exists for, and every request that arrives in the window is
     // parked in the accept backlog and answered by nobody.
     let mut drain_deadline: Option<Instant> = None;
 
@@ -172,6 +172,12 @@ pub fn serve_with_config(listener: TcpListener, config: ServerConfig) -> io::Res
     }
 
     config.log("shutdown: drain complete, closing listener");
+
+    // Close the listener before draining the workers. Leaving it bound would put
+    // the worker-drain window in the same position the shutdown drain used to be
+    // in: connections completed by the kernel and accepted by nobody. Refusing is
+    // what lets a client fail over instead of waiting.
+    drop(listener);
 
     // Stop dispatching new connections to workers.
     drop(sender);
