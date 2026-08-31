@@ -400,7 +400,7 @@ with, never the server's own.
 | `invalidInput` | Declared type conflicts with detected bytes |
 | `invalidOptions` | Options JSON is malformed or contains invalid values |
 | `unsupportedInputMediaType` | Input bytes are not a supported image format |
-| `unsupportedOutputMediaType` | Requested output format is impossible, such as raster to SVG |
+| `unsupportedOutputMediaType` | Requested output format is impossible: a format truss reads but cannot write, such as `gif`, or one this input does not allow, such as SVG from a raster |
 | `decodeFailed` | The image is structurally invalid |
 | `encodeFailed` | Output encoding failed |
 | `capabilityMissing` | The build excluded a requested feature |

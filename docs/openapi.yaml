@@ -1007,8 +1007,9 @@ components:
         Clockwise rotation in whole degrees, applied after EXIF auto-orient.
         Any integer is accepted: a negative angle turns counter-clockwise and an angle past
         a full turn wraps, so `-90` and `270` are the same rotation.
-        Signed URLs must carry the value already wrapped into 0-359, because the signature
-        covers the query string as sent.
+        The signature covers the query string as sent, so a signed URL must spell the value
+        the same way it was signed; `truss sign` and `@nao1215/truss-url-signer` both write
+        the wrapped 0-359 form.
         A multiple of 90 is exact. Any other angle resamples and grows the output to the
         rotated bounding box, filling the exposed corners with `background`
         (transparent by default, white for formats without an alpha channel).
