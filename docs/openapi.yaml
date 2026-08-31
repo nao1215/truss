@@ -934,7 +934,10 @@ components:
       description: |
         Output image format.
         When present, the `Accept` header is ignored.
-        `svg` output is only valid for SVG input.
+        `svg` output is only valid for SVG input, and is a sanitize-only passthrough: the
+        document is returned as written, so `width`, `height`, `rotate`, `grayscale`, and
+        `background` return 400 naming the parameter instead of being ignored. Request a
+        raster format to transform the drawing.
         `gif` is not an output format: truss decodes GIF but does not encode it, so
         requesting it returns 415. A GIF source with no `format` is served as PNG.
         An animated GIF source is rejected with 415 rather than reduced to one frame.

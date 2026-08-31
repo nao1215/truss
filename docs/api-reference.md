@@ -82,7 +82,11 @@ See the [Signed URL Specification](signed-url-spec.md) for canonicalization rule
 | SVG         | Yes  | Yes | Yes  | Yes  | Yes | Yes  | Yes |
 | GIF (static) | Yes  | Yes | Yes  | Yes  | Yes | Yes  | -   |
 
-SVG to SVG performs sanitization only, removing scripts and external references.
+SVG to SVG performs sanitization only, removing scripts and external references. Because the
+document comes back as its author wrote it, a request that also asks for a different picture —
+`width`, `height`, `rotate`, `grayscale`, or `background` — is answered with `400 Bad Request`
+naming the parameter, rather than returning the original and reporting success. Ask for a
+raster output format to transform the drawing.
 
 GIF has no output column: truss decodes it but never encodes it, so `format=gif` returns
 `415 Unsupported Media Type`. A GIF request that does not name a format is served as PNG

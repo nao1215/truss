@@ -162,6 +162,12 @@ EXAMPLES:
   truss diagram.svg -o safe.svg
   truss diagram.svg -o diagram.png --width 1024
 
+SVG:
+  An SVG output sanitizes the document and returns it as written, so an option that asks
+  for a different picture is refused rather than ignored. Convert to a raster format to
+  resize, rotate, or recolour a drawing; --fit, --position, and --without-enlargement then
+  mean what they mean for any other input.
+
 ORDER:
   Options are applied in a fixed order, whatever order they are written in:
   auto-orient, rotate, crop, resize, blur, sharpen, grayscale, watermark, encode.
