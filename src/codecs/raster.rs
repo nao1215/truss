@@ -2200,7 +2200,12 @@ fn encode_baseline_output(
             }
         }
         MediaType::Avif => Ok(EncodedOutput {
-            bytes: encode_avif(image, quality.unwrap_or(80), 4, retained_metadata)?,
+            bytes: encode_avif(
+                image,
+                quality.unwrap_or(80),
+                avif_speed(output_pixels(image), false),
+                retained_metadata,
+            )?,
             used_lossy_webp: false,
         }),
         MediaType::Bmp => Ok(EncodedOutput {
@@ -2283,7 +2288,7 @@ fn encode_lossy_with_quality(
             let bytes = encode_avif(
                 image,
                 quality,
-                if optimized { 2 } else { 4 },
+                avif_speed(output_pixels(image), optimized),
                 retained_metadata,
             )?;
             deadline.check("encode lossy avif")?;
@@ -2476,6 +2481,50 @@ fn encode_webp_lossy_bytes(image: &DynamicImage, quality: u8) -> Result<Vec<u8>,
             "lossy WebP encoding is not enabled in this build".to_string(),
         ))
     }
+}
+
+/// The number of pixels an encoder is about to be handed.
+fn output_pixels(image: &DynamicImage) -> u64 {
+    let (width, height) = image.dimensions();
+    u64::from(width) * u64::from(height)
+}
+
+/// The rav1e speed setting to encode an AVIF of this many pixels with.
+///
+/// rav1e's scale runs from 1, the slowest and smallest, to 10. truss asked for 4 at every
+/// size, which is a fine setting for an image small enough that the time does not matter,
+/// and [`MAX_OUTPUT_PIXELS`] allows outputs where it matters a great deal: 8192x8192 is
+/// exactly that ceiling, and speed 4 takes 55 seconds on two cores against a 30 second
+/// default deadline, or 218 seconds for a source the encoder finds hard.
+///
+/// Below the first step nothing changes. A small output is quick at speed 4 and a faster
+/// setting does not reliably make it smaller: measured on two cores, speed 6 came out 1.3
+/// percent larger than speed 4 on a 1.7MP gradient and 10 percent larger on a 0.3MP image
+/// of noise. There is no deadline to save there, so there is no reason to spend the bytes.
+///
+/// Above it the trade turns over, because the alternative is a request that does not finish.
+/// On two cores, with the source the encoder finds hardest:
+///
+/// | output | speed 4 | this ladder |
+/// |--------|---------|-------------|
+/// | 12MP | 58.4s | 15.5s at speed 8, 3.5 percent more bytes |
+/// | 67MP | 218.2s | 19.2s at speed 10 |
+///
+/// The steps are placed so that the worst of those finishes inside the default deadline on
+/// two cores, which neither did before. On ordinary content the larger sizes come out
+/// smaller as well as faster: a 12MP gradient is 23,925 bytes at speed 8 against 25,885 at
+/// speed 4.
+///
+/// `optimize` asks for the smallest file the encoder can produce and accepts the time, so it
+/// runs two steps slower than the same size would otherwise. Below the first step that is
+/// speed 2, which is what the optimizing path already used.
+fn avif_speed(pixels: u64, optimized: bool) -> u8 {
+    let speed = match pixels {
+        0..=2_000_000 => 4,
+        2_000_001..=16_000_000 => 8,
+        _ => 10,
+    };
+    if optimized { speed - 2 } else { speed }
 }
 
 fn encode_avif(
@@ -4887,6 +4936,45 @@ mod tests {
 
         assert!(retained.is_none());
         assert!(warnings.is_empty());
+    }
+
+    #[rstest]
+    #[case::a_thumbnail_is_unchanged(200 * 200, false, 4)]
+    #[case::at_the_first_step(2_000_000, false, 4)]
+    #[case::just_past_it(2_000_001, false, 8)]
+    #[case::at_the_second_step(16_000_000, false, 8)]
+    #[case::just_past_that(16_000_001, false, 10)]
+    #[case::the_output_ceiling(crate::MAX_OUTPUT_PIXELS, false, 10)]
+    #[case::optimize_below_the_first_step_is_unchanged(200 * 200, true, 2)]
+    #[case::optimize_at_the_ceiling(crate::MAX_OUTPUT_PIXELS, true, 8)]
+    fn avif_speed_climbs_with_the_output_size(
+        #[case] pixels: u64,
+        #[case] optimized: bool,
+        #[case] expected: u8,
+    ) {
+        assert_eq!(super::avif_speed(pixels, optimized), expected);
+    }
+
+    #[test]
+    fn avif_speed_never_leaves_the_encoder_range() {
+        // rav1e takes 1 through 10. The optimizing path subtracts from the step it lands on,
+        // so the lowest step and the subtraction have to be read together.
+        for pixels in [
+            0,
+            1,
+            2_000_000,
+            2_000_001,
+            16_000_000,
+            crate::MAX_OUTPUT_PIXELS,
+        ] {
+            for optimized in [false, true] {
+                let speed = super::avif_speed(pixels, optimized);
+                assert!(
+                    (1..=10).contains(&speed),
+                    "speed {speed} for {pixels} pixels is outside what rav1e takes"
+                );
+            }
+        }
     }
 
     #[test]
