@@ -662,28 +662,37 @@ fn end_of_at_rule(s: &str) -> usize {
 
     while index < bytes.len() {
         let byte = bytes[index];
-        match quote {
-            Some(open) => {
-                if byte == b'\\' {
-                    index += 2;
-                    continue;
+        if let Some(open) = quote {
+            if byte == b'\\' {
+                // Skip the escaped character whole. Advancing a fixed two bytes
+                // would leave the scan inside a multi-byte character; every byte
+                // it could then stop on is a continuation byte, so nothing is
+                // currently misread, but the offset this returns is used to slice
+                // the string and should not depend on that.
+                index += 1;
+                if let Some(escaped) = s[index..].chars().next() {
+                    index += escaped.len_utf8();
                 }
-                if byte == open {
-                    quote = None;
-                }
+                continue;
             }
-            None => match byte {
-                b'"' | b'\'' => quote = Some(byte),
-                b'{' => depth += 1,
-                b'}' => {
-                    if depth <= 1 {
-                        return index + 1;
-                    }
-                    depth -= 1;
+            if byte == open {
+                quote = None;
+            }
+            index += 1;
+            continue;
+        }
+
+        match byte {
+            b'"' | b'\'' => quote = Some(byte),
+            b'{' => depth += 1,
+            b'}' => {
+                if depth <= 1 {
+                    return index + 1;
                 }
-                b';' if depth == 0 => return index + 1,
-                _ => {}
-            },
+                depth -= 1;
+            }
+            b';' if depth == 0 => return index + 1,
+            _ => {}
         }
         index += 1;
     }
@@ -702,16 +711,21 @@ fn strip_disallowed_at_rules(css: &str) -> String {
         let byte = bytes[index];
 
         if let Some(open) = quote {
-            result.push(byte as char);
-            if byte == b'\\' && index + 1 < bytes.len() {
-                result.push(bytes[index + 1] as char);
-                index += 2;
+            // Advance by characters, not bytes: pushing each byte of a multi-byte
+            // character as its own `char` would turn `content: "café"` into mojibake.
+            let ch = css[index..].chars().next().unwrap_or('\u{FFFD}');
+            result.push(ch);
+            index += ch.len_utf8();
+            if ch == '\\' {
+                if let Some(escaped) = css[index..].chars().next() {
+                    result.push(escaped);
+                    index += escaped.len_utf8();
+                }
                 continue;
             }
-            if byte == open {
+            if ch == open as char {
                 quote = None;
             }
-            index += 1;
             continue;
         }
 
@@ -1786,6 +1800,26 @@ mod tests {
         assert!(
             !result.contains("evil.example"),
             "external stylesheet should be removed from `{css}`, got: {result}"
+        );
+    }
+
+    /// Rewriting the stylesheet must not corrupt the text it copies through, and
+    /// must not leave an offset inside a multi-byte character for the caller to
+    /// slice on.
+    #[rstest]
+    #[case::accented_string("rect::after { content: \"caf\u{e9}\" }", "caf\u{e9}")]
+    #[case::emoji_string("rect::after { content: \"\u{1f600}\" }", "\u{1f600}")]
+    #[case::accent_after_escape("rect::after { content: \"\\\\\u{e9}\" }", "\u{e9}")]
+    #[case::accent_inside_a_dropped_rule(
+        "@import \"https://evil.example/\u{e9}.css\"; rect { fill: red }",
+        "fill: red"
+    )]
+    fn sanitize_preserves_non_ascii_css_text(#[case] css: &str, #[case] expected: &str) {
+        let svg = format!("<svg xmlns=\"http://www.w3.org/2000/svg\"><style>{css}</style></svg>");
+        let result = sanitize_svg(svg.as_bytes()).unwrap();
+        assert!(
+            result.contains(expected),
+            "`{css}` should keep `{expected}` intact, got: {result}"
         );
     }
 
