@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## v0.18.0
 
 ### Fixed
 
