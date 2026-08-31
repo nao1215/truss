@@ -3099,62 +3099,33 @@ fn extract_retained_metadata(
     Ok((Some(metadata), warnings))
 }
 
+/// Collects the metadata a decoder carries: EXIF, ICC, XMP, and IPTC.
+///
+/// The four reads are the same for every container, so the format only decides which decoder
+/// to open. A failure here is a decode failure, not a metadata failure: the bytes claimed to
+/// be this format and were not.
+fn retained_metadata<D: ImageDecoder>(mut decoder: D) -> Result<RetainedMetadata, TransformError> {
+    let decode_failed = |error: image::ImageError| TransformError::DecodeFailed(error.to_string());
+    Ok(RetainedMetadata {
+        exif_metadata: decoder.exif_metadata().map_err(decode_failed)?,
+        icc_profile: decoder.icc_profile().map_err(decode_failed)?,
+        xmp_metadata: decoder.xmp_metadata().map_err(decode_failed)?,
+        iptc_metadata: decoder.iptc_metadata().map_err(decode_failed)?,
+    })
+}
+
+/// Reads the metadata truss can carry from one format to another.
+///
+/// The formats not listed carry none through this path: AVIF and TIFF metadata is handled
+/// where those are decoded, SVG has no such containers, and BMP and GIF have nowhere to put
+/// them.
 fn read_input_metadata(input: &Artifact) -> Result<RetainedMetadata, TransformError> {
+    let bytes = Cursor::new(&input.bytes);
+    let open_failed = |error: image::ImageError| TransformError::DecodeFailed(error.to_string());
     match input.media_type {
-        MediaType::Jpeg => {
-            let mut decoder = JpegDecoder::new(Cursor::new(&input.bytes))
-                .map_err(|error| TransformError::DecodeFailed(error.to_string()))?;
-            Ok(RetainedMetadata {
-                exif_metadata: decoder
-                    .exif_metadata()
-                    .map_err(|error| TransformError::DecodeFailed(error.to_string()))?,
-                icc_profile: decoder
-                    .icc_profile()
-                    .map_err(|error| TransformError::DecodeFailed(error.to_string()))?,
-                xmp_metadata: decoder
-                    .xmp_metadata()
-                    .map_err(|error| TransformError::DecodeFailed(error.to_string()))?,
-                iptc_metadata: decoder
-                    .iptc_metadata()
-                    .map_err(|error| TransformError::DecodeFailed(error.to_string()))?,
-            })
-        }
-        MediaType::Png => {
-            let mut decoder = PngDecoder::new(Cursor::new(&input.bytes))
-                .map_err(|error| TransformError::DecodeFailed(error.to_string()))?;
-            Ok(RetainedMetadata {
-                exif_metadata: decoder
-                    .exif_metadata()
-                    .map_err(|error| TransformError::DecodeFailed(error.to_string()))?,
-                icc_profile: decoder
-                    .icc_profile()
-                    .map_err(|error| TransformError::DecodeFailed(error.to_string()))?,
-                xmp_metadata: decoder
-                    .xmp_metadata()
-                    .map_err(|error| TransformError::DecodeFailed(error.to_string()))?,
-                iptc_metadata: decoder
-                    .iptc_metadata()
-                    .map_err(|error| TransformError::DecodeFailed(error.to_string()))?,
-            })
-        }
-        MediaType::Webp => {
-            let mut decoder = WebPDecoder::new(Cursor::new(&input.bytes))
-                .map_err(|error| TransformError::DecodeFailed(error.to_string()))?;
-            Ok(RetainedMetadata {
-                exif_metadata: decoder
-                    .exif_metadata()
-                    .map_err(|error| TransformError::DecodeFailed(error.to_string()))?,
-                icc_profile: decoder
-                    .icc_profile()
-                    .map_err(|error| TransformError::DecodeFailed(error.to_string()))?,
-                xmp_metadata: decoder
-                    .xmp_metadata()
-                    .map_err(|error| TransformError::DecodeFailed(error.to_string()))?,
-                iptc_metadata: decoder
-                    .iptc_metadata()
-                    .map_err(|error| TransformError::DecodeFailed(error.to_string()))?,
-            })
-        }
+        MediaType::Jpeg => retained_metadata(JpegDecoder::new(bytes).map_err(open_failed)?),
+        MediaType::Png => retained_metadata(PngDecoder::new(bytes).map_err(open_failed)?),
+        MediaType::Webp => retained_metadata(WebPDecoder::new(bytes).map_err(open_failed)?),
         MediaType::Avif | MediaType::Svg | MediaType::Bmp | MediaType::Tiff | MediaType::Gif => {
             Ok(RetainedMetadata::default())
         }
