@@ -44,6 +44,10 @@ truss sign --base-url http://localhost:8080 \
 
 See the [Signed URL Specification](signed-url-spec.md) for canonicalization rules, compatibility policy, and SDK implementation guidance.
 
+## Error Responses
+
+Every error is an RFC 9457 problem details body, `application/problem+json`. Branch on `type`: it is a URI naming the class of failure, one of the anchors on [Problem Types](problems.md), and `about:blank` only for a route that does not exist. `title` is fixed per class, `detail` is for a person to read, and `requestId` repeats the `X-Request-Id` header so a body kept on its own can be matched to the access log.
+
 ## Endpoints
 
 ### Public Endpoints (Signed URL)

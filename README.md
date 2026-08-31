@@ -612,6 +612,7 @@ Top-level shortcuts:
 | [Prometheus Metrics](docs/prometheus.md) | Metrics reference, bucket boundaries, example PromQL queries |
 | [Pipeline Order](docs/pipeline.md) | Transform stage order and SVG-specific constraints |
 | [OpenAPI Spec](docs/openapi.yaml) | Machine-readable API specification |
+| [Problem Types](docs/problems.md) | Every `type` an HTTP error body can carry, with its status and when it is sent |
 
 ## Architecture
 

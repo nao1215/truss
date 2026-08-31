@@ -7,7 +7,8 @@ info:
 
     Successful transform requests return image bytes directly as `image/*` or
     `image/svg+xml`; they do not return JSON envelopes. Failures are reported as
-    RFC 7807 `application/problem+json`.
+    RFC 9457 `application/problem+json`, with a `type` URI naming the class of
+    failure; the classes are listed in `docs/problems.md`.
 
     Choose an endpoint based on how the source image is supplied:
 
@@ -1589,21 +1590,29 @@ components:
           description: Present and `true` while a hysteresis-tracked resource check remains in its recovery margin.
     ProblemDetail:
       type: object
-      description: RFC 7807 Problem Details
-      required: [type, title, status, detail]
+      description: |
+        RFC 9457 Problem Details. `type` is the member to branch on: it is a URI naming the
+        class of failure, an anchor on `docs/problems.md`, and `about:blank` only for a route
+        that does not exist. `title` is fixed per class; `detail` is for a person to read and
+        its wording is not part of the API. `requestId` repeats the `X-Request-Id` header.
+      required: [type, title, status, detail, requestId]
       properties:
         type:
           type: string
-          example: "about:blank"
+          format: uri
+          example: "https://github.com/nao1215/truss/blob/main/docs/problems.md#invalid-request"
         title:
           type: string
-          example: "Bad Request"
+          example: "Invalid request"
         status:
           type: integer
           example: 400
         detail:
           type: string
           example: "missing required query parameter: path"
+        requestId:
+          type: string
+          example: "6b3d0a2c-2f6a-4c53-9a1f-0f4b2c1e8d7a"
 
   responses:
     ImageBinary:
@@ -1697,10 +1706,11 @@ components:
           schema:
             $ref: '#/components/schemas/ProblemDetail'
           example:
-            type: about:blank
-            title: Bad Request
+            type: https://github.com/nao1215/truss/blob/main/docs/problems.md#invalid-options
+            title: Invalid transform options
             status: 400
             detail: fit requires both width and height
+            requestId: 6b3d0a2c-2f6a-4c53-9a1f-0f4b2c1e8d7a
     Unauthorized:
       description: Authentication failed or missing
       headers:
@@ -1750,10 +1760,11 @@ components:
           schema:
             $ref: '#/components/schemas/ProblemDetail'
           example:
-            type: about:blank
+            type: https://github.com/nao1215/truss/blob/main/docs/problems.md#unprocessable-entity
             title: Unprocessable Entity
             status: 422
             detail: "input image has 50000000 pixels, server limit is 40000000"
+            requestId: 6b3d0a2c-2f6a-4c53-9a1f-0f4b2c1e8d7a
     UnsupportedMediaType:
       description: |
         Unsupported input format, unsupported output format, or wrong request `Content-Type`.

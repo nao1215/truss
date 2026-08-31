@@ -1609,7 +1609,7 @@ mod tests {
     }
 
     #[test]
-    fn helper_error_responses_use_rfc7807_problem_details() {
+    fn helper_error_responses_use_rfc9457_problem_details() {
         let response = auth_required_response("authorization required");
         let bad_request = bad_request_response("bad input");
 
@@ -1622,14 +1622,14 @@ mod tests {
 
         let auth_body = response_body(&response);
         assert!(auth_body.contains("authorization required"));
-        assert!(auth_body.contains("\"type\":\"about:blank\""));
+        assert!(auth_body.contains("docs/problems.md#unauthorized\""));
         assert!(auth_body.contains("\"title\":\"Unauthorized\""));
         assert!(auth_body.contains("\"status\":401"));
 
         let bad_body = response_body(&bad_request);
         assert!(bad_body.contains("bad input"));
-        assert!(bad_body.contains("\"type\":\"about:blank\""));
-        assert!(bad_body.contains("\"title\":\"Bad Request\""));
+        assert!(bad_body.contains("docs/problems.md#invalid-request\""));
+        assert!(bad_body.contains("\"title\":\"Invalid request\""));
         assert!(bad_body.contains("\"status\":400"));
     }
 

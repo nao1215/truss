@@ -1,4 +1,4 @@
-desc: "Error responses - RFC 7807 problem details"
+desc: "Error responses - RFC 9457 problem details"
 runners:
   req: http://truss:8080
 vars:
@@ -15,6 +15,8 @@ steps:
       && current.res.headers['Content-Type'][0] == 'application/problem+json'
       && current.res.body.status == 404
       && current.res.body.title == 'Not Found'
+      && current.res.body.type == 'about:blank'
+      && current.res.body.requestId == current.res.headers['X-Request-Id'][0]
   wrong_method:
     desc: "GET on the transform endpoint (POST-only) returns 404"
     req:
@@ -35,6 +37,9 @@ steps:
             text/plain: "not json"
     test: |
       current.res.status == 415
+      && current.res.body.type == 'https://github.com/nao1215/truss/blob/main/docs/problems.md#unsupported-media-type'
+      && current.res.body.title == 'Unsupported Media Type'
+      && current.res.body.requestId == current.res.headers['X-Request-Id'][0]
   transform_invalid_json:
     desc: "POST /images:transform with malformed JSON returns 400"
     req:
@@ -48,3 +53,26 @@ steps:
               unexpected_field: true
     test: |
       current.res.status == 400
+      && current.res.body.type == 'https://github.com/nao1215/truss/blob/main/docs/problems.md#invalid-request'
+      && current.res.body.title == 'Invalid request'
+  transform_invalid_options:
+    desc: "fit without both width and height is the transform's own class, invalid-options"
+    req:
+      /images:transform:
+        post:
+          headers:
+            Authorization: "Bearer {{ vars.token }}"
+            Content-Type: "application/json"
+          body:
+            application/json:
+              source:
+                kind: path
+                path: /sample.png
+              options:
+                fit: cover
+                width: 10
+    test: |
+      current.res.status == 400
+      && current.res.body.type == 'https://github.com/nao1215/truss/blob/main/docs/problems.md#invalid-options'
+      && current.res.body.title == 'Invalid transform options'
+      && current.res.body.requestId == current.res.headers['X-Request-Id'][0]

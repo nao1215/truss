@@ -219,9 +219,7 @@ pub(super) fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io:
             && !limiter.check(ip)
         {
             let mut response = too_many_requests_response("rate limit exceeded — try again later");
-            response
-                .headers
-                .push(("X-Request-Id".to_string(), request_id.clone()));
+            response.attach_request_id(&request_id);
             response.strip_body_if_head(is_head);
             record_http_metrics(RouteMetric::Unknown, response.status);
             let sc = status_code(response.status).unwrap_or("unknown");
@@ -269,9 +267,7 @@ pub(super) fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io:
             && let Err(mut response) =
                 super::auth::authorize_request_headers(&partial.headers, config)
         {
-            response
-                .headers
-                .push(("X-Request-Id".to_string(), request_id.clone()));
+            response.attach_request_id(&request_id);
             record_http_metrics(RouteMetric::Unknown, response.status);
             let sc = status_code(response.status).unwrap_or("unknown");
             let method_log = partial.method.clone();
@@ -325,9 +321,7 @@ pub(super) fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io:
             };
 
             if let Some(mut response) = early_response {
-                response
-                    .headers
-                    .push(("X-Request-Id".to_string(), request_id.clone()));
+                response.attach_request_id(&request_id);
                 response.strip_body_if_head(is_head);
                 record_http_metrics(RouteMetric::Metrics, response.status);
                 let sc = status_code(response.status).unwrap_or("unknown");
@@ -374,9 +368,7 @@ pub(super) fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io:
             };
 
             if let Some(mut response) = early_response {
-                response
-                    .headers
-                    .push(("X-Request-Id".to_string(), request_id.clone()));
+                response.attach_request_id(&request_id);
                 response.strip_body_if_head(is_head);
                 record_http_metrics(RouteMetric::Health, response.status);
                 let sc = status_code(response.status).unwrap_or("unknown");
@@ -414,9 +406,7 @@ pub(super) fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io:
         let request = match http_parse::read_request_body(&mut stream, partial) {
             Ok(request) => request,
             Err(mut response) => {
-                response
-                    .headers
-                    .push(("X-Request-Id".to_string(), request_id.clone()));
+                response.attach_request_id(&request_id);
                 record_http_metrics(RouteMetric::Unknown, response.status);
                 let sc = status_code(response.status).unwrap_or("unknown");
                 let _ = write_response_compressed(
@@ -447,9 +437,7 @@ pub(super) fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io:
         let mut response = route_request(request, config);
         record_http_metrics(route, response.status);
 
-        response
-            .headers
-            .push(("X-Request-Id".to_string(), request_id.clone()));
+        response.attach_request_id(&request_id);
 
         let cache_status = extract_cache_status(&response.headers);
         let had_watermark = extract_watermark_flag(&mut response.headers);
