@@ -2791,9 +2791,18 @@ fn sniff_avif(bytes: &[u8]) -> Result<ArtifactMetadata, TransformError> {
 
     let inspection = inspect_avif_container(bytes)?;
 
+    // A clean aperture is the picture; the stored size is what it is cut from.
+    let dimensions = match (inspection.dimensions, inspection.clean_aperture()) {
+        (Some((width, height)), Some(aperture)) => {
+            let (_, _, aperture_width, aperture_height) = aperture.rectangle(width, height)?;
+            Some((aperture_width, aperture_height))
+        }
+        (dimensions, _) => dimensions,
+    };
+
     Ok(ArtifactMetadata {
-        width: inspection.dimensions.map(|(width, _)| width),
-        height: inspection.dimensions.map(|(_, height)| height),
+        width: dimensions.map(|(width, _)| width),
+        height: dimensions.map(|(_, height)| height),
         frame_count: 1,
         duration: None,
         has_alpha: inspection.has_alpha(),
@@ -2837,7 +2846,110 @@ enum AvifProperty {
     Rotation(u8),
     /// An `imir` box: 0 exchanges the top and bottom halves, 1 the left and right halves.
     Mirror(u8),
+    /// A `clap` box: the part of the stored picture that is the picture.
+    CleanAperture(AvifCleanAperture),
     Other,
+}
+
+/// The `clap` box: the clean aperture's size and the offset of its centre from the centre
+/// of the stored picture, each as a numerator over a denominator.
+///
+/// It is the crop MIAF defines alongside `irot` and `imir`, applied before either of them.
+/// An encoder writes one to trim a frame it coded larger than the picture, and a viewer
+/// that ignores it shows the padding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AvifCleanAperture {
+    width: (u32, u32),
+    height: (u32, u32),
+    horizontal_offset: (i32, u32),
+    vertical_offset: (i32, u32),
+}
+
+impl AvifCleanAperture {
+    fn parse(payload: &[u8]) -> Result<Self, TransformError> {
+        if payload.len() < 32 {
+            return Err(avif_box_too_short("clap"));
+        }
+        let field = |index: usize| read_u32_be(&payload[index * 4..index * 4 + 4]);
+        Ok(Self {
+            width: (field(0)?, field(1)?),
+            height: (field(2)?, field(3)?),
+            horizontal_offset: (field(4)? as i32, field(5)?),
+            vertical_offset: (field(6)? as i32, field(7)?),
+        })
+    }
+
+    /// The pixel rectangle the aperture selects out of a `width` by `height` picture, as
+    /// `(x, y, width, height)`.
+    ///
+    /// ISO 14496-12 defines the aperture by its centre: the offset is the distance from the
+    /// picture centre to the aperture centre, so the left edge sits at
+    /// `(width - aperture_width) / 2 + horizontal_offset`, and likewise for the top. MIAF
+    /// requires the result to land on whole pixels for an AV1 image, and one that does not,
+    /// or that reaches outside the picture, is refused rather than rounded.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TransformError::DecodeFailed`] naming the field that is not a whole number
+    /// of pixels or that leaves the picture.
+    pub(crate) fn rectangle(
+        self,
+        width: u32,
+        height: u32,
+    ) -> Result<(u32, u32, u32, u32), TransformError> {
+        let aperture_width = avif_aperture_size(self.width, "width")?;
+        let aperture_height = avif_aperture_size(self.height, "height")?;
+        let x = avif_aperture_origin(width, aperture_width, self.horizontal_offset, "horizontal")?;
+        let y = avif_aperture_origin(height, aperture_height, self.vertical_offset, "vertical")?;
+        Ok((x, y, aperture_width, aperture_height))
+    }
+}
+
+fn avif_aperture_size(
+    (numerator, denominator): (u32, u32),
+    axis: &str,
+) -> Result<u32, TransformError> {
+    if denominator == 0 || numerator == 0 || numerator % denominator != 0 {
+        return Err(TransformError::DecodeFailed(format!(
+            "avif clean aperture {axis} {numerator}/{denominator} is not a whole number of pixels"
+        )));
+    }
+    Ok(numerator / denominator)
+}
+
+/// The aperture's first pixel along one axis: `(picture - aperture) / 2 + offset`, worked in
+/// units of `2 * denominator` so that the halving and the fraction stay exact.
+fn avif_aperture_origin(
+    picture: u32,
+    aperture: u32,
+    (numerator, denominator): (i32, u32),
+    axis: &str,
+) -> Result<u32, TransformError> {
+    if denominator == 0 {
+        return Err(TransformError::DecodeFailed(format!(
+            "avif clean aperture {axis} offset has a zero denominator"
+        )));
+    }
+    if aperture > picture {
+        return Err(TransformError::DecodeFailed(format!(
+            "avif clean aperture is larger than the {picture}-pixel picture along the {axis} axis"
+        )));
+    }
+    let scaled = i64::from(picture - aperture) * i64::from(denominator) + 2 * i64::from(numerator);
+    let divisor = 2 * i64::from(denominator);
+    if scaled % divisor != 0 {
+        return Err(TransformError::DecodeFailed(format!(
+            "avif clean aperture {axis} offset {numerator}/{denominator} does not land on a whole pixel"
+        )));
+    }
+    let origin = scaled / divisor;
+    if origin < 0 || origin + i64::from(aperture) > i64::from(picture) {
+        return Err(TransformError::DecodeFailed(format!(
+            "avif clean aperture leaves the picture along the {axis} axis"
+        )));
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    Ok(origin as u32)
 }
 
 #[derive(Debug, Default)]
@@ -2863,21 +2975,12 @@ impl AvifInspection {
     /// The transform the primary item's `irot` and `imir` properties add up to, as the EXIF
     /// orientation value that names it, or `None` when the item has neither.
     fn orientation(&self) -> Option<u16> {
-        let primary_item = self.primary_item?;
-        let (_, positions) = self
-            .associations
-            .iter()
-            .find(|(item, _)| *item == primary_item)?;
-
         let mut rotation = None;
         let mut mirror = None;
-        for position in positions {
-            let property = usize::from(*position)
-                .checked_sub(1)
-                .and_then(|index| self.properties.get(index));
+        for property in self.primary_properties() {
             match property {
-                Some(AvifProperty::Rotation(angle)) => rotation = Some(*angle),
-                Some(AvifProperty::Mirror(mode)) => mirror = Some(*mode),
+                AvifProperty::Rotation(angle) => rotation = Some(*angle),
+                AvifProperty::Mirror(mode) => mirror = Some(*mode),
                 _ => {}
             }
         }
@@ -2887,6 +2990,46 @@ impl AvifInspection {
         }
         Some(avif_orientation_value(rotation.unwrap_or(0), mirror))
     }
+
+    /// The primary item's clean aperture, when it has one.
+    fn clean_aperture(&self) -> Option<AvifCleanAperture> {
+        self.primary_properties()
+            .find_map(|property| match property {
+                AvifProperty::CleanAperture(aperture) => Some(*aperture),
+                _ => None,
+            })
+    }
+
+    /// The properties `ipma` associates with the primary item, in the order it lists them.
+    fn primary_properties(&self) -> impl Iterator<Item = &AvifProperty> {
+        let positions = self.primary_item.and_then(|primary_item| {
+            self.associations
+                .iter()
+                .find(|(item, _)| *item == primary_item)
+                .map(|(_, positions)| positions.as_slice())
+        });
+        positions.unwrap_or(&[]).iter().filter_map(|position| {
+            usize::from(*position)
+                .checked_sub(1)
+                .and_then(|index| self.properties.get(index))
+        })
+    }
+}
+
+/// Reads the clean aperture an AVIF's primary item carries, when it carries one.
+///
+/// The decoder applies it: `mp4parse` does not read the box, and since MIAF marks it
+/// essential, it forbids the item that carries one, which is why the aperture is read here
+/// from the same walk the sniffer does rather than from the parsed context.
+///
+/// # Errors
+///
+/// Returns [`TransformError::DecodeFailed`] when the container cannot be walked.
+#[cfg(feature = "avif")]
+pub(crate) fn avif_clean_aperture(
+    bytes: &[u8],
+) -> Result<Option<AvifCleanAperture>, TransformError> {
+    Ok(inspect_avif_container(bytes)?.clean_aperture())
 }
 
 /// Reads the orientation an AVIF signals through its `irot` and `imir` item properties.
@@ -3003,6 +3146,7 @@ fn inspect_avif_properties(
             }
             b"irot" => AvifProperty::Rotation(avif_transform_byte(payload, "irot")? & 0b11),
             b"imir" => AvifProperty::Mirror(avif_transform_byte(payload, "imir")? & 0b1),
+            b"clap" => AvifProperty::CleanAperture(AvifCleanAperture::parse(payload)?),
             _ => AvifProperty::Other,
         };
         inspection.properties.push(property);
@@ -4324,6 +4468,108 @@ mod tests {
         assert!(
             error.to_string().contains("ipma box is too short"),
             "{error}"
+        );
+    }
+
+    fn avif_clap(width: u32, height: u32, horizontal: i32, vertical: i32) -> Vec<u8> {
+        let mut payload = Vec::new();
+        for value in [width, 1, height, 1] {
+            payload.extend_from_slice(&value.to_be_bytes());
+        }
+        for offset in [horizontal, vertical] {
+            payload.extend_from_slice(&offset.to_be_bytes());
+            payload.extend_from_slice(&1_u32.to_be_bytes());
+        }
+        mp4_box(b"clap", &payload)
+    }
+
+    /// The clean aperture is the picture, so the sniffer reports its size, and it is cut
+    /// before the orientation turns it, so the oriented size follows from the cut.
+    #[rstest]
+    #[case::centred(30, 20, 0, 0, None, (30, 20), (30, 20))]
+    #[case::offset_to_the_left(30, 20, -5, 0, None, (30, 20), (30, 20))]
+    #[case::then_rotated(30, 20, 0, 0, Some(3), (30, 20), (20, 30))]
+    #[case::whole_picture(40, 20, 0, 0, None, (40, 20), (40, 20))]
+    fn sniff_artifact_reports_the_avif_clean_aperture_as_the_picture(
+        #[case] width: u32,
+        #[case] height: u32,
+        #[case] horizontal: i32,
+        #[case] vertical: i32,
+        #[case] rotation: Option<u8>,
+        #[case] expected: (u32, u32),
+        #[case] expected_oriented: (u32, u32),
+    ) {
+        let mut properties = vec![
+            avif_ispe(40, 20),
+            avif_clap(width, height, horizontal, vertical),
+        ];
+        let mut positions = vec![1_u16, 2];
+        if let Some(angle) = rotation {
+            properties.push(mp4_box(b"irot", &[angle]));
+            positions.push(3);
+        }
+        let bytes = avif_bytes_with_properties(1, &properties, avif_ipma(0, 0, &[(1, &positions)]));
+
+        let artifact = sniff_artifact(RawArtifact::new(bytes, None)).expect("sniff avif");
+
+        assert_eq!(
+            (artifact.metadata.width, artifact.metadata.height),
+            (Some(expected.0), Some(expected.1))
+        );
+        assert_eq!(
+            artifact.metadata.oriented_dimensions(),
+            Some(Dimensions::new(expected_oriented.0, expected_oriented.1))
+        );
+    }
+
+    /// An aperture that does not land on whole pixels or does not fit is refused, not
+    /// rounded: MIAF requires whole pixels for an AV1 image, and a viewer that rounds shows
+    /// a different picture from one that does not.
+    #[rstest]
+    #[case::off_the_pixel_grid(31, 20, 0, 0, "does not land on a whole pixel")]
+    #[case::wider_than_the_picture(50, 20, 0, 0, "larger than the 40-pixel picture")]
+    #[case::pushed_out_of_the_picture(30, 20, 6, 0, "leaves the picture")]
+    fn sniff_artifact_refuses_an_avif_clean_aperture_that_is_not_a_pixel_rectangle(
+        #[case] width: u32,
+        #[case] height: u32,
+        #[case] horizontal: i32,
+        #[case] vertical: i32,
+        #[case] reason: &str,
+    ) {
+        let properties = vec![
+            avif_ispe(40, 20),
+            avif_clap(width, height, horizontal, vertical),
+        ];
+        let bytes = avif_bytes_with_properties(1, &properties, avif_ipma(0, 0, &[(1, &[1, 2])]));
+
+        let error = sniff_artifact(RawArtifact::new(bytes, None)).expect_err("refused");
+
+        assert!(error.to_string().contains(reason), "{error}");
+    }
+
+    /// Two files patched from what libheif wrote, since no encoder here writes the box: a
+    /// 40x20 picture with a centred 30x20 aperture, and the same aperture on a rotated one.
+    #[test]
+    fn sniff_artifact_reads_the_clean_aperture_of_a_patched_avif() {
+        let cropped = include_bytes!("../integration/fixtures/clap-cropped.avif");
+        let rotated = include_bytes!("../integration/fixtures/clap-rotated.avif");
+
+        let cropped = sniff_artifact(RawArtifact::new(cropped.to_vec(), None)).expect("sniff");
+        assert_eq!(
+            (cropped.metadata.width, cropped.metadata.height),
+            (Some(30), Some(20))
+        );
+        assert_eq!(cropped.metadata.orientation, None);
+
+        let rotated = sniff_artifact(RawArtifact::new(rotated.to_vec(), None)).expect("sniff");
+        assert_eq!(
+            (rotated.metadata.width, rotated.metadata.height),
+            (Some(30), Some(20))
+        );
+        assert_eq!(rotated.metadata.orientation, Some(6));
+        assert_eq!(
+            rotated.metadata.oriented_dimensions(),
+            Some(Dimensions::new(20, 30))
         );
     }
 

@@ -183,6 +183,51 @@ scenarios:
             width: 40
             height: 20
 
+  - name: an AVIF clean aperture is the picture, cut before the orientation turns it
+    steps:
+      # clap is the container-level crop MIAF defines next to irot and imir. Both fixtures
+      # are patched from what libheif wrote, since no encoder here writes the box: a 40x20
+      # picture keeping its middle 30 columns, and the same aperture on the rotated one.
+      # The decoder used to refuse both with "AVIF has no primary item data".
+      - run:
+          command: truss inspect "${fixtures}/clap-cropped.avif"
+      - assert:
+          exit_code: 0
+          stdout:
+            json:
+              - path: $.width
+                equals: 30
+              - path: $.height
+                equals: 20
+      - run:
+          command: truss convert "${fixtures}/clap-cropped.avif" -o clap-cropped.png
+      - assert:
+          exit_code: 0
+          image:
+            path: clap-cropped.png
+            width: 30
+            height: 20
+      - run:
+          command: truss inspect "${fixtures}/clap-rotated.avif"
+      - assert:
+          exit_code: 0
+          stdout:
+            json:
+              - path: $.orientation
+                equals: 6
+              - path: $.orientedWidth
+                equals: 20
+              - path: $.orientedHeight
+                equals: 30
+      - run:
+          command: truss convert "${fixtures}/clap-rotated.avif" -o clap-rotated.png
+      - assert:
+          exit_code: 0
+          image:
+            path: clap-rotated.png
+            width: 20
+            height: 30
+
   - name: keeping the metadata does not silence the warning when the output cannot hold the tag
     steps:
       # BMP has nowhere to put an Exif block, so --keep-metadata keeps nothing here and the

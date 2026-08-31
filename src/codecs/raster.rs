@@ -382,9 +382,20 @@ fn decode_input(input: &Artifact) -> Result<DynamicImage, TransformError> {
 /// 10/12-bit images are downscaled to 8-bit with rounding.
 #[cfg(feature = "avif")]
 fn decode_avif(bytes: &[u8]) -> Result<DynamicImage, TransformError> {
+    let aperture = crate::core::avif_clean_aperture(bytes)?;
     let mut cursor = Cursor::new(bytes);
-    let context = mp4parse::read_avif(&mut cursor, ParseStrictness::Normal)
-        .map_err(|e| TransformError::DecodeFailed(format!("AVIF container parse failed: {e}")))?;
+    let parse = |cursor: &mut Cursor<&[u8]>, strictness| {
+        cursor.set_position(0);
+        mp4parse::read_avif(cursor, strictness)
+            .map_err(|e| TransformError::DecodeFailed(format!("AVIF container parse failed: {e}")))
+    };
+    let mut context = parse(&mut cursor, ParseStrictness::Normal)?;
+    // mp4parse does not read `clap` and, since MIAF marks it essential, forbids the item
+    // that carries one. The aperture is read and applied here, so for such a file the parse
+    // is repeated without that check; every other file keeps the stricter parse.
+    if aperture.is_some() && !context.primary_item_is_present() {
+        context = parse(&mut cursor, ParseStrictness::Permissive)?;
+    }
 
     let primary_data = context
         .primary_item_coded_data()
@@ -407,9 +418,24 @@ fn decode_avif(bytes: &[u8]) -> Result<DynamicImage, TransformError> {
         merge_alpha_plane(&alpha_frame, &mut rgba, width, height);
     }
 
-    RgbaImage::from_raw(width, height, rgba)
-        .map(DynamicImage::ImageRgba8)
-        .ok_or_else(|| TransformError::DecodeFailed("AVIF decoded buffer size mismatch".into()))
+    let image = RgbaImage::from_raw(width, height, rgba)
+        .ok_or_else(|| TransformError::DecodeFailed("AVIF decoded buffer size mismatch".into()))?;
+
+    // The clean aperture comes first among the transformative properties, so it is cut
+    // here, before the orientation the pipeline applies to what this returns.
+    let image = match aperture {
+        Some(aperture) => {
+            let (x, y, aperture_width, aperture_height) = aperture.rectangle(width, height)?;
+            if (x, y, aperture_width, aperture_height) == (0, 0, width, height) {
+                image
+            } else {
+                image::imageops::crop_imm(&image, x, y, aperture_width, aperture_height).to_image()
+            }
+        }
+        None => image,
+    };
+
+    Ok(DynamicImage::ImageRgba8(image))
 }
 
 /// Feeds AV1 OBU data to a `rav1d` decoder and returns the first decoded frame.
@@ -7386,6 +7412,60 @@ mod tests {
             "expected an OrientationDropped warning, got {:?}",
             result.warnings
         );
+    }
+
+    /// A clean aperture is cut at decode, before the orientation: the cropped fixture is a
+    /// 40x20 picture whose aperture keeps the middle 30 columns, so 5 of the 10 blue columns
+    /// survive, and the rotated one turns that cut by a quarter turn afterwards.
+    #[cfg(feature = "avif")]
+    #[rstest]
+    #[case::cropped(
+        include_bytes!("../../integration/fixtures/clap-cropped.avif"),
+        (30, 20),
+        [((2, 10), [0, 0, 255]), ((27, 10), [255, 0, 0])]
+    )]
+    #[case::rotated(
+        include_bytes!("../../integration/fixtures/clap-rotated.avif"),
+        (20, 30),
+        [((10, 2), [0, 0, 255]), ((10, 27), [255, 0, 0])]
+    )]
+    fn transform_raster_cuts_an_avif_to_its_clean_aperture_before_orienting_it(
+        #[case] bytes: &[u8],
+        #[case] expected: (u32, u32),
+        #[case] markers: [((u32, u32), [u8; 3]); 2],
+    ) {
+        let artifact = sniff_artifact(RawArtifact::new(bytes.to_vec(), None)).expect("sniff avif");
+
+        let result = transform_raster(TransformRequest::new(
+            artifact,
+            TransformOptions {
+                format: Some(MediaType::Png),
+                ..TransformOptions::default()
+            },
+        ))
+        .expect("decode a clean-aperture avif");
+
+        assert_eq!(
+            (
+                result.artifact.metadata.width,
+                result.artifact.metadata.height
+            ),
+            (Some(expected.0), Some(expected.1))
+        );
+
+        let image = image::load_from_memory(&result.artifact.bytes)
+            .expect("decode png")
+            .to_rgb8();
+        for ((x, y), expected) in markers {
+            let pixel = image.get_pixel(x, y).0;
+            assert!(
+                pixel
+                    .iter()
+                    .zip(expected)
+                    .all(|(got, want)| got.abs_diff(want) < 40),
+                "pixel ({x}, {y}) should be near {expected:?}, got {pixel:?}"
+            );
+        }
     }
 
     /// The two fixtures are what libheif writes for a phone photo: the transform as `irot`
