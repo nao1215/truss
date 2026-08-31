@@ -10,7 +10,7 @@ truss is configured through environment variables and CLI flags. This page docum
 | `TRUSS_STORAGE_ROOT` | Root directory for local image sources |
 | `TRUSS_BEARER_TOKEN` | Bearer token for private endpoints |
 | `TRUSS_STORAGE_BACKEND` | `filesystem` (default), `s3`, `gcs`, or `azure` |
-| `TRUSS_MAX_CONCURRENT_TRANSFORMS` | Max concurrent transforms; excess requests receive 503 (default: `64`, range: 1-1024) |
+| `TRUSS_MAX_CONCURRENT_TRANSFORMS` | Max concurrent transforms; excess requests receive 503 (default: one per core, range: 1-1024) |
 | `TRUSS_TRANSFORM_DEADLINE_SECS` | Per-transform deadline in seconds, read at pipeline stage boundaries (default: `30`, range: 1-300) |
 | `TRUSS_MAX_INPUT_PIXELS` | Max input image pixels before decode; excess images receive 422 (default: `40000000`, range: 1-100000000) |
 | `TRUSS_MAX_UPLOAD_BYTES` | Max upload body size in bytes; excess requests receive 413 (default: `104857600` = 100 MB, range: 1-10737418240) |

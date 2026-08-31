@@ -10,8 +10,8 @@
 //! - **Predictable resource usage:** Each connection consumes a fixed stack
 //!   allocation. There is no task queue, no hidden buffering, and no executor
 //!   scheduling overhead.
-//! - **Bounded concurrency:** `TRUSS_MAX_CONCURRENT_TRANSFORMS` (default 64)
-//!   caps the number of simultaneous image transforms via a semaphore-like
+//! - **Bounded concurrency:** `TRUSS_MAX_CONCURRENT_TRANSFORMS` (default: one per
+//!   core) caps the number of simultaneous image transforms via a semaphore-like
 //!   `TransformSlot` guard. Excess requests receive 503 Service Unavailable.
 //!
 //! **Trade-off:** Slow clients (slow uploads, slow TLS handshakes) block their
@@ -98,7 +98,7 @@ pub(crate) fn stderr_write(msg: &str) {
 #[cfg(test)]
 #[allow(unused_imports)] // Some imports are only used by feature-gated tests (e.g. s3).
 mod tests {
-    use super::config::DEFAULT_MAX_CONCURRENT_TRANSFORMS;
+    use super::config::default_max_concurrent_transforms;
     use super::config::{
         DEFAULT_PUBLIC_MAX_AGE_SECONDS, DEFAULT_PUBLIC_STALE_WHILE_REVALIDATE_SECONDS,
         parse_presets_from_env,
@@ -570,7 +570,7 @@ mod tests {
         let config = ServerConfig::new(std::env::temp_dir(), None);
         config
             .transforms_in_flight
-            .store(DEFAULT_MAX_CONCURRENT_TRANSFORMS, Ordering::Relaxed);
+            .store(default_max_concurrent_transforms(), Ordering::Relaxed);
 
         let request = HttpRequest {
             method: "POST".to_string(),
@@ -605,7 +605,7 @@ mod tests {
 
         assert_eq!(
             config.transforms_in_flight.load(Ordering::Relaxed),
-            DEFAULT_MAX_CONCURRENT_TRANSFORMS
+            default_max_concurrent_transforms()
         );
     }
 
@@ -648,6 +648,20 @@ mod tests {
         );
 
         assert!(response.status.contains("503"));
+        // A request turned away at admission and one abandoned at the deadline are
+        // different answers, and the class is what tells them apart: 503 says the server is
+        // full and to come back, 413 says the request itself was too big. Before the
+        // admission limit was tied to the machine, a server past its capacity answered the
+        // second when it meant the first, after spending the CPU.
+        let body = String::from_utf8(response.body).expect("problem body is utf8");
+        assert!(
+            body.contains("service-unavailable"),
+            "backpressure must be reported as service-unavailable: {body}"
+        );
+        assert!(
+            !body.contains("limit-exceeded"),
+            "backpressure must not be reported as a limit on the request: {body}"
+        );
     }
 
     #[test]
@@ -2842,8 +2856,28 @@ mod tests {
             ],
             || {
                 let config = ServerConfig::from_env().unwrap();
-                assert_eq!(config.max_concurrent_transforms, 64);
+                // The relation rather than a number: the value differs per machine, which
+                // is the point of deriving it.
+                assert_eq!(
+                    config.max_concurrent_transforms,
+                    std::thread::available_parallelism()
+                        .map(|count| count.get() as u64)
+                        .unwrap_or(4)
+                );
             },
+        );
+    }
+
+    #[test]
+    fn the_derived_concurrency_default_is_a_value_the_parser_accepts() {
+        // A machine reporting one core must still admit one transform, and one reporting
+        // more cores than the parser's ceiling must not produce a default the same parser
+        // would reject.
+        let derived = default_max_concurrent_transforms();
+        assert!(
+            (super::config::MIN_CONCURRENT_TRANSFORMS..=super::config::MAX_CONCURRENT_TRANSFORMS)
+                .contains(&derived),
+            "derived default {derived} is outside the range TRUSS_MAX_CONCURRENT_TRANSFORMS accepts"
         );
     }
 
@@ -2898,7 +2932,10 @@ mod tests {
             ],
             || {
                 let config = ServerConfig::from_env().unwrap();
-                assert_eq!(config.max_concurrent_transforms, 64);
+                assert_eq!(
+                    config.max_concurrent_transforms,
+                    default_max_concurrent_transforms()
+                );
             },
         );
     }
@@ -3447,7 +3484,7 @@ mod tests {
         assert!(config.presets.read().unwrap().is_empty());
         assert_eq!(
             config.max_concurrent_transforms,
-            DEFAULT_MAX_CONCURRENT_TRANSFORMS
+            default_max_concurrent_transforms()
         );
         assert_eq!(
             config.public_max_age_seconds,
@@ -3760,7 +3797,7 @@ mod tests {
             .find(|c| c["name"] == "transformCapacity")
             .expect("transformCapacity check");
         assert_eq!(capacity["current"], 0);
-        assert_eq!(capacity["max"], 64);
+        assert_eq!(capacity["max"], default_max_concurrent_transforms());
     }
 
     #[cfg(target_os = "linux")]
