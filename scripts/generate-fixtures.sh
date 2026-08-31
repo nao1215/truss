@@ -174,6 +174,18 @@ magick -size 40x20 xc:red -fill blue -draw 'rectangle 0,0 9,19' \
 magick -size 40x20 xc:white -fill red -draw 'rectangle 0,0 11,3' -fill blue -draw 'rectangle 0,0 3,11' \
   -alpha off -depth 8 -orient left-top "$DIR/imir-transposed-5.avif"
 
+echo "[8c*/14] clap-cropped.avif / clap-rotated.avif — the same pictures behind a clean aperture"
+# clap is the container-level crop MIAF defines alongside irot and imir, applied before
+# either. No encoder here writes the box, so avif-add-clap.py patches it into a file libheif
+# wrote: the property, the essential association in the position MIAF requires, and the
+# box sizes and iloc offsets the insertion moved. Both keep the middle 30 columns of the
+# 40x20 picture, so 5 of the 10 blue columns survive; the rotated one then turns that cut.
+magick -size 40x20 xc:red -fill blue -draw 'rectangle 0,0 9,19' \
+  -alpha off -depth 8 "$DIR/clap-base.avif"
+python3 "$(dirname "$0")/avif-add-clap.py" "$DIR/clap-base.avif" "$DIR/clap-cropped.avif" 30 20
+python3 "$(dirname "$0")/avif-add-clap.py" "$DIR/irot-rotated.avif" "$DIR/clap-rotated.avif" 30 20
+rm -f "$DIR/clap-base.avif"
+
 echo "[8d/14] deep-10bit.avif / deep-12bit.avif — high bit depth AVIF with saturated samples"
 # The image crate writes 8-bit AVIF only, so nothing in the test suite reached the 10/12-bit
 # decode path until these. A blue left half, a red right half, and a white bar along the
