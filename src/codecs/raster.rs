@@ -934,7 +934,7 @@ pub(crate) fn apply_rotation(
 /// 45-degree turn of a square needs about 1.41x each side. Cropping back to the original
 /// size instead would silently cut the corners off, so the box expands and the exposed
 /// area is filled with the background color.
-fn rotated_bounding_box(width: u32, height: u32, degrees: u16) -> (u32, u32) {
+pub(crate) fn rotated_bounding_box(width: u32, height: u32, degrees: u16) -> (u32, u32) {
     // Quarter turns are exact, and must be computed exactly: `cos(90f64.to_radians())` is
     // 6.1e-17 rather than 0, so the general formula rounds 8.0 up to 9 and reports a canvas
     // one pixel too large.
