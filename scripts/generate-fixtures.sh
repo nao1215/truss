@@ -32,7 +32,11 @@ echo "[3/18] sample.bmp — 4x3 RGBA BMP baseline"
 magick -size 4x3 xc:'rgba(0,255,0,255)' "$DIR/sample.bmp"
 
 echo "[4/18] transparent.bmp — 32-bit RGBA BMP with alpha"
-magick -size 4x4 xc:'rgba(255,0,0,128)' -type TrueColorAlpha BMP3:"$DIR/transparent.bmp"
+# A BITMAPV4HEADER, not BMP3: the Windows 3.x header has no alpha mask, so ImageMagick
+# wrote this fixture as 24-bit with the alpha discarded and every test named for it was
+# about an opaque file. The V4 header carries the mask, and the pixels are half-transparent
+# red so that alpha is observable in every output: kept in PNG and BMP, composited in JPEG.
+magick -size 4x4 xc:'rgba(255,0,0,0.5)' -define bmp:format=bmp4 "$DIR/transparent.bmp"
 
 echo "[5/18] 1px.png — minimum dimension (1x1)"
 magick -size 1x1 xc:red "$DIR/1px.png"
