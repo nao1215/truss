@@ -38,7 +38,7 @@ use super::remote::{read_remote_watermark_bytes, resolve_source_bytes};
 use super::response::{
     HttpResponse, NOT_FOUND_BODY, bad_request_response, push_warning_headers,
     service_unavailable_response, transform_error_response, unsupported_media_type_response,
-    warning_header_value,
+    unsupported_output_media_type_response, warning_header_value,
 };
 use super::stderr_write;
 
@@ -291,7 +291,10 @@ pub struct TransformOptionsPayload {
     pub optimize: Option<String>,
     pub target_quality: Option<String>,
     pub background: Option<String>,
-    pub rotate: Option<u16>,
+    /// Clockwise rotation in whole degrees. Negatives turn counter-clockwise and values
+    /// past a full turn wrap, which is what `Rotation` accepts and what the CLI and the
+    /// Wasm package take.
+    pub rotate: Option<i32>,
     pub auto_orient: Option<bool>,
     pub strip_metadata: Option<bool>,
     pub preserve_exif: Option<bool>,
@@ -328,6 +331,24 @@ impl TransformOptionsPayload {
         }
     }
 
+    /// Resolves the requested output format, refusing one truss reads but cannot write.
+    ///
+    /// The refusal is the same class the pipeline gives it, 415 with
+    /// `unsupported-output-media-type`, and the same sentence the CLI and the Wasm package
+    /// print; only the moment moves. It used to be raised by the encoder, which meant the
+    /// server had already fetched the source and decoded the picture for a request it was
+    /// always going to refuse.
+    fn output_format(&self) -> Result<Option<MediaType>, HttpResponse> {
+        let Some(value) = self.format.as_deref() else {
+            return Ok(None);
+        };
+        let media_type = parse_named(value, "format", MediaType::from_str)?;
+        match media_type.unencodable_reason() {
+            Some(reason) => Err(unsupported_output_media_type_response(&reason)),
+            None => Ok(Some(media_type)),
+        }
+    }
+
     pub(super) fn into_options(self) -> Result<TransformOptions, HttpResponse> {
         let defaults = TransformOptions::default();
 
@@ -352,7 +373,7 @@ impl TransformOptionsPayload {
                 "position",
                 Position::from_str,
             )?,
-            format: parse_optional_named(self.format.as_deref(), "format", MediaType::from_str)?,
+            format: self.output_format()?,
             quality: self.quality,
             optimize: parse_optional_named(
                 self.optimize.as_deref(),
@@ -1276,11 +1297,12 @@ pub(super) fn parse_public_get_request(
         optimize: query.get("optimize").cloned(),
         target_quality: query.get("targetQuality").cloned(),
         background: query.get("background").cloned(),
-        rotate: query
-            .get("rotate")
-            .map(|v| v.parse::<u16>())
-            .transpose()
-            .map_err(|_| bad_request_response("rotate must be 0, 90, 180, or 270"))?,
+        // `Rotation` accepts any whole number of degrees, negatives included, so the query
+        // is read through it rather than through a narrower integer type with a range
+        // sentence of its own that stopped being true in v0.13.0.
+        rotate: parse_optional_named(query.get("rotate").map(String::as_str), "rotate", |value| {
+            Rotation::from_str(value).map(|rotation| i32::from(rotation.as_degrees()))
+        })?,
         auto_orient: parse_optional_bool_query(query, "autoOrient")?,
         strip_metadata: parse_optional_bool_query(query, "stripMetadata")?,
         preserve_exif: parse_optional_bool_query(query, "preserveExif")?,
@@ -1719,6 +1741,64 @@ mod tests {
     }
 
     // -- Metadata flags resolve the way every other adapter resolves them --
+
+    /// `rotate` is a whole number of degrees, sign included, everywhere truss takes one.
+    ///
+    /// The payload used to hold a `u16`, so `-90`, which the CLI and the Wasm package both
+    /// turn counter-clockwise, was refused by serde before any truss code ran, with a
+    /// message that named the Rust type.
+    #[test]
+    fn rotate_accepts_the_angles_the_other_adapters_accept() {
+        for (degrees, expected) in [
+            (-90, Rotation::DEG_270),
+            (-360, Rotation::DEG_0),
+            (0, Rotation::DEG_0),
+            (45, Rotation::from_degrees(45)),
+            (370, Rotation::from_degrees(10)),
+        ] {
+            let options = TransformOptionsPayload {
+                rotate: Some(degrees),
+                ..TransformOptionsPayload::default()
+            }
+            .into_options()
+            .unwrap_or_else(|_| panic!("rotate {degrees} is a whole number of degrees"));
+
+            assert_eq!(options.rotate, expected, "rotate {degrees}");
+        }
+    }
+
+    /// A `gif` output is refused while the options are read, not after the picture has been
+    /// decoded, and with the class the pipeline gives the same refusal.
+    #[test]
+    fn a_decode_only_output_format_is_refused_with_the_options() {
+        let error = TransformOptionsPayload {
+            format: Some("gif".to_string()),
+            ..TransformOptionsPayload::default()
+        }
+        .into_options()
+        .expect_err("gif has no encoder behind it");
+
+        assert_eq!(error.status, "415 Unsupported Media Type");
+        let body = String::from_utf8(error.body).expect("utf-8 problem body");
+        assert!(body.contains("unsupported-output-media-type"), "{body}");
+        assert!(body.contains("input-only"), "{body}");
+    }
+
+    /// A format name that is not a format is still a request that could not be understood,
+    /// which is a different class from a format truss knows and will not write.
+    #[test]
+    fn an_unknown_output_format_stays_an_invalid_request() {
+        let error = TransformOptionsPayload {
+            format: Some("bogus".to_string()),
+            ..TransformOptionsPayload::default()
+        }
+        .into_options()
+        .expect_err("bogus is not a format");
+
+        assert_eq!(error.status, "400 Bad Request");
+        let body = String::from_utf8(error.body).expect("utf-8 problem body");
+        assert!(body.contains("invalid-request"), "{body}");
+    }
 
     #[test]
     fn preserve_exif_alone_implies_not_stripping() {

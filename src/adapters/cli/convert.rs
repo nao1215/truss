@@ -277,13 +277,10 @@ where
     let Some(media_type) = infer_output_format(output) else {
         return Ok(());
     };
-    if media_type.is_encodable() {
-        return Ok(());
+    match media_type.unencodable_reason() {
+        Some(reason) => Err(error(&reason)),
+        None => Ok(()),
     }
-    Err(error(&format!(
-        "{} is an input-only format; choose an output format such as png, jpeg, webp, or avif",
-        media_type.as_name()
-    )))
 }
 
 fn infer_output_format(output: &OutputTarget) -> Option<MediaType> {
