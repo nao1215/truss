@@ -19,8 +19,7 @@ use super::auth::{
     parse_query_params, required_query_param, validate_public_query_names,
 };
 use super::cache::{
-    CacheLookup, TransformCache, compute_cache_key, compute_watermark_identity,
-    try_versioned_cache_lookup,
+    TransformCache, compute_cache_key, compute_watermark_identity, try_versioned_cache_lookup,
 };
 use super::http_parse::{
     HttpRequest, parse_named, parse_optional_named, request_has_json_content_type,
@@ -1339,38 +1338,15 @@ pub(super) fn transform_source_bytes(
         && options.format.is_some()
     {
         let cache_key = compute_cache_key(source_hash, &options, watermark_identity);
-        if let CacheLookup::Hit {
-            media_type,
-            body,
-            age,
-            warnings,
-        } = cache.get(&cache_key)
-        {
+        if let Some(response) = cache.get(&cache_key).into_hit_response(
+            request,
+            response_policy,
+            false,
+            config.public_cache_control(),
+            &config.custom_response_headers,
+        ) {
             CACHE_HITS_TOTAL.fetch_add(1, Ordering::Relaxed);
-            let etag = build_image_etag(&body);
-            let mut headers = build_image_response_headers(
-                media_type,
-                &etag,
-                response_policy,
-                false,
-                CacheHitStatus::Hit,
-                config.public_max_age_seconds,
-                config.public_stale_while_revalidate_seconds,
-                &config.custom_response_headers,
-            );
-            headers.push(("Age".to_string(), age.as_secs().to_string()));
-            if matches!(response_policy, ImageResponsePolicy::PublicGet)
-                && if_none_match_matches(request.header("if-none-match"), &etag)
-            {
-                return HttpResponse::empty("304 Not Modified", headers);
-            }
-            push_warning_headers(&mut headers, &warnings);
-            return HttpResponse::binary_with_headers(
-                "200 OK",
-                media_type.as_mime(),
-                headers,
-                body,
-            );
+            return response;
         }
     }
 
@@ -1473,33 +1449,16 @@ fn transform_source_bytes_inner(
     let cache_key = compute_cache_key(source_hash, &options, watermark_identity);
 
     if let Some(cache) = cache
-        && let CacheLookup::Hit {
-            media_type,
-            body,
-            age,
-            warnings,
-        } = cache.get(&cache_key)
-    {
-        CACHE_HITS_TOTAL.fetch_add(1, Ordering::Relaxed);
-        let etag = build_image_etag(&body);
-        let mut headers = build_image_response_headers(
-            media_type,
-            &etag,
+        && let Some(response) = cache.get(&cache_key).into_hit_response(
+            request,
             response_policy,
             accept_may_vary,
-            CacheHitStatus::Hit,
-            response_config.public_cache_control.max_age,
-            response_config.public_cache_control.stale_while_revalidate,
+            response_config.public_cache_control,
             &config.custom_response_headers,
-        );
-        headers.push(("Age".to_string(), age.as_secs().to_string()));
-        if matches!(response_policy, ImageResponsePolicy::PublicGet)
-            && if_none_match_matches(request.header("if-none-match"), &etag)
-        {
-            return HttpResponse::empty("304 Not Modified", headers);
-        }
-        push_warning_headers(&mut headers, &warnings);
-        return HttpResponse::binary_with_headers("200 OK", media_type.as_mime(), headers, body);
+        )
+    {
+        CACHE_HITS_TOTAL.fetch_add(1, Ordering::Relaxed);
+        return response;
     }
 
     if cache.is_some() {
@@ -1581,8 +1540,7 @@ fn transform_source_bytes_inner(
         response_policy,
         accept_may_vary,
         cache_hit_status,
-        response_config.public_cache_control.max_age,
-        response_config.public_cache_control.stale_while_revalidate,
+        response_config.public_cache_control,
         &config.custom_response_headers,
     );
 

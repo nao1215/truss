@@ -782,6 +782,15 @@ fn cfg_storage_eq(_this: &ServerConfig, _other: &ServerConfig) -> bool {
 impl Eq for ServerConfig {}
 
 impl ServerConfig {
+    /// The public `Cache-Control` directives as one value, so a caller that builds image
+    /// response headers passes the pair rather than the two fields separately.
+    pub(super) const fn public_cache_control(&self) -> super::handler::PublicCacheControl {
+        super::handler::PublicCacheControl {
+            max_age: self.public_max_age_seconds,
+            stale_while_revalidate: self.public_stale_while_revalidate_seconds,
+        }
+    }
+
     /// Creates a server configuration from explicit values.
     ///
     /// This constructor does not canonicalize the storage root. It is primarily intended for

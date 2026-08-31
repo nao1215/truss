@@ -121,9 +121,9 @@ mod tests {
         authorize_request_headers, authorize_signed_request, canonical_query_without_signature,
     };
     use super::handler::{
-        DEFAULT_HYSTERESIS_MARGIN, HealthCache, TransformImageRequestPayload, TransformSlot,
-        TransformSourcePayload, WatermarkSource, disk_free_bytes, parse_public_get_request,
-        process_rss_bytes, transform_source_bytes,
+        DEFAULT_HYSTERESIS_MARGIN, HealthCache, PublicCacheControl, TransformImageRequestPayload,
+        TransformSlot, TransformSourcePayload, WatermarkSource, disk_free_bytes,
+        parse_public_get_request, process_rss_bytes, transform_source_bytes,
     };
     use super::lifecycle::preset_watcher;
     use super::negotiate::{
@@ -516,8 +516,10 @@ mod tests {
             ImageResponsePolicy::PublicGet,
             true,
             CacheHitStatus::Disabled,
-            DEFAULT_PUBLIC_MAX_AGE_SECONDS,
-            DEFAULT_PUBLIC_STALE_WHILE_REVALIDATE_SECONDS,
+            PublicCacheControl {
+                max_age: DEFAULT_PUBLIC_MAX_AGE_SECONDS,
+                stale_while_revalidate: DEFAULT_PUBLIC_STALE_WHILE_REVALIDATE_SECONDS,
+            },
             &[],
         );
 
@@ -545,8 +547,10 @@ mod tests {
             ImageResponsePolicy::PublicGet,
             true,
             CacheHitStatus::Disabled,
-            DEFAULT_PUBLIC_MAX_AGE_SECONDS,
-            DEFAULT_PUBLIC_STALE_WHILE_REVALIDATE_SECONDS,
+            PublicCacheControl {
+                max_age: DEFAULT_PUBLIC_MAX_AGE_SECONDS,
+                stale_while_revalidate: DEFAULT_PUBLIC_STALE_WHILE_REVALIDATE_SECONDS,
+            },
             &[],
         );
 
@@ -561,8 +565,10 @@ mod tests {
             ImageResponsePolicy::PublicGet,
             true,
             CacheHitStatus::Disabled,
-            DEFAULT_PUBLIC_MAX_AGE_SECONDS,
-            DEFAULT_PUBLIC_STALE_WHILE_REVALIDATE_SECONDS,
+            PublicCacheControl {
+                max_age: DEFAULT_PUBLIC_MAX_AGE_SECONDS,
+                stale_while_revalidate: DEFAULT_PUBLIC_STALE_WHILE_REVALIDATE_SECONDS,
+            },
             &[],
         );
 
@@ -806,8 +812,10 @@ mod tests {
             ImageResponsePolicy::PublicGet,
             false,
             CacheHitStatus::Hit,
-            DEFAULT_PUBLIC_MAX_AGE_SECONDS,
-            DEFAULT_PUBLIC_STALE_WHILE_REVALIDATE_SECONDS,
+            PublicCacheControl {
+                max_age: DEFAULT_PUBLIC_MAX_AGE_SECONDS,
+                stale_while_revalidate: DEFAULT_PUBLIC_STALE_WHILE_REVALIDATE_SECONDS,
+            },
             &[],
         );
         assert!(headers.contains(&("Cache-Status".to_string(), "\"truss\"; hit".to_string())));
@@ -821,8 +829,10 @@ mod tests {
             ImageResponsePolicy::PublicGet,
             false,
             CacheHitStatus::Miss,
-            DEFAULT_PUBLIC_MAX_AGE_SECONDS,
-            DEFAULT_PUBLIC_STALE_WHILE_REVALIDATE_SECONDS,
+            PublicCacheControl {
+                max_age: DEFAULT_PUBLIC_MAX_AGE_SECONDS,
+                stale_while_revalidate: DEFAULT_PUBLIC_STALE_WHILE_REVALIDATE_SECONDS,
+            },
             &[],
         );
         assert!(headers.contains(&(

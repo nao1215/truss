@@ -35,6 +35,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use super::ServerConfig;
+use super::handler::PublicCacheControl;
 use super::http_parse::HttpRequest;
 use super::metrics::CACHE_HITS_TOTAL;
 use super::negotiate::{
@@ -90,6 +91,58 @@ pub(super) enum CacheLookup {
     },
     /// The entry was not found or is stale.
     Miss,
+}
+
+impl CacheLookup {
+    /// The response a hit stands for, or `None` for a miss.
+    ///
+    /// A hit is answered the same way from all three places that look one up: the ETag is
+    /// the digest of the stored bytes, `Age` is how long the entry has been on disk, a
+    /// matching `If-None-Match` on a public GET answers 304 with the same headers and no
+    /// body, and the warnings the entry kept become `Truss-Warning` headers so a hit reads
+    /// like the miss that wrote it.
+    pub(super) fn into_hit_response(
+        self,
+        request: &HttpRequest,
+        response_policy: ImageResponsePolicy,
+        accept_may_vary: bool,
+        cache_control: PublicCacheControl,
+        custom_headers: &[(String, String)],
+    ) -> Option<HttpResponse> {
+        let Self::Hit {
+            media_type,
+            body,
+            age,
+            warnings,
+        } = self
+        else {
+            return None;
+        };
+
+        let etag = build_image_etag(&body);
+        let mut headers = build_image_response_headers(
+            media_type,
+            &etag,
+            response_policy,
+            accept_may_vary,
+            CacheHitStatus::Hit,
+            cache_control,
+            custom_headers,
+        );
+        headers.push(("Age".to_string(), age.as_secs().to_string()));
+        if matches!(response_policy, ImageResponsePolicy::PublicGet)
+            && if_none_match_matches(request.header("if-none-match"), &etag)
+        {
+            return Some(HttpResponse::empty("304 Not Modified", headers));
+        }
+        push_warning_headers(&mut headers, &warnings);
+        Some(HttpResponse::binary_with_headers(
+            "200 OK",
+            media_type.as_mime(),
+            headers,
+            body,
+        ))
+    }
 }
 
 impl TransformCache {
@@ -678,40 +731,15 @@ pub(super) fn try_versioned_cache_lookup(
     let cache =
         TransformCache::new(cache_root.clone()).with_log_handler(config.log_handler.clone());
     let cache_key = compute_cache_key(source_hash, options, watermark_identity);
-    if let CacheLookup::Hit {
-        media_type,
-        body,
-        age,
-        warnings,
-    } = cache.get(&cache_key)
-    {
-        CACHE_HITS_TOTAL.fetch_add(1, Ordering::Relaxed);
-        let etag = build_image_etag(&body);
-        let mut headers = build_image_response_headers(
-            media_type,
-            &etag,
-            response_policy,
-            false,
-            CacheHitStatus::Hit,
-            config.public_max_age_seconds,
-            config.public_stale_while_revalidate_seconds,
-            &config.custom_response_headers,
-        );
-        headers.push(("Age".to_string(), age.as_secs().to_string()));
-        if matches!(response_policy, ImageResponsePolicy::PublicGet)
-            && if_none_match_matches(request.header("if-none-match"), &etag)
-        {
-            return Some(HttpResponse::empty("304 Not Modified", headers));
-        }
-        push_warning_headers(&mut headers, &warnings);
-        return Some(HttpResponse::binary_with_headers(
-            "200 OK",
-            media_type.as_mime(),
-            headers,
-            body,
-        ));
-    }
-    None
+    let response = cache.get(&cache_key).into_hit_response(
+        request,
+        response_policy,
+        false,
+        config.public_cache_control(),
+        &config.custom_response_headers,
+    )?;
+    CACHE_HITS_TOTAL.fetch_add(1, Ordering::Relaxed);
+    Some(response)
 }
 
 #[cfg(test)]
