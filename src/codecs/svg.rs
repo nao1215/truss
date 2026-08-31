@@ -368,8 +368,7 @@ fn sanitize_svg(bytes: &[u8]) -> Result<String, TransformError> {
                     continue;
                 }
                 if in_style {
-                    let decoded = e.decode().unwrap_or_default();
-                    let text = quick_xml::escape::unescape(&decoded).unwrap_or_default();
+                    let text = quick_xml::escape::unescape(e.as_ref()).unwrap_or_default();
                     let sanitized_css = sanitize_css_urls(&text);
                     let text_event = quick_xml::events::BytesText::new(&sanitized_css);
                     writer
@@ -393,8 +392,7 @@ fn sanitize_svg(bytes: &[u8]) -> Result<String, TransformError> {
                     // as a regular Text event (the CDATA wrapper is unnecessary
                     // after sanitization and would hide the content from further
                     // processing by downstream parsers).
-                    let text = String::from_utf8_lossy(e.as_ref());
-                    let sanitized_css = sanitize_css_urls(&text);
+                    let sanitized_css = sanitize_css_urls(e.as_ref());
                     let text_event = quick_xml::events::BytesText::new(&sanitized_css);
                     writer
                         .write_event(Event::Text(text_event.into_owned()))
@@ -469,23 +467,17 @@ fn sanitize_svg(bytes: &[u8]) -> Result<String, TransformError> {
 ///
 /// A `SYSTEM` or `PUBLIC` identifier on the doctype itself, outside the subset,
 /// points at a DTD that no renderer fetches and is left alone.
-fn doctype_carries_unsafe_declarations(doctype: &[u8]) -> bool {
-    let Ok(text) = std::str::from_utf8(doctype) else {
-        // A doctype that is not valid UTF-8 cannot be inspected, so it is not kept.
-        return true;
-    };
-    let Some(subset) = text.split_once('[').map(|(_, rest)| rest) else {
+fn doctype_carries_unsafe_declarations(doctype: &str) -> bool {
+    let Some(subset) = doctype.split_once('[').map(|(_, rest)| rest) else {
         return false;
     };
     subset.contains("SYSTEM") || subset.contains("PUBLIC") || subset.contains('&')
 }
 
 /// Returns the local name of an XML element (strips namespace prefix).
-fn local_name(name: &[u8]) -> String {
-    let name_str = std::str::from_utf8(name).unwrap_or("");
-    name_str
-        .rsplit_once(':')
-        .map_or(name_str, |(_, local)| local)
+fn local_name(name: &str) -> String {
+    name.rsplit_once(':')
+        .map_or(name, |(_, local)| local)
         .to_ascii_lowercase()
 }
 
@@ -559,22 +551,11 @@ fn is_dangerous_href(value: &str) -> bool {
 /// references inside inline `style` attributes. Non-UTF-8 attributes are
 /// dropped entirely as a safety measure.
 fn sanitize_attributes<'a>(element: &'a BytesStart<'a>) -> BytesStart<'a> {
-    let mut sanitized = BytesStart::new(
-        std::str::from_utf8(element.name().as_ref())
-            .unwrap_or("unknown")
-            .to_string(),
-    );
+    let mut sanitized = BytesStart::new(element.name().as_ref().to_string());
 
     for attr in element.attributes().flatten() {
-        // Drop attributes with non-UTF-8 names or values. A browser's lenient
-        // parser might interpret them differently than quick-xml, so keeping
-        // them would be a security risk.
-        let Ok(key) = std::str::from_utf8(attr.key.as_ref()) else {
-            continue;
-        };
-        let Ok(value) = std::str::from_utf8(&attr.value) else {
-            continue;
-        };
+        let key: &str = attr.key.as_ref();
+        let value: &str = &attr.value;
 
         let key_lower = key.to_ascii_lowercase();
         let key_local = key_lower
