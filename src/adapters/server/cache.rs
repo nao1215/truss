@@ -41,7 +41,7 @@ use super::negotiate::{
     CacheHitStatus, ImageResponsePolicy, build_image_etag, build_image_response_headers,
     if_none_match_matches,
 };
-use super::response::HttpResponse;
+use super::response::{HttpResponse, push_warning_headers};
 use crate::core::default_lossy_target_quality;
 use crate::{Fit, Position, TransformOptions};
 
@@ -84,6 +84,9 @@ pub(super) enum CacheLookup {
         media_type: MediaType,
         body: Vec<u8>,
         age: Duration,
+        /// The warnings the transform raised when the entry was written, so a hit answers
+        /// with the same `Truss-Warning` headers the miss did.
+        warnings: Vec<String>,
     },
     /// The entry was not found or is stale.
     Miss,
@@ -170,7 +173,8 @@ impl TransformCache {
             return CacheLookup::Miss;
         }
 
-        // Parse the header line: "<media_type>\n<body>"
+        // Parse the header line: "<media_type>[\t<warning>]*\n<body>". An entry written
+        // before warnings were kept has no tab and reads as warning-free.
         let newline_pos = match data.iter().position(|&b| b == b'\n') {
             Some(pos) => pos,
             None => {
@@ -178,20 +182,22 @@ impl TransformCache {
                 return CacheLookup::Miss;
             }
         };
-        let media_type_str = match std::str::from_utf8(&data[..newline_pos]) {
+        let header = match std::str::from_utf8(&data[..newline_pos]) {
             Ok(s) => s,
             Err(_) => {
                 self.remove_corrupted(&path, "invalid UTF-8 in header");
                 return CacheLookup::Miss;
             }
         };
-        let media_type = match MediaType::from_str(media_type_str) {
-            Ok(mt) => mt,
-            Err(_) => {
+        let mut fields = header.split('\t');
+        let media_type = match fields.next().map(MediaType::from_str) {
+            Some(Ok(mt)) => mt,
+            _ => {
                 self.remove_corrupted(&path, "unrecognized media type");
                 return CacheLookup::Miss;
             }
         };
+        let warnings: Vec<String> = fields.map(str::to_string).collect();
 
         // Remove the header in-place to avoid a second allocation.
         data.drain(..=newline_pos);
@@ -200,6 +206,7 @@ impl TransformCache {
             media_type,
             body: data,
             age,
+            warnings,
         }
     }
 
@@ -216,7 +223,12 @@ impl TransformCache {
     ///
     /// Uses write-to-tempfile-then-rename for atomic writes, preventing readers from seeing
     /// partial data.
-    pub(super) fn put(&self, key: &str, media_type: MediaType, body: &[u8]) {
+    ///
+    /// `warnings` are the transform's warnings as header values, one line of visible ASCII
+    /// each; they go on the header line after the media type, tab-separated, so a later hit
+    /// can answer with them. A tab or newline in one would break the framing, so each is
+    /// flattened to a space here as well as where the values are made.
+    pub(super) fn put(&self, key: &str, media_type: MediaType, body: &[u8], warnings: &[String]) {
         let path = self.entry_path(key);
         if let Some(parent) = path.parent()
             && let Err(err) = fs::create_dir_all(parent)
@@ -228,6 +240,16 @@ impl TransformCache {
         // Write to a temp file with a unique suffix, then rename atomically.
         let tmp_path = path.with_extension(unique_tmp_suffix());
         let mut header = media_type.as_name().as_bytes().to_vec();
+        for warning in warnings {
+            header.push(b'\t');
+            header.extend(warning.bytes().map(|b| {
+                if b == b'\t' || b == b'\n' || b == b'\r' {
+                    b' '
+                } else {
+                    b
+                }
+            }));
+        }
         header.push(b'\n');
 
         let result = (|| -> io::Result<()> {
@@ -660,6 +682,7 @@ pub(super) fn try_versioned_cache_lookup(
         media_type,
         body,
         age,
+        warnings,
     } = cache.get(&cache_key)
     {
         CACHE_HITS_TOTAL.fetch_add(1, Ordering::Relaxed);
@@ -680,6 +703,7 @@ pub(super) fn try_versioned_cache_lookup(
         {
             return Some(HttpResponse::empty("304 Not Modified", headers));
         }
+        push_warning_headers(&mut headers, &warnings);
         return Some(HttpResponse::binary_with_headers(
             "200 OK",
             media_type.as_mime(),
@@ -822,14 +846,14 @@ mod tests {
         // Write four entries, each ~60 bytes on disk (header + body).
         // Total will exceed 200 bytes after all writes.
         let body = vec![0u8; 50];
-        cache.put(&test_key(0), MediaType::Jpeg, &body);
+        cache.put(&test_key(0), MediaType::Jpeg, &body, &[]);
         // Ensure distinct mtimes by touching the file timestamps manually.
         std::thread::sleep(std::time::Duration::from_millis(50));
-        cache.put(&test_key(1), MediaType::Jpeg, &body);
+        cache.put(&test_key(1), MediaType::Jpeg, &body, &[]);
         std::thread::sleep(std::time::Duration::from_millis(50));
-        cache.put(&test_key(2), MediaType::Jpeg, &body);
+        cache.put(&test_key(2), MediaType::Jpeg, &body, &[]);
         std::thread::sleep(std::time::Duration::from_millis(50));
-        cache.put(&test_key(3), MediaType::Jpeg, &body);
+        cache.put(&test_key(3), MediaType::Jpeg, &body, &[]);
 
         // Directly trigger eviction (maybe_evict is throttled in production).
         let _ = cache.evict_to_limit();
@@ -865,7 +889,7 @@ mod tests {
 
         let body = vec![0u8; 100];
         for i in 0..5 {
-            cache.put(&test_key(i), MediaType::Jpeg, &body);
+            cache.put(&test_key(i), MediaType::Jpeg, &body, &[]);
         }
 
         let entries = collect_cache_entries(dir.path()).unwrap();
@@ -884,7 +908,7 @@ mod tests {
 
         let body = vec![0u8; 50];
         for i in 0..3 {
-            cache.put(&test_key(i), MediaType::Jpeg, &body);
+            cache.put(&test_key(i), MediaType::Jpeg, &body, &[]);
         }
 
         let entries = collect_cache_entries(dir.path()).unwrap();
@@ -895,13 +919,64 @@ mod tests {
         );
     }
 
+    /// A hit answers with the warnings the miss raised, so they ride on the entry's
+    /// header line; an entry written before they were kept reads as warning-free.
+    #[test]
+    fn cache_entry_keeps_the_transform_warnings() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = TransformCache::new(dir.path().to_path_buf());
+        let warnings = vec![
+            "the input carries EXIF orientation 6".to_string(),
+            "flat\ttab and\nnewline".to_string(),
+        ];
+        cache.put(&test_key(0), MediaType::Png, b"png-data", &warnings);
+
+        match cache.get(&test_key(0)) {
+            CacheLookup::Hit {
+                media_type,
+                body,
+                warnings,
+                ..
+            } => {
+                assert_eq!(media_type, MediaType::Png);
+                assert_eq!(body, b"png-data");
+                assert_eq!(
+                    warnings,
+                    vec![
+                        "the input carries EXIF orientation 6".to_string(),
+                        "flat tab and newline".to_string()
+                    ],
+                    "a tab or newline would break the framing, so it is flattened"
+                );
+            }
+            CacheLookup::Miss => panic!("expected a hit"),
+        }
+
+        let legacy = cache.entry_path(&test_key(1));
+        std::fs::create_dir_all(legacy.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&legacy, b"jpeg\nold-entry").expect("write legacy entry");
+        match cache.get(&test_key(1)) {
+            CacheLookup::Hit {
+                media_type,
+                body,
+                warnings,
+                ..
+            } => {
+                assert_eq!(media_type, MediaType::Jpeg);
+                assert_eq!(body, b"old-entry");
+                assert!(warnings.is_empty(), "{warnings:?}");
+            }
+            CacheLookup::Miss => panic!("expected the legacy entry to read"),
+        }
+    }
+
     #[test]
     fn collect_cache_entries_skips_temp_files() {
         let dir = tempfile::tempdir().unwrap();
         let cache = TransformCache::new(dir.path().to_path_buf());
 
         // Write a normal entry.
-        cache.put(&test_key(0), MediaType::Jpeg, b"data");
+        cache.put(&test_key(0), MediaType::Jpeg, b"data", &[]);
 
         // Create a temp file that should be skipped.
         let key = test_key(1);

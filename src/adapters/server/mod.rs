@@ -730,6 +730,7 @@ mod tests {
             "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890",
             MediaType::Png,
             b"png-data",
+            &[],
         );
         let result = cache.get("abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890");
 
@@ -759,7 +760,7 @@ mod tests {
         let cache = super::cache::TransformCache::new(dir.path().to_path_buf());
 
         let key = "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890";
-        cache.put(key, MediaType::Jpeg, b"jpeg-data");
+        cache.put(key, MediaType::Jpeg, b"jpeg-data", &[]);
 
         let expected = dir.path().join("ab").join("cd").join("ef").join(key);
         assert!(
@@ -775,7 +776,7 @@ mod tests {
         cache.ttl = Duration::from_secs(0);
 
         let key = "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890";
-        cache.put(key, MediaType::Png, b"data");
+        cache.put(key, MediaType::Png, b"data", &[]);
 
         std::thread::sleep(Duration::from_millis(10));
 

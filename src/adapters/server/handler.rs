@@ -37,8 +37,9 @@ use super::negotiate::{
 };
 use super::remote::{read_remote_watermark_bytes, resolve_source_bytes};
 use super::response::{
-    HttpResponse, NOT_FOUND_BODY, bad_request_response, service_unavailable_response,
-    transform_error_response, unsupported_media_type_response,
+    HttpResponse, NOT_FOUND_BODY, bad_request_response, push_warning_headers,
+    service_unavailable_response, transform_error_response, unsupported_media_type_response,
+    warning_header_value,
 };
 use super::stderr_write;
 
@@ -1342,6 +1343,7 @@ pub(super) fn transform_source_bytes(
             media_type,
             body,
             age,
+            warnings,
         } = cache.get(&cache_key)
         {
             CACHE_HITS_TOTAL.fetch_add(1, Ordering::Relaxed);
@@ -1362,6 +1364,7 @@ pub(super) fn transform_source_bytes(
             {
                 return HttpResponse::empty("304 Not Modified", headers);
             }
+            push_warning_headers(&mut headers, &warnings);
             return HttpResponse::binary_with_headers(
                 "200 OK",
                 media_type.as_mime(),
@@ -1474,6 +1477,7 @@ fn transform_source_bytes_inner(
             media_type,
             body,
             age,
+            warnings,
         } = cache.get(&cache_key)
     {
         CACHE_HITS_TOTAL.fetch_add(1, Ordering::Relaxed);
@@ -1494,6 +1498,7 @@ fn transform_source_bytes_inner(
         {
             return HttpResponse::empty("304 Not Modified", headers);
         }
+        push_warning_headers(&mut headers, &warnings);
         return HttpResponse::binary_with_headers("200 OK", media_type.as_mime(), headers, body);
     }
 
@@ -1539,6 +1544,13 @@ fn transform_source_bytes_inner(
     };
     record_transform_duration(result.artifact.media_type, transform_start);
 
+    // The warnings go three ways: the log, the response, and the cache entry, so that a
+    // later hit answers with the same headers this miss does.
+    let warnings: Vec<String> = result
+        .warnings
+        .iter()
+        .map(|warning| warning_header_value(&warning.to_string()))
+        .collect();
     for warning in &result.warnings {
         let msg = format!("truss: {warning}");
         if let Some(c) = cache
@@ -1553,7 +1565,7 @@ fn transform_source_bytes_inner(
     let output = result.artifact;
 
     if let Some(cache) = cache {
-        cache.put(&cache_key, output.media_type, &output.bytes);
+        cache.put(&cache_key, output.media_type, &output.bytes, &warnings);
     }
 
     let cache_hit_status = if cache.is_some() {
@@ -1563,7 +1575,7 @@ fn transform_source_bytes_inner(
     };
 
     let etag = build_image_etag(&output.bytes);
-    let headers = build_image_response_headers(
+    let mut headers = build_image_response_headers(
         output.media_type,
         &etag,
         response_policy,
@@ -1580,6 +1592,9 @@ fn transform_source_bytes_inner(
         return HttpResponse::empty("304 Not Modified", headers);
     }
 
+    // A 304 says the client already has the representation, warnings included; only the
+    // response that carries the image carries them.
+    push_warning_headers(&mut headers, &warnings);
     let mut response = HttpResponse::binary_with_headers(
         "200 OK",
         output.media_type.as_mime(),

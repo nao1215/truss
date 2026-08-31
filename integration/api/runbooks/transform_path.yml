@@ -67,6 +67,24 @@ steps:
             application/json: {}
     test: |
       current.res.status == 400
+  transform_dropped_orientation_warns_in_a_header:
+    desc: "autoOrient=false on a tagged JPEG answers 200 with the warning as a Truss-Warning header"
+    req:
+      /images:transform:
+        post:
+          headers:
+            Authorization: "Bearer {{ vars.token }}"
+            Content-Type: "application/json"
+          body:
+            application/json:
+              source:
+                kind: path
+                path: /exif-rotated.jpg
+              options:
+                autoOrient: false
+    test: |
+      current.res.status == 200
+      && current.res.headers['Truss-Warning'][0] contains 'EXIF orientation 6'
   transform_nonexistent_path:
     desc: "Request with a path that does not exist returns an error"
     req:

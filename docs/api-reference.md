@@ -48,6 +48,10 @@ See the [Signed URL Specification](signed-url-spec.md) for canonicalization rule
 
 Every error is an RFC 9457 problem details body, `application/problem+json`. Branch on `type`: it is a URI naming the class of failure, one of the anchors on [Problem Types](problems.md), and `about:blank` only for a route that does not exist. `title` is fixed per class, `detail` is for a person to read, and `requestId` repeats the `X-Request-Id` header so a body kept on its own can be matched to the access log.
 
+## Warnings
+
+A transform that succeeds but is not quite what was asked for answers 200 with one `Truss-Warning` header per warning: an EXIF orientation dropped with `autoOrient=false`, a `targetQuality` the encode could not reach, metadata the output format cannot carry. The text is the same the CLI prints after `warning:` and `@nao1215/truss-wasm` returns in `warnings`. A cache hit repeats the headers the original transform produced; a 304 carries none.
+
 ## Endpoints
 
 ### Public Endpoints (Signed URL)
