@@ -2,9 +2,11 @@ use crate::adapters::server::{self, ServerConfig};
 use std::io::{self, Write};
 use std::net::TcpListener;
 
+use crate::core::error_class::ErrorClass;
+
 use super::{
     ClapServeArgs, ClapValidateArgs, CliError, Command, EXIT_RUNTIME, EXIT_USAGE, HelpTopic,
-    ServeCommand, runtime_error, serve_usage,
+    ServeCommand, runtime_error, serve_usage, usage_error,
 };
 
 // ---------------------------------------------------------------------------
@@ -129,10 +131,7 @@ pub(super) fn execute_validate<W: Write>(stdout: &mut W) -> Result<(), CliError>
             )?;
             Ok(())
         }
-        Err(error) => Err(runtime_error(
-            EXIT_USAGE,
-            &format!("invalid configuration: {error}"),
-        )),
+        Err(error) => Err(usage_error(&format!("invalid configuration: {error}"))),
     }
 }
 
@@ -144,22 +143,15 @@ pub(super) fn resolve_server_config(command: ServeCommand) -> Result<ServerConfi
     // A configuration fault exits 1, the same code `truss validate` reports for the same
     // fault. Exit 5 is for what happens after the configuration is accepted — a port
     // already in use, a stream that cannot be written.
-    let mut config = ServerConfig::from_env().map_err(|error| {
-        runtime_error(
-            EXIT_USAGE,
-            &format!("failed to load server configuration: {error}"),
-        )
-    })?;
+    let mut config = ServerConfig::from_env()
+        .map_err(|error| usage_error(&format!("failed to load server configuration: {error}")))?;
 
     if let Some(storage_root) = command.storage_root {
         config.storage_root = storage_root.canonicalize().map_err(|error| {
-            runtime_error(
-                EXIT_USAGE,
-                &format!(
-                    "failed to resolve storage root {}: {error}",
-                    storage_root.display()
-                ),
-            )
+            usage_error(&format!(
+                "failed to resolve storage root {}: {error}",
+                storage_root.display()
+            ))
         })?;
     }
 
@@ -174,6 +166,7 @@ pub(super) fn resolve_server_config(command: ServeCommand) -> Result<ServerConfi
         (Some(_), None) | (None, Some(_)) => {
             return Err(CliError {
                 exit_code: EXIT_USAGE,
+                class: ErrorClass::InvalidRequest,
                 message: "--signed-url-key-id and --signed-url-secret must be provided together"
                     .to_string(),
                 usage: Some(serve_usage().to_string()),
