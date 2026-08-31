@@ -125,6 +125,30 @@ Measured with `docs/img/logo.png` (1536 x 1024 PNG, 1.6 MB) on AMD Ryzen 7 5800U
 | JPEG quality 50 | 54 ms | 53 ms | 61 ms |
 | Inspect metadata | 5 ms | 5 ms | 6 ms |
 
+The AVIF rows predate v0.19.0, which turned on the encoder's thread pool. They are the cost of encoding on one core, and are no longer representative on a machine with cores to spare.
+
+### Criterion Suite
+
+`cargo bench --bench transform` runs the criterion suite in `benches/transform.rs`. Every case that touches pixels builds its own 640x427 source, so the size in a case name is the size it ran at.
+
+Baseline on a 32-core machine, median of each case, for comparison rather than as a threshold:
+
+| Case | Median |
+|---|---|
+| `format_conversion/jpeg_to_png/640x427` | 21.3 ms |
+| `format_conversion/jpeg_to_webp/640x427` | 18.2 ms |
+| `format_conversion/jpeg_to_avif/640x427` | 327.8 ms |
+| `resize/cover/100x100` | 3.3 ms |
+| `resize/cover/1920x1080` | 87.2 ms |
+| `fit_modes/cover/300x300` | 6.6 ms |
+| `filters/blur/sigma_5` | 8.8 ms |
+| `filters/sharpen/sigma_3` | 9.7 ms |
+| `watermark/bottom_right` | 21.7 ms |
+| `svg/rasterize_to_png_1024w` | 639 µs |
+| `sniff_artifact/sample.jpg` | 19 ns |
+
+The AVIF case is the one that varies most with the machine, because it is the only encoder that uses more than one core.
+
 ## Contributing
 
 Contributions are welcome. See [../CONTRIBUTING.md](../CONTRIBUTING.md) for details.

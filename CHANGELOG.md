@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- The criterion benchmarks measure the work they are named after ([#398](https://github.com/nao1215/truss/issues/398)). Every case that named an image size in its id read `integration/fixtures/sample.jpg`, which is 4 by 3 pixels, so `format_conversion/jpeg_to_avif/640x427` encoded twelve pixels and reported 238 microseconds for it. The suite measured per-call setup and nothing else, which is why it ran green through every release that shipped the single-threaded AVIF encoder: an eleven-fold regression on real images is invisible on an image with no parallelism to exploit. Each case that touches pixels now builds its own source at the size its name gives, a gradient with a fine texture over it because the encoders are content-sensitive and a flat image is the cheapest thing they will ever be handed, and the generator reads the size back out of the encoded bytes so a name and an image cannot drift apart again. The same case now reports 328 milliseconds. The format conversion group takes twenty samples rather than a hundred, since an AVIF encode of that size would otherwise put the group into the minutes on its own. `sniff_artifact` and `png_to_jpeg` keep their fixtures, which are the specific files those cases are about. `docs/development.md` gains the current medians as a baseline, and marks the AVIF rows of the older CLI table as predating the threading change in v0.19.0.
+
 ## v0.19.0
 
 ### Added
