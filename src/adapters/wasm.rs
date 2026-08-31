@@ -594,18 +594,11 @@ pub fn transform_image_with_watermark(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use image::codecs::png::PngEncoder;
-    use image::{ColorType, ImageEncoder, Rgba, RgbaImage};
     use rstest::rstest;
     const WASM_DOCS: &str = include_str!("../../docs/wasm.md");
 
     fn png_bytes(width: u32, height: u32) -> Vec<u8> {
-        let image = RgbaImage::from_pixel(width, height, Rgba([10, 20, 30, 255]));
-        let mut bytes = Vec::new();
-        PngEncoder::new(&mut bytes)
-            .write_image(&image, width, height, ColorType::Rgba8.into())
-            .expect("encode png");
-        bytes
+        crate::test_support::flat_png(width, height)
     }
 
     #[test]

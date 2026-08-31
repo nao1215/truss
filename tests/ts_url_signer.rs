@@ -109,7 +109,7 @@ fn typescript_signer_generates_a_working_public_path_url() {
         },
         "keyId": "public-dev",
         "secret": "secret-value",
-        "expires": 4102444800u64,
+        "expires": 4_102_444_800_u64,
     }));
 
     let response = send_get_request(&signed_url);
@@ -161,7 +161,7 @@ fn typescript_signer_generates_a_working_public_remote_url() {
         },
         "keyId": "public-dev",
         "secret": "secret-value",
-        "expires": 4102444800u64,
+        "expires": 4_102_444_800_u64,
     }));
 
     let response = send_get_request(&signed_url);
@@ -225,7 +225,7 @@ fn typescript_signer_matches_rust_head_canonicalization_with_preset_and_watermar
         &options,
         "public-demo",
         "secret-value",
-        1900000000,
+        1_900_000_000,
         Some(&watermark),
         Some("social-card"),
     )
@@ -262,7 +262,7 @@ fn typescript_signer_matches_rust_head_canonicalization_with_preset_and_watermar
         "preset": "social-card",
         "keyId": "public-demo",
         "secret": "secret-value",
-        "expires": 1900000000,
+        "expires": 1_900_000_000,
         "method": "HEAD",
     }));
 

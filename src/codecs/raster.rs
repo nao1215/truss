@@ -30,18 +30,6 @@ use std::time::{Duration, Instant};
 #[cfg(feature = "avif")]
 use yuvutils_rs::{YuvGrayImage, YuvPlanarImage, YuvRange, YuvStandardMatrix};
 
-/// Checks the transform deadline and returns an error if exceeded.
-///
-/// This macro reduces boilerplate for the repeated deadline-check pattern
-/// throughout the transform pipeline.
-macro_rules! check_deadline_if_set {
-    ($start:expr, $deadline:expr, $stage:expr) => {
-        if let (Some(start), Some(limit)) = ($start, $deadline) {
-            check_deadline(start.elapsed(), limit, $stage)?;
-        }
-    };
-}
-
 /// Transforms a raster artifact using the current backend implementation.
 ///
 /// The input artifact must already be classified by [`crate::sniff_artifact`]. This backend
@@ -193,7 +181,10 @@ pub fn transform_raster(request: TransformRequest) -> Result<TransformResult, Tr
         return Ok(result);
     }
     let deadline = normalized.options.deadline;
-    let start = deadline.map(|_| Instant::now());
+    let budget = EncodeDeadline {
+        start: deadline.map(|_| Instant::now()),
+        deadline,
+    };
 
     let (retained_metadata, mut warnings) = extract_retained_metadata(
         &normalized.input,
@@ -205,63 +196,9 @@ pub fn transform_raster(request: TransformRequest) -> Result<TransformResult, Tr
     check_input_pixel_limit(&normalized.input)?;
 
     let mut image = decode_input(&normalized.input)?;
-    check_deadline_if_set!(start, deadline, "decode");
+    budget.check("decode")?;
 
-    if normalized.options.auto_orient {
-        image = apply_auto_orientation(image, &normalized.input);
-    }
-
-    image = apply_rotation(
-        image,
-        normalized.options.rotate,
-        normalized.options.background,
-        normalized.options.format,
-    )?;
-    check_deadline_if_set!(start, deadline, "rotate");
-
-    if let Some(crop) = normalized.options.crop {
-        image = apply_crop(image, crop)?;
-        check_deadline_if_set!(start, deadline, "crop");
-    }
-
-    check_output_pixel_limit(
-        &image,
-        normalized.options.width,
-        normalized.options.height,
-        normalized.options.fit,
-        normalized.options.without_enlargement,
-    )?;
-    image = apply_resize(
-        image,
-        normalized.options.width,
-        normalized.options.height,
-        normalized.options.fit,
-        normalized.options.position,
-        normalized.options.background,
-        normalized.options.format,
-        normalized.options.without_enlargement,
-    );
-    check_deadline_if_set!(start, deadline, "resize");
-
-    if let Some(sigma) = normalized.options.blur {
-        image = image.blur(sigma);
-        check_deadline_if_set!(start, deadline, "blur");
-    }
-
-    if let Some(sigma) = normalized.options.sharpen {
-        image = image.unsharpen(sigma, 1);
-        check_deadline_if_set!(start, deadline, "sharpen");
-    }
-
-    if normalized.options.grayscale {
-        image = apply_grayscale(image);
-        check_deadline_if_set!(start, deadline, "grayscale");
-    }
-
-    if let Some(ref wm) = normalized.watermark {
-        image = apply_watermark(image, wm)?;
-        check_deadline_if_set!(start, deadline, "watermark");
-    }
+    image = apply_pixel_stages(image, &normalized, budget)?;
 
     // Formats without an alpha channel need the transparency resolved before the encoder
     // sees it, or it is truncated away rather than composited.
@@ -279,10 +216,10 @@ pub fn transform_raster(request: TransformRequest) -> Result<TransformResult, Tr
         normalized.options.format,
         &normalized.options,
         retained_metadata.as_ref(),
-        EncodeDeadline { start, deadline },
+        budget,
         &mut encode_warnings,
     )?;
-    check_deadline_if_set!(start, deadline, "encode");
+    budget.check("encode")?;
 
     // Post-encode byte-level injection for metadata the encoders cannot embed themselves:
     // XMP/IPTC for JPEG and PNG, and the whole WebP metadata set for lossy output, which
@@ -339,6 +276,75 @@ pub fn transform_raster(request: TransformRequest) -> Result<TransformResult, Tr
         ),
         warnings,
     })
+}
+
+/// Runs the stages that touch pixels, in the order `docs/pipeline.md` fixes: auto-orient,
+/// rotate, crop, resize, blur, sharpen, grayscale, watermark.
+///
+/// The order is the contract, not the order the caller wrote the options in. Each stage
+/// works on the one before it, and each checks the deadline after it, so a single slow stage
+/// cannot run past the budget unnoticed. The output pixel limit is checked before the resize
+/// rather than after, from the dimensions alone, so an outsized request is refused without
+/// allocating the buffer it asked for.
+fn apply_pixel_stages(
+    mut image: DynamicImage,
+    normalized: &NormalizedTransformRequest,
+    budget: EncodeDeadline,
+) -> Result<DynamicImage, TransformError> {
+    let options = &normalized.options;
+
+    if options.auto_orient {
+        image = apply_auto_orientation(image, &normalized.input);
+    }
+
+    image = apply_rotation(image, options.rotate, options.background, options.format)?;
+    budget.check("rotate")?;
+
+    if let Some(crop) = options.crop {
+        image = apply_crop(image, crop)?;
+        budget.check("crop")?;
+    }
+
+    check_output_pixel_limit(
+        &image,
+        options.width,
+        options.height,
+        options.fit,
+        options.without_enlargement,
+    )?;
+    image = apply_resize(
+        image,
+        options.width,
+        options.height,
+        options.fit,
+        options.position,
+        options.background,
+        options.format,
+        options.without_enlargement,
+    );
+    budget.check("resize")?;
+
+    if let Some(sigma) = options.blur {
+        image = image.blur(sigma);
+        budget.check("blur")?;
+    }
+
+    if let Some(sigma) = options.sharpen {
+        image = image.unsharpen(sigma, 1);
+        budget.check("sharpen")?;
+    }
+
+    if options.grayscale {
+        image = apply_grayscale(image);
+        budget.check("grayscale")?;
+    }
+
+    if let Some(ref watermark) = normalized.watermark {
+        image = apply_watermark(image, watermark)?;
+        budget.check("watermark")?;
+    }
+
+    Ok(image)
 }
 
 fn decode_input(input: &Artifact) -> Result<DynamicImage, TransformError> {
@@ -3099,62 +3105,33 @@ fn extract_retained_metadata(
     Ok((Some(metadata), warnings))
 }
 
+/// Collects the metadata a decoder carries: EXIF, ICC, XMP, and IPTC.
+///
+/// The four reads are the same for every container, so the format only decides which decoder
+/// to open. A failure here is a decode failure, not a metadata failure: the bytes claimed to
+/// be this format and were not.
+fn retained_metadata<D: ImageDecoder>(mut decoder: D) -> Result<RetainedMetadata, TransformError> {
+    let decode_failed = |error: image::ImageError| TransformError::DecodeFailed(error.to_string());
+    Ok(RetainedMetadata {
+        exif_metadata: decoder.exif_metadata().map_err(decode_failed)?,
+        icc_profile: decoder.icc_profile().map_err(decode_failed)?,
+        xmp_metadata: decoder.xmp_metadata().map_err(decode_failed)?,
+        iptc_metadata: decoder.iptc_metadata().map_err(decode_failed)?,
+    })
+}
+
+/// Reads the metadata truss can carry from one format to another.
+///
+/// The formats not listed carry none through this path: AVIF and TIFF metadata is handled
+/// where those are decoded, SVG has no such containers, and BMP and GIF have nowhere to put
+/// them.
 fn read_input_metadata(input: &Artifact) -> Result<RetainedMetadata, TransformError> {
+    let bytes = Cursor::new(&input.bytes);
+    let open_failed = |error: image::ImageError| TransformError::DecodeFailed(error.to_string());
     match input.media_type {
-        MediaType::Jpeg => {
-            let mut decoder = JpegDecoder::new(Cursor::new(&input.bytes))
-                .map_err(|error| TransformError::DecodeFailed(error.to_string()))?;
-            Ok(RetainedMetadata {
-                exif_metadata: decoder
-                    .exif_metadata()
-                    .map_err(|error| TransformError::DecodeFailed(error.to_string()))?,
-                icc_profile: decoder
-                    .icc_profile()
-                    .map_err(|error| TransformError::DecodeFailed(error.to_string()))?,
-                xmp_metadata: decoder
-                    .xmp_metadata()
-                    .map_err(|error| TransformError::DecodeFailed(error.to_string()))?,
-                iptc_metadata: decoder
-                    .iptc_metadata()
-                    .map_err(|error| TransformError::DecodeFailed(error.to_string()))?,
-            })
-        }
-        MediaType::Png => {
-            let mut decoder = PngDecoder::new(Cursor::new(&input.bytes))
-                .map_err(|error| TransformError::DecodeFailed(error.to_string()))?;
-            Ok(RetainedMetadata {
-                exif_metadata: decoder
-                    .exif_metadata()
-                    .map_err(|error| TransformError::DecodeFailed(error.to_string()))?,
-                icc_profile: decoder
-                    .icc_profile()
-                    .map_err(|error| TransformError::DecodeFailed(error.to_string()))?,
-                xmp_metadata: decoder
-                    .xmp_metadata()
-                    .map_err(|error| TransformError::DecodeFailed(error.to_string()))?,
-                iptc_metadata: decoder
-                    .iptc_metadata()
-                    .map_err(|error| TransformError::DecodeFailed(error.to_string()))?,
-            })
-        }
-        MediaType::Webp => {
-            let mut decoder = WebPDecoder::new(Cursor::new(&input.bytes))
-                .map_err(|error| TransformError::DecodeFailed(error.to_string()))?;
-            Ok(RetainedMetadata {
-                exif_metadata: decoder
-                    .exif_metadata()
-                    .map_err(|error| TransformError::DecodeFailed(error.to_string()))?,
-                icc_profile: decoder
-                    .icc_profile()
-                    .map_err(|error| TransformError::DecodeFailed(error.to_string()))?,
-                xmp_metadata: decoder
-                    .xmp_metadata()
-                    .map_err(|error| TransformError::DecodeFailed(error.to_string()))?,
-                iptc_metadata: decoder
-                    .iptc_metadata()
-                    .map_err(|error| TransformError::DecodeFailed(error.to_string()))?,
-            })
-        }
+        MediaType::Jpeg => retained_metadata(JpegDecoder::new(bytes).map_err(open_failed)?),
+        MediaType::Png => retained_metadata(PngDecoder::new(bytes).map_err(open_failed)?),
+        MediaType::Webp => retained_metadata(WebPDecoder::new(bytes).map_err(open_failed)?),
         MediaType::Avif | MediaType::Svg | MediaType::Bmp | MediaType::Tiff | MediaType::Gif => {
             Ok(RetainedMetadata::default())
         }

@@ -1,3 +1,4 @@
+use super::handler::PublicCacheControl;
 use super::response::{HttpResponse, not_acceptable_response};
 use crate::{Artifact, MediaType};
 use sha2::{Digest, Sha256};
@@ -256,24 +257,23 @@ pub(super) enum ImageResponsePolicy {
     PrivateTransform,
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn build_image_response_headers(
     media_type: MediaType,
     etag: &str,
     response_policy: ImageResponsePolicy,
     accept_may_vary: bool,
     cache_status: CacheHitStatus,
-    public_max_age: u32,
-    public_swr: u32,
+    cache_control: PublicCacheControl,
     custom_headers: &[(String, String)],
 ) -> Vec<(String, String)> {
     let mut headers = vec![
         (
             "Cache-Control".to_string(),
             match response_policy {
-                ImageResponsePolicy::PublicGet => {
-                    format!("public, max-age={public_max_age}, stale-while-revalidate={public_swr}")
-                }
+                ImageResponsePolicy::PublicGet => format!(
+                    "public, max-age={}, stale-while-revalidate={}",
+                    cache_control.max_age, cache_control.stale_while_revalidate
+                ),
                 ImageResponsePolicy::PrivateTransform => "no-store".to_string(),
             },
         ),
@@ -698,8 +698,10 @@ mod tests {
             ImageResponsePolicy::PublicGet,
             false,
             CacheHitStatus::Miss,
-            3600,
-            86400,
+            PublicCacheControl {
+                max_age: 3600,
+                stale_while_revalidate: 86400,
+            },
             &[],
         );
         let cache_control = headers.iter().find(|(k, _)| *k == "Cache-Control").unwrap();
@@ -717,8 +719,10 @@ mod tests {
             ImageResponsePolicy::PrivateTransform,
             false,
             CacheHitStatus::Disabled,
-            0,
-            0,
+            PublicCacheControl {
+                max_age: 0,
+                stale_while_revalidate: 0,
+            },
             &[],
         );
         let cache_control = headers.iter().find(|(k, _)| *k == "Cache-Control").unwrap();
@@ -733,8 +737,10 @@ mod tests {
             ImageResponsePolicy::PublicGet,
             true,
             CacheHitStatus::Hit,
-            60,
-            120,
+            PublicCacheControl {
+                max_age: 60,
+                stale_while_revalidate: 120,
+            },
             &[],
         );
         let vary = headers.iter().find(|(k, _)| *k == "Vary");
@@ -750,8 +756,10 @@ mod tests {
             ImageResponsePolicy::PublicGet,
             false,
             CacheHitStatus::Miss,
-            60,
-            120,
+            PublicCacheControl {
+                max_age: 60,
+                stale_while_revalidate: 120,
+            },
             &[],
         );
         let vary = headers.iter().find(|(k, _)| *k == "Vary");
@@ -766,8 +774,10 @@ mod tests {
             ImageResponsePolicy::PublicGet,
             false,
             CacheHitStatus::Miss,
-            60,
-            120,
+            PublicCacheControl {
+                max_age: 60,
+                stale_while_revalidate: 120,
+            },
             &[],
         );
         let csp = headers
@@ -785,8 +795,10 @@ mod tests {
             ImageResponsePolicy::PublicGet,
             false,
             CacheHitStatus::Miss,
-            60,
-            120,
+            PublicCacheControl {
+                max_age: 60,
+                stale_while_revalidate: 120,
+            },
             &[],
         );
         let csp = headers
@@ -803,8 +815,10 @@ mod tests {
             ImageResponsePolicy::PrivateTransform,
             false,
             CacheHitStatus::Disabled,
-            0,
-            0,
+            PublicCacheControl {
+                max_age: 0,
+                stale_while_revalidate: 0,
+            },
             &[],
         );
         let nosniff = headers.iter().find(|(k, _)| *k == "X-Content-Type-Options");
@@ -820,8 +834,10 @@ mod tests {
             ImageResponsePolicy::PublicGet,
             false,
             CacheHitStatus::Miss,
-            60,
-            120,
+            PublicCacheControl {
+                max_age: 60,
+                stale_while_revalidate: 120,
+            },
             &[],
         );
         let cd = headers
@@ -839,8 +855,10 @@ mod tests {
             ImageResponsePolicy::PublicGet,
             false,
             CacheHitStatus::Hit,
-            60,
-            120,
+            PublicCacheControl {
+                max_age: 60,
+                stale_while_revalidate: 120,
+            },
             &[],
         );
         let cs = headers.iter().find(|(k, _)| *k == "Cache-Status").unwrap();
@@ -855,8 +873,10 @@ mod tests {
             ImageResponsePolicy::PublicGet,
             false,
             CacheHitStatus::Miss,
-            60,
-            120,
+            PublicCacheControl {
+                max_age: 60,
+                stale_while_revalidate: 120,
+            },
             &[],
         );
         let cs = headers.iter().find(|(k, _)| *k == "Cache-Status").unwrap();
@@ -871,8 +891,10 @@ mod tests {
             ImageResponsePolicy::PublicGet,
             false,
             CacheHitStatus::Disabled,
-            60,
-            120,
+            PublicCacheControl {
+                max_age: 60,
+                stale_while_revalidate: 120,
+            },
             &[],
         );
         let cs = headers.iter().find(|(k, _)| *k == "Cache-Status").unwrap();
@@ -891,8 +913,10 @@ mod tests {
             ImageResponsePolicy::PublicGet,
             false,
             CacheHitStatus::Miss,
-            3600,
-            86400,
+            PublicCacheControl {
+                max_age: 3600,
+                stale_while_revalidate: 86400,
+            },
             &custom,
         );
         let cdn = headers
@@ -915,8 +939,10 @@ mod tests {
             ImageResponsePolicy::PublicGet,
             false,
             CacheHitStatus::Miss,
-            3600,
-            86400,
+            PublicCacheControl {
+                max_age: 3600,
+                stale_while_revalidate: 86400,
+            },
             &[],
         );
         // Should not have CDN-specific headers.

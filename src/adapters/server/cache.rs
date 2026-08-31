@@ -35,6 +35,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use super::ServerConfig;
+use super::handler::PublicCacheControl;
 use super::http_parse::HttpRequest;
 use super::metrics::CACHE_HITS_TOTAL;
 use super::negotiate::{
@@ -90,6 +91,58 @@ pub(super) enum CacheLookup {
     },
     /// The entry was not found or is stale.
     Miss,
+}
+
+impl CacheLookup {
+    /// The response a hit stands for, or `None` for a miss.
+    ///
+    /// A hit is answered the same way from all three places that look one up: the ETag is
+    /// the digest of the stored bytes, `Age` is how long the entry has been on disk, a
+    /// matching `If-None-Match` on a public GET answers 304 with the same headers and no
+    /// body, and the warnings the entry kept become `Truss-Warning` headers so a hit reads
+    /// like the miss that wrote it.
+    pub(super) fn into_hit_response(
+        self,
+        request: &HttpRequest,
+        response_policy: ImageResponsePolicy,
+        accept_may_vary: bool,
+        cache_control: PublicCacheControl,
+        custom_headers: &[(String, String)],
+    ) -> Option<HttpResponse> {
+        let Self::Hit {
+            media_type,
+            body,
+            age,
+            warnings,
+        } = self
+        else {
+            return None;
+        };
+
+        let etag = build_image_etag(&body);
+        let mut headers = build_image_response_headers(
+            media_type,
+            &etag,
+            response_policy,
+            accept_may_vary,
+            CacheHitStatus::Hit,
+            cache_control,
+            custom_headers,
+        );
+        headers.push(("Age".to_string(), age.as_secs().to_string()));
+        if matches!(response_policy, ImageResponsePolicy::PublicGet)
+            && if_none_match_matches(request.header("if-none-match"), &etag)
+        {
+            return Some(HttpResponse::empty("304 Not Modified", headers));
+        }
+        push_warning_headers(&mut headers, &warnings);
+        Some(HttpResponse::binary_with_headers(
+            "200 OK",
+            media_type.as_mime(),
+            headers,
+            body,
+        ))
+    }
 }
 
 impl TransformCache {
@@ -148,19 +201,17 @@ impl TransformCache {
         let path = self.entry_path(key);
 
         // Open a single file handle to avoid TOCTOU between read and metadata.
-        let file = match fs::File::open(&path) {
-            Ok(f) => f,
-            Err(_) => return CacheLookup::Miss,
+        let Ok(file) = fs::File::open(&path) else {
+            return CacheLookup::Miss;
         };
 
         // Check staleness via mtime on the same file handle.
-        let age = match file
+        let Ok(age) = file
             .metadata()
             .and_then(|m| m.modified())
             .and_then(|mtime| mtime.elapsed().map_err(io::Error::other))
-        {
-            Ok(age) => age,
-            Err(_) => return CacheLookup::Miss,
+        else {
+            return CacheLookup::Miss;
         };
 
         if age > self.ttl {
@@ -175,27 +226,18 @@ impl TransformCache {
 
         // Parse the header line: "<media_type>[\t<warning>]*\n<body>". An entry written
         // before warnings were kept has no tab and reads as warning-free.
-        let newline_pos = match data.iter().position(|&b| b == b'\n') {
-            Some(pos) => pos,
-            None => {
-                self.remove_corrupted(&path, "missing header newline");
-                return CacheLookup::Miss;
-            }
+        let Some(newline_pos) = data.iter().position(|&b| b == b'\n') else {
+            self.remove_corrupted(&path, "missing header newline");
+            return CacheLookup::Miss;
         };
-        let header = match std::str::from_utf8(&data[..newline_pos]) {
-            Ok(s) => s,
-            Err(_) => {
-                self.remove_corrupted(&path, "invalid UTF-8 in header");
-                return CacheLookup::Miss;
-            }
+        let Ok(header) = std::str::from_utf8(&data[..newline_pos]) else {
+            self.remove_corrupted(&path, "invalid UTF-8 in header");
+            return CacheLookup::Miss;
         };
         let mut fields = header.split('\t');
-        let media_type = match fields.next().map(MediaType::from_str) {
-            Some(Ok(mt)) => mt,
-            _ => {
-                self.remove_corrupted(&path, "unrecognized media type");
-                return CacheLookup::Miss;
-            }
+        let Some(Ok(media_type)) = fields.next().map(MediaType::from_str) else {
+            self.remove_corrupted(&path, "unrecognized media type");
+            return CacheLookup::Miss;
         };
         let warnings: Vec<String> = fields.map(str::to_string).collect();
 
@@ -351,9 +393,8 @@ fn collect_cache_entries(root: &Path) -> io::Result<Vec<CacheEntry>> {
 }
 
 fn collect_entries_recursive(dir: &Path, entries: &mut Vec<CacheEntry>) {
-    let read_dir = match fs::read_dir(dir) {
-        Ok(rd) => rd,
-        Err(_) => return,
+    let Ok(read_dir) = fs::read_dir(dir) else {
+        return;
     };
     for entry in read_dir.flatten() {
         let path = entry.path();
@@ -678,40 +719,15 @@ pub(super) fn try_versioned_cache_lookup(
     let cache =
         TransformCache::new(cache_root.clone()).with_log_handler(config.log_handler.clone());
     let cache_key = compute_cache_key(source_hash, options, watermark_identity);
-    if let CacheLookup::Hit {
-        media_type,
-        body,
-        age,
-        warnings,
-    } = cache.get(&cache_key)
-    {
-        CACHE_HITS_TOTAL.fetch_add(1, Ordering::Relaxed);
-        let etag = build_image_etag(&body);
-        let mut headers = build_image_response_headers(
-            media_type,
-            &etag,
-            response_policy,
-            false,
-            CacheHitStatus::Hit,
-            config.public_max_age_seconds,
-            config.public_stale_while_revalidate_seconds,
-            &config.custom_response_headers,
-        );
-        headers.push(("Age".to_string(), age.as_secs().to_string()));
-        if matches!(response_policy, ImageResponsePolicy::PublicGet)
-            && if_none_match_matches(request.header("if-none-match"), &etag)
-        {
-            return Some(HttpResponse::empty("304 Not Modified", headers));
-        }
-        push_warning_headers(&mut headers, &warnings);
-        return Some(HttpResponse::binary_with_headers(
-            "200 OK",
-            media_type.as_mime(),
-            headers,
-            body,
-        ));
-    }
-    None
+    let response = cache.get(&cache_key).into_hit_response(
+        request,
+        response_policy,
+        false,
+        config.public_cache_control(),
+        &config.custom_response_headers,
+    )?;
+    CACHE_HITS_TOTAL.fetch_add(1, Ordering::Relaxed);
+    Some(response)
 }
 
 #[cfg(test)]

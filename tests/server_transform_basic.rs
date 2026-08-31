@@ -513,7 +513,7 @@ fn serve_once_health_token_rejects_unauthenticated() {
         .expect("join server thread")
         .expect("serve one request");
 
-    let (header, content_type, _body) = split_response(&response);
+    let (header, content_type, body) = split_response(&response);
     assert!(
         header.starts_with("HTTP/1.1 401"),
         "expected 401 from /health without token, got: {header}"
@@ -523,7 +523,7 @@ fn serve_once_health_token_rejects_unauthenticated() {
         header.contains("WWW-Authenticate: Bearer"),
         "expected WWW-Authenticate header in: {header}"
     );
-    let body_str = String::from_utf8_lossy(&_body);
+    let body_str = String::from_utf8_lossy(&body);
     assert!(
         body_str.contains("health endpoint requires authentication"),
         "expected auth error message, got: {body_str}"

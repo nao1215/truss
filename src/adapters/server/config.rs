@@ -782,6 +782,15 @@ fn cfg_storage_eq(_this: &ServerConfig, _other: &ServerConfig) -> bool {
 impl Eq for ServerConfig {}
 
 impl ServerConfig {
+    /// The public `Cache-Control` directives as one value, so a caller that builds image
+    /// response headers passes the pair rather than the two fields separately.
+    pub(super) const fn public_cache_control(&self) -> super::handler::PublicCacheControl {
+        super::handler::PublicCacheControl {
+            max_age: self.public_max_age_seconds,
+            stale_while_revalidate: self.public_stale_while_revalidate_seconds,
+        }
+    }
+
     /// Creates a server configuration from explicit values.
     ///
     /// This constructor does not canonicalize the storage root. It is primarily intended for
@@ -1536,12 +1545,11 @@ fn parse_env_f64_ranged(name: &str, min: f64, max: f64) -> io::Result<Option<f64
 /// Returns an empty `Vec` when the variable is unset or empty, which tells the
 /// negotiation layer to use its built-in default order.
 pub(super) fn parse_format_preference_from_env() -> io::Result<Vec<crate::MediaType>> {
-    let value = match env::var("TRUSS_FORMAT_PREFERENCE")
+    let Some(value) = env::var("TRUSS_FORMAT_PREFERENCE")
         .ok()
         .filter(|v| !v.is_empty())
-    {
-        Some(v) => v,
-        None => return Ok(Vec::new()),
+    else {
+        return Ok(Vec::new());
     };
 
     let mut formats = Vec::new();
@@ -1649,12 +1657,11 @@ pub(super) fn parse_presets_file(
 /// validate that every name and value conforms to RFC 7230. Returns an empty vec when the
 /// variable is unset or empty.
 fn parse_response_headers_from_env() -> io::Result<Vec<(String, String)>> {
-    let raw = match env::var("TRUSS_RESPONSE_HEADERS")
+    let Some(raw) = env::var("TRUSS_RESPONSE_HEADERS")
         .ok()
         .filter(|v| !v.is_empty())
-    {
-        Some(value) => value,
-        None => return Ok(Vec::new()),
+    else {
+        return Ok(Vec::new());
     };
 
     let map: HashMap<String, String> = serde_json::from_str(&raw).map_err(|e| {

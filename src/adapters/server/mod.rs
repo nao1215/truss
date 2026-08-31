@@ -121,9 +121,9 @@ mod tests {
         authorize_request_headers, authorize_signed_request, canonical_query_without_signature,
     };
     use super::handler::{
-        DEFAULT_HYSTERESIS_MARGIN, HealthCache, TransformImageRequestPayload, TransformSlot,
-        TransformSourcePayload, WatermarkSource, disk_free_bytes, parse_public_get_request,
-        process_rss_bytes, transform_source_bytes,
+        DEFAULT_HYSTERESIS_MARGIN, HealthCache, PublicCacheControl, TransformImageRequestPayload,
+        TransformSlot, TransformSourcePayload, WatermarkSource, disk_free_bytes,
+        parse_public_get_request, process_rss_bytes, transform_source_bytes,
     };
     use super::lifecycle::preset_watcher;
     use super::negotiate::{
@@ -163,20 +163,11 @@ mod tests {
     }
 
     fn png_bytes() -> Vec<u8> {
-        let image = RgbaImage::from_pixel(4, 3, Rgba([10, 20, 30, 255]));
-        let mut bytes = Vec::new();
-        PngEncoder::new(&mut bytes)
-            .write_image(&image, 4, 3, ColorType::Rgba8.into())
-            .expect("encode png");
-        bytes
+        crate::test_support::flat_png(4, 3)
     }
 
     fn temp_dir(name: &str) -> PathBuf {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("current time")
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!("truss-server-{name}-{unique}"));
+        let path = crate::test_support::unique_temp_path(&format!("truss-server-{name}"));
         fs::create_dir_all(&path).expect("create temp dir");
         path
     }
@@ -243,9 +234,10 @@ mod tests {
                 }
                 Err(error) => panic!("read fixture request headers: {error}"),
             };
-            if read == 0 {
-                panic!("fixture request ended before headers were complete");
-            }
+            assert!(
+                read > 0,
+                "fixture request ended before headers were complete"
+            );
             buffer.extend_from_slice(&chunk[..read]);
             if let Some(index) = find_header_terminator(&buffer) {
                 break index;
@@ -261,12 +253,11 @@ mod tests {
                     .eq_ignore_ascii_case("content-length")
                     .then_some(value.trim())
             })
-            .map(|value| {
+            .map_or(0, |value| {
                 value
                     .parse::<usize>()
                     .expect("fixture content-length should be numeric")
-            })
-            .unwrap_or(0);
+            });
 
         let mut body = buffer.len().saturating_sub(header_end + 4);
         while body < content_length {
@@ -283,9 +274,7 @@ mod tests {
                 }
                 Err(error) => panic!("read fixture request body: {error}"),
             };
-            if read == 0 {
-                panic!("fixture request body was truncated");
-            }
+            assert!(read > 0, "fixture request body was truncated");
             body += read;
         }
     }
@@ -324,7 +313,8 @@ mod tests {
                     body.len()
                 );
                 for (name, value) in headers {
-                    header.push_str(&format!("{name}: {value}\r\n"));
+                    use std::fmt::Write as FmtWrite;
+                    let _ = write!(header, "{name}: {value}\r\n");
                 }
                 header.push_str("\r\n");
                 stream
@@ -516,8 +506,10 @@ mod tests {
             ImageResponsePolicy::PublicGet,
             true,
             CacheHitStatus::Disabled,
-            DEFAULT_PUBLIC_MAX_AGE_SECONDS,
-            DEFAULT_PUBLIC_STALE_WHILE_REVALIDATE_SECONDS,
+            PublicCacheControl {
+                max_age: DEFAULT_PUBLIC_MAX_AGE_SECONDS,
+                stale_while_revalidate: DEFAULT_PUBLIC_STALE_WHILE_REVALIDATE_SECONDS,
+            },
             &[],
         );
 
@@ -545,8 +537,10 @@ mod tests {
             ImageResponsePolicy::PublicGet,
             true,
             CacheHitStatus::Disabled,
-            DEFAULT_PUBLIC_MAX_AGE_SECONDS,
-            DEFAULT_PUBLIC_STALE_WHILE_REVALIDATE_SECONDS,
+            PublicCacheControl {
+                max_age: DEFAULT_PUBLIC_MAX_AGE_SECONDS,
+                stale_while_revalidate: DEFAULT_PUBLIC_STALE_WHILE_REVALIDATE_SECONDS,
+            },
             &[],
         );
 
@@ -561,8 +555,10 @@ mod tests {
             ImageResponsePolicy::PublicGet,
             true,
             CacheHitStatus::Disabled,
-            DEFAULT_PUBLIC_MAX_AGE_SECONDS,
-            DEFAULT_PUBLIC_STALE_WHILE_REVALIDATE_SECONDS,
+            PublicCacheControl {
+                max_age: DEFAULT_PUBLIC_MAX_AGE_SECONDS,
+                stale_while_revalidate: DEFAULT_PUBLIC_STALE_WHILE_REVALIDATE_SECONDS,
+            },
             &[],
         );
 
@@ -806,8 +802,10 @@ mod tests {
             ImageResponsePolicy::PublicGet,
             false,
             CacheHitStatus::Hit,
-            DEFAULT_PUBLIC_MAX_AGE_SECONDS,
-            DEFAULT_PUBLIC_STALE_WHILE_REVALIDATE_SECONDS,
+            PublicCacheControl {
+                max_age: DEFAULT_PUBLIC_MAX_AGE_SECONDS,
+                stale_while_revalidate: DEFAULT_PUBLIC_STALE_WHILE_REVALIDATE_SECONDS,
+            },
             &[],
         );
         assert!(headers.contains(&("Cache-Status".to_string(), "\"truss\"; hit".to_string())));
@@ -821,8 +819,10 @@ mod tests {
             ImageResponsePolicy::PublicGet,
             false,
             CacheHitStatus::Miss,
-            DEFAULT_PUBLIC_MAX_AGE_SECONDS,
-            DEFAULT_PUBLIC_STALE_WHILE_REVALIDATE_SECONDS,
+            PublicCacheControl {
+                max_age: DEFAULT_PUBLIC_MAX_AGE_SECONDS,
+                stale_while_revalidate: DEFAULT_PUBLIC_STALE_WHILE_REVALIDATE_SECONDS,
+            },
             &[],
         );
         assert!(headers.contains(&(
@@ -2174,7 +2174,9 @@ mod tests {
     /// Save current values, run `f`, then restore originals regardless of
     /// panics. Holds `FROM_ENV_MUTEX` for the duration.
     fn with_env<F: FnOnce()>(vars: &[(&str, Option<&str>)], f: F) {
-        let _guard = FROM_ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = FROM_ENV_MUTEX
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         for &(key, _) in vars {
             debug_assert!(
                 ENV_VARS.contains(&key),
@@ -3297,7 +3299,7 @@ mod tests {
 
     #[test]
     fn x_request_id_not_extracted_when_empty() {
-        let headers = vec![("x-request-id".to_string(), "".to_string())];
+        let headers = vec![("x-request-id".to_string(), String::new())];
         assert!(extract_request_id(&headers).is_none());
     }
 

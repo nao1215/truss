@@ -261,7 +261,7 @@ pub(super) fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io:
 
         let requires_auth = matches!(
             (partial.method.as_str(), partial.path()),
-            ("POST", "/images:transform") | ("POST", "/images")
+            ("POST", "/images:transform" | "/images")
         );
         if requires_auth
             && let Err(mut response) =

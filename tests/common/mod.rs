@@ -6,6 +6,7 @@ use image::codecs::png::PngEncoder;
 use image::{ColorType, ImageEncoder, Rgba, RgbaImage};
 use sha2::Sha256;
 use std::collections::BTreeMap;
+use std::fmt::Write as FmtWrite;
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -123,9 +124,10 @@ fn read_fixture_request(stream: &mut TcpStream) {
             }
             Err(error) => panic!("read fixture request headers: {error}"),
         };
-        if read == 0 {
-            panic!("fixture request ended before headers were complete");
-        }
+        assert!(
+            read > 0,
+            "fixture request ended before headers were complete"
+        );
         buffer.extend_from_slice(&chunk[..read]);
         if let Some(index) = find_header_terminator(&buffer) {
             break index;
@@ -141,12 +143,11 @@ fn read_fixture_request(stream: &mut TcpStream) {
                 .eq_ignore_ascii_case("content-length")
                 .then_some(value.trim())
         })
-        .map(|value| {
+        .map_or(0, |value| {
             value
                 .parse::<usize>()
                 .expect("fixture content-length should be numeric")
-        })
-        .unwrap_or(0);
+        });
 
     let mut body = buffer.len().saturating_sub(header_end + 4);
     while body < content_length {
@@ -163,9 +164,7 @@ fn read_fixture_request(stream: &mut TcpStream) {
             }
             Err(error) => panic!("read fixture request body: {error}"),
         };
-        if read == 0 {
-            panic!("fixture request body was truncated");
-        }
+        assert!(read > 0, "fixture request body was truncated");
         body += read;
     }
 }
@@ -210,7 +209,7 @@ pub fn spawn_fixture_server(responses: Vec<FixtureResponse>) -> (String, thread:
                 body.len()
             );
             for (name, value) in headers {
-                header.push_str(&format!("{name}: {value}\r\n"));
+                let _ = write!(header, "{name}: {value}\r\n");
             }
             header.push_str("\r\n");
             stream
@@ -304,7 +303,7 @@ pub fn send_public_get_request_with_headers(
     let mut request = format!("GET {target} HTTP/1.1\r\nHost: {host}\r\n");
     request.push_str("Connection: close\r\n");
     for (name, value) in headers {
-        request.push_str(&format!("{name}: {value}\r\n"));
+        let _ = write!(request, "{name}: {value}\r\n");
     }
     request.push_str("\r\n");
     stream.write_all(request.as_bytes()).expect("write request");
@@ -413,32 +412,27 @@ fn parse_transform_options(query: &BTreeMap<String, String>) -> TransformOptions
         quality: query
             .get("quality")
             .map(|value| value.parse().expect("parse signed quality")),
-        optimize: query
-            .get("optimize")
-            .map(|value| OptimizeMode::from_str(value).expect("parse signed optimize"))
-            .unwrap_or(OptimizeMode::None),
+        optimize: query.get("optimize").map_or(OptimizeMode::None, |value| {
+            OptimizeMode::from_str(value).expect("parse signed optimize")
+        }),
         target_quality: query
             .get("targetQuality")
             .map(|value| TargetQuality::from_str(value).expect("parse signed target quality")),
         background: query
             .get("background")
             .map(|value| Rgba8::from_hex(value).expect("parse signed background")),
-        rotate: query
-            .get("rotate")
-            .map(|value| Rotation::from_str(value).expect("parse signed rotation"))
-            .unwrap_or(Rotation::DEG_0),
+        rotate: query.get("rotate").map_or(Rotation::DEG_0, |value| {
+            Rotation::from_str(value).expect("parse signed rotation")
+        }),
         auto_orient: query
             .get("autoOrient")
-            .map(|value| parse_bool_query(value, "autoOrient"))
-            .unwrap_or(true),
+            .is_none_or(|value| parse_bool_query(value, "autoOrient")),
         strip_metadata: query
             .get("stripMetadata")
-            .map(|value| parse_bool_query(value, "stripMetadata"))
-            .unwrap_or(true),
+            .is_none_or(|value| parse_bool_query(value, "stripMetadata")),
         preserve_exif: query
             .get("preserveExif")
-            .map(|value| parse_bool_query(value, "preserveExif"))
-            .unwrap_or(false),
+            .is_some_and(|value| parse_bool_query(value, "preserveExif")),
         blur: query
             .get("blur")
             .map(|value| value.parse().expect("parse signed blur")),
@@ -447,12 +441,10 @@ fn parse_transform_options(query: &BTreeMap<String, String>) -> TransformOptions
             .map(|value| value.parse().expect("parse signed sharpen")),
         grayscale: query
             .get("grayscale")
-            .map(|value| parse_bool_query(value, "grayscale"))
-            .unwrap_or(false),
+            .is_some_and(|value| parse_bool_query(value, "grayscale")),
         without_enlargement: query
             .get("withoutEnlargement")
-            .map(|value| parse_bool_query(value, "withoutEnlargement"))
-            .unwrap_or(false),
+            .is_some_and(|value| parse_bool_query(value, "withoutEnlargement")),
         crop: query
             .get("crop")
             .map(|value| CropRegion::from_str(value).expect("parse signed crop")),
