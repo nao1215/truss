@@ -218,6 +218,50 @@ scenarios:
             # `without_enlargement`, a Rust field name no adapter exposes.
             contains: "withoutEnlargement requires width or height"
 
+  - name: an SVG source fits its box the same way a raster source does
+    steps:
+      # The rasterizer used to draw straight into the requested box, which is `fill`
+      # whatever was asked for, so a drawing whose aspect ratio differed from the box came
+      # out stretched and `inside` returned the box instead of the scaled content.
+      - fixture:
+          file: in.svg
+          from: ${fixtures}/svg-minimal.svg
+      - run:
+          command: truss convert in.svg -o inside.png --format png --width 40 --height 20 --fit inside
+      - assert:
+          exit_code: 0
+          image:
+            path: inside.png
+            format: png
+            width: 20
+            height: 20
+      - run:
+          command: truss convert in.svg -o contain.png --format png --width 40 --height 20 --fit contain
+      - assert:
+          exit_code: 0
+          image:
+            path: contain.png
+            format: png
+            width: 40
+            height: 20
+
+  - name: --without-enlargement holds an SVG at its own size
+    steps:
+      # The enlargement policy was read nowhere on the SVG path, so a one-pixel drawing was
+      # scaled up to whatever box was asked for.
+      - fixture:
+          file: in.svg
+          from: ${fixtures}/svg-minimal.svg
+      - run:
+          command: truss convert in.svg -o kept.png --format png --width 40 --height 20 --fit inside --without-enlargement
+      - assert:
+          exit_code: 0
+          image:
+            path: kept.png
+            format: png
+            width: 1
+            height: 1
+
   - name: convert help documents the corrected fit modes
     steps:
       - run:

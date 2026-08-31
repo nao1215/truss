@@ -91,3 +91,39 @@ scenarios:
           exit_code: 2
           stderr:
             contains: "error:"
+
+  - name: reports the dimensions an SVG declares on its root element
+    steps:
+      # SVG was the one format inspect never measured, so an application recording
+      # intrinsic dimensions at upload time had no answer for it and had to rasterize.
+      - run:
+          command: truss inspect "${fixtures}/svg-minimal.svg"
+      - assert:
+          exit_code: 0
+          stdout:
+            json:
+              path: $.format
+              equals: svg
+      - assert:
+          stdout:
+            json:
+              path: $.width
+              equals: 1
+      - assert:
+          stdout:
+            json:
+              path: $.orientedHeight
+              equals: 1
+      - run:
+          command: truss inspect "${fixtures}/svg-illustrator-prolog.svg"
+      - assert:
+          exit_code: 0
+          stdout:
+            json:
+              path: $.width
+              equals: 100
+      - assert:
+          stdout:
+            json:
+              path: $.height
+              equals: 100

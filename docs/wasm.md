@@ -239,6 +239,11 @@ orientation transposes the axes — the usual case for a photo taken in portrait
 They equal `width` and `height` when there is no orientation tag, so intrinsic-size markup
 can read them unconditionally.
 
+For an SVG the dimensions are the ones the root element declares, resolved from `width` and
+`height` when those are absolute lengths and from the `viewBox` extent otherwise. They stay
+`null` when the document gives no absolute answer, such as a percentage width with no
+`viewBox` to resolve it against, since that needs a viewport the file does not carry.
+
 ### `transformImage(inputBytes, declaredMediaType?, optionsJson)`
 
 Returns a `WasmTransformOutput` object:

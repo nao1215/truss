@@ -255,6 +255,40 @@ scenarios:
           stderr:
             contains: "crop is not supported for SVG inputs"
 
+  - name: the geometry options are refused for an SVG output, by name
+    steps:
+      # An SVG output returns the document as written, so these can never take effect.
+      # They used to be discarded in silence, which meant a resize job reported success on
+      # every file and produced none of the sizes it was asked for.
+      - fixture:
+          file: in.svg
+          from: ${fixtures}/svg-minimal.svg
+      - run:
+          command: truss convert in.svg -o out.svg --width 64
+      - assert:
+          exit_code: 1
+          stderr:
+            contains: "width is not supported with SVG output"
+      - run:
+          command: truss convert in.svg -o out.svg --rotate 90
+      - assert:
+          exit_code: 1
+          stderr:
+            contains: "rotate is not supported with SVG output"
+      - run:
+          command: truss convert in.svg -o out.svg --grayscale
+      - assert:
+          exit_code: 1
+          stderr:
+            contains: "grayscale is not supported with SVG output"
+      - run:
+          command: truss convert in.svg -o sanitized.svg
+      - assert:
+          exit_code: 0
+          file:
+            path: sanitized.svg
+            exists: true
+
   - name: rasterizing an SVG first makes the raster-only stages available
     steps:
       - fixture:

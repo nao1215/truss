@@ -833,6 +833,30 @@ impl Default for TransformOptions {
 
 impl TransformOptions {
     /// Normalizes and validates the options against the input media type.
+    /// The first option set on this request that an SVG passthrough cannot honour.
+    ///
+    /// `fit`, `position`, and `withoutEnlargement` are absent from the list because the rules
+    /// above already require a width or a height alongside each of them, so naming the axis
+    /// covers those too and names the option the caller has to drop.
+    fn svg_passthrough_unsupported_option(&self) -> Option<&'static str> {
+        if self.width.is_some() {
+            return Some("width");
+        }
+        if self.height.is_some() {
+            return Some("height");
+        }
+        if !self.rotate.is_identity() {
+            return Some("rotate");
+        }
+        if self.grayscale {
+            return Some("grayscale");
+        }
+        if self.background.is_some() {
+            return Some("background");
+        }
+        None
+    }
+
     pub fn normalize(
         self,
         input_media_type: MediaType,
@@ -905,6 +929,20 @@ impl TransformOptions {
             return Err(TransformError::InvalidOptions(
                 "preserveExif is not supported with SVG output".to_string(),
             ));
+        }
+
+        // SVG in and SVG out is a sanitize-only passthrough: the document is returned as its
+        // author wrote it, so an option that asks for a different picture cannot be honoured.
+        // Refusing it is what the rule above already does, and what `transform_svg` does for
+        // blur, sharpen, crop, and watermark; the alternative is a caller who asked for a
+        // 64-pixel icon getting the original back with exit code 0.
+        if input_media_type == MediaType::Svg
+            && format == MediaType::Svg
+            && let Some(option) = self.svg_passthrough_unsupported_option()
+        {
+            return Err(TransformError::InvalidOptions(format!(
+                "{option} is not supported with SVG output; choose a raster output format such as png"
+            )));
         }
 
         if self.quality.is_some() && !format.is_lossy() {
@@ -1812,9 +1850,16 @@ fn is_avif(bytes: &[u8]) -> bool {
 /// instead rejects documents real editors produce: Adobe Illustrator writes the
 /// declaration, a generator comment, and then a doctype with an internal subset.
 fn is_svg(bytes: &[u8]) -> bool {
-    let Ok(text) = std::str::from_utf8(bytes) else {
-        return false;
-    };
+    svg_root_element(bytes).is_some()
+}
+
+/// Returns the document text from the root element onwards, when that root is `<svg`.
+///
+/// The prolog walk is shared with [`sniff_svg`], which needs the root element's attributes
+/// and would otherwise repeat it. Splitting the two apart is what keeps detection and
+/// measurement from disagreeing about where the root begins.
+fn svg_root_element(bytes: &[u8]) -> Option<&str> {
+    let text = std::str::from_utf8(bytes).ok()?;
 
     // Skip UTF-8 BOM if present.
     let mut remaining = text.strip_prefix('\u{FEFF}').unwrap_or(text);
@@ -1824,9 +1869,7 @@ fn is_svg(bytes: &[u8]) -> bool {
         remaining = remaining.trim_start();
 
         if let Some(rest) = remaining.strip_prefix("<!--") {
-            let Some(end) = rest.find("-->") else {
-                return false;
-            };
+            let end = rest.find("-->")?;
             remaining = &rest[end + 3..];
             continue;
         }
@@ -1834,17 +1877,13 @@ fn is_svg(bytes: &[u8]) -> bool {
         // Any processing instruction, including the XML declaration, which is
         // just the one whose target is `xml`.
         if let Some(rest) = remaining.strip_prefix("<?") {
-            let Some(end) = rest.find("?>") else {
-                return false;
-            };
+            let end = rest.find("?>")?;
             remaining = &rest[end + 2..];
             continue;
         }
 
         if !seen_doctype && let Some(rest) = remaining.strip_prefix("<!DOCTYPE") {
-            let Some(after) = skip_doctype(rest) else {
-                return false;
-            };
+            let after = skip_doctype(rest)?;
             seen_doctype = true;
             remaining = after;
             continue;
@@ -1853,11 +1892,12 @@ fn is_svg(bytes: &[u8]) -> bool {
         break;
     }
 
-    remaining.starts_with("<svg")
+    let is_root = remaining.starts_with("<svg")
         && remaining
             .as_bytes()
             .get(4)
-            .is_some_and(|&b| b == b' ' || b == b'\t' || b == b'\n' || b == b'\r' || b == b'>')
+            .is_some_and(|&b| b == b' ' || b == b'\t' || b == b'\n' || b == b'\r' || b == b'>');
+    is_root.then_some(remaining)
 }
 
 /// Returns the text after a doctype declaration, or `None` when it is unterminated.
@@ -1891,18 +1931,195 @@ fn skip_doctype(rest: &str) -> Option<&str> {
     None
 }
 
-/// Extracts basic SVG metadata. SVGs inherently support transparency.
-/// Width and height are left unknown because SVGs may define dimensions via
-/// `viewBox`, percentage-based attributes, or not at all.
-fn sniff_svg(_bytes: &[u8]) -> ArtifactMetadata {
+/// Extracts SVG metadata. SVGs inherently support transparency.
+///
+/// The dimensions come from the root element's `width` and `height`, falling back to the
+/// `viewBox` extent, which is what SVG defines the intrinsic size to be. They stay unknown
+/// when the document gives no absolute answer — a percentage with no `viewBox` to resolve
+/// it against, a font-relative unit, nothing declared at all — because a viewport is needed
+/// to resolve those and a file on disk has none.
+fn sniff_svg(bytes: &[u8]) -> ArtifactMetadata {
+    let size = svg_root_element(bytes).and_then(svg_intrinsic_size);
     ArtifactMetadata {
-        width: None,
-        height: None,
+        width: size.map(|(width, _)| width),
+        height: size.map(|(_, height)| height),
         frame_count: 1,
         duration: None,
         has_alpha: Some(true),
         orientation: None,
     }
+}
+
+/// The intrinsic size an SVG document declares, in pixels.
+///
+/// SVG resolves an intrinsic size from `width` and `height` when both are absolute lengths,
+/// and from the `viewBox` extent otherwise; when one axis is absolute and the other is not,
+/// the missing one follows from the `viewBox` aspect ratio. Anything that needs a viewport
+/// or a font to resolve — a percentage, `em`, `ex` — has no answer here and returns `None`
+/// rather than a guess, which is what the `Option` in `ArtifactMetadata` is for.
+fn svg_intrinsic_size(root: &str) -> Option<(u32, u32)> {
+    let tag = svg_root_tag(root)?;
+    let width = root_attribute(tag, "width").and_then(svg_length_px);
+    let height = root_attribute(tag, "height").and_then(svg_length_px);
+    let view_box = root_attribute(tag, "viewBox").and_then(parse_view_box);
+
+    let (width, height) = match (width, height, view_box) {
+        (Some(width), Some(height), _) => (width, height),
+        (Some(width), None, Some((box_width, box_height))) => {
+            (width, width * box_height / box_width)
+        }
+        (None, Some(height), Some((box_width, box_height))) => {
+            (height * box_width / box_height, height)
+        }
+        (None, None, Some(size)) => size,
+        _ => return None,
+    };
+
+    Some((to_dimension(width)?, to_dimension(height)?))
+}
+
+/// Returns the text between `<` and the `>` that closes the root start tag.
+///
+/// The terminator is not simply the first `>`: an attribute value is a quoted string and may
+/// contain one, which is the same trap [`skip_doctype`] works around.
+fn svg_root_tag(root: &str) -> Option<&str> {
+    let mut quote: Option<u8> = None;
+    for (index, &byte) in root.as_bytes().iter().enumerate() {
+        match quote {
+            Some(open) => {
+                if byte == open {
+                    quote = None;
+                }
+            }
+            None => match byte {
+                b'"' | b'\'' => quote = Some(byte),
+                b'>' => return Some(&root[1..index]),
+                _ => {}
+            },
+        }
+    }
+    None
+}
+
+/// Returns the value of one attribute of a start tag, by exact name.
+///
+/// Matching on the whole name rather than searching for it as a substring is what keeps
+/// `stroke-width` from answering for `width`.
+fn root_attribute<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
+    let bytes = tag.as_bytes();
+    let mut index = 0;
+
+    // Step over the element name; attributes start after the first run of whitespace.
+    while index < bytes.len() && !bytes[index].is_ascii_whitespace() {
+        index += 1;
+    }
+
+    loop {
+        while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+            index += 1;
+        }
+        if index >= bytes.len() {
+            return None;
+        }
+
+        let name_start = index;
+        while index < bytes.len()
+            && bytes[index] != b'='
+            && !bytes[index].is_ascii_whitespace()
+            && bytes[index] != b'/'
+        {
+            index += 1;
+        }
+        let attribute = &tag[name_start..index];
+        if attribute.is_empty() {
+            // Nothing was consumed, so skip the character to guarantee progress.
+            index += 1;
+            continue;
+        }
+
+        while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+            index += 1;
+        }
+        if index >= bytes.len() || bytes[index] != b'=' {
+            continue;
+        }
+        index += 1;
+        while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+            index += 1;
+        }
+
+        let &quote = bytes.get(index)?;
+        if quote != b'"' && quote != b'\'' {
+            return None;
+        }
+        index += 1;
+        let value_start = index;
+        while index < bytes.len() && bytes[index] != quote {
+            index += 1;
+        }
+        if index >= bytes.len() {
+            return None;
+        }
+        let value = &tag[value_start..index];
+        index += 1;
+
+        if attribute == name {
+            return Some(value);
+        }
+    }
+}
+
+/// Converts a CSS length to pixels, for the absolute units only.
+///
+/// The relative units — `%`, `em`, `ex`, `ch`, `rem`, `vw`, `vh` — need a viewport or a font
+/// to resolve and have no answer for a file read off disk, so they return `None` and let the
+/// `viewBox` answer instead.
+fn svg_length_px(value: &str) -> Option<f64> {
+    let value = value.trim();
+    let split = value
+        .find(|c: char| !matches!(c, '0'..='9' | '.' | '+' | '-' | 'e' | 'E'))
+        .unwrap_or(value.len());
+    let number: f64 = value[..split].parse().ok()?;
+    let scale = match value[split..].trim().to_ascii_lowercase().as_str() {
+        "" | "px" => 1.0,
+        "pt" => 96.0 / 72.0,
+        "pc" => 16.0,
+        "in" => 96.0,
+        "cm" => 96.0 / 2.54,
+        "mm" => 96.0 / 25.4,
+        "q" => 96.0 / 101.6,
+        _ => return None,
+    };
+    let pixels = number * scale;
+    (pixels.is_finite() && pixels > 0.0).then_some(pixels)
+}
+
+/// Returns the width and height of a `viewBox`, which is its third and fourth numbers.
+fn parse_view_box(value: &str) -> Option<(f64, f64)> {
+    let numbers: Vec<f64> = value
+        .split([' ', '\t', '\n', '\r', ','])
+        .filter(|part| !part.is_empty())
+        .map(str::parse)
+        .collect::<Result<_, _>>()
+        .ok()?;
+    let [_, _, width, height] = numbers[..] else {
+        return None;
+    };
+    (width.is_finite() && width > 0.0 && height.is_finite() && height > 0.0)
+        .then_some((width, height))
+}
+
+/// Truncates a resolved length to the pixel count a caller can act on.
+///
+/// Truncation rather than rounding is deliberate: `usvg` truncates when it turns the same
+/// document into a render size, and a reported dimension that disagrees with the one a
+/// conversion produces is the drift issue #322 closed for EXIF orientation.
+fn to_dimension(value: f64) -> Option<u32> {
+    if !(value.is_finite() && value >= 1.0 && value < f64::from(u32::MAX)) {
+        return None;
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    Some(value as u32)
 }
 
 /// Detects BMP files by checking for the "BM" signature at offset 0.
@@ -3174,6 +3391,97 @@ mod tests {
                 },
                 expected_error: Some("preserveExif is not supported with SVG output"),
             },
+            // SVG output is a sanitize-only passthrough: the document comes back as written,
+            // so an option asking for a different picture cannot be honoured. Refusing it is
+            // what the rules above already do for the options they cover.
+            Case {
+                name: "width unsupported for svg output",
+                input_media_type: MediaType::Svg,
+                options: TransformOptions {
+                    format: Some(MediaType::Svg),
+                    width: Some(100),
+                    ..TransformOptions::default()
+                },
+                expected_error: Some(
+                    "width is not supported with SVG output; choose a raster output format such as png",
+                ),
+            },
+            Case {
+                name: "height unsupported for svg output",
+                input_media_type: MediaType::Svg,
+                options: TransformOptions {
+                    format: Some(MediaType::Svg),
+                    height: Some(100),
+                    ..TransformOptions::default()
+                },
+                expected_error: Some(
+                    "height is not supported with SVG output; choose a raster output format such as png",
+                ),
+            },
+            Case {
+                name: "rotate unsupported for svg output",
+                input_media_type: MediaType::Svg,
+                options: TransformOptions {
+                    format: Some(MediaType::Svg),
+                    rotate: Rotation::DEG_90,
+                    ..TransformOptions::default()
+                },
+                expected_error: Some(
+                    "rotate is not supported with SVG output; choose a raster output format such as png",
+                ),
+            },
+            Case {
+                name: "grayscale unsupported for svg output",
+                input_media_type: MediaType::Svg,
+                options: TransformOptions {
+                    format: Some(MediaType::Svg),
+                    grayscale: true,
+                    ..TransformOptions::default()
+                },
+                expected_error: Some(
+                    "grayscale is not supported with SVG output; choose a raster output format such as png",
+                ),
+            },
+            Case {
+                name: "background unsupported for svg output",
+                input_media_type: MediaType::Svg,
+                options: TransformOptions {
+                    format: Some(MediaType::Svg),
+                    background: Some(Rgba8 {
+                        r: 255,
+                        g: 0,
+                        b: 0,
+                        a: 255,
+                    }),
+                    ..TransformOptions::default()
+                },
+                expected_error: Some(
+                    "background is not supported with SVG output; choose a raster output format such as png",
+                ),
+            },
+            Case {
+                name: "svg passthrough with no transform options is accepted",
+                input_media_type: MediaType::Svg,
+                options: TransformOptions {
+                    format: Some(MediaType::Svg),
+                    rotate: Rotation::DEG_0,
+                    ..TransformOptions::default()
+                },
+                expected_error: None,
+            },
+            Case {
+                name: "svg input rasterized to png accepts the same options",
+                input_media_type: MediaType::Svg,
+                options: TransformOptions {
+                    format: Some(MediaType::Png),
+                    width: Some(100),
+                    height: Some(100),
+                    rotate: Rotation::DEG_90,
+                    grayscale: true,
+                    ..TransformOptions::default()
+                },
+                expected_error: None,
+            },
             Case {
                 name: "auto optimize accepts lossy target quality",
                 input_media_type: MediaType::Jpeg,
@@ -3555,6 +3863,69 @@ mod tests {
         let artifact = sniff_artifact(RawArtifact::new(document.as_bytes().to_vec(), None))
             .unwrap_or_else(|err| panic!("prolog should be recognized as SVG, got: {err}"));
         assert_eq!(artifact.media_type, MediaType::Svg);
+    }
+
+    /// Every other format reports the dimensions its container stores, and an SVG stores
+    /// them on the root element. The unit table is what stops the next spelling from
+    /// silently becoming `None`: a length with no unit and one in `px` are the same number,
+    /// and the absolute units are fixed ratios of it.
+    #[rstest]
+    #[case::bare_numbers(r#"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="50"/>"#, Some((100, 50)))]
+    #[case::px(r#"<svg xmlns="http://www.w3.org/2000/svg" width="100px" height="50px"/>"#, Some((100, 50)))]
+    #[case::decimal(r#"<svg xmlns="http://www.w3.org/2000/svg" width="100.6" height="50.2"/>"#, Some((100, 50)))]
+    #[case::inches(r#"<svg xmlns="http://www.w3.org/2000/svg" width="1in" height="2in"/>"#, Some((96, 192)))]
+    #[case::points(r#"<svg xmlns="http://www.w3.org/2000/svg" width="72pt" height="36pt"/>"#, Some((96, 48)))]
+    #[case::picas(r#"<svg xmlns="http://www.w3.org/2000/svg" width="1pc" height="2pc"/>"#, Some((16, 32)))]
+    #[case::whitespace_around_the_value(r#"<svg xmlns="http://www.w3.org/2000/svg" width=" 100 " height=" 50 "/>"#, Some((100, 50)))]
+    #[case::single_quoted(r#"<svg xmlns='http://www.w3.org/2000/svg' width='100' height='50'/>"#, Some((100, 50)))]
+    #[case::view_box_only(r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 60"/>"#, Some((120, 60)))]
+    #[case::view_box_with_commas(r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0,0,120,60"/>"#, Some((120, 60)))]
+    #[case::percentages_fall_back_to_the_view_box(r#"<svg xmlns="http://www.w3.org/2000/svg" width="100%" height="100%" viewBox="0 0 30 20"/>"#, Some((30, 20)))]
+    #[case::one_axis_takes_its_aspect_ratio_from_the_view_box(r#"<svg xmlns="http://www.w3.org/2000/svg" width="100" viewBox="0 0 30 20"/>"#, Some((100, 66)))]
+    #[case::font_relative_units_are_unresolvable(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="10em" height="4em"/>"#,
+        None
+    )]
+    #[case::percentages_with_no_view_box(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="100%" height="100%"/>"#,
+        None
+    )]
+    #[case::nothing_declared(r#"<svg xmlns="http://www.w3.org/2000/svg"><rect/></svg>"#, None)]
+    #[case::zero_is_not_a_size(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="0" height="50"/>"#,
+        None
+    )]
+    #[case::negative_is_not_a_size(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="-100" height="50"/>"#,
+        None
+    )]
+    #[case::malformed_view_box(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120"/>"#,
+        None
+    )]
+    #[case::illustrator_prolog(
+        "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<!-- Generator: Adobe Illustrator 27.0.0 -->\n<!DOCTYPE svg PUBLIC \"-//W3C//DTD SVG 1.1//EN\" \"http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd\" [\n\t<!ENTITY ns_extend \"http://ns.adobe.com/Extensibility/1.0/\">\n]>\n<svg xmlns=\"http://www.w3.org/2000/svg\" x=\"0px\" y=\"0px\" width=\"64px\" height=\"32px\" viewBox=\"0 0 64 32\"><rect/></svg>",
+        Some((64, 32))
+    )]
+    fn sniff_artifact_reads_svg_dimensions_from_the_root_element(
+        #[case] document: &str,
+        #[case] expected: Option<(u32, u32)>,
+    ) {
+        let artifact = sniff_artifact(RawArtifact::new(document.as_bytes().to_vec(), None))
+            .expect("document should be recognized as SVG");
+
+        assert_eq!(artifact.media_type, MediaType::Svg);
+        assert_eq!(
+            artifact.metadata.width.zip(artifact.metadata.height),
+            expected
+        );
+        assert_eq!(
+            artifact
+                .metadata
+                .oriented_dimensions()
+                .map(|d| (d.width, d.height)),
+            expected
+        );
     }
 
     /// Reading the prolog must not turn the sniffer into something that claims
