@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -29,6 +29,9 @@ mkdirSync(npmCacheDir, { recursive: true });
 
 try {
   run(npmCommand, ["pack", "--pack-destination", packDir], { cwd: packageDir });
+
+  // `npm pack` runs the package's prepare script, so `dist` exists from here on.
+  assertSideEffectsPreserveTheEntry(packageJson);
 
   writeFileSync(
     path.join(consumerDir, "package.json"),
@@ -124,4 +127,36 @@ function run(command, args, options = {}) {
     shell: process.platform === "win32" && command.endsWith(".cmd"),
     stdio: "inherit",
   });
+}
+
+// The entry module instantiates the Wasm binary with a top-level `await init(...)`,
+// which a bundler that believes `sideEffects: false` is free to drop — leaving every
+// export bound to a module that was never instantiated. Nothing fails at build time
+// when that happens, so the flag is checked here instead of waiting for a bundler
+// that acts on it.
+function assertSideEffectsPreserveTheEntry(manifest) {
+  const entry = manifest.main;
+  const sideEffects = manifest.sideEffects;
+
+  if (!Array.isArray(sideEffects)) {
+    throw new Error(
+      `packages/truss-wasm/package.json: sideEffects must list the entry module (${entry}), got ${JSON.stringify(sideEffects)}`,
+    );
+  }
+
+  const normalize = (value) => value.replace(/^\.\//, "");
+  if (!sideEffects.map(normalize).includes(normalize(entry))) {
+    throw new Error(
+      `packages/truss-wasm/package.json: sideEffects does not include the entry module ${entry}, so a bundler may drop its top-level Wasm init`,
+    );
+  }
+
+  for (const module of sideEffects) {
+    const modulePath = path.join(packageDir, module);
+    if (!existsSync(modulePath)) {
+      throw new Error(
+        `packages/truss-wasm/package.json: sideEffects names ${module}, which does not exist`,
+      );
+    }
+  }
 }

@@ -17,7 +17,9 @@
     "README.md",
     "LICENSE"
   ],
-  "sideEffects": false,
+  "sideEffects": [
+    "./dist/truss.js"
+  ],
   "trussWasmBuild": {
     "wasmBindgenVersion": "0.2.114"
   },
