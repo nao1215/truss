@@ -2353,17 +2353,18 @@ fn sniff_png(bytes: &[u8]) -> Result<ArtifactMetadata, TransformError> {
 /// The tag says how the stored pixels are meant to be displayed, so a reader that honours
 /// it in one container and not the next makes the container a photo happens to arrive in
 /// decide whether the picture comes out upright. Browsers honour it in JPEG, PNG, WebP, and
-/// TIFF alike, so truss reads all four through here, and the sniffers and the transform
-/// pipeline both go through this function so what `inspect` reports and what `convert`
-/// applies cannot drift.
+/// TIFF alike, and honour the AVIF properties that mean the same, so truss reads all five
+/// through here, and the sniffers and the transform pipeline both go through this function
+/// so what `inspect` reports and what `convert` applies cannot drift.
 ///
 /// A file with no EXIF block, no Orientation field, or an unreadable one reports `None`,
 /// which means no transform. Each container is located by walking its headers rather than
 /// by decoding it, which is what keeps the common file — the one carrying no metadata at
 /// all — from paying for a container scan on every `sniff_artifact` call.
 ///
-/// BMP and GIF have nowhere to put the tag. AVIF can carry one, but its container is parsed
-/// by the decoder rather than here, and reading it is not part of this function yet.
+/// BMP and GIF have nowhere to put the tag. AVIF signals the same transform without an Exif
+/// field, as `irot` and `imir` item properties, and [`avif_orientation`] folds those into
+/// the same eight values, so a caller reads one number whatever the container.
 pub(crate) fn exif_orientation(media_type: MediaType, bytes: &[u8]) -> Option<u16> {
     let payload = match media_type {
         MediaType::Jpeg => jpeg_exif_payload(bytes)?,
@@ -2371,7 +2372,8 @@ pub(crate) fn exif_orientation(media_type: MediaType, bytes: &[u8]) -> Option<u1
         MediaType::Webp => webp_exif_payload(bytes)?,
         // A TIFF file is an Exif block from byte zero, so it needs no locating.
         MediaType::Tiff => return tiff_orientation(bytes),
-        MediaType::Avif | MediaType::Bmp | MediaType::Gif | MediaType::Svg => return None,
+        MediaType::Avif => return avif_orientation(bytes),
+        MediaType::Bmp | MediaType::Gif | MediaType::Svg => return None,
     };
     exif_orientation_from_payload(payload)
 }
@@ -2760,7 +2762,7 @@ fn sniff_avif(bytes: &[u8]) -> Result<ArtifactMetadata, TransformError> {
         frame_count: 1,
         duration: None,
         has_alpha: inspection.has_alpha(),
-        orientation: None,
+        orientation: inspection.orientation(),
     })
 }
 
@@ -2790,11 +2792,28 @@ fn is_avif_brand(bytes: &[u8]) -> bool {
 
 const AVIF_ALPHA_AUX_TYPE: &[u8] = b"urn:mpeg:mpegB:cicp:systems:auxiliary:alpha";
 
+/// One box of an AVIF `ipco` container, in the position it holds there.
+///
+/// `ipma` names properties by their one-based position in `ipco`, so every box is recorded
+/// whether or not anything here reads it, or the positions would slip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AvifProperty {
+    /// An `irot` box: the quarter turns, anti-clockwise, to display the stored pixels by.
+    Rotation(u8),
+    /// An `imir` box: 0 exchanges the top and bottom halves, 1 the left and right halves.
+    Mirror(u8),
+    Other,
+}
+
 #[derive(Debug, Default)]
 struct AvifInspection {
     dimensions: Option<(u32, u32)>,
     saw_structured_meta: bool,
     found_alpha_item: bool,
+    primary_item: Option<u32>,
+    properties: Vec<AvifProperty>,
+    /// Each item's one-based `ipco` positions, as `ipma` lists them.
+    associations: Vec<(u32, Vec<u16>)>,
 }
 
 impl AvifInspection {
@@ -2805,6 +2824,65 @@ impl AvifInspection {
             None
         }
     }
+
+    /// The transform the primary item's `irot` and `imir` properties add up to, as the EXIF
+    /// orientation value that names it, or `None` when the item has neither.
+    fn orientation(&self) -> Option<u16> {
+        let primary_item = self.primary_item?;
+        let (_, positions) = self
+            .associations
+            .iter()
+            .find(|(item, _)| *item == primary_item)?;
+
+        let mut rotation = None;
+        let mut mirror = None;
+        for position in positions {
+            let property = usize::from(*position)
+                .checked_sub(1)
+                .and_then(|index| self.properties.get(index));
+            match property {
+                Some(AvifProperty::Rotation(angle)) => rotation = Some(*angle),
+                Some(AvifProperty::Mirror(mode)) => mirror = Some(*mode),
+                _ => {}
+            }
+        }
+
+        if rotation.is_none() && mirror.is_none() {
+            return None;
+        }
+        Some(avif_orientation_value(rotation.unwrap_or(0), mirror))
+    }
+}
+
+/// Reads the orientation an AVIF signals through its `irot` and `imir` item properties.
+///
+/// AVIF has no orientation field of its own kind. An encoder handed a photo with an EXIF
+/// orientation writes the transform as these two properties of the primary item, and a
+/// browser applies them, so they are what decides whether the picture displays upright.
+/// The container may also hold an Exif item whose Orientation field says something, and
+/// that field is ignored here as Chrome and Firefox ignore it: the properties are the
+/// signal the encoder chose, and honouring both would turn the picture twice.
+fn avif_orientation(bytes: &[u8]) -> Option<u16> {
+    inspect_avif_container(bytes).ok()?.orientation()
+}
+
+/// Folds an AVIF rotation and mirror into the EXIF orientation value naming the same transform.
+///
+/// `angle` is the `irot` value, quarter turns anti-clockwise, and `mirror` the `imir` mode,
+/// 0 for top-bottom and 1 for left-right. MIAF applies the rotation before the mirror
+/// whatever order the file lists them in, and each row below is one mirror worked through
+/// the four angles under that rule.
+fn avif_orientation_value(angle: u8, mirror: Option<u8>) -> u16 {
+    const NO_MIRROR: [u16; 4] = [1, 8, 3, 6];
+    const TOP_BOTTOM: [u16; 4] = [4, 5, 2, 7];
+    const LEFT_RIGHT: [u16; 4] = [2, 7, 4, 5];
+
+    let row = match mirror {
+        None => NO_MIRROR,
+        Some(0) => TOP_BOTTOM,
+        Some(_) => LEFT_RIGHT,
+    };
+    row[usize::from(angle & 0b11)]
 }
 
 fn inspect_avif_container(bytes: &[u8]) -> Result<AvifInspection, TransformError> {
@@ -2830,21 +2908,21 @@ fn inspect_avif_boxes(bytes: &[u8], inspection: &mut AvifInspection) -> Result<(
                 }
                 inspect_avif_boxes(&payload[4..], inspection)?;
             }
-            b"iprp" | b"ipco" => {
+            b"iprp" => {
                 inspection.saw_structured_meta = true;
                 inspect_avif_boxes(payload, inspection)?;
             }
-            b"ispe" => {
+            b"ipco" => {
                 inspection.saw_structured_meta = true;
-                if inspection.dimensions.is_none() {
-                    inspection.dimensions = Some(parse_avif_ispe(payload)?);
-                }
+                inspect_avif_properties(payload, inspection)?;
             }
-            b"auxC" => {
+            b"pitm" => {
                 inspection.saw_structured_meta = true;
-                if avif_auxc_declares_alpha(payload)? {
-                    inspection.found_alpha_item = true;
-                }
+                inspection.primary_item = Some(parse_avif_pitm(payload)?);
+            }
+            b"ipma" => {
+                inspection.saw_structured_meta = true;
+                inspection.associations.extend(parse_avif_ipma(payload)?);
             }
             b"auxl" => {
                 inspection.saw_structured_meta = true;
@@ -2863,6 +2941,116 @@ fn inspect_avif_boxes(bytes: &[u8], inspection: &mut AvifInspection) -> Result<(
     }
 
     Ok(())
+}
+
+/// Walks an `ipco` box, recording every property in order so `ipma` positions resolve.
+fn inspect_avif_properties(
+    bytes: &[u8],
+    inspection: &mut AvifInspection,
+) -> Result<(), TransformError> {
+    let mut offset = 0;
+
+    while offset + 8 <= bytes.len() {
+        let (box_type, payload, next_offset) = parse_mp4_box(bytes, offset)?;
+
+        let property = match box_type {
+            b"ispe" => {
+                if inspection.dimensions.is_none() {
+                    inspection.dimensions = Some(parse_avif_ispe(payload)?);
+                }
+                AvifProperty::Other
+            }
+            b"auxC" => {
+                if avif_auxc_declares_alpha(payload)? {
+                    inspection.found_alpha_item = true;
+                }
+                AvifProperty::Other
+            }
+            b"irot" => AvifProperty::Rotation(avif_transform_byte(payload, "irot")? & 0b11),
+            b"imir" => AvifProperty::Mirror(avif_transform_byte(payload, "imir")? & 0b1),
+            _ => AvifProperty::Other,
+        };
+        inspection.properties.push(property);
+
+        offset = next_offset;
+    }
+
+    if offset != bytes.len() {
+        return Err(TransformError::DecodeFailed(
+            "avif box payload has trailing bytes".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
+fn avif_box_too_short(box_name: &str) -> TransformError {
+    TransformError::DecodeFailed(format!("avif {box_name} box is too short"))
+}
+
+/// The single payload byte of an `irot` or `imir` box.
+fn avif_transform_byte(bytes: &[u8], box_name: &str) -> Result<u8, TransformError> {
+    bytes
+        .first()
+        .copied()
+        .ok_or_else(|| avif_box_too_short(box_name))
+}
+
+/// Reads the primary item id out of a `pitm` box.
+fn parse_avif_pitm(bytes: &[u8]) -> Result<u32, TransformError> {
+    let too_short = || avif_box_too_short("pitm");
+    // A version 0 box holds a 16-bit id after the version and flags, version 1 a 32-bit one.
+    match bytes.first().ok_or_else(too_short)? {
+        0 => Ok(u32::from(read_u16_be(
+            bytes.get(4..6).ok_or_else(too_short)?,
+        )?)),
+        _ => read_u32_be(bytes.get(4..8).ok_or_else(too_short)?),
+    }
+}
+
+/// Reads an `ipma` box as (item id, one-based `ipco` positions) pairs.
+///
+/// The essential bit on each position is dropped: it tells a reader that cannot apply a
+/// property to refuse the file, and both properties read here are applied.
+fn parse_avif_ipma(bytes: &[u8]) -> Result<Vec<(u32, Vec<u16>)>, TransformError> {
+    let too_short = || avif_box_too_short("ipma");
+    let version = *bytes.first().ok_or_else(too_short)?;
+    // The low flag bit widens each position from 7 bits to 15.
+    let wide_positions = bytes.get(3).ok_or_else(too_short)? & 1 == 1;
+    let entry_count = read_u32_be(bytes.get(4..8).ok_or_else(too_short)?)?;
+
+    let mut offset = 8;
+    let mut entries = Vec::new();
+    for _ in 0..entry_count {
+        let item = if version == 0 {
+            let item = read_u16_be(bytes.get(offset..offset + 2).ok_or_else(too_short)?)?;
+            offset += 2;
+            u32::from(item)
+        } else {
+            let item = read_u32_be(bytes.get(offset..offset + 4).ok_or_else(too_short)?)?;
+            offset += 4;
+            item
+        };
+        let count = *bytes.get(offset).ok_or_else(too_short)?;
+        offset += 1;
+
+        let mut positions = Vec::with_capacity(usize::from(count));
+        for _ in 0..count {
+            let position = if wide_positions {
+                let position = read_u16_be(bytes.get(offset..offset + 2).ok_or_else(too_short)?)?;
+                offset += 2;
+                position & 0x7FFF
+            } else {
+                let position = *bytes.get(offset).ok_or_else(too_short)?;
+                offset += 1;
+                u16::from(position & 0x7F)
+            };
+            positions.push(position);
+        }
+        entries.push((item, positions));
+    }
+
+    Ok(entries)
 }
 
 fn parse_mp4_box(bytes: &[u8], offset: usize) -> Result<(&[u8; 4], &[u8], usize), TransformError> {
@@ -2989,9 +3177,9 @@ fn read_u64_be(bytes: &[u8]) -> Result<u64, TransformError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Artifact, ArtifactMetadata, Fit, MediaType, MetadataPolicy, OptimizeMode, Position,
-        QualityMetric, RawArtifact, Rgba8, Rotation, TargetQuality, TransformError,
-        TransformOptions, TransformRequest, sniff_artifact,
+        Artifact, ArtifactMetadata, Dimensions, Fit, MediaType, MetadataPolicy, OptimizeMode,
+        Position, QualityMetric, RawArtifact, Rgba8, Rotation, TargetQuality, TransformError,
+        TransformOptions, TransformRequest, exif_orientation, sniff_artifact,
     };
     #[cfg(feature = "avif")]
     use image::codecs::avif::AvifEncoder;
@@ -3923,6 +4111,210 @@ mod tests {
         assert_eq!(artifact.metadata.width, Some(9));
         assert_eq!(artifact.metadata.height, Some(4));
         assert_eq!(artifact.metadata.has_alpha, Some(false));
+    }
+
+    fn mp4_box(box_type: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(
+            &u32::try_from(payload.len() + 8)
+                .expect("box size")
+                .to_be_bytes(),
+        );
+        bytes.extend_from_slice(box_type);
+        bytes.extend_from_slice(payload);
+        bytes
+    }
+
+    fn mp4_full_box(box_type: &[u8; 4], version: u8, flags: u32, payload: &[u8]) -> Vec<u8> {
+        let mut body = vec![version];
+        body.extend_from_slice(&flags.to_be_bytes()[1..]);
+        body.extend_from_slice(payload);
+        mp4_box(box_type, &body)
+    }
+
+    fn avif_ispe(width: u32, height: u32) -> Vec<u8> {
+        let mut payload = width.to_be_bytes().to_vec();
+        payload.extend_from_slice(&height.to_be_bytes());
+        mp4_full_box(b"ispe", 0, 0, &payload)
+    }
+
+    /// An `ipma` box in the given encoding: version 1 widens item ids to 32 bits, and flag
+    /// bit 0 widens property positions to 15 bits.
+    fn avif_ipma(version: u8, flags: u32, associations: &[(u32, &[u16])]) -> Vec<u8> {
+        let mut payload = u32::try_from(associations.len())
+            .expect("entry count")
+            .to_be_bytes()
+            .to_vec();
+        for (item, positions) in associations {
+            if version == 0 {
+                payload.extend_from_slice(&u16::try_from(*item).expect("item id").to_be_bytes());
+            } else {
+                payload.extend_from_slice(&item.to_be_bytes());
+            }
+            payload.push(u8::try_from(positions.len()).expect("association count"));
+            for position in *positions {
+                if flags & 1 == 1 {
+                    payload.extend_from_slice(&position.to_be_bytes());
+                } else {
+                    payload.push(u8::try_from(*position).expect("narrow position"));
+                }
+            }
+        }
+        mp4_full_box(b"ipma", version, flags, &payload)
+    }
+
+    /// A structurally complete AVIF with no coded picture: the sniffer reads the item
+    /// properties and never the payload, so none is needed to ask it about orientation.
+    fn avif_bytes_with_properties(
+        primary_item: u32,
+        properties: &[Vec<u8>],
+        ipma: Vec<u8>,
+    ) -> Vec<u8> {
+        let pitm = mp4_full_box(
+            b"pitm",
+            0,
+            0,
+            &u16::try_from(primary_item).expect("item id").to_be_bytes(),
+        );
+        let ipco = mp4_box(b"ipco", &properties.concat());
+        let iprp = mp4_box(b"iprp", &[ipco, ipma].concat());
+        let meta = mp4_full_box(b"meta", 0, 0, &[pitm, iprp].concat());
+        let mut bytes = avif_bytes();
+        bytes.extend_from_slice(&meta);
+        bytes
+    }
+
+    fn avif_bytes_with_transforms(rotation: Option<u8>, mirror: Option<u8>) -> Vec<u8> {
+        let mut properties = vec![avif_ispe(40, 20)];
+        let mut positions = vec![1_u16];
+        if let Some(angle) = rotation {
+            properties.push(mp4_box(b"irot", &[angle]));
+            positions.push(u16::try_from(properties.len()).expect("position"));
+        }
+        if let Some(mode) = mirror {
+            properties.push(mp4_box(b"imir", &[mode]));
+            positions.push(u16::try_from(properties.len()).expect("position"));
+        }
+        avif_bytes_with_properties(1, &properties, avif_ipma(0, 0, &[(1, &positions)]))
+    }
+
+    /// Every combination of the two properties, against the table Chrome and Firefox use.
+    /// The rotation is applied before the mirror, which is what tells 5 from 7.
+    #[rstest]
+    #[case(None, None, None)]
+    #[case(Some(0), None, Some(1))]
+    #[case(Some(1), None, Some(8))]
+    #[case(Some(2), None, Some(3))]
+    #[case(Some(3), None, Some(6))]
+    #[case(None, Some(0), Some(4))]
+    #[case(None, Some(1), Some(2))]
+    #[case(Some(1), Some(0), Some(5))]
+    #[case(Some(1), Some(1), Some(7))]
+    #[case(Some(2), Some(0), Some(2))]
+    #[case(Some(2), Some(1), Some(4))]
+    #[case(Some(3), Some(0), Some(7))]
+    #[case(Some(3), Some(1), Some(5))]
+    fn sniff_artifact_folds_avif_irot_and_imir_into_an_orientation(
+        #[case] rotation: Option<u8>,
+        #[case] mirror: Option<u8>,
+        #[case] expected: Option<u16>,
+    ) {
+        let bytes = avif_bytes_with_transforms(rotation, mirror);
+        let artifact = sniff_artifact(RawArtifact::new(bytes.clone(), None)).expect("sniff avif");
+
+        assert_eq!(
+            artifact.metadata.orientation, expected,
+            "irot {rotation:?}, imir {mirror:?}"
+        );
+        assert_eq!(
+            (artifact.metadata.width, artifact.metadata.height),
+            (Some(40), Some(20)),
+            "the dimensions are still read from the same property container"
+        );
+        assert_eq!(
+            exif_orientation(MediaType::Avif, &bytes),
+            expected,
+            "the pipeline reads what the sniffer reports"
+        );
+    }
+
+    /// The properties of another item — an alpha plane with its own `irot` — say nothing
+    /// about the primary picture.
+    #[test]
+    fn sniff_artifact_ignores_avif_transforms_on_other_items() {
+        let properties = vec![avif_ispe(40, 20), mp4_box(b"irot", &[3])];
+        let bytes =
+            avif_bytes_with_properties(1, &properties, avif_ipma(0, 0, &[(1, &[1]), (2, &[1, 2])]));
+
+        let artifact = sniff_artifact(RawArtifact::new(bytes, None)).expect("sniff avif");
+
+        assert_eq!(artifact.metadata.orientation, None);
+    }
+
+    /// `ipma` has two encodings for ids and two for positions, and encoders use both.
+    #[test]
+    fn sniff_artifact_reads_avif_associations_in_the_wide_ipma_encoding() {
+        let properties = vec![avif_ispe(40, 20), mp4_box(b"irot", &[3])];
+        let bytes = avif_bytes_with_properties(1, &properties, avif_ipma(1, 1, &[(1, &[1, 2])]));
+
+        let artifact = sniff_artifact(RawArtifact::new(bytes, None)).expect("sniff avif");
+
+        assert_eq!(artifact.metadata.orientation, Some(6));
+    }
+
+    /// The order the file lists the two properties in does not change the answer: MIAF
+    /// fixes the rotation before the mirror.
+    #[test]
+    fn sniff_artifact_applies_avif_rotation_before_mirror_whatever_the_listed_order() {
+        let properties = vec![
+            avif_ispe(40, 20),
+            mp4_box(b"imir", &[1]),
+            mp4_box(b"irot", &[3]),
+        ];
+        let bytes = avif_bytes_with_properties(1, &properties, avif_ipma(0, 0, &[(1, &[3, 2, 1])]));
+
+        let artifact = sniff_artifact(RawArtifact::new(bytes, None)).expect("sniff avif");
+
+        assert_eq!(artifact.metadata.orientation, Some(5));
+    }
+
+    /// An `ipma` that promises more entries than it holds is refused, not read past.
+    #[test]
+    fn sniff_artifact_rejects_a_truncated_avif_ipma() {
+        let ipma = mp4_full_box(b"ipma", 0, 0, &5_u32.to_be_bytes());
+        let bytes = avif_bytes_with_properties(1, &[avif_ispe(4, 4)], ipma);
+
+        let error = sniff_artifact(RawArtifact::new(bytes, None)).expect_err("truncated ipma");
+
+        assert!(
+            error.to_string().contains("ipma box is too short"),
+            "{error}"
+        );
+    }
+
+    /// Two files ImageMagick wrote through libheif, which is the encoder behind the phones
+    /// and the CMSes that produce AVIF: the transform is in the properties and there is no
+    /// Exif block at all.
+    #[test]
+    fn sniff_artifact_reads_the_orientation_libheif_writes() {
+        let rotated = include_bytes!("../integration/fixtures/irot-rotated.avif");
+        let transposed = include_bytes!("../integration/fixtures/imir-transposed-5.avif");
+
+        let rotated = sniff_artifact(RawArtifact::new(rotated.to_vec(), None)).expect("sniff");
+        assert_eq!(rotated.metadata.orientation, Some(6));
+        assert_eq!(
+            (rotated.metadata.width, rotated.metadata.height),
+            (Some(40), Some(20))
+        );
+        assert_eq!(
+            rotated.metadata.oriented_dimensions(),
+            Some(Dimensions::new(20, 40)),
+            "the oriented dimensions are what convert will produce"
+        );
+
+        let transposed =
+            sniff_artifact(RawArtifact::new(transposed.to_vec(), None)).expect("sniff");
+        assert_eq!(transposed.metadata.orientation, Some(5));
     }
 
     #[test]

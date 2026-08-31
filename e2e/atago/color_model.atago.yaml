@@ -183,3 +183,33 @@ scenarios:
             json:
               path: $.hasAlpha
               equals: false
+
+  - name: a 10-bit AVIF keeps its saturated colours when narrowed to 8 bits
+    steps:
+      # The two deep fixtures were written by ImageMagick: a blue left half, a red right
+      # half, and a white bar along the top, which put a sample at the top of its range in
+      # each of U, V, and Y. Those are the samples that used to round past 8 bits and wrap
+      # to zero, so white came out black and the primaries came out green. The baseline is
+      # the same picture drawn at 8 bits.
+      - run:
+          command: truss convert "${fixtures}/deep-10bit.avif" -o deep10.png
+      - assert:
+          exit_code: 0
+          image:
+            path: deep10.png
+            format: png
+            width: 40
+            height: 20
+      - assert:
+          image:
+            path: deep10.png
+            similar_to: testdata/deep-avif.png
+            max_diff: 0.01
+      - run:
+          command: truss convert "${fixtures}/deep-12bit.avif" -o deep12.png
+      - assert:
+          exit_code: 0
+          image:
+            path: deep12.png
+            similar_to: testdata/deep-avif.png
+            max_diff: 0.01

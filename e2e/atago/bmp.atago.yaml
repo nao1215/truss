@@ -104,3 +104,48 @@ scenarios:
           image:
             path: implicit.png
             format: png
+
+  - name: a BMP alpha channel survives to PNG and BMP and is composited into JPEG
+    steps:
+      # transparent.bmp is a BITMAPV4HEADER file whose every pixel is half-transparent red.
+      # It used to be written with a BMP3 header, which has no alpha mask, so it was an
+      # opaque 24-bit file and nothing asserted alpha through BMP at all. JPEG has no alpha,
+      # so the pixels composite against the default white background rather than being
+      # truncated to opaque red.
+      - run:
+          command: truss inspect "${fixtures}/transparent.bmp"
+      - assert:
+          exit_code: 0
+          stdout:
+            json:
+              path: $.hasAlpha
+              equals: true
+      - run:
+          command: truss convert "${fixtures}/transparent.bmp" -o alpha.png
+      - assert:
+          exit_code: 0
+          image:
+            path: alpha.png
+            format: png
+            alpha: true
+      - run:
+          command: truss convert "${fixtures}/transparent.bmp" -o alpha-copy.bmp
+      - assert:
+          exit_code: 0
+      - run:
+          command: truss inspect alpha-copy.bmp
+      - assert:
+          exit_code: 0
+          stdout:
+            json:
+              path: $.hasAlpha
+              equals: true
+      - run:
+          command: truss convert "${fixtures}/transparent.bmp" -o alpha.jpg
+      - assert:
+          exit_code: 0
+          image:
+            path: alpha.jpg
+            format: jpeg
+            similar_to: testdata/bmp-alpha-on-white.png
+            max_diff: 0.02

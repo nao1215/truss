@@ -209,12 +209,6 @@ pub fn transform_raster(request: TransformRequest) -> Result<TransformResult, Tr
 
     if normalized.options.auto_orient {
         image = apply_auto_orientation(image, &normalized.input);
-    } else if let Some(warning) = dropped_orientation_warning(
-        &normalized.input,
-        normalized.options.auto_orient,
-        normalized.options.metadata_policy,
-    ) {
-        warnings.push(warning);
     }
 
     image = apply_rotation(
@@ -312,6 +306,13 @@ pub fn transform_raster(request: TransformRequest) -> Result<TransformResult, Tr
     // this is what `inspect` reports for the same file. Asked of the output's own format,
     // because every container that can carry the tag can carry it into the output too.
     let orientation = crate::core::exif_orientation(normalized.options.format, &bytes);
+    if let Some(warning) = dropped_orientation_warning(
+        &normalized.input,
+        normalized.options.auto_orient,
+        orientation,
+    ) {
+        warnings.push(warning);
+    }
 
     Ok(TransformResult {
         artifact: Artifact::new(
@@ -490,21 +491,19 @@ fn yuv_frame_to_rgba(
             )?;
         }
         Planes::Depth16(planes) => {
-            let bit_depth = frame.bit_depth();
-            let shift = bit_depth - 8;
-            let round = 1u16 << (shift - 1);
+            let shift = frame.bit_depth() - 8;
             let y8: Vec<u8> = planes
                 .y()
                 .as_slice()
                 .iter()
-                .map(|&v| ((v.saturating_add(round)) >> shift) as u8)
+                .map(|&v| narrow_sample(v, shift))
                 .collect();
             let y_stride = planes.y().stride();
             let u8s: Option<(Vec<u8>, usize)> = planes.u().as_ref().map(|p| {
                 let data: Vec<u8> = p
                     .as_slice()
                     .iter()
-                    .map(|&v| ((v.saturating_add(round)) >> shift) as u8)
+                    .map(|&v| narrow_sample(v, shift))
                     .collect();
                 (data, p.stride())
             });
@@ -512,7 +511,7 @@ fn yuv_frame_to_rgba(
                 let data: Vec<u8> = p
                     .as_slice()
                     .iter()
-                    .map(|&v| ((v.saturating_add(round)) >> shift) as u8)
+                    .map(|&v| narrow_sample(v, shift))
                     .collect();
                 (data, p.stride())
             });
@@ -533,6 +532,17 @@ fn yuv_frame_to_rgba(
     }
 
     Ok(rgba)
+}
+
+/// Narrows a 10- or 12-bit sample to 8 bits, rounding to nearest.
+///
+/// `shift` is the depth minus eight. The rounding is clamped: a sample at the top of its
+/// range rounds past 255 otherwise, and a cast would wrap it to 0, which turned white into
+/// black and a saturated primary into green in every deep AVIF.
+#[cfg(feature = "avif")]
+fn narrow_sample(value: u16, shift: u8) -> u8 {
+    let round = 1u16 << shift.saturating_sub(1);
+    u8::try_from((u32::from(value) + u32::from(round)) >> shift).unwrap_or(u8::MAX)
 }
 
 /// Converts 8-bit YUV plane data to RGBA, dispatching by pixel layout.
@@ -630,7 +640,7 @@ fn merge_alpha_plane(alpha_frame: &rav1d_safe::Frame, rgba: &mut [u8], width: u3
                 for (col, &alpha) in row.iter().enumerate().take(w) {
                     let idx = row_start + col * 4 + 3;
                     if idx < rgba.len() {
-                        rgba[idx] = (alpha >> shift) as u8;
+                        rgba[idx] = narrow_sample(alpha, shift);
                     }
                 }
             }
@@ -1446,11 +1456,14 @@ fn try_passthrough_lossless_optimization(
                 normalized.options.metadata_policy,
             )?;
 
+            // Read back rather than copied from the input: the policy may have dropped the
+            // segment that carried it, and this is what `inspect` reports for the output.
+            let orientation = crate::core::exif_orientation(MediaType::Jpeg, &bytes);
             let mut warnings = Vec::new();
             if let Some(warning) = dropped_orientation_warning(
                 &normalized.input,
                 normalized.options.auto_orient,
-                normalized.options.metadata_policy,
+                orientation,
             ) {
                 warnings.push(warning);
             }
@@ -1459,7 +1472,10 @@ fn try_passthrough_lossless_optimization(
                 artifact: Artifact::new(
                     bytes,
                     normalized.options.format,
-                    normalized.input.metadata.clone(),
+                    ArtifactMetadata {
+                        orientation,
+                        ..normalized.input.metadata.clone()
+                    },
                 ),
                 warnings,
             }))
@@ -1608,15 +1624,20 @@ fn lossless_jpeg_refusal(normalized: &NormalizedTransformRequest) -> String {
 
 /// The warning for an input whose EXIF orientation the output records nowhere.
 ///
-/// With auto-orientation off the pixels stay as stored, and with the metadata stripped the
-/// tag that said how to display them is gone, so the output displays rotated. Each flag on
-/// its own is honest; the combination is a rotation, and nothing else says so.
+/// With auto-orientation off the pixels stay as stored, and when the tag that said how to
+/// display them is gone too, the output displays rotated. Each flag on its own is honest;
+/// the combination is a rotation, and nothing else says so.
+///
+/// Whether the tag is gone is asked of the output bytes, not of the metadata policy. A
+/// policy that keeps Exif keeps nothing from a container whose metadata is never read, and
+/// keeps it nowhere in an output format that cannot carry it, and both used to pass for
+/// retained; what the output actually says is the one answer that covers every pair.
 fn dropped_orientation_warning(
     input: &Artifact,
     auto_orient: bool,
-    metadata_policy: MetadataPolicy,
+    output_orientation: Option<u16>,
 ) -> Option<TransformWarning> {
-    if auto_orient || metadata_policy_retains_exif(metadata_policy) {
+    if auto_orient || matches!(output_orientation, Some(2..=8)) {
         return None;
     }
 
@@ -4299,6 +4320,60 @@ mod tests {
         assert_eq!(png_result.artifact.media_type, MediaType::Png);
         assert_eq!(png_result.artifact.metadata.width, Some(4));
         assert_eq!(png_result.artifact.metadata.height, Some(3));
+    }
+
+    /// A sample at the top of its range must round to 255, not past it.
+    #[cfg(feature = "avif")]
+    #[rstest]
+    #[case::ten_bit_max(1023, 2, 255)]
+    #[case::twelve_bit_max(4095, 4, 255)]
+    #[case::ten_bit_rounds_down(117, 2, 29)]
+    #[case::ten_bit_rounds_up(118, 2, 30)]
+    #[case::twelve_bit_zero(0, 4, 0)]
+    fn narrow_sample_rounds_to_nearest_within_eight_bits(
+        #[case] value: u16,
+        #[case] shift: u8,
+        #[case] expected: u8,
+    ) {
+        assert_eq!(super::narrow_sample(value, shift), expected);
+    }
+
+    /// The `image` crate writes 8-bit AVIF only, so the deep path is exercised by two files
+    /// ImageMagick wrote: a blue left half, a red right half, and a white bar along the top,
+    /// which are the three saturated samples that used to wrap to zero.
+    #[cfg(feature = "avif")]
+    #[rstest]
+    #[case::ten_bit(include_bytes!("../../integration/fixtures/deep-10bit.avif"))]
+    #[case::twelve_bit(include_bytes!("../../integration/fixtures/deep-12bit.avif"))]
+    fn transform_raster_decodes_deep_avif_without_wrapping_saturated_samples(#[case] bytes: &[u8]) {
+        let artifact = sniff_artifact(RawArtifact::new(bytes.to_vec(), None)).expect("sniff avif");
+
+        let result = transform_raster(TransformRequest::new(
+            artifact,
+            TransformOptions {
+                format: Some(MediaType::Png),
+                ..TransformOptions::default()
+            },
+        ))
+        .expect("decode deep avif");
+
+        let image = image::load_from_memory(&result.artifact.bytes)
+            .expect("decode png")
+            .to_rgb8();
+        for ((x, y), expected) in [
+            ((2, 10), [0, 0, 255]),
+            ((30, 10), [255, 0, 0]),
+            ((20, 1), [255, 255, 255]),
+        ] {
+            let pixel = image.get_pixel(x, y).0;
+            assert!(
+                pixel
+                    .iter()
+                    .zip(expected)
+                    .all(|(got, want)| got.abs_diff(want) < 16),
+                "pixel ({x}, {y}) should be near {expected:?}, got {pixel:?}"
+            );
+        }
     }
 
     #[cfg(feature = "avif")]
@@ -7010,6 +7085,70 @@ mod tests {
         );
     }
 
+    /// Whether the tag survives is a fact about the bytes, not about the policy: a TIFF's
+    /// metadata is never read, and BMP and TIFF outputs carry none, so keeping the metadata
+    /// keeps nothing in those cases and the drop has to be said.
+    #[rstest]
+    #[case::tiff_input_to_png(MediaType::Tiff, MediaType::Png)]
+    #[case::jpeg_input_to_bmp(MediaType::Jpeg, MediaType::Bmp)]
+    #[case::jpeg_input_to_tiff(MediaType::Jpeg, MediaType::Tiff)]
+    fn transform_raster_warns_when_a_kept_orientation_never_reaches_the_output(
+        #[case] input: MediaType,
+        #[case] output: MediaType,
+    ) {
+        let bytes = match input {
+            MediaType::Tiff => tiff_bytes_with_orientation(4, 2, 6),
+            MediaType::Jpeg => jpeg_artifact_with_metadata(4, 2, Some(6), None).bytes,
+            other => unreachable!("{other:?}"),
+        };
+        let artifact = sniff_artifact(RawArtifact::new(bytes, None)).expect("sniff");
+
+        let result = transform_raster(TransformRequest::new(
+            artifact,
+            TransformOptions {
+                format: Some(output),
+                auto_orient: false,
+                strip_metadata: false,
+                ..TransformOptions::default()
+            },
+        ))
+        .unwrap_or_else(|error| panic!("{input:?} to {output:?} should transform: {error}"));
+
+        assert_eq!(
+            result.artifact.metadata.orientation, None,
+            "{input:?} to {output:?}: the tag should not have survived"
+        );
+        assert!(
+            result.warnings.iter().any(|warning| matches!(
+                warning,
+                TransformWarning::OrientationDropped { orientation: 6 }
+            )),
+            "{input:?} to {output:?}: expected an OrientationDropped warning, got {:?}",
+            result.warnings
+        );
+    }
+
+    /// The negative: when the tag does reach the output there is nothing to warn about, and
+    /// the output's metadata reports the tag `inspect` will find in it.
+    #[test]
+    fn transform_raster_does_not_warn_when_the_kept_orientation_reaches_the_output() {
+        let artifact = jpeg_artifact_with_metadata(4, 2, Some(6), None);
+
+        let result = transform_raster(TransformRequest::new(
+            artifact,
+            TransformOptions {
+                format: Some(MediaType::Jpeg),
+                auto_orient: false,
+                strip_metadata: false,
+                ..TransformOptions::default()
+            },
+        ))
+        .expect("transform");
+
+        assert_eq!(result.artifact.metadata.orientation, Some(6));
+        assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+    }
+
     /// The #331 warning is about the combination, not about the container.
     #[test]
     fn transform_raster_warns_when_a_png_orientation_is_dropped_unapplied() {
@@ -7034,5 +7173,62 @@ mod tests {
             "expected an OrientationDropped warning, got {:?}",
             result.warnings
         );
+    }
+
+    /// The two fixtures are what libheif writes for a phone photo: the transform as `irot`
+    /// and `imir` item properties, with no Exif block. The transposed one is the pair a
+    /// mirror in the wrong order gets backwards, so the marker bars are checked and not
+    /// only the dimensions, which are 20x40 for every orientation from 5 to 8.
+    #[cfg(feature = "avif")]
+    #[rstest]
+    #[case::rotated(
+        include_bytes!("../../integration/fixtures/irot-rotated.avif"),
+        6,
+        [((10, 2), [0, 0, 255]), ((10, 30), [255, 0, 0])]
+    )]
+    #[case::transposed(
+        include_bytes!("../../integration/fixtures/imir-transposed-5.avif"),
+        5,
+        [((8, 1), [0, 0, 255]), ((1, 8), [255, 0, 0])]
+    )]
+    fn transform_raster_auto_orients_an_avif_by_its_item_properties(
+        #[case] bytes: &[u8],
+        #[case] orientation: u16,
+        #[case] markers: [((u32, u32), [u8; 3]); 2],
+    ) {
+        let artifact = sniff_artifact(RawArtifact::new(bytes.to_vec(), None)).expect("sniff avif");
+        assert_eq!(artifact.metadata.orientation, Some(orientation));
+
+        let result = transform_raster(TransformRequest::new(
+            artifact,
+            TransformOptions {
+                format: Some(MediaType::Png),
+                ..TransformOptions::default()
+            },
+        ))
+        .expect("transform avif");
+
+        assert_eq!(
+            (
+                result.artifact.metadata.width,
+                result.artifact.metadata.height
+            ),
+            (Some(20), Some(40))
+        );
+        assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+
+        let image = image::load_from_memory(&result.artifact.bytes)
+            .expect("decode png")
+            .to_rgb8();
+        for ((x, y), expected) in markers {
+            let pixel = image.get_pixel(x, y).0;
+            assert!(
+                pixel
+                    .iter()
+                    .zip(expected)
+                    .all(|(got, want)| got.abs_diff(want) < 40),
+                "pixel ({x}, {y}) should be near {expected:?}, got {pixel:?}"
+            );
+        }
     }
 }

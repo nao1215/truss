@@ -32,7 +32,11 @@ echo "[3/18] sample.bmp — 4x3 RGBA BMP baseline"
 magick -size 4x3 xc:'rgba(0,255,0,255)' "$DIR/sample.bmp"
 
 echo "[4/18] transparent.bmp — 32-bit RGBA BMP with alpha"
-magick -size 4x4 xc:'rgba(255,0,0,128)' -type TrueColorAlpha BMP3:"$DIR/transparent.bmp"
+# A BITMAPV4HEADER, not BMP3: the Windows 3.x header has no alpha mask, so ImageMagick
+# wrote this fixture as 24-bit with the alpha discarded and every test named for it was
+# about an opaque file. The V4 header carries the mask, and the pixels are half-transparent
+# red so that alpha is observable in every output: kept in PNG and BMP, composited in JPEG.
+magick -size 4x4 xc:'rgba(255,0,0,0.5)' -define bmp:format=bmp4 "$DIR/transparent.bmp"
 
 echo "[5/18] 1px.png — minimum dimension (1x1)"
 magick -size 1x1 xc:red "$DIR/1px.png"
@@ -154,6 +158,32 @@ for orientation in (5, 7):
     image.save(f'$DIR/exif-transposed-{orientation}.jpg', exif=exif.tobytes(), quality=95)
     print(f'  wrote 40x20 with EXIF Orientation={orientation}')
 "
+
+echo "[8c/14] irot-rotated.avif / imir-transposed-5.avif — the same orientations as AVIF item properties"
+# AVIF has no EXIF orientation of its own: an encoder writes the transform as the irot and
+# imir item properties of the primary item, and browsers apply those and ignore any Exif
+# item. `-orient` sets ImageMagick's orientation without minting an EXIF profile, so
+# libheif writes the properties and nothing else, which is what proves truss reads the
+# properties rather than a tag. Same pictures as exif-rotated.jpg and exif-transposed-5.jpg,
+# so the same assertions and the same baseline apply. `-alpha off` keeps the drawing from
+# growing an alpha plane, which would be a second item with its own properties, and
+# `-depth 8` keeps these about orientation: a 16-bit canvas would otherwise come out as a
+# 12-bit AVIF, which is what the deep fixtures below are for.
+magick -size 40x20 xc:red -fill blue -draw 'rectangle 0,0 9,19' \
+  -alpha off -depth 8 -orient right-top "$DIR/irot-rotated.avif"
+magick -size 40x20 xc:white -fill red -draw 'rectangle 0,0 11,3' -fill blue -draw 'rectangle 0,0 3,11' \
+  -alpha off -depth 8 -orient left-top "$DIR/imir-transposed-5.avif"
+
+echo "[8d/14] deep-10bit.avif / deep-12bit.avif — high bit depth AVIF with saturated samples"
+# The image crate writes 8-bit AVIF only, so nothing in the test suite reached the 10/12-bit
+# decode path until these. A blue left half, a red right half, and a white bar along the
+# top put a sample at the top of its range in U, in V, and in Y, which is what rounded past
+# 8 bits and wrapped to zero. The 8-bit baseline of the same picture lives in
+# e2e/atago/testdata/deep-avif.png.
+for depth in 10 12; do
+  magick -size 40x20 xc:red -fill blue -draw 'rectangle 0,0 19,19' -fill white -draw 'rectangle 0,0 39,3' \
+    -alpha off -depth "$depth" "$DIR/deep-${depth}bit.avif"
+done
 
 # ---------------------------------------------------------------------------
 # 4b. ICC profile (needs Pillow's ImageCms; ImageMagick cannot mint a profile)
