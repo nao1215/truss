@@ -237,6 +237,13 @@ The CLI uses structured exit codes. When changing CLI error handling, keep these
 A configuration fault is code 1 from both `truss validate` and `truss serve`; code 5 is
 for what fails after the configuration is accepted.
 
+The exit code is the coarse half of how the CLI reports a failure. The other half is the
+class, which stderr names in parentheses after the message and
+[docs/problems.md](docs/problems.md) lists with the HTTP status and the Wasm `kind` of the
+same class. A class determines an exit code, so a new one belongs in that table before it
+belongs in a `match`; the codes above are coarser than the classes and several classes share
+one.
+
 ### 9. GHCR package visibility
 
 The first GHCR package publish is private by default. To allow anonymous pulls (e.g. from ECS), change the package visibility to `Public` in GitHub Packages settings once after the first publish.
