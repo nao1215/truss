@@ -1020,6 +1020,26 @@ pub(super) fn handle_metrics_request(request: HttpRequest, config: &ServerConfig
 // Transform handler
 // ---------------------------------------------------------------------------
 
+/// Refuses a query string on a route whose options come from the request body.
+///
+/// The public GET routes carry the transform vocabulary in the query and reject a name
+/// outside it, so a caller who moves a request from a signed URL to one of these two writes
+/// the same names here. Reading none of them and answering 200 hands back an image that is
+/// not the one asked for, which is the failure the multipart parser already refuses for an
+/// unrecognised form field.
+fn reject_query_string(request: &HttpRequest) -> Result<(), HttpResponse> {
+    let Some(query) = request.query().filter(|query| !query.is_empty()) else {
+        return Ok(());
+    };
+    let names: Vec<String> = url::form_urlencoded::parse(query.as_bytes())
+        .map(|(name, _)| format!("`{name}`"))
+        .collect();
+    Err(bad_request_response(&format!(
+        "this route takes its options from the request body, not the query string; remove {}",
+        names.join(", ")
+    )))
+}
+
 pub(super) fn handle_transform_request(
     request: HttpRequest,
     config: &ServerConfig,
@@ -1027,6 +1047,10 @@ pub(super) fn handle_transform_request(
     let request_deadline = Some(Instant::now() + Duration::from_secs(REQUEST_DEADLINE_SECS));
 
     if let Err(response) = authorize_request(&request, config) {
+        return response;
+    }
+
+    if let Err(response) = reject_query_string(&request) {
         return response;
     }
 
@@ -1206,6 +1230,10 @@ fn handle_public_get_request(
 
 pub(super) fn handle_upload_request(request: HttpRequest, config: &ServerConfig) -> HttpResponse {
     if let Err(response) = authorize_request(&request, config) {
+        return response;
+    }
+
+    if let Err(response) = reject_query_string(&request) {
         return response;
     }
 

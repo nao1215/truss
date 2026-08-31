@@ -20,7 +20,13 @@ info:
     - `POST /images`: private uploads using `multipart/form-data`.
 
     Common transform options are shared across endpoints. When `format` is omitted,
-    the server first tries `Accept` negotiation and otherwise keeps the input format.
+    the server reads `Accept` and picks the format it prefers among the ones the header
+    names, and keeps the input format when the header names none. An `Accept` of `*/*`
+    names none: RFC 9110 section 12.5.1 makes it the same request as a missing `Accept`,
+    so both keep the input format rather than transcoding.
+
+    The two private endpoints take their options from the request body and read no query
+    parameters. A query string on either is rejected with `400 Bad Request`.
 
     **Watermark compositing** is available on all transform endpoints. Public GET
     endpoints accept `watermarkUrl`, `watermarkPosition`, `watermarkOpacity`, and
@@ -378,7 +384,11 @@ paths:
         Bearer token instead of generating signed public URLs.
 
         When `options.format` is omitted, the server tries `Accept` negotiation and
-        otherwise keeps the input format.
+        otherwise keeps the input format. An `Accept` of `*/*` states no preference and
+        keeps the input format.
+
+        This operation reads no query parameters. A request that carries a query string
+        is rejected with `400 Bad Request` naming the parameters it carried.
       operationId: transformImageByReference
       security:
         - BearerAuth: []
@@ -446,6 +456,9 @@ paths:
 
         This endpoint is useful when the caller already has the source bytes in hand
         and does not want to make the server read from a path or remote URL.
+
+        This operation reads no query parameters. A request that carries a query string
+        is rejected with `400 Bad Request` naming the parameters it carried.
       operationId: transformUploadedImage
       security:
         - BearerAuth: []

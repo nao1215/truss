@@ -234,12 +234,23 @@ pub fn send_transform_request(
     body: &str,
     authorization: Option<&str>,
 ) -> Vec<u8> {
+    send_transform_request_to(addr, "/images:transform", body, authorization)
+}
+
+/// Like [`send_transform_request`] but writes the request target verbatim, so a test can
+/// send a query string the route does not take.
+pub fn send_transform_request_to(
+    addr: SocketAddr,
+    target: &str,
+    body: &str,
+    authorization: Option<&str>,
+) -> Vec<u8> {
     let mut stream = TcpStream::connect(addr).expect("connect to test server");
     let authorization_header = authorization
         .map(|value| format!("Authorization: Bearer {value}\r\n"))
         .unwrap_or_default();
     let request = format!(
-        "POST /images:transform HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n{authorization_header}Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+        "POST {target} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n{authorization_header}Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
         body.len()
     );
     stream.write_all(request.as_bytes()).expect("write request");
@@ -256,12 +267,24 @@ pub fn send_upload_request(
     boundary: &str,
     authorization: Option<&str>,
 ) -> Vec<u8> {
+    send_upload_request_to(addr, "/images", body, boundary, authorization)
+}
+
+/// Like [`send_upload_request`] but writes the request target verbatim, so a test can send
+/// a query string the route does not take.
+pub fn send_upload_request_to(
+    addr: SocketAddr,
+    target: &str,
+    body: &[u8],
+    boundary: &str,
+    authorization: Option<&str>,
+) -> Vec<u8> {
     let mut stream = TcpStream::connect(addr).expect("connect to test server");
     let authorization_header = authorization
         .map(|value| format!("Authorization: Bearer {value}\r\n"))
         .unwrap_or_default();
     let request = format!(
-        "POST /images HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n{authorization_header}Content-Type: multipart/form-data; boundary={boundary}\r\nContent-Length: {}\r\n\r\n",
+        "POST {target} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n{authorization_header}Content-Type: multipart/form-data; boundary={boundary}\r\nContent-Length: {}\r\n\r\n",
         body.len()
     );
     stream.write_all(request.as_bytes()).expect("write request");

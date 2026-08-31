@@ -59,6 +59,15 @@ pub(super) fn negotiate_output_format(
         return Err(not_acceptable_for_accept());
     }
 
+    // A winner matched only by `*/*` is a client that named no format. RFC 9110 section
+    // 12.5.1 makes that the same request as one with no `Accept` at all, which returns
+    // `Ok(None)` above, so it answers the same way: the input's format is kept and nothing
+    // is transcoded. A browser fetching an `<img>` sends `image/avif,image/webp,image/apng,
+    // */*;q=0.8`, whose winner is matched by an exact range, and still negotiates.
+    if best_specificity == 0 {
+        return Ok(None);
+    }
+
     Ok(best_candidate)
 }
 
@@ -1002,11 +1011,28 @@ mod tests {
     }
 
     #[test]
-    fn test_negotiate_output_format_wildcard_fallback() {
+    fn a_wildcard_only_accept_answers_the_same_as_an_absent_accept() {
+        // RFC 9110 section 12.5.1 makes the two the same request: "A request without an
+        // Accept header field implies that the user agent will accept any media type in
+        // response." Neither states a preference, so neither selects a format.
         let artifact = make_artifact(MediaType::Jpeg, None);
-        let result = negotiate_output_format(Some("*/*"), &artifact, &[]);
-        // Wildcard matches all; server-preferred (avif) should win
-        assert_eq!(result.unwrap(), Some(MediaType::Avif));
+        assert_eq!(
+            negotiate_output_format(Some("*/*"), &artifact, &[]).unwrap(),
+            None
+        );
+        assert_eq!(negotiate_output_format(None, &artifact, &[]).unwrap(), None);
+    }
+
+    #[test]
+    fn a_wildcard_only_accept_states_no_preference_even_with_a_server_preference() {
+        // The server preference orders the candidates a client asked for. A client that
+        // asked for nothing has nothing to order.
+        let artifact = make_artifact(MediaType::Jpeg, None);
+        let preference = &[MediaType::Webp];
+        assert_eq!(
+            negotiate_output_format(Some("*/*;q=0.8"), &artifact, preference).unwrap(),
+            None
+        );
     }
 
     #[test]
@@ -1264,12 +1290,12 @@ mod tests {
     }
 
     #[test]
-    fn test_negotiate_with_custom_preference_jpeg_first() {
+    fn a_configured_preference_does_not_order_a_client_that_named_nothing() {
         let artifact = make_artifact(MediaType::Jpeg, None);
         let pref = &[MediaType::Jpeg, MediaType::Png];
-        // Client accepts everything via wildcard; server prefers jpeg.
+        // The preference orders the formats a client asked for, and `*/*` asks for none.
         let result = negotiate_output_format(Some("*/*"), &artifact, pref);
-        assert_eq!(result.unwrap(), Some(MediaType::Jpeg));
+        assert_eq!(result.unwrap(), None);
     }
 
     #[test]

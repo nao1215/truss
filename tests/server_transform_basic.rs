@@ -2,7 +2,8 @@ mod common;
 
 use common::{
     animated_gif_bytes, gif_bytes, png_bytes, send_metrics_request, send_raw_request,
-    send_transform_request, spawn_fixture_server, spawn_server, split_response, temp_dir,
+    send_transform_request, send_transform_request_to, spawn_fixture_server, spawn_server,
+    split_response, temp_dir,
 };
 use serial_test::serial;
 use std::fs;
@@ -814,5 +815,64 @@ fn serve_once_rejects_preserve_exif_only_when_stripping_is_asked_for_explicitly(
     assert!(
         header.starts_with("HTTP/1.1 200 OK"),
         "the pair resolves the way the CLI resolves it, got: {header}"
+    );
+}
+
+#[test]
+fn serve_once_rejects_a_json_transform_that_carries_a_query_string() {
+    // Options come from the body on this route, and a query string here is silently
+    // dropped, so a caller who writes one is answered 200 with an image it did not ask for.
+    let storage_root = temp_dir("json-query-string");
+    fs::write(storage_root.join("image.png"), png_bytes()).expect("write source fixture");
+    let (addr, handle) = spawn_server(ServerConfig::new(storage_root, Some("secret".to_string())));
+    let response = send_transform_request_to(
+        addr,
+        "/images:transform?width=64&format=png",
+        r#"{"source":{"kind":"path","path":"/image.png"}}"#,
+        Some("secret"),
+    );
+
+    handle
+        .join()
+        .expect("join server thread")
+        .expect("serve one request");
+
+    let (header, content_type, body) = split_response(&response);
+    let body = String::from_utf8(body).expect("utf8 response body");
+
+    assert!(header.starts_with("HTTP/1.1 400 Bad Request"));
+    assert_eq!(content_type, "application/problem+json");
+    assert!(
+        body.contains("width"),
+        "the refusal names what was sent: {body}"
+    );
+}
+
+#[test]
+fn serve_once_rejects_a_json_transform_that_carries_an_unknown_query_name() {
+    // A name that means nothing anywhere is the same mistake as a transform name that
+    // means something elsewhere, and the public GET routes already refuse both.
+    let storage_root = temp_dir("json-unknown-query");
+    fs::write(storage_root.join("image.png"), png_bytes()).expect("write source fixture");
+    let (addr, handle) = spawn_server(ServerConfig::new(storage_root, Some("secret".to_string())));
+    let response = send_transform_request_to(
+        addr,
+        "/images:transform?bogusParam=1",
+        r#"{"source":{"kind":"path","path":"/image.png"}}"#,
+        Some("secret"),
+    );
+
+    handle
+        .join()
+        .expect("join server thread")
+        .expect("serve one request");
+
+    let (header, _, body) = split_response(&response);
+    let body = String::from_utf8(body).expect("utf8 response body");
+
+    assert!(header.starts_with("HTTP/1.1 400 Bad Request"));
+    assert!(
+        body.contains("bogusParam"),
+        "the refusal names what was sent: {body}"
     );
 }

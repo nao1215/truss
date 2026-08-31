@@ -392,6 +392,9 @@ pub struct ServerConfig {
     pub max_concurrent_transforms: u64,
     /// Per-transform wall-clock deadline in seconds.
     ///
+    /// Read at pipeline stage boundaries, so a transform stops at the first boundary past
+    /// the deadline rather than at the deadline itself.
+    ///
     /// Configurable via `TRUSS_TRANSFORM_DEADLINE_SECS`. Defaults to 30.
     pub transform_deadline_secs: u64,
     /// Maximum number of input pixels allowed before decode.

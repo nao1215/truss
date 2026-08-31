@@ -1,6 +1,9 @@
 mod common;
 
-use common::{png_bytes, send_upload_request, spawn_server, split_response, temp_dir, upload_body};
+use common::{
+    png_bytes, send_upload_request, send_upload_request_to, spawn_server, split_response, temp_dir,
+    upload_body,
+};
 use truss::{MediaType, RawArtifact, ServerConfig, sniff_artifact};
 
 #[test]
@@ -261,4 +264,56 @@ fn serve_once_rejects_upload_with_unknown_field_name() {
     assert!(header.starts_with("HTTP/1.1 400 Bad Request"));
     assert_eq!(content_type, "application/problem+json");
     assert!(body.to_lowercase().contains("unsupported field"));
+}
+
+#[test]
+fn serve_once_rejects_an_upload_that_carries_a_query_string() {
+    // The transform vocabulary lives in the `options` part on this route. The same names
+    // mean something on the public GET routes, so a caller who moves a request across
+    // sends them here, and silently dropping them answers 200 with the wrong image.
+    let storage_root = temp_dir("upload-query-string");
+    let (addr, handle) = spawn_server(ServerConfig::new(storage_root, Some("secret".to_string())));
+    let (boundary, body) = upload_body(&png_bytes(), None);
+    let response = send_upload_request_to(
+        addr,
+        "/images?width=64&height=32&fit=fill&format=png",
+        &body,
+        &boundary,
+        Some("secret"),
+    );
+
+    handle
+        .join()
+        .expect("join server thread")
+        .expect("serve one request");
+
+    let (header, content_type, body) = split_response(&response);
+    let body = String::from_utf8(body).expect("utf8 response body");
+
+    assert!(header.starts_with("HTTP/1.1 400 Bad Request"));
+    assert_eq!(content_type, "application/problem+json");
+    assert!(
+        body.contains("width"),
+        "the refusal names what was sent: {body}"
+    );
+}
+
+#[test]
+fn serve_once_accepts_an_upload_whose_target_carries_no_query_string() {
+    // The sibling of the case above: the check must look at the query string, not at the
+    // presence of a `?`, so a plain upload keeps working.
+    let storage_root = temp_dir("upload-no-query-string");
+    let (addr, handle) = spawn_server(ServerConfig::new(storage_root, Some("secret".to_string())));
+    let (boundary, body) = upload_body(&png_bytes(), Some(r#"{"format":"jpeg"}"#));
+    let response = send_upload_request_to(addr, "/images", &body, &boundary, Some("secret"));
+
+    handle
+        .join()
+        .expect("join server thread")
+        .expect("serve one request");
+
+    let (header, content_type, _) = split_response(&response);
+
+    assert!(header.starts_with("HTTP/1.1 200 OK"));
+    assert_eq!(content_type, "image/jpeg");
 }

@@ -834,6 +834,11 @@ pub struct TransformOptions {
     /// [`TransformError::LimitExceeded`] if the deadline is exceeded. Adapters inject
     /// this value based on their operational requirements — for example, the HTTP server
     /// sets a 30-second deadline while the CLI leaves it as `None` (unlimited).
+    ///
+    /// The check happens between stages, not inside one. A stage that is already running
+    /// runs to its end, so a transform can return after the deadline rather than at it,
+    /// by however long its slowest single step takes. Encoding is the step where that
+    /// matters, since no encoder truss calls can be interrupted part way.
     pub deadline: Option<Duration>,
 }
 

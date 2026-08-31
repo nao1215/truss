@@ -17,6 +17,19 @@ steps:
     test: |
       current.res.status == 200
       && current.res.headers['Content-Type'][0] contains 'image/'
+  upload_rejects_a_query_string:
+    desc: "A query string on the upload endpoint is refused rather than dropped"
+    req:
+      /images?width=2&format=png:
+        post:
+          headers:
+            Authorization: "Bearer {{ vars.token }}"
+          body:
+            multipart/form-data:
+              file: /fixtures/sample.png
+    test: |
+      current.res.status == 400
+      && current.res.headers['Content-Type'][0] == 'application/problem+json'
   upload_no_auth:
     desc: "Upload without Bearer token returns 401 Unauthorized"
     req:
