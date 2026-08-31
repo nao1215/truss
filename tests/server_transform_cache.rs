@@ -99,6 +99,130 @@ fn serve_once_public_get_negotiates_accept_and_sets_cache_headers() {
     assert_eq!(artifact.media_type, MediaType::Avif);
 }
 
+/// `Vary` describes the resource, not the request that happened to arrive. A
+/// request with no `Accept` gets the default representation of a URL whose
+/// representation still depends on `Accept`, so it has to say so: a shared
+/// cache that stores a response with no `Vary` serves it to every client.
+#[test]
+fn serve_once_public_get_reports_vary_accept_when_the_request_omits_accept() {
+    let storage_root = temp_dir("public-no-accept");
+    fs::write(storage_root.join("image.png"), png_bytes()).expect("write source fixture");
+    let (addr, handle) = spawn_server(
+        ServerConfig::new(storage_root, Some("secret".to_string()))
+            .with_signed_url_credentials("public-dev", "secret-value"),
+    );
+    let target = signed_target(
+        "/images/by-path",
+        BTreeMap::from([
+            ("path".to_string(), "/image.png".to_string()),
+            ("keyId".to_string(), "public-dev".to_string()),
+            ("expires".to_string(), "4102444800".to_string()),
+        ]),
+        "cdn.example.com",
+        "secret-value",
+    );
+    let response = send_public_get_request(addr, &target, "cdn.example.com");
+
+    handle
+        .join()
+        .expect("join server thread")
+        .expect("serve one request");
+
+    let (header, content_type, _) = split_response(&response);
+    assert!(header.starts_with("HTTP/1.1 200 OK"), "got: {header}");
+    assert_eq!(content_type, "image/png");
+    assert!(
+        header.lines().any(|line| line == "Vary: Accept"),
+        "a negotiable URL must report Vary: Accept even when the request sent no Accept: {header}"
+    );
+}
+
+/// The narrow half of the same rule: an explicit `format` takes negotiation out
+/// of the picture, so `Accept` cannot have influenced the answer and the header
+/// would only split a CDN's entries for nothing.
+#[test]
+fn serve_once_public_get_omits_vary_accept_when_the_format_is_explicit() {
+    let storage_root = temp_dir("public-explicit-format");
+    fs::write(storage_root.join("image.png"), png_bytes()).expect("write source fixture");
+    let (addr, handle) = spawn_server(
+        ServerConfig::new(storage_root, Some("secret".to_string()))
+            .with_signed_url_credentials("public-dev", "secret-value"),
+    );
+    let target = signed_target(
+        "/images/by-path",
+        BTreeMap::from([
+            ("path".to_string(), "/image.png".to_string()),
+            ("keyId".to_string(), "public-dev".to_string()),
+            ("expires".to_string(), "4102444800".to_string()),
+            ("format".to_string(), "jpeg".to_string()),
+        ]),
+        "cdn.example.com",
+        "secret-value",
+    );
+    let response = send_public_get_request_with_headers(
+        addr,
+        &target,
+        "cdn.example.com",
+        &[("Accept", "image/avif,image/webp")],
+    );
+
+    handle
+        .join()
+        .expect("join server thread")
+        .expect("serve one request");
+
+    let (header, content_type, _) = split_response(&response);
+    assert!(header.starts_with("HTTP/1.1 200 OK"), "got: {header}");
+    assert_eq!(content_type, "image/jpeg");
+    assert!(
+        !header.lines().any(|line| line == "Vary: Accept"),
+        "an explicitly formatted URL does not vary on Accept: {header}"
+    );
+}
+
+/// The 406 is a selected response for the same resource, so it varies on the
+/// header that produced it.
+#[test]
+fn serve_once_public_get_reports_vary_accept_on_not_acceptable() {
+    let storage_root = temp_dir("public-not-acceptable");
+    fs::write(storage_root.join("image.png"), png_bytes()).expect("write source fixture");
+    let (addr, handle) = spawn_server(
+        ServerConfig::new(storage_root, Some("secret".to_string()))
+            .with_signed_url_credentials("public-dev", "secret-value"),
+    );
+    let target = signed_target(
+        "/images/by-path",
+        BTreeMap::from([
+            ("path".to_string(), "/image.png".to_string()),
+            ("keyId".to_string(), "public-dev".to_string()),
+            ("expires".to_string(), "4102444800".to_string()),
+        ]),
+        "cdn.example.com",
+        "secret-value",
+    );
+    let response = send_public_get_request_with_headers(
+        addr,
+        &target,
+        "cdn.example.com",
+        &[("Accept", "text/html")],
+    );
+
+    handle
+        .join()
+        .expect("join server thread")
+        .expect("serve one request");
+
+    let (header, _, _) = split_response(&response);
+    assert!(
+        header.starts_with("HTTP/1.1 406"),
+        "expected 406, got: {header}"
+    );
+    assert!(
+        header.lines().any(|line| line == "Vary: Accept"),
+        "the 406 was selected by Accept and must say so: {header}"
+    );
+}
+
 #[test]
 fn serve_once_public_get_returns_not_modified_for_matching_etag() {
     let storage_root = temp_dir("public-etag");

@@ -1619,7 +1619,7 @@ components:
           schema:
             type: string
         Vary:
-          description: Set to `Accept` when content negotiation was used
+          description: Set to `Accept` whenever the output format was left to content negotiation, including when the request sent no `Accept` header. Absent when the request named a format explicitly.
           schema:
             type: string
         Cache-Status:
