@@ -121,9 +121,15 @@ In production, place a CDN such as CloudFront (or a reverse proxy like nginx / E
 
 ## Graceful Shutdown
 
-truss supports graceful shutdown for zero-downtime deployments. The `TRUSS_SHUTDOWN_DRAIN_SECS` variable controls the drain period (default: 10 seconds). During this period, `/health/ready` returns 503 immediately so that load balancers stop sending new traffic, while in-flight requests complete.
+truss supports graceful shutdown for zero-downtime deployments. The `TRUSS_SHUTDOWN_DRAIN_SECS` variable controls the drain period (default: 10 seconds). During this period the server keeps accepting and answering requests, and `/health/ready` returns 503 to every one of them so that load balancers stop sending new traffic while in-flight requests complete. The listener is closed once the drain period ends, so a connection attempted after it is refused rather than left waiting.
 
 On Kubernetes, set `terminationGracePeriodSeconds` >= drain + 20 (e.g. `35` for the default 10 s drain).
+
+## Rate Limiting
+
+Per-client rate limiting is off by default. Set `TRUSS_RATE_LIMIT_RPS` to a positive value to enable it; each client IP then gets a token bucket refilling at that rate, with a capacity of `TRUSS_RATE_LIMIT_BURST` (defaulting to the same value), and requests that find an empty bucket receive 429.
+
+Behind a CDN or reverse proxy every connection arrives from the proxy, so without further configuration all traffic shares one bucket and the limit applies to the whole site at once rather than per client. Set `TRUSS_TRUSTED_PROXIES` to the proxy addresses or CIDR ranges to fix this: when a connection comes from one of them, the client IP is taken from `X-Forwarded-For` (rightmost entry that is not itself a trusted proxy) or `X-Real-IP`. Only list addresses you control, because trusting an address means trusting whatever it puts in those headers.
 
 ## Health Checks
 

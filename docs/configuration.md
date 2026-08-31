@@ -26,6 +26,10 @@ truss is configured through environment variables and CLI flags. This page docum
 | `TRUSS_MAX_SOURCE_BYTES` | Max source image size in bytes from filesystem or remote URL (default: `104857600` = 100 MB, range: 1-10737418240) |
 | `TRUSS_MAX_WATERMARK_BYTES` | Max watermark image size in bytes from remote URL (default: `10485760` = 10 MB, range: 1-1073741824) |
 | `TRUSS_MAX_REMOTE_REDIRECTS` | Max HTTP redirects to follow when fetching a remote URL (default: `5`, range: 0-20) |
+| `TRUSS_RATE_LIMIT_RPS` | Sustained per-client requests per second; excess requests receive 429 (default: `0`, range: 0-100000). `0` disables rate limiting entirely |
+| `TRUSS_RATE_LIMIT_BURST` | Token-bucket capacity, the number of requests a client may send back to back after an idle period (default: the value of `TRUSS_RATE_LIMIT_RPS`, range: 1-100000). Ignored when rate limiting is disabled |
+| `TRUSS_TRUSTED_PROXIES` | Comma-separated IPs or CIDR ranges whose `X-Forwarded-For` / `X-Real-IP` headers are trusted, used to recover the real client IP for rate limiting (default: empty, so the TCP peer address is used). Set this when running behind a reverse proxy or CDN together with `TRUSS_RATE_LIMIT_RPS`, or every client shares one bucket. See [deployment.md](deployment.md) |
+| `TRUSS_HEALTH_CACHE_TTL_SECS` | How long `/health/ready` may reuse its disk and memory measurements before taking them again (default: `5`, range: 0-300). `0` measures on every probe |
 | `TRUSS_LOG_LEVEL` | Log verbosity level (default: `info`, options: `error`, `warn`, `info`, `debug`). On Unix, send `SIGUSR1` to cycle the level at runtime without restarting (`info -> debug -> error -> warn -> info`) |
 
 `TRUSS_STORAGE_BACKEND` selects the source for public `GET /images/by-path`. When set to `s3`, `gcs`, or `azure`, the `path` query parameter is used as the object key. Only one backend can be active at a time. Private endpoints can still use `kind: storage` regardless of this setting.
@@ -39,6 +43,8 @@ truss is configured through environment variables and CLI flags. This page docum
 | `TRUSS_SIGNED_URL_KEY_ID` | Key ID for signed public URLs (legacy; merged into `TRUSS_SIGNING_KEYS` at startup) |
 | `TRUSS_SIGNED_URL_SECRET` | Shared secret for signed public URLs (legacy; merged into `TRUSS_SIGNING_KEYS` at startup) |
 | `TRUSS_CACHE_ROOT` | Directory for the transform cache; caching is disabled when unset |
+| `TRUSS_CACHE_MAX_BYTES` | Size budget for the transform cache directory in bytes; the oldest entries are evicted when it is exceeded (default: `0`, which means no eviction and unbounded growth). Set it whenever `TRUSS_CACHE_ROOT` points at a disk that must not fill |
+| `TRUSS_FORMAT_PREFERENCE` | Comma-separated output formats ordered by server preference, used to break ties during Accept negotiation (default: `avif,webp,jpeg,png`, with `png` ahead of `jpeg` for sources with alpha). Formats not listed keep their default relative order. Only `avif`, `webp`, `jpeg`, and `png` take part in negotiation; other encodable names are accepted at startup but have no effect |
 | `TRUSS_PUBLIC_MAX_AGE` | `Cache-Control: max-age` for public GET responses in seconds (default: `3600`) |
 | `TRUSS_PUBLIC_STALE_WHILE_REVALIDATE` | `Cache-Control: stale-while-revalidate` for public GET responses in seconds (default: `60`) |
 | `TRUSS_DISABLE_ACCEPT_NEGOTIATION` | Disable Accept-based content negotiation (`true`/`1`; recommended behind CDNs that don't forward Accept) |

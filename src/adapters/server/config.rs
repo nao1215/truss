@@ -102,8 +102,8 @@ impl std::str::FromStr for LogLevel {
 /// A trusted proxy specification: either a single IP address or a CIDR block.
 ///
 /// Used with `TRUSS_TRUSTED_PROXIES` to identify reverse proxies whose
-/// `X-Forwarded-For` / `X-Real-IP` headers should be trusted for
-/// client-IP extraction (rate limiting, access logging).
+/// `X-Forwarded-For` / `X-Real-IP` headers should be trusted when recovering
+/// the client IP the rate limiter buckets by.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TrustedProxy {
@@ -2436,6 +2436,36 @@ mod tests {
     fn from_env_trusted_proxies_invalid_rejects() {
         let _env = ScopedEnv::set("TRUSS_TRUSTED_PROXIES", "not-an-ip");
         assert!(ServerConfig::from_env().is_err());
+    }
+
+    /// Every setting the server reads from the environment has to appear in the
+    /// reference an operator actually reads. Rustdoc on the corresponding field
+    /// is not a substitute: someone deploying the container never opens it.
+    #[test]
+    fn every_environment_variable_is_documented() {
+        let source = include_str!("config.rs");
+        let reference = include_str!("../../../docs/configuration.md");
+
+        let mut undocumented: Vec<&str> = Vec::new();
+        for (index, _) in source.match_indices("TRUSS_") {
+            let name: &str = source[index..]
+                .split(|c: char| !(c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_'))
+                .next()
+                .unwrap_or("");
+            // `TRUSS_` on its own is a prefix fragment in a format string, and the
+            // name has to be a whole word in the reference, not part of a longer one.
+            if name == "TRUSS_" || reference.contains(&format!("`{name}`")) {
+                continue;
+            }
+            if !undocumented.contains(&name) {
+                undocumented.push(name);
+            }
+        }
+
+        assert!(
+            undocumented.is_empty(),
+            "these environment variables are read by config.rs but have no row in docs/configuration.md: {undocumented:?}"
+        );
     }
 
     #[test]
