@@ -125,7 +125,9 @@ import init, {
   transformImageWithWatermark,
 } from "./truss_bg.js";
 
-await init(await resolveWasmInput());
+// The generated init takes one options object; a bare argument still works but is the
+// deprecated form, and the glue warns about it on every import.
+await init({ module_or_path: await resolveWasmInput() });
 
 export {
   WasmTransformOutput,

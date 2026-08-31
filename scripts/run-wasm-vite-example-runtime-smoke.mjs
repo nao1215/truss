@@ -85,6 +85,16 @@ try {
         `unexpected runtime status: ${statusText}\n${browserMessages.join("\n")}`,
       );
     }
+
+    // The package initializes the Wasm module at import time, and the generated glue
+    // warns on the console when handed the deprecated positional argument. A bundled app
+    // shows that line at startup, so the browser console is checked for it here.
+    const deprecation = browserMessages.find((message) => message.includes("deprecated"));
+    if (deprecation) {
+      throw new Error(
+        `importing the package printed a deprecation warning: ${deprecation}`,
+      );
+    }
   } finally {
     await browser.close();
   }

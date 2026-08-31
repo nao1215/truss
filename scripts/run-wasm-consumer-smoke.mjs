@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -105,9 +105,20 @@ console.log(JSON.stringify({
   );
 
   run(npmCommand, ["install", "--no-save", tarballPath], { cwd: consumerDir });
-  run("node", ["--no-warnings", "smoke.mjs", fixtureImagePath], {
-    cwd: consumerDir,
-  });
+  const consumerStderr = runCapturingStderr(
+    "node",
+    ["--no-warnings", "smoke.mjs", fixtureImagePath],
+    { cwd: consumerDir },
+  );
+  // The entry initializes the Wasm module itself, and the generated glue warns on the
+  // console when it is handed the deprecated positional argument. That warning reaches
+  // every application that imports the package, so the consumer's stderr is the place
+  // to catch it coming back.
+  if (consumerStderr.includes("deprecated")) {
+    throw new Error(
+      `importing the package printed a deprecation warning:\n${consumerStderr}`,
+    );
+  }
 } catch (error) {
   console.error(`consumer smoke failed in ${tempRoot}`);
   throw error;
@@ -127,6 +138,30 @@ function run(command, args, options = {}) {
     shell: process.platform === "win32" && command.endsWith(".cmd"),
     stdio: "inherit",
   });
+}
+
+// Like `run`, but hands stderr back to the caller after echoing it, so a check can be
+// made on what the command printed without hiding it from the log.
+function runCapturingStderr(command, args, options = {}) {
+  const result = spawnSync(command, args, {
+    cwd: options.cwd ?? rootDir,
+    env: {
+      ...process.env,
+      NPM_CONFIG_CACHE: npmCacheDir,
+    },
+    encoding: "utf8",
+    stdio: ["inherit", "inherit", "pipe"],
+  });
+  if (result.stderr) {
+    process.stderr.write(result.stderr);
+  }
+  if (result.error) {
+    throw result.error;
+  }
+  if (result.status !== 0) {
+    throw new Error(`${command} ${args.join(" ")} exited with status ${result.status}`);
+  }
+  return result.stderr ?? "";
 }
 
 // The entry module instantiates the Wasm binary with a top-level `await init(...)`,
