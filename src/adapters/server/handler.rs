@@ -777,7 +777,13 @@ pub(super) fn handle_health_ready(config: &ServerConfig) -> HttpResponse {
         }))
         .expect("serialize readiness");
         body.push(b'\n');
-        return HttpResponse::json("503 Service Unavailable", body);
+        let mut response = HttpResponse::json("503 Service Unavailable", body);
+        // The process is going away, not momentarily busy, so tell the client
+        // and any intermediary not to come straight back.
+        response
+            .headers
+            .push(("Retry-After".to_string(), "5".to_string()));
+        return response;
     }
 
     let (checks, all_ok) = collect_resource_checks(config);
@@ -1418,23 +1424,23 @@ fn transform_source_bytes_inner(
             return transform_error_response(error);
         }
     };
-    let negotiation_used =
-        if options.format.is_none() && !response_config.disable_accept_negotiation {
-            match negotiate_output_format(
-                request.header("accept"),
-                &artifact,
-                &config.format_preference,
-            ) {
-                Ok(Some(format)) => {
-                    options.format = Some(format);
-                    true
-                }
-                Ok(None) => false,
-                Err(response) => return response,
-            }
-        } else {
-            false
-        };
+    // `Vary` describes the resource, not the request that happened to arrive. What
+    // matters is whether `Accept` could have selected the representation for this
+    // URL, not whether it did: a request that sends no `Accept` gets the default
+    // representation of a URL that another request negotiates away from, and a
+    // shared cache that stores a response with no `Vary` serves it to everyone.
+    let accept_may_vary = options.format.is_none() && !response_config.disable_accept_negotiation;
+    if accept_may_vary {
+        match negotiate_output_format(
+            request.header("accept"),
+            &artifact,
+            &config.format_preference,
+        ) {
+            Ok(Some(format)) => options.format = Some(format),
+            Ok(None) => {}
+            Err(response) => return response,
+        }
+    }
 
     if options.format.is_none() {
         // The server needs a concrete format here, ahead of the transform, for the cache
@@ -1459,7 +1465,7 @@ fn transform_source_bytes_inner(
     // The Accept header is deliberately absent from the key. Negotiation's whole output is
     // the format, which `options.format` already carries, so including the raw header would
     // write one copy of the same image per distinct header string — unboundedly many, and
-    // straight off the request. `Vary: Accept` is built per response from `negotiation_used`,
+    // straight off the request. `Vary: Accept` is built per response from `accept_may_vary`,
     // so an entry shared with a request that named the format explicitly still answers right.
     let cache_key = compute_cache_key(source_hash, &options, watermark_identity);
 
@@ -1476,7 +1482,7 @@ fn transform_source_bytes_inner(
             media_type,
             &etag,
             response_policy,
-            negotiation_used,
+            accept_may_vary,
             CacheHitStatus::Hit,
             response_config.public_cache_control.max_age,
             response_config.public_cache_control.stale_while_revalidate,
@@ -1561,7 +1567,7 @@ fn transform_source_bytes_inner(
         output.media_type,
         &etag,
         response_policy,
-        negotiation_used,
+        accept_may_vary,
         cache_hit_status,
         response_config.public_cache_control.max_age,
         response_config.public_cache_control.stale_while_revalidate,

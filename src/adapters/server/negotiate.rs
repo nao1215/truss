@@ -33,9 +33,7 @@ pub(super) fn negotiate_output_format(
         // The header contained segments but none were recognized image types
         // (e.g. Accept: application/json). This is an explicit mismatch.
         if had_any_segment {
-            return Err(not_acceptable_response(
-                "Accept does not allow any supported output media type",
-            ));
+            return Err(not_acceptable_for_accept());
         }
         return Ok(None);
     }
@@ -57,12 +55,21 @@ pub(super) fn negotiate_output_format(
     }
 
     if best_q == 0 {
-        return Err(not_acceptable_response(
-            "Accept does not allow any supported output media type",
-        ));
+        return Err(not_acceptable_for_accept());
     }
 
     Ok(best_candidate)
+}
+
+/// The 406 is itself a response selected by `Accept`, so it varies on `Accept`
+/// for the same reason a negotiated image does.
+fn not_acceptable_for_accept() -> HttpResponse {
+    let mut response =
+        not_acceptable_response("Accept does not allow any supported output media type");
+    response
+        .headers
+        .push(("Vary".to_string(), "Accept".to_string()));
+    response
 }
 
 /// Parses Accept header segments. Returns `(recognized, had_any_segments)` where
@@ -254,7 +261,7 @@ pub(super) fn build_image_response_headers(
     media_type: MediaType,
     etag: &str,
     response_policy: ImageResponsePolicy,
-    negotiation_used: bool,
+    accept_may_vary: bool,
     cache_status: CacheHitStatus,
     public_max_age: u32,
     public_swr: u32,
@@ -278,7 +285,7 @@ pub(super) fn build_image_response_headers(
         ),
     ];
 
-    if negotiation_used {
+    if accept_may_vary {
         headers.push(("Vary".to_string(), "Accept".to_string()));
     }
 

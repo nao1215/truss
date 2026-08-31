@@ -1619,7 +1619,7 @@ components:
           schema:
             type: string
         Vary:
-          description: Set to `Accept` when content negotiation was used
+          description: Set to `Accept` whenever the output format was left to content negotiation, including when the request sent no `Accept` header. Absent when the request named a format explicitly or negotiation is disabled server-side.
           schema:
             type: string
         Cache-Status:
@@ -1683,6 +1683,10 @@ components:
         Cache-Status:
           schema:
             type: string
+        Vary:
+          description: Set to `Accept` under the same rule as the 200 response, because a 304 selects the same representation
+          schema:
+            type: string
     BadRequest:
       description: Invalid request parameters or body
       content:
@@ -1721,6 +1725,11 @@ components:
       description: |
         `Accept` header negotiation failed because none of the requested response media types
         matched the formats supported by the server.
+      headers:
+        Vary:
+          description: Always `Accept`, because this response was selected by the `Accept` header
+          schema:
+            type: string
       content:
         application/problem+json:
           schema:

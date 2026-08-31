@@ -3,7 +3,7 @@ use std::io;
 use std::net::{TcpListener, TcpStream};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use super::config::{LogLevel, ServerConfig};
 use super::handler::TransformOptionsPayload;
@@ -121,21 +121,39 @@ pub fn serve_with_config(listener: TcpListener, config: ServerConfig) -> io::Res
     // connections and the shutdown pipe.
     listener.set_nonblocking(true)?;
 
-    loop {
-        // Wait for activity on the listener or shutdown pipe. On Unix we use
-        // poll(2) to block efficiently; on Windows we fall back to polling the
-        // draining flag with a short sleep.
-        wait_for_accept_or_shutdown(&listener, shutdown_read_fd, &config.draining);
+    // The drain deadline, set once the shutdown signal is observed. Until it
+    // elapses the loop keeps accepting: a load balancer probes readiness over a
+    // new connection, so a drain period that stops accepting cannot deliver the
+    // 503 it exists for, and every request that arrives in the window is
+    // parked in the accept backlog and answered by nobody.
+    let mut drain_deadline: Option<Instant> = None;
 
-        // Check the shutdown pipe first.
-        if poll_shutdown_pipe(shutdown_read_fd) {
+    loop {
+        let remaining = drain_deadline
+            .map(|deadline: Instant| deadline.saturating_duration_since(Instant::now()));
+        if remaining.is_some_and(|left| left.is_zero()) {
             break;
         }
 
-        // Also check the draining flag directly (needed on Windows where the
-        // shutdown pipe is not available).
-        if config.draining.load(Ordering::SeqCst) {
-            break;
+        // Wait for activity on the listener or shutdown pipe. On Unix we use
+        // poll(2) to block efficiently; on Windows we fall back to polling the
+        // draining flag with a short sleep. While draining the wait is bounded
+        // so the deadline is noticed even with no traffic at all.
+        wait_for_accept_or_shutdown(&listener, shutdown_read_fd, &config.draining, remaining);
+
+        // The shutdown pipe fires once; the draining flag is what stays set, and
+        // it is also the only signal available on Windows.
+        let signalled =
+            poll_shutdown_pipe(shutdown_read_fd) || config.draining.load(Ordering::SeqCst);
+        if signalled && drain_deadline.is_none() {
+            let drain_secs = config.shutdown_drain_secs;
+            config.log(&format!(
+                "shutdown: drain started, waiting {drain_secs}s for load balancers"
+            ));
+            if drain_secs == 0 {
+                break;
+            }
+            drain_deadline = Some(Instant::now() + Duration::from_secs(drain_secs));
         }
 
         match listener.accept() {
@@ -153,23 +171,21 @@ pub fn serve_with_config(listener: TcpListener, config: ServerConfig) -> io::Res
         }
     }
 
-    // --- Drain phase ---
-    let drain_secs = config.shutdown_drain_secs;
-    config.log(&format!(
-        "shutdown: drain started, waiting {drain_secs}s for load balancers"
-    ));
-    if drain_secs > 0 {
-        std::thread::sleep(Duration::from_secs(drain_secs));
-    }
     config.log("shutdown: drain complete, closing listener");
+
+    // Close the listener before draining the workers. Leaving it bound would put
+    // the worker-drain window in the same position the shutdown drain used to be
+    // in: connections completed by the kernel and accepted by nobody. Refusing is
+    // what lets a client fail over instead of waiting.
+    drop(listener);
 
     // Stop dispatching new connections to workers.
     drop(sender);
     // Worker drain deadline: 15s so that total shutdown (drain + worker drain)
     // fits within Kubernetes default terminationGracePeriodSeconds of 30s.
-    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    let deadline = Instant::now() + Duration::from_secs(15);
     for worker in workers {
-        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             stderr_write("shutdown: timed out waiting for worker threads");
             break;
@@ -276,6 +292,7 @@ fn wait_for_accept_or_shutdown(
     listener: &std::net::TcpListener,
     shutdown_read_fd: i32,
     _draining: &AtomicBool,
+    timeout: Option<Duration>,
 ) {
     use std::os::unix::io::AsRawFd;
     let listener_fd = listener.as_raw_fd();
@@ -291,9 +308,14 @@ fn wait_for_accept_or_shutdown(
             revents: 0,
         },
     ];
-    // Block indefinitely (-1 timeout). Signal delivery will interrupt with
-    // EINTR, which is fine — we just re-check the shutdown conditions.
-    unsafe { libc::poll(fds.as_mut_ptr(), 2, -1) };
+    // Block indefinitely (-1 timeout) unless a drain deadline bounds the wait.
+    // Signal delivery will interrupt with EINTR, which is fine — we just
+    // re-check the shutdown conditions.
+    let timeout_ms = match timeout {
+        None => -1,
+        Some(remaining) => i32::try_from(remaining.as_millis()).unwrap_or(i32::MAX),
+    };
+    unsafe { libc::poll(fds.as_mut_ptr(), 2, timeout_ms) };
 }
 
 #[cfg(windows)]
@@ -301,11 +323,20 @@ fn wait_for_accept_or_shutdown(
     _listener: &std::net::TcpListener,
     _shutdown_read_fd: i32,
     draining: &AtomicBool,
+    timeout: Option<Duration>,
 ) {
-    // On Windows, poll(2) is not available for the listener socket. Sleep
-    // briefly and let the caller check the draining flag.
-    if !draining.load(Ordering::SeqCst) {
-        std::thread::sleep(Duration::from_millis(10));
+    // On Windows, poll(2) is not available for the listener socket, so the loop
+    // spins on a short sleep. Once the drain deadline is set the flag is already
+    // true, so the remaining time is what decides whether to sleep at all.
+    const NAP: Duration = Duration::from_millis(10);
+    match timeout {
+        Some(remaining) if remaining.is_zero() => {}
+        Some(remaining) => std::thread::sleep(NAP.min(remaining)),
+        None => {
+            if !draining.load(Ordering::SeqCst) {
+                std::thread::sleep(NAP);
+            }
+        }
     }
 }
 
@@ -503,8 +534,6 @@ mod tests {
     use std::net::TcpListener;
     #[cfg(unix)]
     use std::sync::atomic::AtomicU8;
-    #[cfg(unix)]
-    use std::time::Instant;
 
     #[cfg(unix)]
     struct ShutdownSignalGuard {
@@ -552,13 +581,38 @@ mod tests {
 
         let draining = AtomicBool::new(false);
         let start = Instant::now();
-        wait_for_accept_or_shutdown(&listener, read_fd, &draining);
+        wait_for_accept_or_shutdown(&listener, read_fd, &draining, None);
 
         assert!(
             start.elapsed() < Duration::from_millis(200),
             "wait_for_accept_or_shutdown should return immediately when the pipe is readable"
         );
         assert!(poll_shutdown_pipe(read_fd));
+
+        close_shutdown_pipe(read_fd, write_fd);
+    }
+
+    /// During the drain window the wait has to be bounded, otherwise the loop
+    /// never notices the deadline on a server with no traffic.
+    #[cfg(unix)]
+    #[test]
+    fn wait_for_accept_or_shutdown_honours_the_drain_timeout() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test listener");
+        let (read_fd, write_fd) = create_shutdown_pipe().expect("create shutdown pipe");
+
+        let draining = AtomicBool::new(true);
+        let start = Instant::now();
+        wait_for_accept_or_shutdown(
+            &listener,
+            read_fd,
+            &draining,
+            Some(Duration::from_millis(50)),
+        );
+
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "a bounded wait must return without traffic on the listener"
+        );
 
         close_shutdown_pipe(read_fd, write_fd);
     }
