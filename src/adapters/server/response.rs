@@ -32,6 +32,30 @@ impl HttpResponse {
         }
     }
 
+    /// Records the request id on the response: as the `X-Request-Id` header and, for a
+    /// problem body, as its `requestId` member too, so a body that is logged or forwarded on
+    /// its own still matches the server's access log line. The member is RFC 9457's
+    /// extension mechanism; `instance` is not used because a client-supplied id need not be
+    /// a URI.
+    pub(super) fn attach_request_id(&mut self, request_id: &str) {
+        self.headers
+            .push(("X-Request-Id".to_string(), request_id.to_string()));
+        if self.content_type != Some("application/problem+json") {
+            return;
+        }
+        if let Ok(serde_json::Value::Object(mut problem)) =
+            serde_json::from_slice::<serde_json::Value>(&self.body)
+        {
+            problem.insert(
+                "requestId".to_string(),
+                serde_json::Value::String(request_id.to_string()),
+            );
+            let mut body = serde_json::to_vec(&problem).expect("serialize problem body");
+            body.push(b'\n');
+            self.body = body;
+        }
+    }
+
     pub(super) fn problem(status: &'static str, body: Vec<u8>) -> Self {
         Self {
             status,
@@ -205,84 +229,211 @@ fn gzip_compress(data: &[u8], level: u32) -> io::Result<Vec<u8>> {
     encoder.finish()
 }
 
+/// Where the problem types are described. Each [`ProblemType`] is an anchor on this page.
+pub(super) const PROBLEM_TYPES_URL: &str =
+    "https://github.com/nao1215/truss/blob/main/docs/problems.md";
+
+/// A class of failure, the way RFC 9457 names one: `type` is a URI identifying the class,
+/// `title` is its fixed short name, and `detail` describes the one occurrence.
+///
+/// The transform classes are the `TransformError` variants under the names the Wasm package
+/// reports as `kind`, so a client sees one classification whichever adapter it talks to; the
+/// rest are the server's own. A variant added here needs its row in `docs/problems.md`, which
+/// is what the `type` URI resolves to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ProblemType {
+    /// The request itself could not be understood: a malformed body, query, or header.
+    InvalidRequest,
+    InvalidOptions,
+    InvalidInput,
+    DecodeFailed,
+    /// The request's own media type, as opposed to the image's: a body that is not JSON
+    /// where JSON is required, or a multipart part of the wrong kind.
+    UnsupportedMediaType,
+    UnsupportedInputMediaType,
+    UnsupportedOutputMediaType,
+    EncodeFailed,
+    CapabilityMissing,
+    LimitExceeded,
+    Unauthorized,
+    Forbidden,
+    NotFound,
+    NotAcceptable,
+    RequestTimeout,
+    PayloadTooLarge,
+    UnprocessableEntity,
+    TooManyRequests,
+    InternalError,
+    NotImplemented,
+    BadGateway,
+    ServiceUnavailable,
+    LoopDetected,
+}
+
+impl ProblemType {
+    /// The anchor on the problem types page, which is also the class's name in the docs.
+    pub(super) const fn slug(self) -> &'static str {
+        match self {
+            Self::InvalidRequest => "invalid-request",
+            Self::InvalidOptions => "invalid-options",
+            Self::InvalidInput => "invalid-input",
+            Self::DecodeFailed => "decode-failed",
+            Self::UnsupportedMediaType => "unsupported-media-type",
+            Self::UnsupportedInputMediaType => "unsupported-input-media-type",
+            Self::UnsupportedOutputMediaType => "unsupported-output-media-type",
+            Self::EncodeFailed => "encode-failed",
+            Self::CapabilityMissing => "capability-missing",
+            Self::LimitExceeded => "limit-exceeded",
+            Self::Unauthorized => "unauthorized",
+            Self::Forbidden => "forbidden",
+            Self::NotFound => "not-found",
+            Self::NotAcceptable => "not-acceptable",
+            Self::RequestTimeout => "request-timeout",
+            Self::PayloadTooLarge => "payload-too-large",
+            Self::UnprocessableEntity => "unprocessable-entity",
+            Self::TooManyRequests => "too-many-requests",
+            Self::InternalError => "internal-error",
+            Self::NotImplemented => "not-implemented",
+            Self::BadGateway => "bad-gateway",
+            Self::ServiceUnavailable => "service-unavailable",
+            Self::LoopDetected => "loop-detected",
+        }
+    }
+
+    /// The fixed `title` of the class. RFC 9457 asks that it not change from one occurrence
+    /// to the next, so nothing about the request goes in here; that is what `detail` is for.
+    pub(super) const fn title(self) -> &'static str {
+        match self {
+            Self::InvalidRequest => "Invalid request",
+            Self::InvalidOptions => "Invalid transform options",
+            Self::InvalidInput => "Invalid input",
+            Self::DecodeFailed => "Input could not be decoded",
+            Self::UnsupportedMediaType => "Unsupported Media Type",
+            Self::UnsupportedInputMediaType => "Unsupported input media type",
+            Self::UnsupportedOutputMediaType => "Unsupported output media type",
+            Self::EncodeFailed => "Output could not be encoded",
+            Self::CapabilityMissing => "Capability not available",
+            Self::LimitExceeded => "Limit exceeded",
+            Self::Unauthorized => "Unauthorized",
+            Self::Forbidden => "Forbidden",
+            Self::NotFound => "Not Found",
+            Self::NotAcceptable => "Not Acceptable",
+            Self::RequestTimeout => "Request Timeout",
+            Self::PayloadTooLarge => "Payload Too Large",
+            Self::UnprocessableEntity => "Unprocessable Entity",
+            Self::TooManyRequests => "Too Many Requests",
+            Self::InternalError => "Internal Server Error",
+            Self::NotImplemented => "Not Implemented",
+            Self::BadGateway => "Bad Gateway",
+            Self::ServiceUnavailable => "Service Unavailable",
+            Self::LoopDetected => "Loop Detected",
+        }
+    }
+
+    /// The `type` URI: the problem types page, at this class's anchor.
+    pub(super) fn uri(self) -> String {
+        format!("{PROBLEM_TYPES_URL}#{}", self.slug())
+    }
+}
+
 pub(super) fn bad_request_response(message: &str) -> HttpResponse {
-    problem_response("400 Bad Request", 400, "Bad Request", message)
+    problem_response("400 Bad Request", 400, ProblemType::InvalidRequest, message)
 }
 
 pub(super) fn auth_required_response(message: &str) -> HttpResponse {
     HttpResponse::problem_with_headers(
         "401 Unauthorized",
         vec![("WWW-Authenticate".to_string(), "Bearer".to_string())],
-        problem_detail_body(401, "Unauthorized", message),
+        problem_detail_body(ProblemType::Unauthorized, 401, message),
     )
 }
 
 pub(super) fn signed_url_unauthorized_response(message: &str) -> HttpResponse {
-    problem_response("401 Unauthorized", 401, "Unauthorized", message)
+    problem_response("401 Unauthorized", 401, ProblemType::Unauthorized, message)
 }
 
 pub(super) fn not_found_response(message: &str) -> HttpResponse {
-    problem_response("404 Not Found", 404, "Not Found", message)
+    problem_response("404 Not Found", 404, ProblemType::NotFound, message)
 }
 
 pub(super) fn forbidden_response(message: &str) -> HttpResponse {
-    problem_response("403 Forbidden", 403, "Forbidden", message)
+    problem_response("403 Forbidden", 403, ProblemType::Forbidden, message)
 }
 
 pub(super) fn unsupported_media_type_response(message: &str) -> HttpResponse {
     problem_response(
         "415 Unsupported Media Type",
         415,
-        "Unsupported Media Type",
+        ProblemType::UnsupportedMediaType,
         message,
     )
 }
 
 pub(super) fn not_acceptable_response(message: &str) -> HttpResponse {
-    problem_response("406 Not Acceptable", 406, "Not Acceptable", message)
+    problem_response(
+        "406 Not Acceptable",
+        406,
+        ProblemType::NotAcceptable,
+        message,
+    )
 }
 
 pub(super) fn unprocessable_entity_response(message: &str) -> HttpResponse {
     problem_response(
         "422 Unprocessable Entity",
         422,
-        "Unprocessable Entity",
+        ProblemType::UnprocessableEntity,
         message,
     )
 }
 
 pub(super) fn payload_too_large_response(message: &str) -> HttpResponse {
-    problem_response("413 Payload Too Large", 413, "Payload Too Large", message)
+    problem_response(
+        "413 Payload Too Large",
+        413,
+        ProblemType::PayloadTooLarge,
+        message,
+    )
 }
 
 pub(super) fn request_timeout_response(message: &str) -> HttpResponse {
-    problem_response("408 Request Timeout", 408, "Request Timeout", message)
+    problem_response(
+        "408 Request Timeout",
+        408,
+        ProblemType::RequestTimeout,
+        message,
+    )
 }
 
 pub(super) fn internal_error_response(message: &str) -> HttpResponse {
     problem_response(
         "500 Internal Server Error",
         500,
-        "Internal Server Error",
+        ProblemType::InternalError,
         message,
     )
 }
 
 pub(super) fn bad_gateway_response(message: &str) -> HttpResponse {
-    problem_response("502 Bad Gateway", 502, "Bad Gateway", message)
+    problem_response("502 Bad Gateway", 502, ProblemType::BadGateway, message)
 }
 
 pub(super) fn service_unavailable_response(message: &str) -> HttpResponse {
     problem_response(
         "503 Service Unavailable",
         503,
-        "Service Unavailable",
+        ProblemType::ServiceUnavailable,
         message,
     )
 }
 
 pub(super) fn too_many_requests_response(message: &str) -> HttpResponse {
-    let mut resp = problem_response("429 Too Many Requests", 429, "Too Many Requests", message);
+    let mut resp = problem_response(
+        "429 Too Many Requests",
+        429,
+        ProblemType::TooManyRequests,
+        message,
+    );
     // RFC 6585 §4: include Retry-After so well-behaved clients back off.
     resp.headers
         .push(("Retry-After".to_string(), "1".to_string()));
@@ -290,33 +441,38 @@ pub(super) fn too_many_requests_response(message: &str) -> HttpResponse {
 }
 
 pub(super) fn too_many_redirects_response(message: &str) -> HttpResponse {
-    problem_response("508 Loop Detected", 508, "Loop Detected", message)
+    problem_response("508 Loop Detected", 508, ProblemType::LoopDetected, message)
 }
 
 pub(super) fn not_implemented_response(message: &str) -> HttpResponse {
-    problem_response("501 Not Implemented", 501, "Not Implemented", message)
+    problem_response(
+        "501 Not Implemented",
+        501,
+        ProblemType::NotImplemented,
+        message,
+    )
 }
 
-/// Builds an RFC 7807 Problem Details error response.
+/// Builds an RFC 9457 Problem Details error response.
 ///
-/// The response uses `application/problem+json` content type and includes
-/// `type`, `title`, `status`, and `detail` fields as specified by RFC 7807.
-/// The `type` field uses `about:blank` to indicate that the HTTP status code
-/// itself is sufficient to describe the problem type.
+/// The body is `application/problem+json` with `type`, `title`, `status`, and `detail`, and
+/// gains `requestId` when the response is sent, in [`HttpResponse::attach_request_id`]. The
+/// one problem body that keeps `about:blank` as its `type` is [`NOT_FOUND_BODY`], for a route
+/// that does not exist, where the status really is all there is to say.
 pub(super) fn problem_response(
     status: &'static str,
     status_code: u16,
-    title: &str,
+    kind: ProblemType,
     detail: &str,
 ) -> HttpResponse {
-    HttpResponse::problem(status, problem_detail_body(status_code, title, detail))
+    HttpResponse::problem(status, problem_detail_body(kind, status_code, detail))
 }
 
-/// Serializes an RFC 7807 Problem Details JSON body.
-pub(super) fn problem_detail_body(status: u16, title: &str, detail: &str) -> Vec<u8> {
+/// Serializes an RFC 9457 Problem Details JSON body.
+pub(super) fn problem_detail_body(kind: ProblemType, status: u16, detail: &str) -> Vec<u8> {
     let mut body = serde_json::to_vec(&json!({
-        "type": "about:blank",
-        "title": title,
+        "type": kind.uri(),
+        "title": kind.title(),
         "status": status,
         "detail": detail,
     }))
@@ -325,22 +481,51 @@ pub(super) fn problem_detail_body(status: u16, title: &str, detail: &str) -> Vec
     body
 }
 
+/// Maps a transform failure onto the status and problem type that name it.
+///
+/// The classes are the ones `@nao1215/truss-wasm` reports as `kind`, so the two adapters
+/// classify a failure the same way; the statuses are unchanged from what each class always got.
 pub(super) fn transform_error_response(error: TransformError) -> HttpResponse {
     match error {
-        TransformError::InvalidInput(reason)
-        | TransformError::InvalidOptions(reason)
-        | TransformError::DecodeFailed(reason) => bad_request_response(&reason),
-        TransformError::UnsupportedInputMediaType(reason) => {
-            unsupported_media_type_response(&reason)
+        TransformError::InvalidOptions(reason) => {
+            problem_response("400 Bad Request", 400, ProblemType::InvalidOptions, &reason)
         }
-        ref error @ TransformError::UnsupportedOutputMediaType(_) => {
-            unsupported_media_type_response(&error.to_string())
+        TransformError::InvalidInput(reason) => {
+            problem_response("400 Bad Request", 400, ProblemType::InvalidInput, &reason)
         }
-        TransformError::EncodeFailed(reason) => {
-            internal_error_response(&format!("failed to encode transformed artifact: {reason}"))
+        TransformError::DecodeFailed(reason) => {
+            problem_response("400 Bad Request", 400, ProblemType::DecodeFailed, &reason)
         }
-        TransformError::CapabilityMissing(reason) => not_implemented_response(&reason),
-        TransformError::LimitExceeded(reason) => payload_too_large_response(&reason),
+        TransformError::UnsupportedInputMediaType(reason) => problem_response(
+            "415 Unsupported Media Type",
+            415,
+            ProblemType::UnsupportedInputMediaType,
+            &reason,
+        ),
+        ref error @ TransformError::UnsupportedOutputMediaType(_) => problem_response(
+            "415 Unsupported Media Type",
+            415,
+            ProblemType::UnsupportedOutputMediaType,
+            &error.to_string(),
+        ),
+        TransformError::EncodeFailed(reason) => problem_response(
+            "500 Internal Server Error",
+            500,
+            ProblemType::EncodeFailed,
+            &format!("failed to encode transformed artifact: {reason}"),
+        ),
+        TransformError::CapabilityMissing(reason) => problem_response(
+            "501 Not Implemented",
+            501,
+            ProblemType::CapabilityMissing,
+            &reason,
+        ),
+        TransformError::LimitExceeded(reason) => problem_response(
+            "413 Payload Too Large",
+            413,
+            ProblemType::LimitExceeded,
+            &reason,
+        ),
     }
 }
 
@@ -368,10 +553,10 @@ mod tests {
 
     #[test]
     fn test_problem_detail_body_contains_required_fields() {
-        let body = problem_detail_body(404, "Not Found", "resource missing");
+        let body = problem_detail_body(ProblemType::NotFound, 404, "resource missing");
         let v: Value = serde_json::from_slice(&body).expect("valid JSON");
 
-        assert_eq!(v["type"], "about:blank");
+        assert_eq!(v["type"], format!("{PROBLEM_TYPES_URL}#not-found"));
         assert_eq!(v["title"], "Not Found");
         assert_eq!(v["status"], 404);
         assert_eq!(v["detail"], "resource missing");
@@ -379,13 +564,17 @@ mod tests {
 
     #[test]
     fn test_problem_detail_body_ends_with_newline() {
-        let body = problem_detail_body(500, "Error", "boom");
+        let body = problem_detail_body(ProblemType::InternalError, 500, "boom");
         assert_eq!(*body.last().unwrap(), b'\n');
     }
 
     #[test]
     fn test_problem_detail_body_special_characters_in_detail() {
-        let body = problem_detail_body(400, "Bad Request", "invalid <script>alert(1)</script>");
+        let body = problem_detail_body(
+            ProblemType::InvalidRequest,
+            400,
+            "invalid <script>alert(1)</script>",
+        );
         let v: Value = serde_json::from_slice(&body).expect("valid JSON");
         assert_eq!(v["detail"], "invalid <script>alert(1)</script>");
     }
@@ -402,7 +591,7 @@ mod tests {
 
         let v = parse_body(&resp);
         assert_eq!(v["status"], 400);
-        assert_eq!(v["title"], "Bad Request");
+        assert_eq!(v["title"], "Invalid request");
         assert_eq!(v["detail"], "missing parameter");
     }
 
@@ -793,41 +982,198 @@ mod tests {
     }
 
     // ---------------------------------------------------------------
-    // RFC 7807: all problem responses use about:blank type
+    // RFC 9457: every helper names its class in `type` and `title`
     // ---------------------------------------------------------------
 
     #[test]
-    fn test_all_problem_responses_use_about_blank_type() {
+    fn every_problem_response_names_its_class() {
         let responses = vec![
-            bad_request_response("x"),
-            not_found_response("x"),
-            internal_error_response("x"),
-            forbidden_response("x"),
-            unsupported_media_type_response("x"),
-            not_acceptable_response("x"),
-            payload_too_large_response("x"),
-            bad_gateway_response("x"),
-            service_unavailable_response("x"),
-            too_many_redirects_response("x"),
-            not_implemented_response("x"),
-            auth_required_response("x"),
-            signed_url_unauthorized_response("x"),
+            (
+                bad_request_response("x"),
+                "invalid-request",
+                "Invalid request",
+                400,
+            ),
+            (
+                auth_required_response("x"),
+                "unauthorized",
+                "Unauthorized",
+                401,
+            ),
+            (
+                signed_url_unauthorized_response("x"),
+                "unauthorized",
+                "Unauthorized",
+                401,
+            ),
+            (forbidden_response("x"), "forbidden", "Forbidden", 403),
+            (not_found_response("x"), "not-found", "Not Found", 404),
+            (
+                not_acceptable_response("x"),
+                "not-acceptable",
+                "Not Acceptable",
+                406,
+            ),
+            (
+                request_timeout_response("x"),
+                "request-timeout",
+                "Request Timeout",
+                408,
+            ),
+            (
+                payload_too_large_response("x"),
+                "payload-too-large",
+                "Payload Too Large",
+                413,
+            ),
+            (
+                unsupported_media_type_response("x"),
+                "unsupported-media-type",
+                "Unsupported Media Type",
+                415,
+            ),
+            (
+                unprocessable_entity_response("x"),
+                "unprocessable-entity",
+                "Unprocessable Entity",
+                422,
+            ),
+            (
+                too_many_requests_response("x"),
+                "too-many-requests",
+                "Too Many Requests",
+                429,
+            ),
+            (
+                internal_error_response("x"),
+                "internal-error",
+                "Internal Server Error",
+                500,
+            ),
+            (
+                not_implemented_response("x"),
+                "not-implemented",
+                "Not Implemented",
+                501,
+            ),
+            (bad_gateway_response("x"), "bad-gateway", "Bad Gateway", 502),
+            (
+                service_unavailable_response("x"),
+                "service-unavailable",
+                "Service Unavailable",
+                503,
+            ),
+            (
+                too_many_redirects_response("x"),
+                "loop-detected",
+                "Loop Detected",
+                508,
+            ),
         ];
 
-        for resp in &responses {
+        for (resp, slug, title, status) in &responses {
             assert_eq!(
                 resp.content_type,
                 Some("application/problem+json"),
-                "response with status '{}' should use problem+json content type",
-                resp.status
+                "{slug}"
             );
             let v = parse_body(resp);
-            assert_eq!(
-                v["type"], "about:blank",
-                "response with status '{}' should use about:blank type",
-                resp.status
-            );
+            assert_eq!(v["type"], format!("{PROBLEM_TYPES_URL}#{slug}"), "{slug}");
+            assert_eq!(v["title"], *title, "{slug}");
+            assert_eq!(v["status"], *status, "{slug}");
+            assert_eq!(v["detail"], "x", "{slug}");
         }
+    }
+
+    /// The transform classes are the ones the Wasm package reports as `kind`, one per
+    /// variant, so the two adapters classify a failure the same way.
+    #[test]
+    fn transform_errors_map_onto_their_own_problem_types() {
+        let cases = vec![
+            (
+                TransformError::InvalidOptions("o".into()),
+                "invalid-options",
+                "400 Bad Request",
+            ),
+            (
+                TransformError::InvalidInput("i".into()),
+                "invalid-input",
+                "400 Bad Request",
+            ),
+            (
+                TransformError::DecodeFailed("d".into()),
+                "decode-failed",
+                "400 Bad Request",
+            ),
+            (
+                TransformError::UnsupportedInputMediaType("u".into()),
+                "unsupported-input-media-type",
+                "415 Unsupported Media Type",
+            ),
+            (
+                TransformError::UnsupportedOutputMediaType(MediaType::Gif),
+                "unsupported-output-media-type",
+                "415 Unsupported Media Type",
+            ),
+            (
+                TransformError::EncodeFailed("e".into()),
+                "encode-failed",
+                "500 Internal Server Error",
+            ),
+            (
+                TransformError::CapabilityMissing("c".into()),
+                "capability-missing",
+                "501 Not Implemented",
+            ),
+            (
+                TransformError::LimitExceeded("l".into()),
+                "limit-exceeded",
+                "413 Payload Too Large",
+            ),
+        ];
+
+        for (error, slug, status) in cases {
+            let resp = transform_error_response(error);
+            assert_eq!(resp.status, status, "{slug}");
+            let v = parse_body(&resp);
+            assert_eq!(v["type"], format!("{PROBLEM_TYPES_URL}#{slug}"), "{slug}");
+            assert_ne!(v["title"], "", "{slug}");
+        }
+    }
+
+    /// A route that does not exist is the one body where the status is all there is.
+    #[test]
+    fn only_the_unknown_route_keeps_about_blank() {
+        let v: Value = serde_json::from_str(NOT_FOUND_BODY).expect("valid JSON");
+        assert_eq!(v["type"], "about:blank");
+    }
+
+    #[test]
+    fn attach_request_id_sets_the_header_and_the_problem_member() {
+        let mut problem = bad_request_response("x");
+        problem.attach_request_id("req-1");
+        assert!(
+            problem
+                .headers
+                .contains(&("X-Request-Id".to_string(), "req-1".to_string()))
+        );
+        let v = parse_body(&problem);
+        assert_eq!(v["requestId"], "req-1");
+        assert_eq!(v["type"], format!("{PROBLEM_TYPES_URL}#invalid-request"));
+        assert!(problem.body.ends_with(b"\n"));
+
+        let mut image = HttpResponse::json("200 OK", b"{}".to_vec());
+        image.attach_request_id("req-2");
+        assert!(
+            image
+                .headers
+                .contains(&("X-Request-Id".to_string(), "req-2".to_string()))
+        );
+        assert_eq!(
+            image.body,
+            b"{}".to_vec(),
+            "only a problem body gains the member"
+        );
     }
 
     // ---------------------------------------------------------------
