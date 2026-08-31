@@ -319,6 +319,7 @@ type WasmTransformOptions = {
   background?: string;
   rotate?: number;
   autoOrient?: boolean;
+  stripMetadata?: boolean;
   keepMetadata?: boolean;
   preserveExif?: boolean;
   crop?: string;
@@ -352,6 +353,11 @@ Notes:
 - Crop width and height must be greater than zero.
 - `blur` and `sharpen` must each be between `0.1` and `100.0`.
 - `grayscale` defaults to `false`, and preserves the alpha channel when enabled.
+- `stripMetadata` defaults to `true` and is the same key the HTTP server and the URL signer
+  take, so an options object built for either works here. `keepMetadata: true` means the
+  same as `stripMetadata: false`.
+- `preserveExif` implies `stripMetadata: false`; an explicit `stripMetadata: true` alongside
+  it is overridden rather than refused, as the server does.
 - `keepMetadata` and `preserveExif` are mutually exclusive.
 - `autoOrient` defaults to `true`.
 - `rotate` is clockwise whole degrees. Negatives turn counter-clockwise and values past a

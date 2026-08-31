@@ -428,3 +428,52 @@ scenarios:
             contains:
               - "requires -o <output>"
               - "truss optimize input.jpg -o output.jpg"
+
+  - name: a target the quality cap cannot reach is reported, not passed off as met
+    steps:
+      # icc-profile.jpg is a 64x64 gradient, which quality 5 cannot hold to 60 dB. The cap
+      # and the target came from the same command line, and the cap wins; the warning names
+      # the target and the score the encode did reach so the caller can tell which to move.
+      - run:
+          command: truss optimize "${fixtures}/icc-profile.jpg" -o capped.jpg --mode lossy --quality 5 --target-quality psnr:60
+      - assert:
+          exit_code: 0
+          stderr:
+            contains:
+              - "warning:"
+              - "could not reach psnr:60"
+              - "quality cap of 5"
+          image:
+            path: capped.jpg
+            format: jpeg
+
+  - name: a target the search does reach is met without a word
+    steps:
+      - run:
+          command: truss optimize "${fixtures}/icc-profile.jpg" -o reached.jpg --mode lossy --quality 90 --target-quality psnr:30
+      - assert:
+          exit_code: 0
+          stderr:
+            not_contains: "warning:"
+          image:
+            path: reached.jpg
+            format: jpeg
+
+  - name: auto keeps a named target even when meeting it costs more than the default encode
+    steps:
+      # The 64x64 gradient resized to 32 wide comes out of an untargeted auto at about 670
+      # bytes and needs about 880 to reach 50 dB. auto used to keep whichever was smaller,
+      # which threw the target away; the untargeted size is the floor this pins above.
+      - run:
+          command: truss convert "${fixtures}/icc-profile.jpg" -o targeted.jpg --width 32 --optimize auto --target-quality psnr:50
+      - assert:
+          exit_code: 0
+          stderr:
+            not_contains: "warning:"
+          image:
+            path: targeted.jpg
+            format: jpeg
+            width: 32
+          file:
+            path: targeted.jpg
+            min_size: 800

@@ -47,9 +47,13 @@ pub struct WasmTransformOptions {
     pub rotate: Option<i32>,
     /// Whether EXIF auto-orientation should run. Defaults to `true`.
     pub auto_orient: Option<bool>,
-    /// Whether all supported metadata should be retained when possible.
+    /// Whether all metadata should be stripped. Defaults to `true`, and is the spelling the
+    /// HTTP server and the URL signer use, so an options object built for either works here.
+    pub strip_metadata: Option<bool>,
+    /// Whether all supported metadata should be retained when possible. `stripMetadata:
+    /// false` says the same thing.
     pub keep_metadata: Option<bool>,
-    /// Whether only EXIF metadata should be retained.
+    /// Whether only EXIF metadata should be retained. Implies `stripMetadata: false`.
     pub preserve_exif: Option<bool>,
     /// Explicit crop region as `x,y,w,h`.
     pub crop: Option<String>,
@@ -202,8 +206,11 @@ fn sniff_browser_artifact(
 }
 
 fn parse_wasm_options(options: WasmTransformOptions) -> Result<TransformOptions, TransformError> {
-    let (strip_metadata, preserve_exif) =
-        crate::core::resolve_metadata_flags(None, options.keep_metadata, options.preserve_exif)?;
+    let (strip_metadata, preserve_exif) = crate::core::resolve_metadata_flags(
+        options.strip_metadata,
+        options.keep_metadata,
+        options.preserve_exif,
+    )?;
 
     let fit = parse_optional_enum(options.fit, "fit")?;
     let position = parse_optional_enum(options.position, "position")?;
@@ -595,6 +602,7 @@ mod tests {
     use super::*;
     use image::codecs::png::PngEncoder;
     use image::{ColorType, ImageEncoder, Rgba, RgbaImage};
+    use rstest::rstest;
     const WASM_DOCS: &str = include_str!("../../docs/wasm.md");
 
     fn png_bytes(width: u32, height: u32) -> Vec<u8> {
@@ -686,6 +694,81 @@ mod tests {
                 "keepMetadata and preserveExif cannot both be true".to_string()
             )
         );
+    }
+
+    /// `stripMetadata` is the spelling the server and the signer use, so an options object
+    /// built for either resolves here to the same policy it resolves to there.
+    #[rstest]
+    #[case::keep_all(Some(false), None, false, false)]
+    #[case::strip_all(Some(true), None, true, false)]
+    #[case::preserve_exif_wins(Some(true), Some(true), false, true)]
+    fn parse_wasm_options_reads_strip_metadata_like_the_server(
+        #[case] strip_metadata: Option<bool>,
+        #[case] preserve_exif: Option<bool>,
+        #[case] expected_strip: bool,
+        #[case] expected_preserve: bool,
+    ) {
+        let options = parse_wasm_options(WasmTransformOptions {
+            strip_metadata,
+            preserve_exif,
+            ..WasmTransformOptions::default()
+        })
+        .expect("stripMetadata should resolve");
+
+        assert_eq!(options.strip_metadata, expected_strip);
+        assert_eq!(options.preserve_exif, expected_preserve);
+    }
+
+    /// The key deserializes rather than being refused as unknown.
+    #[test]
+    fn wasm_options_json_accepts_strip_metadata() {
+        let options: WasmTransformOptions =
+            serde_json::from_str(r#"{"format":"jpeg","stripMetadata":false}"#)
+                .expect("stripMetadata is a known key");
+
+        assert_eq!(options.strip_metadata, Some(false));
+    }
+
+    /// The transform vocabulary the HTTP server and the URL signer accept, key for key. The
+    /// options struct refuses unknown keys, so an options object built for the server that
+    /// this cannot deserialize is a key the browser spells differently, which is the drift
+    /// this pins.
+    #[test]
+    fn wasm_options_accept_every_key_the_server_accepts() {
+        let server_vocabulary = [
+            ("width", "1"),
+            ("height", "1"),
+            ("fit", "\"cover\""),
+            ("position", "\"top-left\""),
+            ("format", "\"webp\""),
+            ("quality", "80"),
+            ("optimize", "\"lossy\""),
+            ("targetQuality", "\"ssim:0.98\""),
+            ("background", "\"ffffff\""),
+            ("rotate", "90"),
+            ("autoOrient", "true"),
+            ("stripMetadata", "false"),
+            ("preserveExif", "false"),
+            ("crop", "\"0,0,1,1\""),
+            ("blur", "1.5"),
+            ("sharpen", "1.5"),
+            ("grayscale", "true"),
+            ("withoutEnlargement", "true"),
+        ];
+        let json = format!(
+            "{{{}}}",
+            server_vocabulary
+                .iter()
+                .map(|(key, value)| format!("\"{key}\":{value}"))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+
+        let options: WasmTransformOptions =
+            serde_json::from_str(&json).expect("every server key is a Wasm key");
+
+        assert_eq!(options.strip_metadata, Some(false));
+        assert_eq!(options.without_enlargement, Some(true));
     }
 
     #[test]

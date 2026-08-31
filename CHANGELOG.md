@@ -1,5 +1,18 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- A lossy encode that cannot reach the requested `targetQuality` now says so ([#370](https://github.com/nao1215/truss/issues/370)). The search binary-searches the encode quality for the lowest one whose score meets the target, and when no quality in its range does, it encoded at the top of the range and returned that as if it were an answer, at exit 0 and with nothing on stderr. The range is capped by `quality` when one is given, so `--quality 5 --target-quality psnr:40` returned a 24 dB file with the target dropped without a word, and a target no encoder reaches for a picture whose pixels changed did the same at quality 100. The shortfall is now a `TransformWarning::TargetQualityNotReached` carrying the target, the score the encode did reach, and the quality it reached it at, which the CLI prints as `warning:` on stderr, the server writes to its log, and the Wasm package returns in `warnings`, so the reader can tell a cap that is too low from a target that is too high. It is raised only for a target the caller named, not for the one `auto` aims at on its own, and not when the input's own bytes are handed back, since those score perfectly against themselves. The bytes returned are what they were before.
+
+- `optimize: auto` no longer drops a named `targetQuality` when meeting it costs more bytes than the default encode ([#373](https://github.com/nao1215/truss/issues/373)). `auto` encodes a baseline at the default quality, runs the targeted search, and kept whichever was smaller; the baseline never looked at the target, so whenever the target needed a higher quality than the default the baseline won and `--optimize auto --target-quality psnr:45` returned the same bytes as no target at all, at exit 0 and with no warning, which the new shortfall warning could not catch because the search had succeeded and its result was then discarded. With a target the caller named, `auto` now returns the targeted encode: when the baseline would have met the target the search lands at or below its quality and is no larger, so the comparison only ever changed the answer when the baseline missed the target. The default target `auto` picks on its own is still weighed against the baseline as before, and the input's own bytes still pass through when they are smaller.
+- `@nao1215/truss-wasm` accepts `stripMetadata`, the metadata key the HTTP server and the URL signer use ([#371](https://github.com/nao1215/truss/issues/371)). The Wasm options were the one place in the vocabulary that spelled the policy differently, as `keepMetadata`, and because unknown keys are refused, a transform options object built once for the server and reused for an in-browser preview failed on the preview with `unknown field stripMetadata`. The key now goes into the same `resolve_metadata_flags` every adapter uses, with the same precedence the server applies: `preserveExif` implies `stripMetadata: false` and overrides an explicit `true`, and `keepMetadata` together with `preserveExif` is still refused. `keepMetadata` remains and means `stripMetadata: false`, so no existing caller changes. A unit test now feeds every key the server accepts to the Wasm options, so the next spelling that drifts fails there.
+
+### Breaking Changes
+
+- `TransformWarning` no longer implements `Eq`. The new `TargetQualityNotReached` variant carries a `TargetQuality`, whose threshold is an `f32`, and `f32` has no total equality. `PartialEq` remains, so `assert_eq!` and `==` on warnings work as before; only a use that required `Eq`, such as a `HashSet<TransformWarning>`, needs to change.
+
 ## v0.17.0
 
 ### Fixed

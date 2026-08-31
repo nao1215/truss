@@ -271,12 +271,16 @@ pub fn transform_raster(request: TransformRequest) -> Result<TransformResult, Tr
         normalized.options.format,
     );
 
+    // Kept apart from `warnings` until the passthrough below has decided: a warning about
+    // the encode is void when the encode is not what gets returned.
+    let mut encode_warnings = Vec::new();
     let encoded = encode_output(
         &image,
         normalized.options.format,
         &normalized.options,
         retained_metadata.as_ref(),
         EncodeDeadline { start, deadline },
+        &mut encode_warnings,
     )?;
     check_deadline_if_set!(start, deadline, "encode");
 
@@ -298,7 +302,13 @@ pub fn transform_raster(request: TransformRequest) -> Result<TransformResult, Tr
     // `auto` and `lossless` both mean "no bigger than what you were handed". The input's
     // own bytes are a candidate whenever no pixel transform was asked for, and for an image
     // the encoder compresses worse than whatever produced the input they are the smallest.
-    let bytes = smaller_passthrough(&normalized, &bytes).unwrap_or(bytes);
+    let bytes = match smaller_passthrough(&normalized, &bytes) {
+        Some(input) => input,
+        None => {
+            warnings.append(&mut encode_warnings);
+            bytes
+        }
+    };
 
     let (width, height) = image.dimensions();
     // Read the tag back out of the encoded bytes rather than predicting it: with
@@ -1792,20 +1802,31 @@ fn encode_output(
     options: &NormalizedTransformOptions,
     retained_metadata: Option<&RetainedMetadata>,
     deadline: EncodeDeadline,
+    warnings: &mut Vec<TransformWarning>,
 ) -> Result<EncodedOutput, TransformError> {
     match options.optimize {
         OptimizeMode::None => {
             encode_baseline_output(image, media_type, options.quality, retained_metadata)
         }
-        OptimizeMode::Auto => {
-            encode_auto_output(image, media_type, options, retained_metadata, deadline)
-        }
+        OptimizeMode::Auto => encode_auto_output(
+            image,
+            media_type,
+            options,
+            retained_metadata,
+            deadline,
+            warnings,
+        ),
         OptimizeMode::Lossless => {
             encode_lossless_optimized_output(image, media_type, retained_metadata, deadline)
         }
-        OptimizeMode::Lossy => {
-            encode_lossy_optimized_output(image, media_type, options, retained_metadata, deadline)
-        }
+        OptimizeMode::Lossy => encode_lossy_optimized_output(
+            image,
+            media_type,
+            options,
+            retained_metadata,
+            deadline,
+            warnings,
+        ),
     }
 }
 
@@ -1815,10 +1836,13 @@ fn encode_auto_output(
     options: &NormalizedTransformOptions,
     retained_metadata: Option<&RetainedMetadata>,
     deadline: EncodeDeadline,
+    warnings: &mut Vec<TransformWarning>,
 ) -> Result<EncodedOutput, TransformError> {
     let baseline = encode_baseline_output(image, media_type, options.quality, retained_metadata)?;
     deadline.check("encode auto baseline")?;
 
+    // The attempt's warnings are about the attempt, so they are kept only if it is chosen.
+    let mut attempt_warnings = Vec::new();
     let optimized = match media_type {
         MediaType::Png => encode_png_optimized(image, retained_metadata, deadline)?,
         MediaType::Jpeg | MediaType::Webp | MediaType::Avif => {
@@ -1828,6 +1852,7 @@ fn encode_auto_output(
                 options,
                 retained_metadata,
                 deadline,
+                &mut attempt_warnings,
             ) {
                 Ok(output) => output,
                 Err(TransformError::CapabilityMissing(_)) if media_type == MediaType::Webp => {
@@ -1839,7 +1864,13 @@ fn encode_auto_output(
         _ => return Ok(baseline),
     };
 
-    if optimized.bytes.len() < baseline.bytes.len() {
+    // A target the caller named is a requirement, and the baseline never looked at it, so
+    // the size comparison is only for the default target `auto` picks on its own. When the
+    // baseline would have met the named target the search lands at or below its quality
+    // and is no larger, so the comparison only ever changed the answer when the baseline
+    // missed the target, which is exactly when it must not win.
+    if options.target_quality.is_some() || optimized.bytes.len() < baseline.bytes.len() {
+        warnings.append(&mut attempt_warnings);
         Ok(optimized)
     } else {
         Ok(baseline)
@@ -1878,6 +1909,7 @@ fn encode_lossy_optimized_output(
     options: &NormalizedTransformOptions,
     retained_metadata: Option<&RetainedMetadata>,
     deadline: EncodeDeadline,
+    warnings: &mut Vec<TransformWarning>,
 ) -> Result<EncodedOutput, TransformError> {
     let target = options.target_quality.or_else(|| {
         if options.quality.is_none() {
@@ -1889,14 +1921,22 @@ fn encode_lossy_optimized_output(
 
     let max_quality = options.quality.unwrap_or(100);
     if let Some(target) = target {
-        encode_lossy_with_target(
+        // A shortfall is worth a word only for a target the caller named: the default
+        // `auto` aims at is a preference, not a promise the caller was given.
+        let mut shortfall = Vec::new();
+        let encoded = encode_lossy_with_target(
             image,
             media_type,
             target,
             max_quality,
             retained_metadata,
             deadline,
-        )
+            &mut shortfall,
+        )?;
+        if options.target_quality.is_some() {
+            warnings.append(&mut shortfall);
+        }
+        Ok(encoded)
     } else {
         let quality = options
             .quality
@@ -1928,6 +1968,7 @@ fn encode_lossy_with_target(
     max_quality: u8,
     retained_metadata: Option<&RetainedMetadata>,
     deadline: EncodeDeadline,
+    warnings: &mut Vec<TransformWarning>,
 ) -> Result<EncodedOutput, TransformError> {
     let mut low = 1u8;
     let mut high = max_quality.max(1);
@@ -1954,17 +1995,29 @@ fn encode_lossy_with_target(
     }
 
     if let Some(best) = best {
-        Ok(best)
-    } else {
-        encode_lossy_with_quality(
-            image,
-            media_type,
-            max_quality.max(1),
-            retained_metadata,
-            true,
-            deadline,
-        )
+        return Ok(best);
     }
+
+    // No quality the search was allowed reaches the target. The highest one is the closest
+    // there is, and returning it silently would pass a shortfall off as an answer, so the
+    // score it did reach is reported alongside it.
+    let quality = max_quality.max(1);
+    let fallback = encode_lossy_with_quality(
+        image,
+        media_type,
+        quality,
+        retained_metadata,
+        true,
+        deadline,
+    )?;
+    let achieved =
+        measure_quality_metric(image, &fallback.bytes, media_type, target.metric, deadline)?;
+    warnings.push(TransformWarning::TargetQualityNotReached {
+        target,
+        achieved,
+        quality,
+    });
+    Ok(fallback)
 }
 
 fn measure_quality_metric(
@@ -6094,6 +6147,166 @@ mod tests {
         assert!(
             result.artifact.bytes.len() > input_length,
             "a named quality must produce the encoder's output, not the input"
+        );
+    }
+
+    /// A picture no lossy encoder scores well on: every pixel is an independent draw from
+    /// a fixed-seed generator, so PSNR stays low at any quality and a target above what the
+    /// cap allows is a target that cannot be met.
+    fn noisy_png_artifact(size: u32) -> Artifact {
+        let mut state: u64 = 0x2545_F491_4F6C_DD1D;
+        let mut next = move || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 33) as u8
+        };
+        let image = RgbaImage::from_fn(size, size, |_, _| Rgba([next(), next(), next(), 255]));
+        let mut bytes = Vec::new();
+        PngEncoder::new(&mut bytes)
+            .write_image(&image, size, size, ColorType::Rgba8.into())
+            .expect("encode png");
+        sniff_artifact(RawArtifact::new(bytes, None)).expect("sniff noisy png")
+    }
+
+    fn target_shortfall(warnings: &[TransformWarning]) -> Option<(f32, u8)> {
+        warnings.iter().find_map(|warning| match warning {
+            TransformWarning::TargetQualityNotReached {
+                achieved, quality, ..
+            } => Some((*achieved, *quality)),
+            _ => None,
+        })
+    }
+
+    /// A quality cap that stops the search short of the target is a shortfall the caller
+    /// asked to be told about, since the cap and the target came from the same command.
+    #[test]
+    fn lossy_optimization_warns_when_the_quality_cap_stops_short_of_the_target() {
+        let result = transform_raster(TransformRequest::new(
+            noisy_png_artifact(64),
+            TransformOptions {
+                format: Some(MediaType::Jpeg),
+                optimize: OptimizeMode::Lossy,
+                quality: Some(5),
+                target_quality: Some("psnr:60".parse().expect("target")),
+                ..TransformOptions::default()
+            },
+        ))
+        .expect("transform");
+
+        let (achieved, quality) = target_shortfall(&result.warnings).expect("a shortfall warning");
+        assert!(
+            achieved < 60.0,
+            "achieved {achieved} should be below the target"
+        );
+        assert_eq!(quality, 5, "the search was capped at the named quality");
+        assert_eq!(result.warnings.len(), 1, "{:?}", result.warnings);
+    }
+
+    /// With no cap the search may go to 100, and a target nothing reaches is reported at
+    /// that quality. The resize keeps the input from being handed back as the answer.
+    #[test]
+    fn lossy_optimization_warns_when_no_quality_reaches_the_target() {
+        let result = transform_raster(TransformRequest::new(
+            noisy_png_artifact(64),
+            TransformOptions {
+                format: Some(MediaType::Jpeg),
+                optimize: OptimizeMode::Lossy,
+                width: Some(32),
+                target_quality: Some("psnr:99".parse().expect("target")),
+                ..TransformOptions::default()
+            },
+        ))
+        .expect("transform");
+
+        let (achieved, quality) = target_shortfall(&result.warnings).expect("a shortfall warning");
+        assert!(
+            achieved < 99.0,
+            "achieved {achieved} should be below the target"
+        );
+        assert_eq!(quality, 100);
+    }
+
+    /// `auto` keeps a named target even when meeting it costs more than the default encode:
+    /// the baseline never looked at the target, so it may only win when no target was named.
+    #[test]
+    fn auto_optimization_keeps_a_named_target_over_a_smaller_baseline() {
+        let encode = |optimize: OptimizeMode, target: Option<&str>| {
+            transform_raster(TransformRequest::new(
+                noisy_png_artifact(64),
+                TransformOptions {
+                    format: Some(MediaType::Jpeg),
+                    optimize,
+                    width: Some(32),
+                    target_quality: target.map(|value| value.parse().expect("target")),
+                    ..TransformOptions::default()
+                },
+            ))
+            .expect("transform")
+        };
+
+        let untargeted = encode(OptimizeMode::Auto, None);
+        let lossy = encode(OptimizeMode::Lossy, Some("psnr:45"));
+        let auto = encode(OptimizeMode::Auto, Some("psnr:45"));
+
+        assert!(
+            lossy.artifact.bytes.len() > untargeted.artifact.bytes.len(),
+            "the target must cost more than the default encode for this to say anything"
+        );
+        assert_eq!(
+            auto.artifact.bytes.len(),
+            lossy.artifact.bytes.len(),
+            "auto with a named target should return the targeted encode"
+        );
+        assert!(
+            target_shortfall(&auto.warnings).is_none(),
+            "{:?}",
+            auto.warnings
+        );
+    }
+
+    /// A target the search does reach, the default target `auto` picks on its own, and a
+    /// request the input passes through all say nothing: there is no shortfall in the
+    /// first, no promise in the second, and a perfect score in the third.
+    #[rstest]
+    #[case::reached(OptimizeMode::Lossy, Some(5), Some("psnr:10"), None)]
+    #[case::default_target(OptimizeMode::Auto, None, None, None)]
+    #[case::passthrough(OptimizeMode::Lossy, None, Some("psnr:99"), Some(MediaType::Jpeg))]
+    fn lossy_optimization_does_not_warn_without_a_shortfall_of_its_own(
+        #[case] optimize: OptimizeMode,
+        #[case] quality: Option<u8>,
+        #[case] target: Option<&str>,
+        #[case] passthrough_input: Option<MediaType>,
+    ) {
+        let artifact = match passthrough_input {
+            Some(MediaType::Jpeg) => flat_jpeg_artifact(64, 64),
+            _ => noisy_png_artifact(64),
+        };
+        let input_length = artifact.bytes.len();
+
+        let result = transform_raster(TransformRequest::new(
+            artifact,
+            TransformOptions {
+                format: Some(MediaType::Jpeg),
+                optimize,
+                quality,
+                target_quality: target.map(|value| value.parse().expect("target")),
+                ..TransformOptions::default()
+            },
+        ))
+        .expect("transform");
+
+        if passthrough_input.is_some() {
+            assert_eq!(
+                result.artifact.bytes.len(),
+                input_length,
+                "the input should have been handed back"
+            );
+        }
+        assert!(
+            target_shortfall(&result.warnings).is_none(),
+            "unexpected shortfall warning: {:?}",
+            result.warnings
         );
     }
 

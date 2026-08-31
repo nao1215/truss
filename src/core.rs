@@ -669,6 +669,11 @@ impl FromStr for QualityMetric {
 }
 
 /// A perceptual quality target used when binary-searching a lossy encode quality.
+///
+/// The search runs over `1..=quality` when a `quality` is given and `1..=100` otherwise,
+/// and returns the lowest quality whose score meets `value`. When none does, the highest
+/// quality in the range is returned together with a
+/// [`TransformWarning::TargetQualityNotReached`] naming the score it reached.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TargetQuality {
     /// The requested quality metric.
@@ -1558,7 +1563,7 @@ impl fmt::Display for MetadataKind {
 ///     "XMP metadata was present in the input but could not be preserved by the output encoder"
 /// );
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum TransformWarning {
     /// Metadata of the given kind was present in the input but could not be preserved
@@ -1569,6 +1574,18 @@ pub enum TransformWarning {
     OrientationDropped {
         /// The EXIF orientation value the input carried.
         orientation: u16,
+    },
+    /// The lossy encode could not reach the requested quality target, so the output scores
+    /// below it. Raised only for a target the caller named, never for the one `auto` picks
+    /// on its own, and never when the input's own bytes were handed back.
+    TargetQualityNotReached {
+        /// The target that was asked for.
+        target: TargetQuality,
+        /// The best score the search reached.
+        achieved: f32,
+        /// The quality the best score was reached at: the `quality` cap when one was given,
+        /// otherwise 100.
+        quality: u8,
     },
 }
 
@@ -1583,6 +1600,24 @@ impl fmt::Display for TransformWarning {
                 f,
                 "the input carries EXIF orientation {orientation}; with autoOrient off and the metadata stripped the output records it neither in its pixels nor in its metadata, so it displays rotated. Keep the metadata to preserve the tag, or leave autoOrient on to apply it to the pixels"
             ),
+            Self::TargetQualityNotReached {
+                target,
+                achieved,
+                quality,
+            } => {
+                let metric = target.metric.as_name();
+                if *quality < 100 {
+                    write!(
+                        f,
+                        "the lossy encode could not reach {target} within the quality cap of {quality}: the best it reached was {metric} {achieved:.3}. Raise the cap or lower the target"
+                    )
+                } else {
+                    write!(
+                        f,
+                        "the lossy encode could not reach {target} even at quality 100: the best it reached was {metric} {achieved:.3}. Lower the target"
+                    )
+                }
+            }
         }
     }
 }
