@@ -282,10 +282,12 @@ pub fn transform_raster(request: TransformRequest) -> Result<TransformResult, Tr
 /// rotate, crop, resize, blur, sharpen, grayscale, watermark.
 ///
 /// The order is the contract, not the order the caller wrote the options in. Each stage
-/// works on the one before it, and each checks the deadline after it, so a single slow stage
-/// cannot run past the budget unnoticed. The output pixel limit is checked before the resize
-/// rather than after, from the dimensions alone, so an outsized request is refused without
-/// allocating the buffer it asked for.
+/// works on the one before it, and each checks the deadline after it, so a pipeline that has
+/// spent its budget stops at the next boundary rather than carrying on. A stage already under
+/// way is not interrupted, so the transform returns after the deadline by however long that
+/// stage takes. The output pixel limit is checked before the resize rather than after, from
+/// the dimensions alone, so an outsized request is refused without allocating the buffer it
+/// asked for.
 fn apply_pixel_stages(
     mut image: DynamicImage,
     normalized: &NormalizedTransformRequest,
@@ -4885,6 +4887,25 @@ mod tests {
 
         assert!(retained.is_none());
         assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn the_avif_feature_turns_on_the_encoder_thread_pool() {
+        // `image`'s AVIF encoder reaches rav1e through `maybe-rayon`, which is a set of
+        // no-op shims until `ravif/threading` is on, and `image/rayon` is what turns that
+        // on. Without it the encoder runs on one core: a 4000x3000 photo took 112 seconds
+        // rather than 10, for byte-identical output, which is long enough to run past the
+        // server's transform deadline and hold a worker while it does. Nothing in the
+        // encode path can assert this at run time, so the feature list is what is checked.
+        let manifest = include_str!("../../Cargo.toml");
+        let avif_feature = manifest
+            .lines()
+            .find(|line| line.starts_with("avif = "))
+            .expect("the manifest declares an avif feature");
+        assert!(
+            avif_feature.contains("\"image/rayon\""),
+            "the avif feature must keep image/rayon: {avif_feature}"
+        );
     }
 
     #[test]
