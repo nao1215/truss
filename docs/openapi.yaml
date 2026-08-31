@@ -1021,7 +1021,7 @@ components:
       required: false
       description: |
         Apply EXIF orientation when the input provides it, then reset the orientation tag.
-        Most useful for JPEG camera images.
+        Read from JPEG, PNG, WebP, and TIFF, which are the containers that can carry it.
       schema:
         type: boolean
         default: true
@@ -1333,7 +1333,7 @@ components:
         autoOrient:
           type: boolean
           default: true
-          description: Apply EXIF orientation when present.
+          description: Apply EXIF orientation when present, in JPEG, PNG, WebP, or TIFF.
         stripMetadata:
           type: boolean
           default: true

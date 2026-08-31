@@ -126,20 +126,36 @@ pub fn transform_svg(request: TransformRequest) -> Result<TransformResult, Trans
     let tree = resvg::usvg::Tree::from_str(&sanitized, &resvg::usvg::Options::default())
         .map_err(|e| TransformError::DecodeFailed(format!("SVG parse error: {e}")))?;
 
+    // The pipeline order is rotate then resize, so the size the fit mode is asked about is
+    // the size of the rotated drawing, not of the drawing as it was written. Asking about
+    // the unrotated one and turning the finished canvas afterwards returns the rotated
+    // bounding box of the requested box, which is not the size the caller named.
+    let intrinsic = intrinsic_render_size(&tree);
+    let rotated_intrinsic = crate::codecs::raster::rotated_bounding_box(
+        intrinsic.0,
+        intrinsic.1,
+        normalized.options.rotate.as_degrees(),
+    );
+
     // The drawing is rasterized at the size the fit mode scales the content to, not at the
     // requested box, so the scale stays uniform on both axes and the padding or cropping the
     // mode calls for is done afterwards by the same helpers the raster codec uses. Drawing
     // straight into the box would be `fill` whatever was asked for.
-    let intrinsic = intrinsic_render_size(&tree);
-    let render = crate::codecs::raster::resize_content_size(
-        intrinsic,
+    let rotated_render = crate::codecs::raster::resize_content_size(
+        rotated_intrinsic,
         normalized.options.width,
         normalized.options.height,
         normalized.options.fit,
         normalized.options.without_enlargement,
     );
-    let canvas = crate::codecs::raster::resolved_output_dimensions(
+    let render = pre_rotation_render_size(
+        rotated_render,
         intrinsic,
+        rotated_intrinsic,
+        normalized.options.rotate.as_degrees(),
+    );
+    let canvas = crate::codecs::raster::resolved_output_dimensions(
+        rotated_intrinsic,
         normalized.options.width,
         normalized.options.height,
         normalized.options.fit,
@@ -164,6 +180,22 @@ pub fn transform_svg(request: TransformRequest) -> Result<TransformResult, Trans
         crate::codecs::raster::check_deadline(start.elapsed(), limit, "rasterize")?;
     }
 
+    // Rotation comes before the resize, which is the order the raster pipeline runs in and
+    // the order `docs/pipeline.md` states. The raster codec owns the arbitrary-angle path,
+    // so a rasterized SVG rotates through exactly the same code, the same background rule,
+    // and the same pixel-limit check on the canvas the turn needs.
+    let rgba_image = if normalized.options.rotate.is_identity() {
+        rgba_image
+    } else {
+        crate::codecs::raster::apply_rotation(
+            image::DynamicImage::ImageRgba8(rgba_image),
+            normalized.options.rotate,
+            normalized.options.background,
+            normalized.options.format,
+        )?
+        .into_rgba8()
+    };
+
     // The buffer is already the content size, so every resize inside this call is a no-op and
     // what it contributes is the padding for `contain` and the crop for `cover`, with the
     // requested anchor and background.
@@ -178,20 +210,6 @@ pub fn transform_svg(request: TransformRequest) -> Result<TransformResult, Trans
         normalized.options.without_enlargement,
     )
     .into_rgba8();
-
-    // Apply rotation if requested. The raster codec owns the arbitrary-angle path, so a
-    // rasterized SVG rotates through exactly the same code and the same background rule.
-    let rgba_image = if normalized.options.rotate.is_identity() {
-        rgba_image
-    } else {
-        crate::codecs::raster::apply_rotation(
-            image::DynamicImage::ImageRgba8(rgba_image),
-            normalized.options.rotate,
-            normalized.options.background,
-            normalized.options.format,
-        )?
-        .into_rgba8()
-    };
 
     // Desaturate after rotation so the operation order matches the raster pipeline.
     let rgba_image = if normalized.options.grayscale {
@@ -881,6 +899,37 @@ fn is_dangerous_css_url(value: &str) -> bool {
 /// This is the equivalent of a raster source's stored dimensions: the fit mode, the
 /// enlargement policy, and the requested box are applied to it by the shared resize
 /// helpers, so a vector source and a raster source of the same size answer alike.
+/// The size to rasterize the drawing at so that rotating the result lands on `target`.
+///
+/// `target` is the size the fit mode scales the rotated drawing to, so this maps it back
+/// through the rotation. A quarter turn is exact: it either leaves the axes alone or swaps
+/// them. Any other angle grows the canvas to a bounding box that no size maps onto exactly,
+/// so the drawing is scaled uniformly by the larger of the two ratios, which is never
+/// coarser than the output needs; `apply_resize` corrects the remaining pixel afterwards.
+fn pre_rotation_render_size(
+    target: (u32, u32),
+    intrinsic: (u32, u32),
+    rotated: (u32, u32),
+    degrees: u16,
+) -> (u32, u32) {
+    match degrees {
+        0 | 180 => target,
+        90 | 270 => (target.1, target.0),
+        _ => {
+            let scale = f64::max(
+                f64::from(target.0) / f64::from(rotated.0.max(1)),
+                f64::from(target.1) / f64::from(rotated.1.max(1)),
+            );
+            let scaled = |value: u32| {
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                let scaled = (f64::from(value) * scale).round() as u32;
+                scaled.max(1)
+            };
+            (scaled(intrinsic.0), scaled(intrinsic.1))
+        }
+    }
+}
+
 fn intrinsic_render_size(tree: &resvg::usvg::Tree) -> (u32, u32) {
     let size = tree.size();
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
@@ -1053,6 +1102,12 @@ mod tests {
 
     fn svg_with_data_script() -> Vec<u8> {
         b"<svg xmlns=\"http://www.w3.org/2000/svg\"><a href=\"data:text/html,<script>alert(1)</script>\">click</a></svg>".to_vec()
+    }
+
+    /// A 100x100 drawing, so a rotation that transposes the axes leaves the intrinsic size
+    /// alone and only the requested box can explain the output size.
+    fn square_svg() -> Vec<u8> {
+        b"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\"><rect width=\"100\" height=\"100\" fill=\"red\"/></svg>".to_vec()
     }
 
     fn simple_svg() -> Vec<u8> {
@@ -1669,6 +1724,62 @@ mod tests {
             result.artifact.metadata.height,
             Some(20),
             "height should be swapped after 90 degree rotation"
+        );
+    }
+
+    /// The same picture as a PNG of the drawing's own size, so the two codecs can be asked
+    /// the same question. Whatever the fit modes mean, they have to mean it in both.
+    fn square_png() -> Artifact {
+        let input = sniff_artifact(RawArtifact::new(square_svg(), None)).unwrap();
+        let rasterized = transform_svg(TransformRequest::new(
+            input,
+            TransformOptions {
+                format: Some(MediaType::Png),
+                ..TransformOptions::default()
+            },
+        ))
+        .expect("rasterize the reference drawing");
+        sniff_artifact(RawArtifact::new(rasterized.artifact.bytes, None)).expect("sniff png")
+    }
+
+    #[rstest]
+    #[case(Fit::Contain, 90)]
+    #[case(Fit::Cover, 90)]
+    #[case(Fit::Fill, 90)]
+    #[case(Fit::Inside, 90)]
+    #[case(Fit::Contain, 45)]
+    #[case(Fit::Inside, 270)]
+    fn transform_svg_rotates_before_it_resizes(#[case] fit: Fit, #[case] degrees: i32) {
+        // The documented order is rotate then resize, so the turn happens first and the
+        // resize fits the turned drawing into the box. Turning the finished canvas instead
+        // returns the rotated bounding box of the box, which is a different size from the
+        // one the caller named, and which no raster source would have returned.
+        let options = TransformOptions {
+            format: Some(MediaType::Png),
+            rotate: Rotation::from_degrees(degrees),
+            width: Some(200),
+            height: Some(100),
+            fit: Some(fit),
+            ..TransformOptions::default()
+        };
+
+        let input = sniff_artifact(RawArtifact::new(square_svg(), None)).unwrap();
+        let from_svg = transform_svg(TransformRequest::new(input, options.clone()))
+            .expect("SVG to PNG with rotate and a box should succeed");
+        let from_png =
+            crate::codecs::raster::transform_raster(TransformRequest::new(square_png(), options))
+                .expect("PNG to PNG with rotate and a box should succeed");
+
+        assert_eq!(
+            (
+                from_svg.artifact.metadata.width,
+                from_svg.artifact.metadata.height
+            ),
+            (
+                from_png.artifact.metadata.width,
+                from_png.artifact.metadata.height
+            ),
+            "{fit:?} at {degrees} degrees must answer the same for both codecs"
         );
     }
 

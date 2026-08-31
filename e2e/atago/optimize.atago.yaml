@@ -377,6 +377,44 @@ scenarios:
             width: 16
             height: 16
 
+  - name: no mode returns more bytes than it was given
+    steps:
+      # "optimize" is a promise about size. flat.jpg was written by an encoder with
+      # optimized Huffman tables, which is what a file from a design tool or a phone looks
+      # like, and re-encoding it costs more than it saves — so every mode has to notice
+      # that the input is already the smallest answer it has.
+      - run:
+          command: truss optimize "${fixtures}/flat.jpg" -o auto.jpg --mode auto
+      - assert:
+          exit_code: 0
+          file:
+            path: auto.jpg
+            max_size: 1653
+      - run:
+          command: truss optimize "${fixtures}/flat.jpg" -o lossless.jpg --mode lossless
+      - assert:
+          exit_code: 0
+          file:
+            path: lossless.jpg
+            max_size: 1653
+      - run:
+          command: truss optimize "${fixtures}/flat.jpg" -o lossy.jpg --mode lossy
+      - assert:
+          exit_code: 0
+          file:
+            path: lossy.jpg
+            max_size: 1653
+
+  - name: naming a quality asks for that encode, so lossy re-encodes
+    steps:
+      - run:
+          command: truss optimize "${fixtures}/flat.jpg" -o forced.jpg --mode lossy --quality 98
+      - assert:
+          exit_code: 0
+          file:
+            path: forced.jpg
+            min_size: 1654
+
   - name: optimize without an output says which flag is missing
     steps:
       - fixture:

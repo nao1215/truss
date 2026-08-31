@@ -184,8 +184,10 @@ scenarios:
               - "1000px margin"
               - "64x64 output"
 
-  - name: a watermark file that is not there is an I/O error
+  - name: a watermark file that is not there is an I/O error naming the file
     steps:
+      # Two paths go in on one command line, so an error that says only "watermark file"
+      # leaves the caller guessing which of them was the missing one.
       - fixture:
           file: in.png
           from: testdata/sample.png
@@ -194,7 +196,7 @@ scenarios:
       - assert:
           exit_code: 2
           stderr:
-            contains: "failed to read watermark file"
+            contains: "failed to read watermark absent.png"
 
   - name: a vector watermark is refused because there is nothing to composite
     steps:

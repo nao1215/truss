@@ -2312,7 +2312,7 @@ fn sniff_tiff(bytes: &[u8]) -> Result<ArtifactMetadata, TransformError> {
         frame_count: 1,
         duration: None,
         has_alpha: Some(has_alpha),
-        orientation: None,
+        orientation: exif_orientation(MediaType::Tiff, bytes),
     })
 }
 
@@ -2344,21 +2344,148 @@ fn sniff_png(bytes: &[u8]) -> Result<ArtifactMetadata, TransformError> {
         frame_count: 1,
         duration: None,
         has_alpha,
-        orientation: None,
+        orientation: exif_orientation(MediaType::Png, bytes),
     })
 }
 
-/// Reads the EXIF Orientation tag out of a JPEG, when it has one.
+/// Reads the EXIF Orientation tag out of any container that can carry one.
 ///
-/// The transform pipeline reads the tag through this same function, so what `inspect`
-/// reports and what `convert` applies cannot drift apart. A file with no EXIF block, no
-/// Orientation field, or an unreadable one reports `None`, which means no transform.
+/// The tag says how the stored pixels are meant to be displayed, so a reader that honours
+/// it in one container and not the next makes the container a photo happens to arrive in
+/// decide whether the picture comes out upright. Browsers honour it in JPEG, PNG, WebP, and
+/// TIFF alike, so truss reads all four through here, and the sniffers and the transform
+/// pipeline both go through this function so what `inspect` reports and what `convert`
+/// applies cannot drift.
 ///
-/// The APP1 segment is located by walking the marker headers, which is what keeps a JPEG
-/// without EXIF — the common case for `sniff_artifact` — from paying for a full container
-/// scan on every call.
-pub(crate) fn jpeg_exif_orientation(bytes: &[u8]) -> Option<u16> {
-    exif_orientation_from_payload(jpeg_exif_payload(bytes)?)
+/// A file with no EXIF block, no Orientation field, or an unreadable one reports `None`,
+/// which means no transform. Each container is located by walking its headers rather than
+/// by decoding it, which is what keeps the common file — the one carrying no metadata at
+/// all — from paying for a container scan on every `sniff_artifact` call.
+///
+/// BMP and GIF have nowhere to put the tag. AVIF can carry one, but its container is parsed
+/// by the decoder rather than here, and reading it is not part of this function yet.
+pub(crate) fn exif_orientation(media_type: MediaType, bytes: &[u8]) -> Option<u16> {
+    let payload = match media_type {
+        MediaType::Jpeg => jpeg_exif_payload(bytes)?,
+        MediaType::Png => png_exif_payload(bytes)?,
+        MediaType::Webp => webp_exif_payload(bytes)?,
+        // A TIFF file is an Exif block from byte zero, so it needs no locating.
+        MediaType::Tiff => return tiff_orientation(bytes),
+        MediaType::Avif | MediaType::Bmp | MediaType::Gif | MediaType::Svg => return None,
+    };
+    exif_orientation_from_payload(payload)
+}
+
+/// Returns the contents of a PNG `eXIf` chunk.
+///
+/// Only the chunk headers are walked, so no compressed data is touched: `sniff_artifact`
+/// runs on every server upload and this runs with it. The chunk holds the Exif block
+/// directly, but writers that carry the JPEG APP1 prefix over into it are common enough to
+/// be worth stripping.
+fn png_exif_payload(bytes: &[u8]) -> Option<&[u8]> {
+    // Past the 8-byte signature; a shorter input never sniffed as a PNG.
+    let mut offset = 8usize;
+    while offset + 8 <= bytes.len() {
+        let length = usize::try_from(read_u32_be(bytes.get(offset..offset + 4)?).ok()?).ok()?;
+        let chunk_type = bytes.get(offset + 4..offset + 8)?;
+        let start = offset + 8;
+        let end = start.checked_add(length)?;
+        if end > bytes.len() {
+            return None;
+        }
+        if chunk_type == b"eXIf" {
+            return Some(strip_exif_prefix(bytes.get(start..end)?));
+        }
+        if chunk_type == b"IEND" {
+            return None;
+        }
+        // Past the payload and its CRC.
+        offset = end.checked_add(4)?;
+    }
+    None
+}
+
+/// Returns the contents of a WebP `EXIF` chunk.
+///
+/// The chunk sits after the image data in an extended container, which is why this walks
+/// the file rather than reusing the loop in [`sniff_webp`]: that one stops at the first
+/// image chunk, which is what makes it cheap for the common file with no metadata at all.
+fn webp_exif_payload(bytes: &[u8]) -> Option<&[u8]> {
+    // Past "RIFF", the file size, and "WEBP".
+    let mut offset = 12usize;
+    while offset + 8 <= bytes.len() {
+        let chunk_tag = bytes.get(offset..offset + 4)?;
+        let size = usize::try_from(read_u32_le(bytes.get(offset + 4..offset + 8)?).ok()?).ok()?;
+        let start = offset + 8;
+        let end = start.checked_add(size)?;
+        if end > bytes.len() {
+            return None;
+        }
+        if chunk_tag == b"EXIF" {
+            return Some(strip_exif_prefix(bytes.get(start..end)?));
+        }
+        // RIFF chunks are padded to an even length.
+        offset = end.checked_add(size % 2)?;
+    }
+    None
+}
+
+/// Drops the JPEG APP1 marker prefix when a writer has carried it into another container.
+fn strip_exif_prefix(payload: &[u8]) -> &[u8] {
+    payload
+        .strip_prefix(b"Exif\0\0".as_slice())
+        .unwrap_or(payload)
+}
+
+/// Reads the Orientation tag out of a bare TIFF header.
+///
+/// The entries of the first IFD are walked rather than the file being handed to the exif
+/// crate, which reads from an owned buffer and would copy the whole image to reach twelve
+/// bytes of it.
+fn tiff_orientation(bytes: &[u8]) -> Option<u16> {
+    let little_endian = match bytes.get(0..2)? {
+        b"II" => true,
+        b"MM" => false,
+        _ => return None,
+    };
+
+    let read_u16 = |offset: usize| -> Option<u16> {
+        let raw: [u8; 2] = bytes.get(offset..offset + 2)?.try_into().ok()?;
+        Some(if little_endian {
+            u16::from_le_bytes(raw)
+        } else {
+            u16::from_be_bytes(raw)
+        })
+    };
+    let read_u32 = |offset: usize| -> Option<u32> {
+        let raw: [u8; 4] = bytes.get(offset..offset + 4)?.try_into().ok()?;
+        Some(if little_endian {
+            u32::from_le_bytes(raw)
+        } else {
+            u32::from_be_bytes(raw)
+        })
+    };
+
+    const ORIENTATION_TAG: u16 = 0x0112;
+    const TYPE_SHORT: u16 = 3;
+    const TYPE_LONG: u16 = 4;
+
+    let ifd = usize::try_from(read_u32(4)?).ok()?;
+    let entry_count = usize::from(read_u16(ifd)?);
+    for index in 0..entry_count {
+        let entry = ifd.checked_add(2)?.checked_add(index.checked_mul(12)?)?;
+        if read_u16(entry)? != ORIENTATION_TAG {
+            continue;
+        }
+        // A value short enough to fit is left-justified in the value field under either
+        // byte order, so both widths are read from the same offset.
+        return match read_u16(entry + 2)? {
+            TYPE_SHORT => read_u16(entry + 8),
+            TYPE_LONG => u16::try_from(read_u32(entry + 8)?).ok(),
+            _ => None,
+        };
+    }
+    None
 }
 
 /// Reads the Orientation tag out of an already-located Exif TIFF block.
@@ -2513,14 +2640,20 @@ fn sniff_webp(bytes: &[u8]) -> Result<ArtifactMetadata, TransformError> {
 
         let chunk_data = &bytes[chunk_start..chunk_end];
 
-        match chunk_tag {
-            b"VP8X" => return sniff_webp_vp8x(chunk_data),
-            b"VP8 " => return sniff_webp_vp8(chunk_data),
-            b"VP8L" => return sniff_webp_vp8l(chunk_data),
-            _ => {}
-        }
+        let mut metadata = match chunk_tag {
+            b"VP8X" => sniff_webp_vp8x(chunk_data)?,
+            b"VP8 " => sniff_webp_vp8(chunk_data)?,
+            b"VP8L" => sniff_webp_vp8l(chunk_data)?,
+            _ => {
+                offset = chunk_end + (chunk_size % 2);
+                continue;
+            }
+        };
 
-        offset = chunk_end + (chunk_size % 2);
+        // The EXIF chunk follows the image data, so it is read from the whole file rather
+        // than from the chunk this loop stopped at.
+        metadata.orientation = exif_orientation(MediaType::Webp, bytes);
+        return Ok(metadata);
     }
 
     Err(TransformError::DecodeFailed(

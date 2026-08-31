@@ -66,6 +66,69 @@ scenarios:
             width: 20
             height: 40
 
+  - name: the tag is honoured in every container that can carry it
+    steps:
+      # PNG keeps it in an eXIf chunk, WebP in an EXIF chunk, and every browser applies it
+      # in both, so which container a photo arrives in must not decide whether the picture
+      # comes out upright. The three fixtures are the same 40x20 picture with the same tag.
+      - run:
+          command: truss inspect "${fixtures}/exif-rotated.png"
+      - assert:
+          exit_code: 0
+          stdout:
+            json:
+              path: $.orientation
+              equals: 6
+      - assert:
+          stdout:
+            json:
+              path: $.orientedWidth
+              equals: 20
+      - assert:
+          stdout:
+            json:
+              path: $.orientedHeight
+              equals: 40
+      - run:
+          command: truss convert "${fixtures}/exif-rotated.png" -o png-applied.png
+      - assert:
+          exit_code: 0
+          image:
+            path: png-applied.png
+            width: 20
+            height: 40
+      - run:
+          command: truss inspect "${fixtures}/exif-rotated.webp"
+      - assert:
+          exit_code: 0
+          stdout:
+            json:
+              path: $.orientation
+              equals: 6
+      - run:
+          command: truss convert "${fixtures}/exif-rotated.webp" -o webp-applied.png
+      - assert:
+          exit_code: 0
+          image:
+            path: webp-applied.png
+            width: 20
+            height: 40
+
+  - name: dropping a PNG orientation with the pixels as stored warns like a JPEG does
+    steps:
+      - run:
+          command: truss convert "${fixtures}/exif-rotated.png" -o unturned.png --no-auto-orient
+      - assert:
+          exit_code: 0
+          stderr:
+            contains:
+              - "warning:"
+              - "EXIF orientation 6"
+          image:
+            path: unturned.png
+            width: 40
+            height: 20
+
   - name: an input with no orientation to drop does not warn
     steps:
       - run:

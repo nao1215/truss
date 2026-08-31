@@ -115,6 +115,24 @@ image.save('$DIR/exif-rotated.jpg', exif=exif.tobytes(), quality=95)
 print('  wrote 40x20 with EXIF Orientation=6')
 "
 
+echo "[8*/14] exif-rotated.png / exif-rotated.webp — the same tag in the other containers"
+# PNG carries the tag in an eXIf chunk and WebP in an EXIF chunk, and browsers honour it in
+# both, so truss reads it in both. Same picture and same tag as exif-rotated.jpg, so a test
+# can ask the three containers the same question and expect one answer.
+python3 -c "
+from PIL import Image
+
+image = Image.new('RGB', (40, 20), (255, 0, 0))
+for x in range(10):
+    for y in range(20):
+        image.putpixel((x, y), (0, 0, 255))
+exif = image.getexif()
+exif[274] = 6  # Orientation: rotate 90 degrees clockwise
+image.save('$DIR/exif-rotated.png', exif=exif.tobytes())
+image.save('$DIR/exif-rotated.webp', exif=exif.tobytes(), lossless=True)
+print('  wrote 40x20 PNG and WebP with EXIF Orientation=6')
+"
+
 echo "[8a/14] exif-transposed-5.jpg / exif-transposed-7.jpg — orientations 5 and 7"
 # Orientations 5 to 8 all turn a 40x20 image into a 20x40 one, so dimensions alone cannot
 # tell them apart. These two are the pair that a mirrored transform gets backwards: 5 is

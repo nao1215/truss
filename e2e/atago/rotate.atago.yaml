@@ -193,6 +193,9 @@ scenarios:
 
   - name: an SVG rasterizes and rotates through the same path
     steps:
+      # svg-minimal.svg is 1x1, so the turn grows it to 2x2 and the resize then fits that
+      # into the box, which is the box. A 1x1 raster source answers 16x16 for the same
+      # request, and answering the same is the point of the scenario.
       - run:
           command: truss convert "${fixtures}/svg-minimal.svg" -o svg.png --format png --width 16 --height 16 --rotate 45
       - assert:
@@ -200,8 +203,59 @@ scenarios:
           image:
             path: svg.png
             format: png
-            width: 23
-            height: 23
+            width: 16
+            height: 16
+      - run:
+          command: truss convert "${fixtures}/1px.png" -o raster.png --width 16 --height 16 --rotate 45
+      - assert:
+          exit_code: 0
+          image:
+            path: raster.png
+            width: 16
+            height: 16
+
+  - name: an SVG turned into a box returns the box, the way a raster source does
+    steps:
+      # Rotate comes before resize, so the turned drawing is what gets fitted into the box
+      # and the output is the size that was named. Turning the finished canvas instead
+      # returns the rotated bounding box of the box: 100x200 here, and 283x283 at 45
+      # degrees. Both codecs are asked the same question from the same 100x100 picture.
+      - fixture:
+          file: square.svg
+          content: |
+            <svg xmlns="http://www.w3.org/2000/svg" width="100" height="100"><rect width="100" height="100" fill="#ff0000"/></svg>
+      - run:
+          command: truss convert square.svg -o square.png --format png
+      - assert:
+          exit_code: 0
+          image:
+            path: square.png
+            width: 100
+            height: 100
+      - run:
+          command: truss convert square.svg -o from-svg.png --format png --rotate 90 --width 200 --height 100
+      - assert:
+          exit_code: 0
+          image:
+            path: from-svg.png
+            width: 200
+            height: 100
+      - run:
+          command: truss convert square.png -o from-png.png --rotate 90 --width 200 --height 100
+      - assert:
+          exit_code: 0
+          image:
+            path: from-png.png
+            width: 200
+            height: 100
+      - run:
+          command: truss convert square.svg -o tilted.png --format png --rotate 45 --width 200 --height 200
+      - assert:
+          exit_code: 0
+          image:
+            path: tilted.png
+            width: 200
+            height: 200
 
   - name: convert help documents the rotation rules
     steps:

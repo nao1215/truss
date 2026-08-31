@@ -214,7 +214,10 @@ where
 
     let watermark = if let Some(ref wm_path) = command.watermark_path {
         let wm_bytes = fs::read(wm_path).map_err(|error| {
-            runtime_error(EXIT_IO, &format!("failed to read watermark file: {error}"))
+            runtime_error(
+                EXIT_IO,
+                &format!("failed to read watermark {}: {error}", wm_path.display()),
+            )
         })?;
         let wm_artifact = sniff_artifact(RawArtifact::new(wm_bytes, None)).map_err(|error| {
             runtime_error(

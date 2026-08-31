@@ -309,12 +309,9 @@ pub fn transform_raster(request: TransformRequest) -> Result<TransformResult, Tr
     let (width, height) = image.dimensions();
     // Read the tag back out of the encoded bytes rather than predicting it: with
     // auto-orientation off and metadata retained, the output carries the input's tag, and
-    // this is what `inspect` reports for the same file.
-    let orientation = if normalized.options.format == MediaType::Jpeg {
-        crate::core::jpeg_exif_orientation(&bytes)
-    } else {
-        None
-    };
+    // this is what `inspect` reports for the same file. Asked of the output's own format,
+    // because every container that can carry the tag can carry it into the output too.
+    let orientation = crate::core::exif_orientation(normalized.options.format, &bytes);
 
     Ok(TransformResult {
         artifact: Artifact::new(
@@ -874,14 +871,11 @@ fn check_output_pixel_limit(
 
 /// Applies the input's EXIF orientation, reading the tag the way `inspect` reports it.
 ///
-/// Both go through [`crate::core::jpeg_exif_orientation`], so what `inspect` says a file is
-/// tagged with and what `convert` does about it cannot disagree.
+/// Both go through [`crate::core::exif_orientation`], so what `inspect` says a file is
+/// tagged with and what `convert` does about it cannot disagree, in any of the containers
+/// that can carry the tag.
 fn apply_auto_orientation(image: DynamicImage, input: &Artifact) -> DynamicImage {
-    if input.media_type != MediaType::Jpeg {
-        return image;
-    }
-
-    match crate::core::jpeg_exif_orientation(&input.bytes) {
+    match crate::core::exif_orientation(input.media_type, &input.bytes) {
         Some(orientation) => apply_exif_orientation(image, orientation),
         None => image,
     }
@@ -934,7 +928,7 @@ pub(crate) fn apply_rotation(
 /// 45-degree turn of a square needs about 1.41x each side. Cropping back to the original
 /// size instead would silently cut the corners off, so the box expands and the exposed
 /// area is filled with the background color.
-fn rotated_bounding_box(width: u32, height: u32, degrees: u16) -> (u32, u32) {
+pub(crate) fn rotated_bounding_box(width: u32, height: u32, degrees: u16) -> (u32, u32) {
     // Quarter turns are exact, and must be computed exactly: `cos(90f64.to_radians())` is
     // 6.1e-17 rather than 0, so the general formula rounds 8.0 up to 9 and reports a canvas
     // one pixel too large.
@@ -1495,7 +1489,7 @@ fn is_passthrough_lossless_request(normalized: &NormalizedTransformRequest) -> b
         // which would need a decode and a re-encode, and so would not be lossless — is
         // not what makes the result correct.
         && (!normalized.options.auto_orient
-            || jpeg_auto_orientation_is_noop(&normalized.input)
+            || auto_orientation_is_noop(&normalized.input)
             || metadata_policy_retains_exif(normalized.options.metadata_policy))
 }
 
@@ -1516,11 +1510,19 @@ fn metadata_policy_retains_exif(metadata_policy: MetadataPolicy) -> bool {
 /// The input is a legal answer only when nothing about the pixels was asked to change and
 /// the metadata policy is already satisfied by the file as it stands, which is what
 /// `is_passthrough_lossless_request` and the per-format checks below decide.
+///
+/// This holds for `lossy` as much as for the other two. Asking for a lossy optimization is
+/// asking for the smallest acceptable file, not for a re-encode at any price, and a caller
+/// who does want a particular encode names a `quality` — which `is_passthrough_lossless_request`
+/// already treats as disqualifying. A `targetQuality` does not disqualify it: the input
+/// scores perfectly against itself and is smaller than any re-encode that also meets the
+/// target, so it is the best answer to the question that was asked.
+///
+/// `none` is the one mode that never passes through, because it is the mode that says no
+/// optimization was requested at all.
 fn smaller_passthrough(normalized: &NormalizedTransformRequest, encoded: &[u8]) -> Option<Vec<u8>> {
-    if !matches!(
-        normalized.options.optimize,
-        OptimizeMode::Auto | OptimizeMode::Lossless
-    ) || !is_passthrough_lossless_request(normalized)
+    if matches!(normalized.options.optimize, OptimizeMode::None)
+        || !is_passthrough_lossless_request(normalized)
     {
         return None;
     }
@@ -1592,8 +1594,9 @@ fn png_bytes_satisfying_metadata_policy(
 /// caller did not ask for, which sends readers looking for a flag they never passed.
 fn lossless_jpeg_refusal(normalized: &NormalizedTransformRequest) -> String {
     if normalized.options.auto_orient
-        && !jpeg_auto_orientation_is_noop(&normalized.input)
-        && let Some(orientation) = crate::core::jpeg_exif_orientation(&normalized.input.bytes)
+        && !auto_orientation_is_noop(&normalized.input)
+        && let Some(orientation) =
+            crate::core::exif_orientation(normalized.input.media_type, &normalized.input.bytes)
     {
         return format!(
             "lossless JPEG optimization cannot apply the EXIF orientation ({orientation}) this file carries; keep the metadata to preserve the file's own orientation, or use a re-encoding optimize mode"
@@ -1613,26 +1616,23 @@ fn dropped_orientation_warning(
     auto_orient: bool,
     metadata_policy: MetadataPolicy,
 ) -> Option<TransformWarning> {
-    if auto_orient
-        || input.media_type != MediaType::Jpeg
-        || metadata_policy_retains_exif(metadata_policy)
-    {
+    if auto_orient || metadata_policy_retains_exif(metadata_policy) {
         return None;
     }
 
-    match crate::core::jpeg_exif_orientation(&input.bytes) {
+    match crate::core::exif_orientation(input.media_type, &input.bytes) {
         Some(orientation @ 2..=8) => Some(TransformWarning::OrientationDropped { orientation }),
         _ => None,
     }
 }
 
-fn jpeg_auto_orientation_is_noop(input: &Artifact) -> bool {
-    if input.media_type != MediaType::Jpeg {
-        return true;
-    }
-
+/// Reports whether auto-orientation would leave the pixels as they are stored.
+///
+/// A passthrough hands the input's own bytes back, which is only the same picture when
+/// there is no orientation to apply.
+fn auto_orientation_is_noop(input: &Artifact) -> bool {
     matches!(
-        crate::core::jpeg_exif_orientation(&input.bytes),
+        crate::core::exif_orientation(input.media_type, &input.bytes),
         None | Some(0 | 1)
     )
 }
@@ -2956,9 +2956,9 @@ fn extract_retained_metadata(
     }
 
     let mut metadata = read_input_metadata(input)?;
+    // The pixels have been turned, so a retained tag would turn them again in the viewer.
     if let Some(exif_chunk) = metadata.exif_metadata.as_mut()
         && auto_orient
-        && matches!(input.media_type, MediaType::Jpeg)
     {
         let _ = Orientation::remove_from_exif_chunk(exif_chunk);
     }
@@ -3143,7 +3143,11 @@ mod tests {
         ColorType, DynamicImage, GenericImageView, ImageDecoder, ImageEncoder, ImageFormat, Rgba,
         RgbaImage,
     };
+    use rstest::rstest;
     use std::io::Cursor;
+
+    /// A flat-colour JPEG written by an encoder that is not this crate's.
+    const FLAT_JPEG: &[u8] = include_bytes!("../../integration/fixtures/flat.jpg");
 
     /// Reads a RIFF chunk payload straight out of a WebP container.
     fn webp_chunk_payload(bytes: &[u8], fourcc: &[u8; 4]) -> Option<Vec<u8>> {
@@ -3331,6 +3335,59 @@ mod tests {
                 orientation: None,
             },
         )
+    }
+
+    /// A minimal uncompressed RGB TIFF carrying an Orientation tag.
+    ///
+    /// Written by hand because no encoder in the tree can set tag 274, and a binary fixture
+    /// would hide what makes the file interesting.
+    fn tiff_bytes_with_orientation(width: u32, height: u32, orientation: u16) -> Vec<u8> {
+        const IFD_OFFSET: u32 = 8;
+        const ENTRY_COUNT: u16 = 10;
+        // Header, entry count, the entries themselves, and the next-IFD pointer.
+        const BITS_OFFSET: u32 = IFD_OFFSET + 2 + ENTRY_COUNT as u32 * 12 + 4;
+        const PIXELS_OFFSET: u32 = BITS_OFFSET + 6;
+
+        const SHORT: u16 = 3;
+        const LONG: u16 = 4;
+
+        let byte_count = width * height * 3;
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"II");
+        bytes.extend_from_slice(&42u16.to_le_bytes());
+        bytes.extend_from_slice(&IFD_OFFSET.to_le_bytes());
+        bytes.extend_from_slice(&ENTRY_COUNT.to_le_bytes());
+
+        let mut entry = |tag: u16, field_type: u16, count: u32, value: u32| {
+            bytes.extend_from_slice(&tag.to_le_bytes());
+            bytes.extend_from_slice(&field_type.to_le_bytes());
+            bytes.extend_from_slice(&count.to_le_bytes());
+            // A SHORT that fits in the value field is left-aligned in it.
+            if field_type == SHORT && count == 1 {
+                bytes.extend_from_slice(&u16::try_from(value).expect("short value").to_le_bytes());
+                bytes.extend_from_slice(&0u16.to_le_bytes());
+            } else {
+                bytes.extend_from_slice(&value.to_le_bytes());
+            }
+        };
+
+        entry(256, SHORT, 1, width);
+        entry(257, SHORT, 1, height);
+        entry(258, SHORT, 3, BITS_OFFSET);
+        entry(259, SHORT, 1, 1);
+        entry(262, SHORT, 1, 2);
+        entry(273, LONG, 1, PIXELS_OFFSET);
+        entry(274, SHORT, 1, u32::from(orientation));
+        entry(277, SHORT, 1, 3);
+        entry(278, SHORT, 1, height);
+        entry(279, LONG, 1, byte_count);
+
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        for _ in 0..3 {
+            bytes.extend_from_slice(&8u16.to_le_bytes());
+        }
+        bytes.extend(std::iter::repeat_n(0x40u8, byte_count as usize));
+        bytes
     }
 
     fn webp_artifact_with_metadata(
@@ -3601,6 +3658,7 @@ mod tests {
             artifact,
             TransformOptions {
                 format: Some(MediaType::Png),
+                auto_orient: false,
                 strip_metadata: false,
                 preserve_exif: true,
                 ..TransformOptions::default()
@@ -3619,6 +3677,36 @@ mod tests {
         assert_eq!(
             Orientation::from_exif_chunk(&exif),
             Some(Orientation::Rotate90)
+        );
+    }
+
+    /// With auto-orientation on, the tag has been spent on the pixels, so keeping it would
+    /// turn them a second time in the viewer.
+    #[test]
+    fn transform_raster_clears_a_retained_png_orientation_once_it_has_been_applied() {
+        let artifact = png_artifact_with_metadata(4, 2, Some(6), None);
+        let result = transform_raster(TransformRequest::new(
+            artifact,
+            TransformOptions {
+                format: Some(MediaType::Png),
+                strip_metadata: false,
+                preserve_exif: true,
+                ..TransformOptions::default()
+            },
+        ))
+        .expect("preserve png exif");
+
+        assert_eq!(result.artifact.metadata.width, Some(2));
+        assert_eq!(result.artifact.metadata.height, Some(4));
+
+        let mut decoder = PngDecoder::new(Cursor::new(&result.artifact.bytes)).expect("decode png");
+        let orientation = decoder
+            .exif_metadata()
+            .expect("read png exif")
+            .and_then(|exif| Orientation::from_exif_chunk(&exif));
+        assert!(
+            matches!(orientation, None | Some(Orientation::NoTransforms)),
+            "expected the tag to be cleared, got {orientation:?}"
         );
     }
 
@@ -5850,6 +5938,7 @@ mod tests {
     // ── optimize never returns more bytes than it was given ─────────────
 
     /// Builds a JPEG the encoder compresses worse than Pillow-style flat encoding does.
+    /// A flat-colour JPEG produced by this crate's own encoder.
     fn flat_jpeg_artifact(width: u32, height: u32) -> Artifact {
         let image = image::RgbImage::from_pixel(width, height, image::Rgb([30, 80, 200]));
         let mut bytes = Vec::new();
@@ -5874,24 +5963,63 @@ mod tests {
         .bytes
     }
 
-    /// A flat JPEG re-encodes larger than it started, so `auto` must hand back the input.
+    /// A flat JPEG re-encodes larger than it started, so every mode must hand back the input.
     ///
     /// `auto` used to compare two re-encodes and never the bytes it was given, so it
     /// returned a bigger file than `lossless` did, having paid a generation loss for it.
-    #[test]
-    fn auto_optimization_never_returns_more_bytes_than_the_input() {
+    /// `lossy` kept doing that after `auto` and `lossless` stopped, which made the command's
+    /// name wrong for the mode a caller reaches for when they want the largest reduction.
+    #[rstest]
+    #[case(OptimizeMode::Auto)]
+    #[case(OptimizeMode::Lossless)]
+    #[case(OptimizeMode::Lossy)]
+    fn optimization_never_returns_more_bytes_than_the_input(#[case] mode: OptimizeMode) {
+        // The synthetic images are encoded by the same encoder that would re-encode them,
+        // which is the easy half of the property. `flat.jpg` came from a different encoder
+        // with optimized Huffman tables, which is what a file arriving from a design tool
+        // or a phone looks like, and is where a re-encode costs more than it saves.
+        let mut inputs = vec![
+            sniff_artifact(RawArtifact::new(FLAT_JPEG.to_vec(), None)).expect("sniff flat.jpg"),
+        ];
         for size in [32, 64, 128, 256] {
-            let artifact = flat_jpeg_artifact(size, size);
+            inputs.push(flat_jpeg_artifact(size, size));
+        }
+
+        for artifact in inputs {
+            let dimensions = artifact.metadata.dimensions();
             let input_length = artifact.bytes.len();
 
-            let optimized = optimize_bytes(artifact, OptimizeMode::Auto);
+            let optimized = optimize_bytes(artifact, mode);
 
             assert!(
                 optimized.len() <= input_length,
-                "{size}x{size}: auto produced {} bytes from {input_length}",
+                "{dimensions:?}: {mode:?} produced {} bytes from {input_length}",
                 optimized.len()
             );
         }
+    }
+
+    /// Naming a quality is asking for that encode, so the passthrough stands aside.
+    #[test]
+    fn lossy_optimization_still_re_encodes_when_a_quality_is_named() {
+        let artifact = flat_jpeg_artifact(128, 128);
+        let input_length = artifact.bytes.len();
+
+        let result = transform_raster(TransformRequest::new(
+            artifact,
+            TransformOptions {
+                format: Some(MediaType::Jpeg),
+                optimize: OptimizeMode::Lossy,
+                quality: Some(98),
+                ..TransformOptions::default()
+            },
+        ))
+        .expect("transform");
+
+        assert!(
+            result.artifact.bytes.len() > input_length,
+            "a named quality must produce the encoder's output, not the input"
+        );
     }
 
     /// And never more than `lossless` would, which is the stronger statement of the same.
@@ -6837,5 +6965,74 @@ mod tests {
                 "orientation {orientation}: expected height {expected_h}"
             );
         }
+    }
+
+    /// PNG, WebP, and TIFF carry the same tag, and every browser honours it in all three.
+    /// Reading it in one container and not the others turns the container a photo happens
+    /// to arrive in into the thing that decides whether the picture comes out upright.
+    #[rstest]
+    #[case(MediaType::Png)]
+    #[case(MediaType::Webp)]
+    #[case(MediaType::Tiff)]
+    fn transform_raster_auto_orients_every_container_that_carries_the_tag(
+        #[case] media_type: MediaType,
+    ) {
+        let bytes = match media_type {
+            MediaType::Png => png_artifact_with_metadata(4, 2, Some(6), None).bytes,
+            MediaType::Webp => webp_artifact_with_metadata(4, 2, Some(6), None).bytes,
+            MediaType::Tiff => tiff_bytes_with_orientation(4, 2, 6),
+            other => unreachable!("{other:?}"),
+        };
+        let artifact = sniff_artifact(RawArtifact::new(bytes, None)).expect("sniff");
+
+        assert_eq!(
+            artifact.metadata.orientation,
+            Some(6),
+            "{media_type:?}: the sniffer should report the tag"
+        );
+
+        let result = transform_raster(TransformRequest::new(
+            artifact,
+            TransformOptions {
+                format: Some(MediaType::Png),
+                ..TransformOptions::default()
+            },
+        ))
+        .unwrap_or_else(|error| panic!("{media_type:?} should transform: {error}"));
+
+        assert_eq!(
+            (
+                result.artifact.metadata.width,
+                result.artifact.metadata.height
+            ),
+            (Some(2), Some(4)),
+            "{media_type:?}: a quarter turn should have been applied"
+        );
+    }
+
+    /// The #331 warning is about the combination, not about the container.
+    #[test]
+    fn transform_raster_warns_when_a_png_orientation_is_dropped_unapplied() {
+        let bytes = png_artifact_with_metadata(4, 2, Some(6), None).bytes;
+        let artifact = sniff_artifact(RawArtifact::new(bytes, None)).expect("sniff png");
+
+        let result = transform_raster(TransformRequest::new(
+            artifact,
+            TransformOptions {
+                format: Some(MediaType::Png),
+                auto_orient: false,
+                ..TransformOptions::default()
+            },
+        ))
+        .expect("transform");
+
+        assert!(
+            result.warnings.iter().any(|warning| matches!(
+                warning,
+                TransformWarning::OrientationDropped { orientation: 6 }
+            )),
+            "expected an OrientationDropped warning, got {:?}",
+            result.warnings
+        );
     }
 }

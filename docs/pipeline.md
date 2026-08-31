@@ -11,7 +11,7 @@ decode → auto-orient → rotate → crop → resize → blur → sharpen → g
 | # | Stage | Guard | Description |
 |---|-------|-------|-------------|
 | 1 | **Decode** | — | Parse input bytes into a `DynamicImage` using the detected codec (JPEG, PNG, WebP, AVIF, BMP, TIFF, GIF). |
-| 2 | **Auto-orient** | `auto_orient == true` | Apply EXIF orientation tag (JPEG only, tags 2–8). |
+| 2 | **Auto-orient** | `auto_orient == true` | Apply the EXIF orientation tag, tags 2–8. Read from a JPEG APP1 segment, a PNG `eXIf` chunk, a WebP `EXIF` chunk, or a TIFF IFD entry; BMP and GIF cannot carry one, and an AVIF one is not read. When the metadata is retained, the tag is reset so the viewer does not turn the pixels again. |
 | 3 | **Rotate** | `rotate != 0` | Clockwise rotation by any whole number of degrees. A multiple of 90 permutes pixels exactly; any other angle resamples bilinearly, grows the canvas to the rotated bounding box, and fills the exposed corners with `background`. |
 | 4 | **Crop** | `crop` set | Extract a sub-region defined by `(x, y, width, height)`. |
 | 5 | **Resize** | `width` and/or `height` set | Scale the image according to `fit` and `position`, honouring `without_enlargement`. See [Resize](#resize). |
@@ -115,6 +115,8 @@ transparent color index exactly.
 SVG inputs are handled by `transform_svg()`, not by this pipeline. If `crop`, `blur`, `sharpen`, or `watermark` is requested for an SVG input, the request is rejected with `InvalidOptions`.
 
 With a raster output the drawing is rasterized and then joins the raster pipeline. The size it is rasterized at is the size `fit` scales the content to, not the requested box, so the vector scale is uniform on both axes; the padding `contain` adds and the crop `cover` takes are applied afterwards by the same helpers the raster path uses, with the same `position` anchor and `background`. `withoutEnlargement` clamps that scale the same way it does for a raster source. The document's own size — its `width` and `height`, or its `viewBox` extent — is what all of this scales from, and it is what `truss inspect` reports. Both the rasterization buffer and the final canvas are checked against `MAX_OUTPUT_PIXELS` from dimensions alone, before either is allocated, because `cover` scales the content past the box it returns.
+
+`rotate` runs before the resize here too, so the size the fit mode is asked about is the size of the rotated drawing and the output is the box that was requested, whatever the angle. The drawing is rasterized at the size that maps onto the rotated content size, which is exact for a quarter turn and, for any other angle, a uniform scale chosen so the rasterization is never coarser than the output needs.
 
 `grayscale` is accepted for SVG input when the output is a raster format: it is applied to the rasterized pixels, after rotation, in the same position it occupies in the raster pipeline.
 
