@@ -1648,8 +1648,6 @@ mod tests {
         Fit, MediaType, OptimizeMode, RawArtifact, SignedUrlSource, TransformOptions,
         sniff_artifact,
     };
-    use image::codecs::png::PngEncoder;
-    use image::{ColorType, ImageEncoder, Rgba, RgbaImage};
     use serial_test::serial;
     use std::env;
     use std::fs;
@@ -1657,31 +1655,17 @@ mod tests {
     use std::net::TcpListener;
     use std::path::PathBuf;
     use std::thread;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn png_bytes() -> Vec<u8> {
-        let image = RgbaImage::from_pixel(4, 3, Rgba([10, 20, 30, 255]));
-        let mut bytes = Vec::new();
-        PngEncoder::new(&mut bytes)
-            .write_image(&image, 4, 3, ColorType::Rgba8.into())
-            .expect("encode png");
-        bytes
+        crate::test_support::flat_png(4, 3)
     }
 
     fn temp_file_path(name: &str) -> PathBuf {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("current time")
-            .as_nanos();
-        env::temp_dir().join(format!("truss-{name}-{unique}.bin"))
+        crate::test_support::unique_temp_path(&format!("truss-{name}")).with_extension("bin")
     }
 
     fn temp_dir(name: &str) -> PathBuf {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("current time")
-            .as_nanos();
-        let path = env::temp_dir().join(format!("truss-{name}-{unique}"));
+        let path = crate::test_support::unique_temp_path(&format!("truss-{name}"));
         fs::create_dir_all(&path).expect("create temp dir");
         path
     }

@@ -5,6 +5,7 @@ use std::fmt;
 use std::str::FromStr;
 use std::time::Duration;
 
+#[cfg(feature = "avif")]
 pub(crate) use avif::avif_clean_aperture;
 use avif::{avif_orientation, has_avif_brand, sniff_avif};
 
@@ -2852,7 +2853,9 @@ mod tests {
         Artifact::new(vec![1, 2, 3], MediaType::Jpeg, ArtifactMetadata::default())
     }
 
-    fn png_bytes(width: u32, height: u32, color_type: u8) -> Vec<u8> {
+    /// A PNG header and nothing else: eight signature bytes and an IHDR, with no image
+    /// data. It is what the sniffer reads, and it is deliberately not a decodable file.
+    fn png_ihdr_bytes(width: u32, height: u32, color_type: u8) -> Vec<u8> {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(b"\x89PNG\r\n\x1a\n");
         bytes.extend_from_slice(&13_u32.to_be_bytes());
@@ -3523,7 +3526,7 @@ mod tests {
     #[test]
     fn sniff_artifact_detects_png_dimensions_and_alpha() {
         let artifact =
-            sniff_artifact(RawArtifact::new(png_bytes(64, 32, 6), None)).expect("sniff png");
+            sniff_artifact(RawArtifact::new(png_ihdr_bytes(64, 32, 6), None)).expect("sniff png");
 
         assert_eq!(artifact.media_type, MediaType::Png);
         assert_eq!(artifact.metadata.width, Some(64));
@@ -4083,8 +4086,11 @@ mod tests {
 
     #[test]
     fn sniff_artifact_rejects_declared_media_type_mismatch() {
-        let err = sniff_artifact(RawArtifact::new(png_bytes(8, 8, 2), Some(MediaType::Jpeg)))
-            .expect_err("declared mismatch should fail");
+        let err = sniff_artifact(RawArtifact::new(
+            png_ihdr_bytes(8, 8, 2),
+            Some(MediaType::Jpeg),
+        ))
+        .expect_err("declared mismatch should fail");
 
         assert_eq!(
             err,

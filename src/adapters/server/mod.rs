@@ -163,20 +163,11 @@ mod tests {
     }
 
     fn png_bytes() -> Vec<u8> {
-        let image = RgbaImage::from_pixel(4, 3, Rgba([10, 20, 30, 255]));
-        let mut bytes = Vec::new();
-        PngEncoder::new(&mut bytes)
-            .write_image(&image, 4, 3, ColorType::Rgba8.into())
-            .expect("encode png");
-        bytes
+        crate::test_support::flat_png(4, 3)
     }
 
     fn temp_dir(name: &str) -> PathBuf {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("current time")
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!("truss-server-{name}-{unique}"));
+        let path = crate::test_support::unique_temp_path(&format!("truss-server-{name}"));
         fs::create_dir_all(&path).expect("create temp dir");
         path
     }
