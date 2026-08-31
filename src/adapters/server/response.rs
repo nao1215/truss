@@ -66,19 +66,6 @@ impl HttpResponse {
         }
     }
 
-    pub(super) fn problem_with_headers(
-        status: &'static str,
-        headers: Vec<(String, String)>,
-        body: Vec<u8>,
-    ) -> Self {
-        Self {
-            status,
-            content_type: Some("application/problem+json"),
-            headers,
-            body,
-        }
-    }
-
     pub(super) fn binary_with_headers(
         status: &'static str,
         content_type: &'static str,
@@ -302,6 +289,36 @@ impl ErrorClass {
         }
     }
 
+    /// The status line and the status code this class answers with.
+    ///
+    /// Every class has exactly one status, which is what lets `docs/problems.md` carry a
+    /// status column, so the status is read from the class rather than repeated at each of
+    /// the places that build a response.
+    pub(super) const fn status(self) -> (&'static str, u16) {
+        match self {
+            Self::InvalidRequest
+            | Self::InvalidOptions
+            | Self::InvalidInput
+            | Self::DecodeFailed => ("400 Bad Request", 400),
+            Self::Unauthorized => ("401 Unauthorized", 401),
+            Self::Forbidden => ("403 Forbidden", 403),
+            Self::NotFound => ("404 Not Found", 404),
+            Self::NotAcceptable => ("406 Not Acceptable", 406),
+            Self::RequestTimeout => ("408 Request Timeout", 408),
+            Self::PayloadTooLarge | Self::LimitExceeded => ("413 Payload Too Large", 413),
+            Self::UnsupportedMediaType
+            | Self::UnsupportedInputMediaType
+            | Self::UnsupportedOutputMediaType => ("415 Unsupported Media Type", 415),
+            Self::UnprocessableEntity => ("422 Unprocessable Entity", 422),
+            Self::TooManyRequests => ("429 Too Many Requests", 429),
+            Self::InternalError | Self::EncodeFailed => ("500 Internal Server Error", 500),
+            Self::NotImplemented | Self::CapabilityMissing => ("501 Not Implemented", 501),
+            Self::BadGateway => ("502 Bad Gateway", 502),
+            Self::ServiceUnavailable => ("503 Service Unavailable", 503),
+            Self::LoopDetected => ("508 Loop Detected", 508),
+        }
+    }
+
     /// The `type` URI: the problem types page, at this class's anchor.
     pub(super) fn uri(self) -> String {
         format!("{PROBLEM_TYPES_URL}#{}", self.slug())
@@ -309,142 +326,95 @@ impl ErrorClass {
 }
 
 pub(super) fn bad_request_response(message: &str) -> HttpResponse {
-    problem_response("400 Bad Request", 400, ErrorClass::InvalidRequest, message)
+    problem_response(ErrorClass::InvalidRequest, message)
 }
 
 pub(super) fn auth_required_response(message: &str) -> HttpResponse {
-    HttpResponse::problem_with_headers(
-        "401 Unauthorized",
-        vec![("WWW-Authenticate".to_string(), "Bearer".to_string())],
-        problem_detail_body(ErrorClass::Unauthorized, 401, message),
-    )
+    let mut response = problem_response(ErrorClass::Unauthorized, message);
+    response
+        .headers
+        .push(("WWW-Authenticate".to_string(), "Bearer".to_string()));
+    response
 }
 
 pub(super) fn signed_url_unauthorized_response(message: &str) -> HttpResponse {
-    problem_response("401 Unauthorized", 401, ErrorClass::Unauthorized, message)
+    problem_response(ErrorClass::Unauthorized, message)
 }
 
 pub(super) fn not_found_response(message: &str) -> HttpResponse {
-    problem_response("404 Not Found", 404, ErrorClass::NotFound, message)
+    problem_response(ErrorClass::NotFound, message)
 }
 
 pub(super) fn forbidden_response(message: &str) -> HttpResponse {
-    problem_response("403 Forbidden", 403, ErrorClass::Forbidden, message)
+    problem_response(ErrorClass::Forbidden, message)
 }
 
 pub(super) fn unsupported_media_type_response(message: &str) -> HttpResponse {
-    problem_response(
-        "415 Unsupported Media Type",
-        415,
-        ErrorClass::UnsupportedMediaType,
-        message,
-    )
+    problem_response(ErrorClass::UnsupportedMediaType, message)
 }
 
 pub(super) fn not_acceptable_response(message: &str) -> HttpResponse {
-    problem_response(
-        "406 Not Acceptable",
-        406,
-        ErrorClass::NotAcceptable,
-        message,
-    )
+    problem_response(ErrorClass::NotAcceptable, message)
 }
 
 pub(super) fn unprocessable_entity_response(message: &str) -> HttpResponse {
-    problem_response(
-        "422 Unprocessable Entity",
-        422,
-        ErrorClass::UnprocessableEntity,
-        message,
-    )
+    problem_response(ErrorClass::UnprocessableEntity, message)
 }
 
 pub(super) fn payload_too_large_response(message: &str) -> HttpResponse {
-    problem_response(
-        "413 Payload Too Large",
-        413,
-        ErrorClass::PayloadTooLarge,
-        message,
-    )
+    problem_response(ErrorClass::PayloadTooLarge, message)
 }
 
 pub(super) fn request_timeout_response(message: &str) -> HttpResponse {
-    problem_response(
-        "408 Request Timeout",
-        408,
-        ErrorClass::RequestTimeout,
-        message,
-    )
+    problem_response(ErrorClass::RequestTimeout, message)
 }
 
 pub(super) fn internal_error_response(message: &str) -> HttpResponse {
-    problem_response(
-        "500 Internal Server Error",
-        500,
-        ErrorClass::InternalError,
-        message,
-    )
+    problem_response(ErrorClass::InternalError, message)
 }
 
 pub(super) fn bad_gateway_response(message: &str) -> HttpResponse {
-    problem_response("502 Bad Gateway", 502, ErrorClass::BadGateway, message)
+    problem_response(ErrorClass::BadGateway, message)
 }
 
 pub(super) fn service_unavailable_response(message: &str) -> HttpResponse {
-    problem_response(
-        "503 Service Unavailable",
-        503,
-        ErrorClass::ServiceUnavailable,
-        message,
-    )
+    problem_response(ErrorClass::ServiceUnavailable, message)
 }
 
 pub(super) fn too_many_requests_response(message: &str) -> HttpResponse {
-    let mut resp = problem_response(
-        "429 Too Many Requests",
-        429,
-        ErrorClass::TooManyRequests,
-        message,
-    );
-    // RFC 6585 §4: include Retry-After so well-behaved clients back off.
+    let mut resp = problem_response(ErrorClass::TooManyRequests, message);
+    // RFC 6585 section 4: include Retry-After so well-behaved clients back off.
     resp.headers
         .push(("Retry-After".to_string(), "1".to_string()));
     resp
 }
 
 pub(super) fn too_many_redirects_response(message: &str) -> HttpResponse {
-    problem_response("508 Loop Detected", 508, ErrorClass::LoopDetected, message)
+    problem_response(ErrorClass::LoopDetected, message)
 }
 
 pub(super) fn not_implemented_response(message: &str) -> HttpResponse {
-    problem_response(
-        "501 Not Implemented",
-        501,
-        ErrorClass::NotImplemented,
-        message,
-    )
+    problem_response(ErrorClass::NotImplemented, message)
 }
 
 /// Builds an RFC 9457 Problem Details error response.
 ///
-/// The body is `application/problem+json` with `type`, `title`, `status`, and `detail`, and
-/// gains `requestId` when the response is sent, in [`HttpResponse::attach_request_id`]. The
-/// one problem body that keeps `about:blank` as its `type` is [`NOT_FOUND_BODY`], for a route
+/// The class carries the status, so a caller names only the class and the detail. The body is
+/// `application/problem+json` with `type`, `title`, `status`, and `detail`, and gains
+/// `requestId` when the response is sent, in [`HttpResponse::attach_request_id`]. The one
+/// problem body that keeps `about:blank` as its `type` is [`NOT_FOUND_BODY`], for a route
 /// that does not exist, where the status really is all there is to say.
-pub(super) fn problem_response(
-    status: &'static str,
-    status_code: u16,
-    kind: ErrorClass,
-    detail: &str,
-) -> HttpResponse {
-    HttpResponse::problem(status, problem_detail_body(kind, status_code, detail))
+pub(super) fn problem_response(class: ErrorClass, detail: &str) -> HttpResponse {
+    let (status_line, _) = class.status();
+    HttpResponse::problem(status_line, problem_detail_body(class, detail))
 }
 
 /// Serializes an RFC 9457 Problem Details JSON body.
-pub(super) fn problem_detail_body(kind: ErrorClass, status: u16, detail: &str) -> Vec<u8> {
+pub(super) fn problem_detail_body(class: ErrorClass, detail: &str) -> Vec<u8> {
+    let (_, status) = class.status();
     let mut body = serde_json::to_vec(&json!({
-        "type": kind.uri(),
-        "title": kind.title(),
+        "type": class.uri(),
+        "title": class.title(),
         "status": status,
         "detail": detail,
     }))
@@ -453,32 +423,27 @@ pub(super) fn problem_detail_body(kind: ErrorClass, status: u16, detail: &str) -
     body
 }
 
-/// Maps a transform failure onto the status and detail that present it.
+/// Maps a transform failure onto the problem body that presents it.
 ///
 /// The class comes from [`TransformError::class`], the one table the CLI and
-/// `@nao1215/truss-wasm` also read, so the three adapters name a failure the same way. Only
-/// the status and the wording of `detail` are the server's own.
+/// `@nao1215/truss-wasm` also read, so the three adapters name a failure the same way, and
+/// the class carries the status. Only the wording of `detail` is the server's own.
 pub(super) fn transform_error_response(error: TransformError) -> HttpResponse {
     let class = error.class();
-    let (status_line, status, detail) = match error {
-        TransformError::InvalidOptions(reason) => ("400 Bad Request", 400, reason),
-        TransformError::InvalidInput(reason) => ("400 Bad Request", 400, reason),
-        TransformError::DecodeFailed(reason) => ("400 Bad Request", 400, reason),
-        TransformError::UnsupportedInputMediaType(reason) => {
-            ("415 Unsupported Media Type", 415, reason)
+    let detail = match error {
+        TransformError::EncodeFailed(reason) => {
+            format!("failed to encode transformed artifact: {reason}")
         }
-        ref error @ TransformError::UnsupportedOutputMediaType(_) => {
-            ("415 Unsupported Media Type", 415, error.to_string())
-        }
-        TransformError::EncodeFailed(reason) => (
-            "500 Internal Server Error",
-            500,
-            format!("failed to encode transformed artifact: {reason}"),
-        ),
-        TransformError::CapabilityMissing(reason) => ("501 Not Implemented", 501, reason),
-        TransformError::LimitExceeded(reason) => ("413 Payload Too Large", 413, reason),
+        TransformError::InvalidOptions(reason)
+        | TransformError::InvalidInput(reason)
+        | TransformError::DecodeFailed(reason)
+        | TransformError::UnsupportedInputMediaType(reason)
+        | TransformError::CapabilityMissing(reason)
+        | TransformError::LimitExceeded(reason) => reason,
+        // The error's own Display names the rule that was hit, so it is not restated here.
+        ref error @ TransformError::UnsupportedOutputMediaType(_) => error.to_string(),
     };
-    problem_response(status_line, status, class, &detail)
+    problem_response(class, &detail)
 }
 
 pub(super) fn map_source_io_error(error: io::Error) -> HttpResponse {
@@ -505,7 +470,7 @@ mod tests {
 
     #[test]
     fn test_problem_detail_body_contains_required_fields() {
-        let body = problem_detail_body(ErrorClass::NotFound, 404, "resource missing");
+        let body = problem_detail_body(ErrorClass::NotFound, "resource missing");
         let v: Value = serde_json::from_slice(&body).expect("valid JSON");
 
         assert_eq!(v["type"], format!("{PROBLEM_TYPES_URL}#not-found"));
@@ -516,7 +481,7 @@ mod tests {
 
     #[test]
     fn test_problem_detail_body_ends_with_newline() {
-        let body = problem_detail_body(ErrorClass::InternalError, 500, "boom");
+        let body = problem_detail_body(ErrorClass::InternalError, "boom");
         assert_eq!(*body.last().unwrap(), b'\n');
     }
 
@@ -524,7 +489,6 @@ mod tests {
     fn test_problem_detail_body_special_characters_in_detail() {
         let body = problem_detail_body(
             ErrorClass::InvalidRequest,
-            400,
             "invalid <script>alert(1)</script>",
         );
         let v: Value = serde_json::from_slice(&body).expect("valid JSON");
