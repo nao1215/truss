@@ -74,7 +74,7 @@ The input is not a format truss decodes, or is one it decodes only in part, such
 
 ### unsupported-output-media-type
 
-The requested `format` is not one truss encodes, such as `gif`, or is not valid for this input, such as `svg` for a raster picture.
+The requested `format` is not one truss encodes, such as `gif`, or is not valid for this input, such as `svg` for a raster picture. A format truss reads but cannot write is refused from the options, before the source is read; a format that depends on the input, such as `svg`, is refused by the transform. On the CLI a `--format` value truss cannot write is refused by the command line parser instead, which is a usage error and exit 1; the transform-time refusal is exit 4.
 
 ### encode-failed
 

@@ -353,6 +353,15 @@ pub(super) fn unsupported_media_type_response(message: &str) -> HttpResponse {
     problem_response(ErrorClass::UnsupportedMediaType, message)
 }
 
+/// Refuses a requested output format the pipeline cannot produce.
+///
+/// This is the class the transform itself raises for the same refusal, so a format truss
+/// reads but cannot write is named the same way whether the server catches it in the options
+/// or the encoder catches it later.
+pub(super) fn unsupported_output_media_type_response(message: &str) -> HttpResponse {
+    problem_response(ErrorClass::UnsupportedOutputMediaType, message)
+}
+
 pub(super) fn not_acceptable_response(message: &str) -> HttpResponse {
     problem_response(ErrorClass::NotAcceptable, message)
 }

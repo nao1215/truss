@@ -367,6 +367,22 @@ impl MediaType {
         !matches!(self, Self::Gif)
     }
 
+    /// Why this format cannot be an output, or `None` when it can be one.
+    ///
+    /// A format that parses is not automatically a format truss writes, and the four
+    /// adapters used to each carry their own copy of that sentence. This is the one copy:
+    /// the CLI rejects the flag value with it, the Wasm package and the HTTP server refuse
+    /// the request with it, and all three do so before the input is read rather than after
+    /// the picture has been decoded.
+    pub(crate) fn unencodable_reason(self) -> Option<String> {
+        (!self.is_encodable()).then(|| {
+            format!(
+                "{} is an input-only format; choose an output format such as png, jpeg, webp, or avif",
+                self.as_name()
+            )
+        })
+    }
+
     /// The output format to use when a request does not name one.
     ///
     /// Normally that is the input's own format, so a transform without an explicit

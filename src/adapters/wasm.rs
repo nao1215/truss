@@ -294,23 +294,20 @@ where
         .transpose()
 }
 
-/// Parses an output format name, refusing formats truss can read but not write.
+/// Parses an output format name, refusing a format truss can read but not write.
 ///
 /// `format: "gif"` parses as a media type but has no encoder behind it. Catching that here
-/// makes it an options error the caller can act on, rather than a transform failure raised
-/// after the image has already been decoded.
+/// keeps the refusal ahead of the decode, and reporting it as
+/// [`TransformError::UnsupportedOutputMediaType`] gives it the class the HTTP server and the
+/// pipeline already give the same refusal, so the browser sees the name the server does.
 fn parse_media_type(value: &str, field: &str) -> Result<MediaType, TransformError> {
     let media_type = MediaType::from_str(value).map_err(|reason| {
         TransformError::InvalidOptions(format!("{field} is invalid: {reason}"))
     })?;
-    if media_type.is_encodable() {
-        Ok(media_type)
-    } else {
-        Err(TransformError::InvalidOptions(format!(
-            "{field} is invalid: {} is an input-only format",
-            media_type.as_name()
-        )))
+    if media_type.unencodable_reason().is_some() {
+        return Err(TransformError::UnsupportedOutputMediaType(media_type));
     }
+    Ok(media_type)
 }
 
 /// Normalizes a rotation from the browser options object.
@@ -596,6 +593,274 @@ mod tests {
     use super::*;
     use rstest::rstest;
     const WASM_DOCS: &str = include_str!("../../docs/wasm.md");
+
+    // ── the browser answers what the library answers ─────────────────
+
+    fn parity_source() -> Vec<u8> {
+        use image::codecs::png::PngEncoder;
+        use image::{ColorType, ImageEncoder, Rgba, RgbaImage};
+        let image = RgbaImage::from_fn(64, 48, |x, y| {
+            Rgba([
+                u8::try_from(x * 4).unwrap_or(255),
+                u8::try_from(y * 5).unwrap_or(255),
+                128,
+                u8::try_from(200 + (x % 55)).unwrap_or(255),
+            ])
+        });
+        let mut bytes = Vec::new();
+        PngEncoder::new(&mut bytes)
+            .write_image(&image, 64, 48, ColorType::Rgba8.into())
+            .expect("encode png");
+        bytes
+    }
+
+    fn parity_base() -> (TransformOptions, WasmTransformOptions) {
+        (
+            TransformOptions {
+                width: Some(40),
+                height: Some(30),
+                fit: Some(crate::Fit::Cover),
+                position: Some(Position::Top),
+                format: Some(MediaType::Jpeg),
+                quality: Some(70),
+                optimize: OptimizeMode::None,
+                target_quality: None,
+                background: Some(Rgba8 {
+                    r: 1,
+                    g: 2,
+                    b: 3,
+                    a: 255,
+                }),
+                rotate: Rotation::DEG_90,
+                auto_orient: true,
+                strip_metadata: true,
+                preserve_exif: false,
+                crop: Some(CropRegion {
+                    x: 1,
+                    y: 2,
+                    width: 30,
+                    height: 40,
+                }),
+                blur: Some(1.0),
+                sharpen: Some(2.0),
+                grayscale: false,
+                without_enlargement: false,
+                deadline: None,
+            },
+            WasmTransformOptions {
+                width: Some(40),
+                height: Some(30),
+                fit: Some("cover".to_string()),
+                position: Some("top".to_string()),
+                format: Some("jpeg".to_string()),
+                quality: Some(70),
+                optimize: None,
+                target_quality: None,
+                background: Some("010203".to_string()),
+                rotate: Some(90),
+                auto_orient: Some(true),
+                strip_metadata: Some(true),
+                keep_metadata: None,
+                preserve_exif: None,
+                crop: Some("1,2,30,40".to_string()),
+                blur: Some(1.0),
+                sharpen: Some(2.0),
+                grayscale: Some(false),
+                without_enlargement: Some(false),
+            },
+        )
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn parity_cases() -> Vec<(&'static str, TransformOptions, WasmTransformOptions)> {
+        let m = |f: fn(&mut TransformOptions, &mut WasmTransformOptions)| {
+            let (mut a, mut b) = parity_base();
+            f(&mut a, &mut b);
+            (a, b)
+        };
+        let mut out = Vec::new();
+        let (a, b) = parity_base();
+        out.push(("base", a, b));
+        let (a, b) = m(|a, b| {
+            a.fit = Some(crate::Fit::Inside);
+            b.fit = Some("inside".to_string());
+        });
+        out.push(("fit-inside", a, b));
+        let (a, b) = m(|a, b| {
+            a.fit = Some(crate::Fit::Fill);
+            b.fit = Some("fill".to_string());
+        });
+        out.push(("fit-fill", a, b));
+        let (a, b) = m(|a, b| {
+            a.position = Some(Position::BottomRight);
+            b.position = Some("bottom-right".to_string());
+        });
+        out.push(("position", a, b));
+        let (a, b) = m(|a, b| {
+            a.format = Some(MediaType::Png);
+            a.quality = None;
+            b.format = Some("png".to_string());
+            b.quality = None;
+        });
+        out.push(("format-png", a, b));
+        let (a, b) = m(|a, b| {
+            a.format = Some(MediaType::Webp);
+            b.format = Some("webp".to_string());
+        });
+        out.push(("format-webp", a, b));
+        let (a, b) = m(|a, b| {
+            a.quality = None;
+            a.optimize = OptimizeMode::Auto;
+            b.quality = None;
+            b.optimize = Some("auto".to_string());
+        });
+        out.push(("optimize-auto", a, b));
+        let (a, b) = m(|a, b| {
+            a.format = Some(MediaType::Png);
+            a.quality = None;
+            a.optimize = OptimizeMode::Lossless;
+            b.format = Some("png".to_string());
+            b.quality = None;
+            b.optimize = Some("lossless".to_string());
+        });
+        out.push(("optimize-lossless", a, b));
+        let (a, b) = m(|a, b| {
+            a.quality = None;
+            a.optimize = OptimizeMode::Lossy;
+            a.target_quality = Some(crate::TargetQuality {
+                metric: crate::QualityMetric::Psnr,
+                value: 30.0,
+            });
+            b.quality = None;
+            b.optimize = Some("lossy".to_string());
+            b.target_quality = Some("psnr:30".to_string());
+        });
+        out.push(("targetQuality", a, b));
+        let (a, b) = m(|a, b| {
+            a.background = Some(Rgba8 {
+                r: 200,
+                g: 30,
+                b: 40,
+                a: 128,
+            });
+            b.background = Some("C81E2880".to_string());
+        });
+        out.push(("background-alpha", a, b));
+        let (a, b) = m(|a, b| {
+            a.rotate = Rotation::from_degrees(45);
+            b.rotate = Some(45);
+        });
+        out.push(("rotate-45", a, b));
+        let (a, b) = m(|a, b| {
+            a.rotate = Rotation::from_degrees(-90);
+            b.rotate = Some(-90);
+        });
+        out.push(("rotate-negative", a, b));
+        let (a, b) = m(|a, b| {
+            a.auto_orient = false;
+            b.auto_orient = Some(false);
+        });
+        out.push(("autoOrient-off", a, b));
+        let (a, b) = m(|a, b| {
+            a.strip_metadata = false;
+            b.strip_metadata = Some(false);
+        });
+        out.push(("keepMetadata", a, b));
+        let (a, b) = m(|a, b| {
+            a.strip_metadata = false;
+            a.preserve_exif = true;
+            b.strip_metadata = None;
+            b.preserve_exif = Some(true);
+        });
+        out.push(("preserveExif", a, b));
+        let (a, b) = m(|a, b| {
+            a.crop = None;
+            b.crop = None;
+        });
+        out.push(("crop-none", a, b));
+        let (a, b) = m(|a, b| {
+            a.blur = None;
+            b.blur = None;
+        });
+        out.push(("blur-none", a, b));
+        let (a, b) = m(|a, b| {
+            a.sharpen = None;
+            b.sharpen = None;
+        });
+        out.push(("sharpen-none", a, b));
+        let (a, b) = m(|a, b| {
+            a.grayscale = true;
+            b.grayscale = Some(true);
+        });
+        out.push(("grayscale", a, b));
+        let (a, b) = m(|a, b| {
+            a.width = Some(400);
+            a.height = Some(300);
+            a.without_enlargement = true;
+            b.width = Some(400);
+            b.height = Some(300);
+            b.without_enlargement = Some(true);
+        });
+        out.push(("withoutEnlargement", a, b));
+        let (a, b) = m(|a, b| {
+            a.width = None;
+            a.height = None;
+            a.fit = None;
+            a.position = None;
+            b.width = None;
+            b.height = None;
+            b.fit = None;
+            b.position = None;
+        });
+        out.push(("no-geometry", a, b));
+        out
+    }
+
+    /// The browser options are the library options in another spelling, so the same request
+    /// has to come back as the same bytes and the same refusal.
+    ///
+    /// The table walks every field of `TransformOptions`, because the two conversions are
+    /// written separately and nothing else holds them together: `rotate` was an `i32` here
+    /// and a `u16` on the server, and `format: "gif"` was refused with a different class in
+    /// each of the three adapters.
+    #[test]
+    fn wasm_options_answer_what_the_library_answers() {
+        let source = parity_source();
+        let mut mismatches: Vec<String> = Vec::new();
+        for (name, core_options, wasm_options) in parity_cases() {
+            let expected = {
+                let artifact =
+                    sniff_artifact(RawArtifact::new(source.clone(), None)).expect("sniff");
+                transform(TransformRequest::new(artifact, core_options))
+            };
+            let actual = transform_browser_artifact(source.clone(), Some("png"), wasm_options);
+            match (expected, actual) {
+                (Ok(expected), Ok(actual)) => {
+                    if expected.artifact.bytes != actual.bytes {
+                        mismatches.push(format!(
+                            "{name}: bytes differ (library {}, wasm {})",
+                            expected.artifact.bytes.len(),
+                            actual.bytes.len()
+                        ));
+                    }
+                }
+                (Err(expected), Ok(_)) => {
+                    mismatches.push(format!("{name}: library refused ({expected}) but wasm ok"));
+                }
+                (Ok(_), Err(actual)) => {
+                    mismatches.push(format!("{name}: library ok but wasm refused ({actual})"));
+                }
+                (Err(expected), Err(actual)) => {
+                    if expected.to_string() != actual.to_string() {
+                        mismatches.push(format!(
+                            "{name}: both refused with different words: library `{expected}` wasm `{actual}`"
+                        ));
+                    }
+                }
+            }
+        }
+        assert!(mismatches.is_empty(), "{mismatches:#?}");
+    }
 
     fn png_bytes(width: u32, height: u32) -> Vec<u8> {
         crate::test_support::flat_png(width, height)
@@ -1237,21 +1502,21 @@ mod tests {
 
     #[test]
     fn parse_wasm_options_rejects_a_decode_only_output_format() {
-        // `gif` is a real media type but has no encoder, so it must fail as an options
-        // error here rather than surviving to the transform.
+        // `gif` is a real media type but has no encoder, so it fails here rather than
+        // surviving to the transform, and it fails with the class the pipeline and the HTTP
+        // server give the same refusal so the browser reads the name the server sends.
         let error = parse_wasm_options(WasmTransformOptions {
             format: Some("gif".to_string()),
             ..WasmTransformOptions::default()
         })
         .expect_err("gif output should fail");
 
-        match error {
-            TransformError::InvalidOptions(message) => assert!(
-                message.contains("input-only"),
-                "the error should say why, got: {message}"
-            ),
-            other => panic!("expected InvalidOptions, got: {other}"),
-        }
+        assert_eq!(
+            error,
+            TransformError::UnsupportedOutputMediaType(MediaType::Gif)
+        );
+        assert_eq!(error.class().slug(), "unsupported-output-media-type");
+        assert!(error.to_string().contains("input-only"), "{error}");
     }
 
     #[test]

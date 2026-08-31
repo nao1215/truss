@@ -768,13 +768,9 @@ fn parse_position(s: &str) -> Result<Position, String> {
 /// it here puts the error next to the flag the user typed and names the alternatives.
 fn parse_media_type(s: &str) -> Result<MediaType, String> {
     let media_type = MediaType::from_str(s)?;
-    if media_type.is_encodable() {
-        Ok(media_type)
-    } else {
-        Err(format!(
-            "{} is an input-only format; choose an output format such as png, jpeg, webp, or avif",
-            media_type.as_name()
-        ))
+    match media_type.unencodable_reason() {
+        Some(reason) => Err(reason),
+        None => Ok(media_type),
     }
 }
 
