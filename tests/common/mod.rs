@@ -562,7 +562,14 @@ fn can_use_production_signer(method: &str, route: &str, query: &BTreeMap<String,
     let has_orphaned_watermark_params = query.contains_key("watermarkPosition")
         || query.contains_key("watermarkOpacity")
         || query.contains_key("watermarkMargin");
-    !has_orphaned_watermark_params || query.contains_key("watermarkUrl")
+    if has_orphaned_watermark_params && !query.contains_key("watermarkUrl") {
+        return false;
+    }
+
+    // The signer refuses an option set the server would refuse under every input, so a
+    // test that wants such a URL has to build and sign it by hand.
+    let has_bounded_resize = query.contains_key("width") && query.contains_key("height");
+    !(query.contains_key("fit") || query.contains_key("position")) || has_bounded_resize
 }
 
 pub fn signed_target_with_method(

@@ -132,3 +132,60 @@ steps:
               file: /fixtures/zero-bytes.bin
     test: |
       current.res.status != 200
+  refuse_fit_without_both_dimensions:
+    desc: "An option set no input could make valid is refused as an option error"
+    req:
+      /images:transform:
+        post:
+          headers:
+            Authorization: "Bearer {{ vars.token }}"
+            Content-Type: "application/json"
+          body:
+            application/json:
+              source:
+                kind: path
+                path: /1px.png
+              options:
+                fit: cover
+    test: |
+      current.res.status == 400
+      && current.res.body.detail == 'fit requires both width and height'
+      && current.res.body.type == 'https://github.com/nao1215/truss/blob/main/docs/problems.md#invalid-options'
+  refuse_position_without_both_dimensions:
+    desc: "The neighbouring rule, which shares the conditional the cache key uses"
+    req:
+      /images:transform:
+        post:
+          headers:
+            Authorization: "Bearer {{ vars.token }}"
+            Content-Type: "application/json"
+          body:
+            application/json:
+              source:
+                kind: path
+                path: /1px.png
+              options:
+                position: center
+    test: |
+      current.res.status == 400
+      && current.res.body.detail == 'position requires both width and height'
+      && current.res.body.type == 'https://github.com/nao1215/truss/blob/main/docs/problems.md#invalid-options'
+  refuse_without_enlargement_without_either_dimension:
+    desc: "A resize policy with no resize to act on"
+    req:
+      /images:transform:
+        post:
+          headers:
+            Authorization: "Bearer {{ vars.token }}"
+            Content-Type: "application/json"
+          body:
+            application/json:
+              source:
+                kind: path
+                path: /1px.png
+              options:
+                withoutEnlargement: true
+    test: |
+      current.res.status == 400
+      && current.res.body.detail == 'withoutEnlargement requires width or height'
+      && current.res.body.type == 'https://github.com/nao1215/truss/blob/main/docs/problems.md#invalid-options'

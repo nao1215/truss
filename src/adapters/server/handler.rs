@@ -364,7 +364,7 @@ impl TransformOptionsPayload {
         )
         .map_err(|error| bad_request_response(&error.to_string()))?;
 
-        Ok(TransformOptions {
+        let options = TransformOptions {
             width: self.width,
             height: self.height,
             fit: parse_optional_named(self.fit.as_deref(), "fit", Fit::from_str)?,
@@ -406,7 +406,20 @@ impl TransformOptionsPayload {
                 .without_enlargement
                 .unwrap_or(defaults.without_enlargement),
             deadline: defaults.deadline,
-        })
+        };
+
+        // The rules that need no image are settled here, before the cache is asked
+        // anything and before the source is fetched. Leaving them to `normalize`, which
+        // runs inside the transform, meant a request that was wrong whatever the input
+        // still cost an outbound fetch or a billed storage read, and was then reported as
+        // the origin's failure; it also meant `fit` and `position`, the two options the
+        // cache key drops when the resize is unbounded, could be answered from an entry a
+        // valid request had written.
+        options
+            .validate_without_input()
+            .map_err(transform_error_response)?;
+
+        Ok(options)
     }
 }
 
@@ -1617,6 +1630,7 @@ mod tests {
     use super::*;
 
     use ThresholdDirection::{HigherIsWorse, LowerIsWorse};
+    use rstest::rstest;
 
     /// Shorthand: returns (ok, recovering) tuple from check_with_hysteresis.
     fn check(
@@ -1891,5 +1905,97 @@ mod tests {
         assert!(options.preserve_exif);
         assert!(!options.strip_metadata);
         assert_eq!(options.width, Some(64));
+    }
+
+    /// The rules that need no image are settled while the options are read, so the cache
+    /// is never asked about a request that cannot be served and no source is fetched for
+    /// one. Leaving them to the transform put `fit` and `position` behind a cache lookup
+    /// whose key drops them, and put every other rule behind the fetch.
+    #[rstest]
+    #[case(
+        TransformOptionsPayload { fit: Some("cover".to_string()), ..TransformOptionsPayload::default() },
+        "fit requires both width and height"
+    )]
+    #[case(
+        TransformOptionsPayload { position: Some("center".to_string()), ..TransformOptionsPayload::default() },
+        "position requires both width and height"
+    )]
+    #[case(
+        TransformOptionsPayload { without_enlargement: Some(true), ..TransformOptionsPayload::default() },
+        "withoutEnlargement requires width or height"
+    )]
+    #[case(
+        TransformOptionsPayload { width: Some(0), ..TransformOptionsPayload::default() },
+        "width must be greater than zero"
+    )]
+    #[case(
+        TransformOptionsPayload { quality: Some(101), ..TransformOptionsPayload::default() },
+        "quality must be between 1 and 100"
+    )]
+    #[case(
+        TransformOptionsPayload { blur: Some(200.0), ..TransformOptionsPayload::default() },
+        "blur sigma must be between 0.1 and 100.0"
+    )]
+    #[case(
+        TransformOptionsPayload { sharpen: Some(500.0), ..TransformOptionsPayload::default() },
+        "sharpen sigma must be between 0.1 and 100.0"
+    )]
+    fn into_options_refuses_what_no_input_could_make_valid(
+        #[case] payload: TransformOptionsPayload,
+        #[case] message: &str,
+    ) {
+        let response = payload
+            .into_options()
+            .expect_err("an always-invalid option set is refused while the options are read");
+        let body = String::from_utf8_lossy(&response.body);
+
+        assert!(
+            response.status.starts_with("400"),
+            "expected 400, got {} with {body}",
+            response.status
+        );
+        assert!(body.contains(message), "expected {message}, got {body}");
+    }
+
+    /// A watermark margin has no ceiling of its own here: the pipeline refuses any margin
+    /// that leaves the watermark no room, and the server's own bound only decided which
+    /// of two failure classes the caller saw for the same picture. The opacity keeps its
+    /// early check, before the watermark image is fetched, and reports the message the
+    /// core and the other adapters use.
+    #[test]
+    fn validate_watermark_payload_leaves_the_margin_to_the_pipeline() {
+        let payload = WatermarkPayload {
+            url: Some("https://cdn.example.com/logo.png".to_string()),
+            position: None,
+            opacity: None,
+            margin: Some(10_000),
+        };
+
+        let validated = validate_watermark_payload(Some(&payload))
+            .expect("a large margin is the pipeline's to refuse")
+            .expect("a watermark with a url is validated");
+
+        assert_eq!(validated.margin, 10_000);
+    }
+
+    #[rstest]
+    #[case(0)]
+    #[case(101)]
+    fn validate_watermark_payload_reports_the_shared_opacity_message(#[case] opacity: u8) {
+        let payload = WatermarkPayload {
+            url: Some("https://cdn.example.com/logo.png".to_string()),
+            position: None,
+            opacity: Some(opacity),
+            margin: None,
+        };
+
+        let response = validate_watermark_payload(Some(&payload))
+            .expect_err("an opacity outside 1 to 100 is refused before the fetch");
+        let body = String::from_utf8_lossy(&response.body);
+
+        assert!(
+            body.contains("watermark opacity must be between 1 and 100"),
+            "the message names the option the way every adapter does, got {body}"
+        );
     }
 }
