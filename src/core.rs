@@ -15,6 +15,10 @@ use avif::{avif_orientation, has_avif_brand, sniff_avif};
 mod avif;
 #[cfg(any(feature = "server", feature = "wasm"))]
 pub(crate) mod error_class;
+/// Gated with the `url` crate the address rules parse with, which the server feature brings
+/// in and which the two adapters that fetch are the only users of.
+#[cfg(feature = "server")]
+pub(crate) mod remote_policy;
 
 /// Maximum number of pixels in the output image (width × height).
 ///
