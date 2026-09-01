@@ -826,9 +826,7 @@ fn parse_watermark_opacity(s: &str) -> Result<u8, String> {
     let v: u8 = s
         .parse()
         .map_err(|_| format!("invalid watermark opacity: '{s}'"))?;
-    if !(1..=100).contains(&v) {
-        return Err("watermark opacity must be between 1 and 100".to_string());
-    }
+    crate::core::validate_watermark_opacity(v).map_err(str::to_string)?;
     Ok(v)
 }
 

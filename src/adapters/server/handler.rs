@@ -416,7 +416,6 @@ const REQUEST_DEADLINE_SECS: u64 = 60;
 const WATERMARK_DEFAULT_POSITION: Position = Position::BottomRight;
 const WATERMARK_DEFAULT_OPACITY: u8 = 50;
 const WATERMARK_DEFAULT_MARGIN: u32 = 10;
-const WATERMARK_MAX_MARGIN: u32 = 9999;
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, rename_all = "camelCase", deny_unknown_fields)]
@@ -428,6 +427,7 @@ pub(super) struct WatermarkPayload {
 }
 
 /// Validated watermark parameters ready for fetching. No network I/O performed.
+#[derive(Debug)]
 pub(super) struct ValidatedWatermarkPayload {
     pub(super) url: String,
     pub(super) position: Position,
@@ -447,6 +447,12 @@ impl ValidatedWatermarkPayload {
 }
 
 /// Validates watermark payload fields without performing network I/O.
+///
+/// This serves both the JSON body, where the fields are `watermark.url` and friends, and
+/// the public query string, where they are `watermarkUrl` and friends, so the messages
+/// name the option the way the core and the other adapters do rather than picking one of
+/// the two wire spellings and telling half the callers about a field they cannot have
+/// written.
 pub(super) fn validate_watermark_payload(
     payload: Option<&WatermarkPayload>,
 ) -> Result<Option<ValidatedWatermarkPayload>, HttpResponse> {
@@ -454,28 +460,23 @@ pub(super) fn validate_watermark_payload(
         return Ok(None);
     };
     let url = wm.url.as_deref().filter(|u| !u.is_empty()).ok_or_else(|| {
-        bad_request_response("watermark.url is required when watermark is present")
+        bad_request_response("watermark url is required when a watermark is requested")
     })?;
 
     let position = parse_optional_named(
         wm.position.as_deref(),
-        "watermark.position",
+        "watermark position",
         Position::from_str,
     )?
     .unwrap_or(WATERMARK_DEFAULT_POSITION);
 
     let opacity = wm.opacity.unwrap_or(WATERMARK_DEFAULT_OPACITY);
-    if opacity == 0 || opacity > 100 {
-        return Err(bad_request_response(
-            "watermark.opacity must be between 1 and 100",
-        ));
-    }
+    crate::core::validate_watermark_opacity(opacity).map_err(bad_request_response)?;
+
+    // No ceiling of its own: `apply_watermark` refuses any margin that leaves the
+    // watermark no room, whatever the sizes involved, and a second bound here only
+    // decided which of two failure classes the caller saw for the same picture.
     let margin = wm.margin.unwrap_or(WATERMARK_DEFAULT_MARGIN);
-    if margin > WATERMARK_MAX_MARGIN {
-        return Err(bad_request_response(
-            "watermark.margin must be at most 9999",
-        ));
-    }
 
     Ok(Some(ValidatedWatermarkPayload {
         url: url.to_string(),
@@ -527,17 +528,8 @@ pub(super) fn resolve_multipart_watermark(
     )?
     .unwrap_or(WATERMARK_DEFAULT_POSITION);
     let opacity = opacity.unwrap_or(WATERMARK_DEFAULT_OPACITY);
-    if opacity == 0 || opacity > 100 {
-        return Err(bad_request_response(
-            "watermark_opacity must be between 1 and 100",
-        ));
-    }
+    crate::core::validate_watermark_opacity(opacity).map_err(bad_request_response)?;
     let margin = margin.unwrap_or(WATERMARK_DEFAULT_MARGIN);
-    if margin > WATERMARK_MAX_MARGIN {
-        return Err(bad_request_response(
-            "watermark_margin must be at most 9999",
-        ));
-    }
     Ok(WatermarkInput {
         image: artifact,
         position,

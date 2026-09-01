@@ -1805,12 +1805,24 @@ fn validate_sharpen(value: Option<f32>) -> Result<(), TransformError> {
     Ok(())
 }
 
-fn validate_watermark(wm: &WatermarkInput) -> Result<(), TransformError> {
-    if wm.opacity == 0 || wm.opacity > 100 {
-        return Err(TransformError::InvalidOptions(
-            "watermark opacity must be between 1 and 100".to_string(),
-        ));
+/// Checks the watermark opacity, which every adapter reads before it has an image.
+///
+/// The CLI checks it while parsing a flag, the HTTP server before fetching the watermark
+/// URL, and the Wasm package while reading its options object, so the rule is needed in
+/// four places and the message has to be the same in all of them.
+/// Returns the message to report, so each adapter keeps its own error type and its own
+/// failure class while the sentence the caller reads is written once.
+pub(crate) fn validate_watermark_opacity(opacity: u8) -> Result<(), &'static str> {
+    if opacity == 0 || opacity > 100 {
+        return Err("watermark opacity must be between 1 and 100");
     }
+
+    Ok(())
+}
+
+fn validate_watermark(wm: &WatermarkInput) -> Result<(), TransformError> {
+    validate_watermark_opacity(wm.opacity)
+        .map_err(|message| TransformError::InvalidOptions(message.to_string()))?;
 
     if !wm.image.media_type.is_raster() {
         return Err(TransformError::InvalidOptions(

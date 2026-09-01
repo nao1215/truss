@@ -423,3 +423,97 @@ fn test_watermark_url_redirect_followed() {
         "expected PNG magic bytes in response body"
     );
 }
+
+/// A watermark margin larger than the output is refused by the pipeline, in the class
+/// every adapter reports, rather than by a cap that lived in the server alone.
+///
+/// The geometry check in `apply_watermark` already refuses any margin that leaves no
+/// room, so the server's own ceiling of 9999 only decided which of two classes the
+/// caller saw: `invalid-request` at 10000 and `invalid-options` at 9999, for the same
+/// picture. The CLI and the Wasm package have always reported `invalid-options`, and
+/// both signers emit a margin of 10000 without complaint.
+#[test]
+fn test_watermark_margin_over_the_old_server_cap_is_an_option_error() {
+    let storage_root = temp_dir("wm-large-margin");
+    fs::write(storage_root.join("image.png"), large_png_bytes()).expect("write source fixture");
+
+    let (wm_url, fixture) = spawn_fixture_server(vec![(
+        "200 OK".to_string(),
+        vec![("Content-Type".to_string(), "image/png".to_string())],
+        png_bytes(),
+    )]);
+
+    let (addr, handle) = spawn_server(
+        ServerConfig::new(storage_root, Some("secret".to_string())).with_insecure_url_sources(true),
+    );
+    let body = format!(
+        r#"{{"source":{{"kind":"path","path":"/image.png"}},"options":{{"format":"png"}},"watermark":{{"url":"{wm_url}","margin":10000}}}}"#
+    );
+    let response = send_transform_request(addr, &body, Some("secret"));
+
+    handle
+        .join()
+        .expect("join server thread")
+        .expect("serve one request");
+    fixture.join().expect("join fixture server");
+
+    let (header, _, body) = split_response(&response);
+    let body = String::from_utf8_lossy(&body);
+    assert!(
+        header.starts_with("HTTP/1.1 400 Bad Request"),
+        "a margin that does not fit is still refused: {header}\n{body}"
+    );
+    assert!(
+        body.contains("#invalid-options"),
+        "the class is the one the CLI and the Wasm package report: {body}"
+    );
+    assert!(
+        body.contains("does not fit"),
+        "the message is the pipeline's, which names the sizes involved: {body}"
+    );
+}
+
+/// The opacity rule reads the same whichever door the caller came through, so a query
+/// caller is not told about a field name only the JSON body has.
+#[test]
+fn test_watermark_opacity_message_does_not_name_the_json_field_on_the_query_route() {
+    let storage_root = temp_dir("wm-opacity-wording");
+    fs::write(storage_root.join("image.png"), png_bytes()).expect("write source fixture");
+    let (addr, handle) = spawn_server(
+        ServerConfig::new(storage_root, Some("secret".to_string()))
+            .with_signed_url_credentials("public-dev", "secret-value")
+            .with_insecure_url_sources(true),
+    );
+    let target = signed_target(
+        "/images/by-path",
+        BTreeMap::from([
+            ("path".to_string(), "/image.png".to_string()),
+            ("keyId".to_string(), "public-dev".to_string()),
+            ("expires".to_string(), "4102444800".to_string()),
+            (
+                "watermarkUrl".to_string(),
+                "http://127.0.0.1:1/logo.png".to_string(),
+            ),
+            ("watermarkOpacity".to_string(), "101".to_string()),
+        ]),
+        "cdn.example.com",
+        "secret-value",
+    );
+    let response = send_public_get_request(addr, &target, "cdn.example.com");
+
+    handle
+        .join()
+        .expect("join server thread")
+        .expect("serve one request");
+
+    let (header, _, body) = split_response(&response);
+    let body = String::from_utf8_lossy(&body);
+    assert!(
+        header.starts_with("HTTP/1.1 400 Bad Request"),
+        "an out-of-range opacity is refused: {header}\n{body}"
+    );
+    assert!(
+        body.contains("watermark opacity must be between 1 and 100"),
+        "the message is the one the core, the CLI, and the Wasm package share: {body}"
+    );
+}
