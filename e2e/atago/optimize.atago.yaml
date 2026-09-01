@@ -347,6 +347,23 @@ scenarios:
           stderr:
             contains: "ssim:0.98"
 
+  # Every other named value in the vocabulary is written one way, so the metric is too.
+  - name: a metric in the wrong case is refused like any other unknown name
+    steps:
+      - fixture:
+          file: in.png
+          from: testdata/sample.png
+      - run:
+          command: truss optimize in.png -o out.jpg --target-quality SSIM:0.98
+      - assert:
+          exit_code: 1
+          stderr:
+            contains: "unsupported target quality metric `SSIM`"
+      - run:
+          command: truss optimize in.png -o ok.jpg --target-quality ssim:0.98
+      - assert:
+          exit_code: 0
+
   - name: optimizing an SVG into an SVG has nothing to optimize and says so
     steps:
       - fixture:
