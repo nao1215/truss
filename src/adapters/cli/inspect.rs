@@ -1,7 +1,6 @@
 use crate::{RawArtifact, sniff_artifact};
 use serde::Serialize;
 use std::io::{Read, Write};
-use std::path::PathBuf;
 
 use crate::core::error_class::ErrorClass;
 
@@ -25,8 +24,8 @@ pub(super) fn inspect_from_clap(args: ClapInspectArgs) -> Result<Command, CliErr
             validate_url(url, "--url")?;
             InputSource::Url(url.clone())
         }
-        (None, Some(value)) if value == "-" => InputSource::Stdin,
-        (None, Some(value)) => InputSource::Path(PathBuf::from(value)),
+        (None, Some(value)) if super::is_dash(value) => InputSource::Stdin,
+        (None, Some(value)) => InputSource::Path(value.clone()),
         (None, None) => {
             return Err(CliError {
                 exit_code: EXIT_USAGE,

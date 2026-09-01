@@ -7,7 +7,7 @@ Every error the HTTP server returns is an RFC 9457 problem details body, `applic
 | `type` | A URI naming the class of failure. It is this page, at the anchor of one of the sections below, and it is the member to branch on: two responses with the same `type` failed for the same reason. `about:blank` means the status code is all there is to say. |
 | `title` | The fixed short name of the class. It is the same for every occurrence of a `type` and never carries request specifics. |
 | `status` | The HTTP status code, repeated in the body. |
-| `detail` | What went wrong in this one request, for a person to read. Its wording is not part of the API; do not parse it. |
+| `detail` | What went wrong in this one request, for a person to read. It is one line: a message that came from a decoder and holds a line break is folded onto one before it is sent, the same way the CLI prints one. Its wording is not part of the API; do not parse it. |
 | `requestId` | The request id, the same value as the `X-Request-Id` response header and the `request_id` field of the server's access log, so a body kept on its own can still be matched to the log line. |
 
 ```json
@@ -52,7 +52,7 @@ A dash means the adapter cannot reach the class: the CLI has no `Accept` header 
 | [service-unavailable](#service-unavailable) | — | 503 | — |
 | [loop-detected](#loop-detected) | — | 508 | — |
 
-The CLI's five exit codes are coarser than the classes, so a class determines an exit code but an exit code does not determine a class. `internal-error` is the one class on two of them: the CLI separates a fault while reading or writing (2) from one after that (5), and both are the same class to the server.
+The CLI names the class on stderr as `error: <message> (<class>)`, always on one line, so the class is the last thing on the line whatever the message came from. The CLI's five exit codes are coarser than the classes, so a class determines an exit code but an exit code does not determine a class. `internal-error` is the one class on two of them: the CLI separates a fault while reading or writing (2) from one after that (5), and both are the same class to the server.
 
 ## Transform classes
 
@@ -108,7 +108,7 @@ The credentials verified but do not allow this request, such as a source outside
 
 ### not-found
 
-The source the request named does not exist, which on the CLI is an input file that is not there. A route that does not exist also answers 404, with `type` `about:blank`.
+The source the request named does not exist, which on the CLI is any file the command line named that is not there: the input, or a `--watermark`. A route that does not exist also answers 404, with `type` `about:blank`.
 
 ### not-acceptable
 
@@ -134,7 +134,7 @@ The rate limit for the client's address was reached. `Retry-After` says when to 
 
 ### internal-error
 
-truss failed in a way that is not the request's doing, such as a source it could not read. On the CLI this is every I/O fault other than a missing source or a refused fetch (exit 2), and every fault after the input is read: a port already in use, a standard output that cannot be written (exit 5).
+truss failed in a way that is not the request's doing, such as a source it could not read. On the CLI this is every I/O fault other than a file that is not there or a refused fetch (exit 2), such as a source that cannot be read or an output that cannot be written, and every fault after the input is read: a port already in use, a standard output that cannot be written (exit 5).
 
 ### not-implemented
 

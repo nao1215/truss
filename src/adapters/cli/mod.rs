@@ -4,9 +4,10 @@ use crate::{
     TransformOptions,
 };
 use clap::{CommandFactory, Parser, Subcommand};
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::{self, Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use crate::core::error_class::ErrorClass;
@@ -465,10 +466,10 @@ enum CliSubcommand {
 struct ClapConvertArgs {
     /// Input file path, or - for stdin
     #[arg(allow_hyphen_values = true)]
-    input: Option<String>,
+    input: Option<PathBuf>,
     /// Output file path, or - for stdout
     #[arg(short = 'o', long = "output", allow_hyphen_values = true)]
-    output: Option<String>,
+    output: Option<PathBuf>,
     /// Fetch input from an HTTP(S) URL
     #[arg(long)]
     url: Option<String>,
@@ -556,10 +557,10 @@ struct ClapConvertArgs {
 struct ClapOptimizeArgs {
     /// Input file path, or - for stdin
     #[arg(allow_hyphen_values = true)]
-    input: Option<String>,
+    input: Option<PathBuf>,
     /// Output file path, or - for stdout
     #[arg(short = 'o', long = "output", allow_hyphen_values = true)]
-    output: Option<String>,
+    output: Option<PathBuf>,
     /// Fetch input from an HTTP(S) URL
     #[arg(long)]
     url: Option<String>,
@@ -599,7 +600,7 @@ struct ClapOptimizeArgs {
 struct ClapInspectArgs {
     /// Input file path, or - for stdin
     #[arg(allow_hyphen_values = true)]
-    input: Option<String>,
+    input: Option<PathBuf>,
     /// Fetch input from an HTTP(S) URL
     #[arg(long)]
     url: Option<String>,
@@ -900,7 +901,7 @@ fn sign_usage() -> &'static str {
 /// ```
 pub fn run<I>(args: I) -> ExitCode
 where
-    I: IntoIterator<Item = String>,
+    I: IntoIterator<Item: Into<OsString>>,
 {
     let stdin = io::stdin();
     let stdout = io::stdout();
@@ -1044,7 +1045,7 @@ struct CliError {
 
 fn run_with_io<I, R, W, E>(args: I, stdin: &mut R, stdout: &mut W, stderr: &mut E) -> u8
 where
-    I: IntoIterator<Item = String>,
+    I: IntoIterator<Item: Into<OsString>>,
     R: Read,
     W: Write,
     E: Write,
@@ -1145,15 +1146,27 @@ fn looks_like_unknown_subcommand(value: &str) -> bool {
 
 /// Pre-processes raw args to handle implicit convert and implicit serve
 /// before handing off to clap.
-fn preprocess_args(args: Vec<String>) -> Vec<String> {
+/// Reports whether a path argument is the single dash that names standard input or output.
+///
+/// The comparison is on the bytes rather than on a `str`, so a path that is not text
+/// reaches the file system rather than being read as a stream.
+fn is_dash(path: &Path) -> bool {
+    path.as_os_str() == OsStr::new("-")
+}
+
+fn preprocess_args(args: Vec<OsString>) -> Vec<OsString> {
     if args.len() <= 1 {
         return args;
     }
     let first = &args[1];
+    // A path is bytes on Unix, so an argument that is not text is still a file truss can
+    // read. Only the routing decisions below need it as text, and every one of them is a
+    // comparison against a name truss chose, which no such argument can match.
+    let first_text = first.to_str();
 
     // -h / --help at top level → route to our help subcommand
     if first == "-h" || first == "--help" {
-        let mut new = vec![args[0].clone(), "help".to_string()];
+        let mut new = vec![args[0].clone(), OsString::from("help")];
         if args.len() > 2 {
             new.extend_from_slice(&args[2..]);
         }
@@ -1162,18 +1175,18 @@ fn preprocess_args(args: Vec<String>) -> Vec<String> {
 
     // -V / --version at top level → route to version subcommand
     if first == "-V" || first == "--version" {
-        return vec![args[0].clone(), "version".to_string()];
+        return vec![args[0].clone(), OsString::from("version")];
     }
 
     // If first arg is a serve flag, insert "serve" subcommand
-    if is_serve_flag(first) {
-        let mut new = vec![args[0].clone(), "serve".to_string()];
+    if first_text.is_some_and(is_serve_flag) {
+        let mut new = vec![args[0].clone(), OsString::from("serve")];
         new.extend_from_slice(&args[1..]);
         return new;
     }
 
     // Known subcommand → pass through
-    if KNOWN_SUBCOMMANDS.contains(&first.as_str()) {
+    if first_text.is_some_and(|first| KNOWN_SUBCOMMANDS.contains(&first)) {
         return args;
     }
 
@@ -1182,19 +1195,19 @@ fn preprocess_args(args: Vec<String>) -> Vec<String> {
     // subcommand.  This handles `truss image -o out.jpg` where `image` is a
     // real file.
     if std::path::Path::new(first).is_file() {
-        let mut new = vec![args[0].clone(), "convert".to_string()];
+        let mut new = vec![args[0].clone(), OsString::from("convert")];
         new.extend_from_slice(&args[1..]);
         return new;
     }
 
     // Looks like an unknown subcommand (alphabetic, no dots/slashes) →
     // let clap handle it for typo suggestions
-    if looks_like_unknown_subcommand(first) {
+    if first_text.is_some_and(looks_like_unknown_subcommand) {
         return args;
     }
 
     // Otherwise, treat as implicit convert
-    let mut new = vec![args[0].clone(), "convert".to_string()];
+    let mut new = vec![args[0].clone(), OsString::from("convert")];
     new.extend_from_slice(&args[1..]);
     new
 }
@@ -1205,9 +1218,9 @@ fn preprocess_args(args: Vec<String>) -> Vec<String> {
 
 fn parse_args<I>(args: I) -> Result<Command, CliError>
 where
-    I: IntoIterator<Item = String>,
+    I: IntoIterator<Item: Into<OsString>>,
 {
-    let raw: Vec<String> = args.into_iter().collect();
+    let raw: Vec<OsString> = args.into_iter().map(Into::into).collect();
 
     // Bare invocation → top-level help (exit 0)
     if raw.len() <= 1 {
@@ -1436,20 +1449,27 @@ where
             Ok(bytes)
         }
         InputSource::Path(path) => fs::read(&path).map_err(|error| {
-            // A source that is not there is `not-found`, the class the server gives the
-            // same miss; anything else about the file system is `internal-error`.
-            let class = if error.kind() == io::ErrorKind::NotFound {
-                ErrorClass::NotFound
-            } else {
-                ErrorClass::InternalError
-            };
             classified_error(
-                class,
+                class_for_io_error(&error),
                 EXIT_IO,
                 &format!("failed to read {}: {error}", path.display()),
             )
         }),
         InputSource::Url(url) => read_url_bytes(&url),
+    }
+}
+
+/// Names the class of a file system fault.
+///
+/// A source that is not there is `not-found`, the class the server gives the same miss and
+/// the one `docs/problems.md` describes as an input file that is not there; anything else
+/// about the file system is `internal-error`. Every path the command line names is read
+/// through this, so a mistyped `--watermark` is classified like a mistyped input.
+fn class_for_io_error(error: &io::Error) -> ErrorClass {
+    if error.kind() == io::ErrorKind::NotFound {
+        ErrorClass::NotFound
+    } else {
+        ErrorClass::InternalError
     }
 }
 
@@ -1615,7 +1635,12 @@ fn write_error<E>(stderr: &mut E, error: CliError) -> u8
 where
     E: Write,
 {
-    let _ = writeln!(stderr, "error: {} ({})", error.message, error.class.slug());
+    let _ = writeln!(
+        stderr,
+        "error: {} ({})",
+        crate::core::single_line(&error.message),
+        error.class.slug()
+    );
     if let Some(usage) = &error.usage {
         let _ = writeln!(stderr, "{usage}");
     }
@@ -1643,6 +1668,7 @@ mod tests {
     };
     use serial_test::serial;
     use std::env;
+    use std::ffi::OsString;
     use std::fs;
     use std::io::{self, Cursor, Read, Write};
     use std::net::TcpListener;
@@ -3416,10 +3442,10 @@ mod tests {
         std::env::set_current_dir(&dir).expect("set cwd to temp dir");
 
         let args = vec![
-            "truss".to_string(),
-            "image".to_string(),
-            "-o".to_string(),
-            "out.jpg".to_string(),
+            OsString::from("truss"),
+            OsString::from("image"),
+            OsString::from("-o"),
+            OsString::from("out.jpg"),
         ];
         let result = preprocess_args(args);
 
@@ -3438,8 +3464,8 @@ mod tests {
     fn preprocess_args_nonexistent_extensionless_is_unknown_subcommand() {
         // A name that doesn't exist on disk should pass through (clap handles typo suggestion)
         let args = vec![
-            "truss".to_string(),
-            "nonexistent_subcommand_xyz".to_string(),
+            OsString::from("truss"),
+            OsString::from("nonexistent_subcommand_xyz"),
         ];
         let result = preprocess_args(args.clone());
         assert_eq!(
@@ -3720,6 +3746,301 @@ mod tests {
             Command::Convert(convert) => assert_eq!(convert.options.format, Some(MediaType::Png)),
             other => panic!("expected a convert command, got {other:?}"),
         }
+    }
+
+    // ===== A path argument that is not valid UTF-8 =====
+
+    /// A file name on Linux is a byte string, so `truss convert` has to take one whatever
+    /// bytes it holds. Reading the arguments as `String` panicked before the command line
+    /// was parsed, which no adapter could report and no exit code covered.
+    ///
+    /// Only Linux runs this: APFS refuses to create a name that is not valid UTF-8, with
+    /// `EILSEQ`, so the fixture cannot exist on macOS, and a Windows name is UTF-16. The
+    /// panic itself was not filesystem-specific, and the flag-value case below covers the
+    /// platforms this one skips.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_non_utf8_input_path_is_converted_rather_than_refused() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let dir = temp_dir("non-utf8-input");
+        let mut name = OsString::from_vec(b"caf\xe9".to_vec());
+        name.push(".png");
+        let input_path = dir.join(name);
+        fs::write(&input_path, png_bytes()).expect("write input file");
+        let output_path = dir.join("out.png");
+
+        let mut stdin = Cursor::new(Vec::<u8>::new());
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let exit_code = run_with_io(
+            vec![
+                OsString::from("truss"),
+                OsString::from("convert"),
+                input_path.clone().into_os_string(),
+                OsString::from("-o"),
+                output_path.clone().into_os_string(),
+                OsString::from("--width"),
+                OsString::from("2"),
+            ],
+            &mut stdin,
+            &mut stdout,
+            &mut stderr,
+        );
+
+        let output_exists = output_path.is_file();
+        let _ = fs::remove_dir_all(&dir);
+
+        assert_eq!(
+            exit_code,
+            0,
+            "stderr was: {}",
+            String::from_utf8_lossy(&stderr)
+        );
+        assert!(
+            output_exists,
+            "the conversion should have written an output"
+        );
+    }
+
+    /// The bytes have to survive on the way out as well: a lossy conversion of the path
+    /// would write to a name nobody asked for and report success. Linux only, for the
+    /// reason the test above gives.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_non_utf8_output_path_is_written_under_exactly_those_bytes() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let dir = temp_dir("non-utf8-output");
+        let input_path = dir.join("in.png");
+        fs::write(&input_path, png_bytes()).expect("write input file");
+        let mut name = OsString::from_vec(b"sortie-\xe9".to_vec());
+        name.push(".png");
+        let output_path = dir.join(name);
+
+        let mut stdin = Cursor::new(Vec::<u8>::new());
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let exit_code = run_with_io(
+            vec![
+                OsString::from("truss"),
+                OsString::from("convert"),
+                input_path.into_os_string(),
+                OsString::from("-o"),
+                output_path.clone().into_os_string(),
+            ],
+            &mut stdin,
+            &mut stdout,
+            &mut stderr,
+        );
+
+        let output_exists = output_path.is_file();
+        let _ = fs::remove_dir_all(&dir);
+
+        assert_eq!(
+            exit_code,
+            0,
+            "stderr was: {}",
+            String::from_utf8_lossy(&stderr)
+        );
+        assert!(
+            output_exists,
+            "the output should exist under the bytes that were asked for"
+        );
+    }
+
+    /// A flag whose value is genuinely text keeps refusing bytes that are not text, with
+    /// the usage error every other bad flag value gets rather than a panic.
+    #[cfg(unix)]
+    #[test]
+    fn a_non_utf8_value_for_a_text_flag_is_a_usage_error() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let mut stdin = Cursor::new(png_bytes());
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let exit_code = run_with_io(
+            vec![
+                OsString::from("truss"),
+                OsString::from("convert"),
+                OsString::from("-"),
+                OsString::from("-o"),
+                OsString::from("-"),
+                OsString::from("--format"),
+                OsString::from_vec(vec![0xff]),
+            ],
+            &mut stdin,
+            &mut stdout,
+            &mut stderr,
+        );
+
+        assert_eq!(exit_code, EXIT_USAGE, "a value that is not text is usage");
+        assert!(stdout.is_empty(), "nothing should be written on a refusal");
+    }
+
+    // ===== The class of a file system fault =====
+
+    /// The watermark is a source the command line named, so a missing one is the same
+    /// class as a missing input. `internal-error` says the fault is truss's own.
+    #[test]
+    fn a_missing_watermark_is_not_found_like_a_missing_input() {
+        let dir = temp_dir("watermark-class");
+        let input_path = dir.join("in.png");
+        fs::write(&input_path, png_bytes()).expect("write input file");
+        let output_path = dir.join("out.png");
+
+        let mut stdin = Cursor::new(Vec::<u8>::new());
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let exit_code = run_with_io(
+            vec![
+                "truss".to_string(),
+                "convert".to_string(),
+                input_path.display().to_string(),
+                "-o".to_string(),
+                output_path.display().to_string(),
+                "--watermark".to_string(),
+                dir.join("absent.png").display().to_string(),
+            ],
+            &mut stdin,
+            &mut stdout,
+            &mut stderr,
+        );
+
+        let message = String::from_utf8(stderr).expect("utf8 stderr");
+        let _ = fs::remove_dir_all(&dir);
+
+        assert_eq!(exit_code, 2, "a file system fault is exit 2");
+        assert!(
+            message.contains("(not-found)"),
+            "a missing watermark should be not-found, got: {message}"
+        );
+    }
+
+    /// A watermark that is there and cannot be read is the other class, which is what
+    /// keeps the shared rule honest rather than replacing one blanket answer with another.
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_watermark_is_an_internal_error() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = temp_dir("watermark-unreadable");
+        let input_path = dir.join("in.png");
+        fs::write(&input_path, png_bytes()).expect("write input file");
+        let watermark_path = dir.join("wm.png");
+        fs::write(&watermark_path, png_bytes()).expect("write watermark file");
+        fs::set_permissions(&watermark_path, fs::Permissions::from_mode(0o000))
+            .expect("make the watermark unreadable");
+        let output_path = dir.join("out.png");
+
+        let mut stdin = Cursor::new(Vec::<u8>::new());
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let exit_code = run_with_io(
+            vec![
+                "truss".to_string(),
+                "convert".to_string(),
+                input_path.display().to_string(),
+                "-o".to_string(),
+                output_path.display().to_string(),
+                "--watermark".to_string(),
+                watermark_path.display().to_string(),
+            ],
+            &mut stdin,
+            &mut stdout,
+            &mut stderr,
+        );
+
+        let message = String::from_utf8(stderr).expect("utf8 stderr");
+        let _ = fs::set_permissions(&watermark_path, fs::Permissions::from_mode(0o644));
+        let _ = fs::remove_dir_all(&dir);
+
+        if message.contains("(not-found)") {
+            // Running as root reads it anyway, and the case has nothing to assert.
+            return;
+        }
+        assert_eq!(exit_code, 2, "a file system fault is exit 2");
+        assert!(
+            message.contains("(internal-error)"),
+            "a watermark that cannot be read is not a missing one, got: {message}"
+        );
+    }
+
+    // ===== stderr is one line per failure =====
+
+    /// The failure a real decoder raises, end to end.
+    ///
+    /// `truncated.jpg` is a JPEG whose bytes stop early, which is what an upload cut off
+    /// by a dropped connection looks like, and the decoder's own wording for it ends with
+    /// a newline.
+    #[test]
+    fn a_truncated_jpeg_is_reported_on_one_line() {
+        const TRUNCATED_JPEG: &[u8] = include_bytes!("../../../integration/fixtures/truncated.jpg");
+
+        let mut stdin = Cursor::new(TRUNCATED_JPEG.to_vec());
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let exit_code = run_with_io(
+            vec![
+                "truss".to_string(),
+                "convert".to_string(),
+                "-".to_string(),
+                "-o".to_string(),
+                "-".to_string(),
+                "--format".to_string(),
+                "png".to_string(),
+            ],
+            &mut stdin,
+            &mut stdout,
+            &mut stderr,
+        );
+
+        let rendered = String::from_utf8(stderr).expect("utf8 stderr");
+
+        assert_eq!(exit_code, EXIT_TRANSFORM);
+        assert_eq!(
+            rendered.lines().count(),
+            1,
+            "one failure is one line, got: {rendered:?}"
+        );
+        assert!(
+            rendered.trim_end().ends_with("(decode-failed)"),
+            "the class ends the line, got: {rendered:?}"
+        );
+    }
+
+    /// The class is the last thing on the line, so a message carrying a newline puts it on
+    /// a line of its own where a caller reading the last line cannot find the failure.
+    #[test]
+    fn write_error_keeps_a_message_with_a_newline_on_one_line() {
+        let mut stderr = Vec::new();
+        let code = super::write_error(
+            &mut stderr,
+            super::classified_error(
+                crate::core::error_class::ErrorClass::DecodeFailed,
+                EXIT_TRANSFORM,
+                "decoding failed\n",
+            ),
+        );
+
+        let rendered = String::from_utf8(stderr).expect("utf8 stderr");
+
+        assert_eq!(code, EXIT_TRANSFORM);
+        assert_eq!(
+            rendered.lines().count(),
+            1,
+            "one failure is one line, got: {rendered:?}"
+        );
+        assert!(
+            rendered.ends_with("(decode-failed)\n"),
+            "the class ends the line, got: {rendered:?}"
+        );
     }
 
     #[test]

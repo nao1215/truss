@@ -377,7 +377,7 @@ fn serialize_json<T: Serialize>(value: &T) -> Result<String, JsValue> {
 fn transform_error_to_js(error: TransformError) -> JsValue {
     let payload = WasmErrorPayload {
         kind: error_kind(&error),
-        message: error.to_string(),
+        message: crate::core::single_line(&error.to_string()).into_owned(),
     };
 
     serialize_json(&payload)

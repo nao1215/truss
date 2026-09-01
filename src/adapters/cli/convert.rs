@@ -1,4 +1,5 @@
 use crate::{MediaType, RawArtifact, TransformRequest, WatermarkInput, sniff_artifact, transform};
+use std::ffi::OsString;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -7,9 +8,9 @@ use crate::core::error_class::ErrorClass;
 
 use super::{
     ClapConvertArgs, ClapOptimizeArgs, CliError, Command, ConvertCommand, EXIT_IO, EXIT_RUNTIME,
-    EXIT_USAGE, HelpTopic, InputSource, OutputTarget, TransformFields, convert_error,
-    convert_usage, map_transform_error, optimize_error, optimize_usage, read_input_bytes,
-    runtime_error, validate_url,
+    EXIT_USAGE, HelpTopic, InputSource, OutputTarget, TransformFields, class_for_io_error,
+    classified_error, convert_error, convert_usage, is_dash, map_transform_error, optimize_error,
+    optimize_usage, read_input_bytes, runtime_error, validate_url,
 };
 
 // ---------------------------------------------------------------------------
@@ -26,8 +27,8 @@ pub(super) fn convert_from_clap(args: ClapConvertArgs) -> Result<Command, CliErr
             validate_url(url, "--url")?;
             InputSource::Url(url.clone())
         }
-        (None, Some(value)) if value == "-" => InputSource::Stdin,
-        (None, Some(value)) => InputSource::Path(PathBuf::from(value)),
+        (None, Some(value)) if is_dash(value) => InputSource::Stdin,
+        (None, Some(value)) => InputSource::Path(value.clone()),
         (None, None) => {
             return Err(CliError {
                 exit_code: EXIT_USAGE,
@@ -43,8 +44,8 @@ pub(super) fn convert_from_clap(args: ClapConvertArgs) -> Result<Command, CliErr
     };
 
     let output = match args.output {
-        Some(ref value) if value == "-" => OutputTarget::Stdout,
-        Some(ref value) => OutputTarget::Path(PathBuf::from(value)),
+        Some(ref value) if is_dash(value) => OutputTarget::Stdout,
+        Some(ref value) => OutputTarget::Path(value.clone()),
         None => {
             return Err(CliError {
                 exit_code: EXIT_USAGE,
@@ -124,8 +125,8 @@ pub(super) fn optimize_from_clap(args: ClapOptimizeArgs) -> Result<Command, CliE
             validate_url(url, "--url")?;
             InputSource::Url(url.clone())
         }
-        (None, Some(value)) if value == "-" => InputSource::Stdin,
-        (None, Some(value)) => InputSource::Path(PathBuf::from(value)),
+        (None, Some(value)) if is_dash(value) => InputSource::Stdin,
+        (None, Some(value)) => InputSource::Path(value.clone()),
         (None, None) => {
             return Err(CliError {
                 exit_code: EXIT_USAGE,
@@ -141,8 +142,8 @@ pub(super) fn optimize_from_clap(args: ClapOptimizeArgs) -> Result<Command, CliE
     };
 
     let output = match args.output {
-        Some(ref value) if value == "-" => OutputTarget::Stdout,
-        Some(ref value) => OutputTarget::Path(PathBuf::from(value)),
+        Some(ref value) if is_dash(value) => OutputTarget::Stdout,
+        Some(ref value) => OutputTarget::Path(value.clone()),
         None => {
             return Err(CliError {
                 exit_code: EXIT_USAGE,
@@ -223,7 +224,8 @@ where
 
     let watermark = if let Some(ref wm_path) = command.watermark_path {
         let wm_bytes = fs::read(wm_path).map_err(|error| {
-            runtime_error(
+            classified_error(
+                class_for_io_error(&error),
                 EXIT_IO,
                 &format!("failed to read watermark {}: {error}", wm_path.display()),
             )
@@ -303,11 +305,267 @@ where
         OutputTarget::Stdout => stdout.write_all(bytes).map_err(|error| {
             runtime_error(EXIT_RUNTIME, &format!("failed to write stdout: {error}"))
         }),
-        OutputTarget::Path(path) => fs::write(&path, bytes).map_err(|error| {
-            runtime_error(
+        OutputTarget::Path(path) => replace_file(&path, bytes).map_err(|error| {
+            classified_error(
+                class_for_io_error(&error),
                 EXIT_IO,
                 &format!("failed to write {}: {error}", path.display()),
             )
         }),
+    }
+}
+
+/// Replaces a file with new bytes, or leaves it exactly as it was.
+///
+/// `fs::write` opens the destination with `O_TRUNC`, so a write that stops partway, on a
+/// full disk or a filled quota, leaves a file that is shorter than the image it held and
+/// still looks like an image to anything that reads its header. Converting in place makes
+/// that the only copy. The bytes therefore go to a temporary file in the destination's own
+/// directory, which is renamed over the destination once every byte is in it; a rename
+/// within one directory is atomic, so a reader sees the old file or the new one.
+///
+/// This is what `server::cache` does for a cache entry, for the same reason.
+///
+/// The mode of an existing destination is copied onto the temporary file before the
+/// rename, since the new file would otherwise carry the umask rather than the permissions
+/// the destination was given. A directory that will not take a temporary file, which on
+/// Unix is one the caller cannot write to even though the file inside it may be
+/// replaceable, falls back to writing the destination directly: it is the write that was
+/// done before, and refusing it would take away something that works today.
+fn replace_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let Some(temporary) = temporary_sibling(path) else {
+        return fs::write(path, bytes);
+    };
+    let Ok(mut file) = fs::File::create(&temporary) else {
+        return fs::write(path, bytes);
+    };
+
+    let outcome = (|| -> std::io::Result<()> {
+        file.write_all(bytes)?;
+        drop(file);
+        copy_permissions(path, &temporary);
+        fs::rename(&temporary, path)
+    })();
+
+    if outcome.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    outcome
+}
+
+/// Builds the path of the temporary file a replacement is written to.
+///
+/// It sits beside the destination, because a rename across file systems fails, and it
+/// carries the process id so two `truss` runs writing the same output do not collide.
+fn temporary_sibling(path: &Path) -> Option<PathBuf> {
+    let name = path.file_name()?;
+    let mut candidate = OsString::from(".");
+    candidate.push(name);
+    candidate.push(format!(".tmp.{}", std::process::id()));
+    Some(path.with_file_name(candidate))
+}
+
+/// Gives the replacement the permissions the destination already had.
+///
+/// A destination that is not there yet has none to copy, and a file system that does not
+/// carry Unix modes leaves the temporary file as it was created; neither is a failure of
+/// the write, so nothing is reported.
+fn copy_permissions(path: &Path, temporary: &Path) {
+    if let Ok(metadata) = fs::metadata(path) {
+        let _ = fs::set_permissions(temporary, metadata.permissions());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{OutputTarget, write_output_bytes};
+    use std::fs;
+    use std::path::PathBuf;
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let path = crate::test_support::unique_temp_path(&format!("truss-{name}"));
+        fs::create_dir_all(&path).expect("create temp dir");
+        path
+    }
+
+    /// A write that fails leaves the destination as it was.
+    ///
+    /// `RLIMIT_FSIZE` of zero makes every write fail with `EFBIG` while the open that
+    /// truncates the file still succeeds, which is the shape a full disk and a filled
+    /// quota have: the destination is emptied and then nothing is written into it. The
+    /// limit is process-wide, so the test is serial and restores what it changed.
+    #[cfg(unix)]
+    #[test]
+    #[serial_test::serial]
+    fn a_failed_write_leaves_the_previous_file_in_place() {
+        let dir = temp_dir("write-failure");
+        let destination = dir.join("out.png");
+        let previous = b"the bytes that were already there".to_vec();
+        fs::write(&destination, &previous).expect("write the destination");
+
+        let previous_signal = unsafe { libc::signal(libc::SIGXFSZ, libc::SIG_IGN) };
+        let mut original = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        assert_eq!(
+            unsafe { libc::getrlimit(libc::RLIMIT_FSIZE, &mut original) },
+            0,
+            "read the current file size limit"
+        );
+        let zero = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: original.rlim_max,
+        };
+        assert_eq!(
+            unsafe { libc::setrlimit(libc::RLIMIT_FSIZE, &zero) },
+            0,
+            "forbid writing any bytes"
+        );
+
+        let mut stdout = Vec::new();
+        let result = write_output_bytes(
+            OutputTarget::Path(destination.clone()),
+            b"a new image that cannot be written",
+            &mut stdout,
+        );
+
+        unsafe {
+            libc::setrlimit(libc::RLIMIT_FSIZE, &original);
+            libc::signal(libc::SIGXFSZ, previous_signal);
+        }
+
+        let after = fs::read(&destination).expect("read the destination back");
+        let leftovers: Vec<PathBuf> = fs::read_dir(&dir)
+            .expect("list the directory")
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|path| path != &destination)
+            .collect();
+        let _ = fs::remove_dir_all(&dir);
+
+        assert!(result.is_err(), "the write failed and has to say so");
+        assert_eq!(
+            after, previous,
+            "a failed write must not replace the file it was going to overwrite"
+        );
+        assert!(
+            leftovers.is_empty(),
+            "a failed write left files behind: {leftovers:?}"
+        );
+    }
+
+    /// The same failure with the input and the output being one file, which is the case
+    /// where the bytes exist nowhere else.
+    #[cfg(unix)]
+    #[test]
+    #[serial_test::serial]
+    fn a_failed_in_place_write_leaves_the_only_copy_alone() {
+        let dir = temp_dir("write-failure-in-place");
+        let path = dir.join("photo.png");
+        let previous = crate::test_support::flat_png(4, 3);
+        fs::write(&path, &previous).expect("write the only copy");
+
+        let previous_signal = unsafe { libc::signal(libc::SIGXFSZ, libc::SIG_IGN) };
+        let mut original = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        unsafe { libc::getrlimit(libc::RLIMIT_FSIZE, &mut original) };
+        let zero = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: original.rlim_max,
+        };
+        unsafe { libc::setrlimit(libc::RLIMIT_FSIZE, &zero) };
+
+        let mut stdout = Vec::new();
+        let result = write_output_bytes(OutputTarget::Path(path.clone()), b"smaller", &mut stdout);
+
+        unsafe {
+            libc::setrlimit(libc::RLIMIT_FSIZE, &original);
+            libc::signal(libc::SIGXFSZ, previous_signal);
+        }
+
+        let after = fs::read(&path).expect("read the file back");
+        let _ = fs::remove_dir_all(&dir);
+
+        assert!(result.is_err());
+        assert_eq!(after, previous, "the source was the destination");
+    }
+
+    /// A successful write replaces the file and leaves nothing beside it.
+    #[test]
+    fn a_successful_write_leaves_no_other_file_behind() {
+        let dir = temp_dir("write-success");
+        let destination = dir.join("out.png");
+        fs::write(&destination, b"old").expect("write the destination");
+
+        let mut stdout = Vec::new();
+        write_output_bytes(OutputTarget::Path(destination.clone()), b"new", &mut stdout)
+            .expect("the write succeeds");
+
+        let entries: Vec<PathBuf> = fs::read_dir(&dir)
+            .expect("list the directory")
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .collect();
+        let content = fs::read(&destination).expect("read the destination");
+        let _ = fs::remove_dir_all(&dir);
+
+        assert_eq!(content, b"new");
+        assert_eq!(entries.len(), 1, "the directory holds only the output");
+    }
+
+    /// Replacing a file keeps the permissions it had, which a rename over it would not
+    /// do on its own: the new inode would carry the umask instead.
+    #[cfg(unix)]
+    #[test]
+    fn replacing_a_file_keeps_its_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = temp_dir("write-permissions");
+        let destination = dir.join("out.png");
+        fs::write(&destination, b"old").expect("write the destination");
+        fs::set_permissions(&destination, fs::Permissions::from_mode(0o640))
+            .expect("set the destination mode");
+
+        let mut stdout = Vec::new();
+        write_output_bytes(OutputTarget::Path(destination.clone()), b"new", &mut stdout)
+            .expect("the write succeeds");
+
+        let mode = fs::metadata(&destination)
+            .expect("read the destination metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        let _ = fs::remove_dir_all(&dir);
+
+        assert_eq!(mode, 0o640, "the mode of the replaced file is kept");
+    }
+
+    /// A directory that cannot be written to is still a directory whose files can be
+    /// replaced, which is what the file's own mode decides on Unix. Nothing that worked
+    /// before the write became atomic stops working.
+    #[cfg(unix)]
+    #[test]
+    fn a_file_in_a_read_only_directory_is_still_replaced() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = temp_dir("write-read-only-dir");
+        let destination = dir.join("out.png");
+        fs::write(&destination, b"old").expect("write the destination");
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o555)).expect("seal the directory");
+
+        let mut stdout = Vec::new();
+        let result =
+            write_output_bytes(OutputTarget::Path(destination.clone()), b"new", &mut stdout);
+        let content = fs::read(&destination).expect("read the destination");
+
+        let _ = fs::set_permissions(&dir, fs::Permissions::from_mode(0o755));
+        let _ = fs::remove_dir_all(&dir);
+
+        if result.is_err() {
+            // Running as root ignores the directory mode, and there is nothing to assert.
+            return;
+        }
+        assert_eq!(content, b"new");
     }
 }

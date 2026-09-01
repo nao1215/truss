@@ -265,3 +265,28 @@ scenarios:
           exit_code: 1
           stderr:
             contains: "watermark opacity must be between 1 and 100"
+
+  # A watermark is a source the command line named, so a path that is not there is the
+  # same class as an input that is not there. `internal-error` would say the fault was
+  # truss's own, and a caller branching on the class would retry rather than fix the path.
+  - name: a watermark that is not there is not-found, like an input that is not there
+    steps:
+      - fixture:
+          file: in.png
+          from: testdata/sample.png
+      - run:
+          command: truss convert in.png -o out.png --watermark absent.png
+      - assert:
+          exit_code: 2
+          stderr:
+            contains:
+              - "failed to read watermark"
+              - "(not-found)"
+      - run:
+          command: truss convert absent.png -o out.png
+      - assert:
+          exit_code: 2
+          stderr:
+            contains:
+              - "failed to read absent.png"
+              - "(not-found)"
