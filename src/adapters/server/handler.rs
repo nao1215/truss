@@ -282,12 +282,14 @@ pub(super) fn storage_backend_label(config: &ServerConfig) -> &'static str {
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 #[serde(default, rename_all = "camelCase", deny_unknown_fields)]
 pub struct TransformOptionsPayload {
+    #[serde(default, deserialize_with = "crate::core::deserialize_width")]
     pub width: Option<u32>,
+    #[serde(default, deserialize_with = "crate::core::deserialize_height")]
     pub height: Option<u32>,
     pub fit: Option<String>,
     pub position: Option<String>,
     pub format: Option<String>,
-    #[serde(default, deserialize_with = "deserialize_quality")]
+    #[serde(default, deserialize_with = "crate::core::deserialize_quality")]
     pub quality: Option<u8>,
     pub optimize: Option<String>,
     pub target_quality: Option<String>,
@@ -295,7 +297,10 @@ pub struct TransformOptionsPayload {
     /// Clockwise rotation in whole degrees. Negatives turn counter-clockwise and values
     /// past a full turn wrap, which is what `Rotation` accepts and what the CLI and the
     /// Wasm package take.
-    #[serde(default, deserialize_with = "deserialize_rotation_degrees")]
+    #[serde(
+        default,
+        deserialize_with = "crate::core::deserialize_rotation_degrees"
+    )]
     pub rotate: Option<i32>,
     pub auto_orient: Option<bool>,
     pub strip_metadata: Option<bool>,
@@ -305,37 +310,6 @@ pub struct TransformOptionsPayload {
     pub sharpen: Option<f32>,
     pub grayscale: Option<bool>,
     pub without_enlargement: Option<bool>,
-}
-
-/// Reads a quality as a number of any width and judges it by the range truss publishes.
-///
-/// Deserializing straight into the `u8` the field holds made `serde` refuse 256 with
-/// `invalid value: integer 256, expected u8`, which names a Rust type and a limit that is
-/// not truss's, while 255 reached the transform and got `quality must be between 1 and 100`.
-fn deserialize_quality<'de, D>(deserializer: D) -> Result<Option<u8>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    use serde::de::Error as _;
-    let value = Option::<i64>::deserialize(deserializer)?;
-    match value {
-        None => Ok(None),
-        Some(value) => crate::core::validate_quality_value(value)
-            .map(Some)
-            .map_err(D::Error::custom),
-    }
-}
-
-/// Reads a rotation as a number of any width and reduces it to a single turn.
-///
-/// The option documents that an angle past a full turn wraps, and the CLI takes any whole
-/// number of degrees; deserializing into `i32` made the server refuse what the CLI accepts.
-fn deserialize_rotation_degrees<'de, D>(deserializer: D) -> Result<Option<i32>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let value = Option::<i64>::deserialize(deserializer)?;
-    Ok(value.map(|degrees| (degrees % 360) as i32))
 }
 
 impl TransformOptionsPayload {
@@ -1349,7 +1323,11 @@ pub(super) fn parse_public_get_request(
                 "watermarkOpacity",
                 crate::core::validate_watermark_opacity_value,
             )?,
-            margin: parse_optional_integer_query(query, "watermarkMargin")?,
+            margin: parse_optional_integer_query(
+                query,
+                "watermarkMargin",
+                crate::core::validate_watermark_margin_value,
+            )?,
         })
     } else if has_orphaned_watermark_params {
         return Err(bad_request_response(
@@ -1361,8 +1339,8 @@ pub(super) fn parse_public_get_request(
 
     // Build per-request overrides from query parameters.
     let per_request = TransformOptionsPayload {
-        width: parse_optional_integer_query(query, "width")?,
-        height: parse_optional_integer_query(query, "height")?,
+        width: parse_optional_integer_query(query, "width", crate::core::validate_width_value)?,
+        height: parse_optional_integer_query(query, "height", crate::core::validate_height_value)?,
         fit: query.get("fit").cloned(),
         position: query.get("position").cloned(),
         format: query.get("format").cloned(),

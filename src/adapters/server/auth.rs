@@ -357,15 +357,28 @@ pub(super) fn required_auth_query_param<'a>(
         .ok_or_else(|| signed_url_unauthorized_response("signed URL is invalid or expired"))
 }
 
+/// Reads a query parameter that ends up in a `u32`, judging what does not fit by `validate`.
+///
+/// Parsing straight into `u32` made `width=4294967296` answered `query parameter `width`
+/// must be an integer`, which it is. A value that fits is handed on so the transform
+/// reports it with the class it always did; one that does not is refused with the sentence
+/// the range check would have given.
 pub(super) fn parse_optional_integer_query(
     query: &BTreeMap<String, String>,
     name: &str,
+    validate: fn(i64) -> Result<u32, &'static str>,
 ) -> Result<Option<u32>, HttpResponse> {
-    match query.get(name) {
-        Some(value) => value.parse::<u32>().map(Some).map_err(|_| {
-            bad_request_response(&format!("query parameter `{name}` must be an integer"))
-        }),
-        None => Ok(None),
+    let Some(value) = query.get(name) else {
+        return Ok(None);
+    };
+    let parsed: i64 = value.parse().map_err(|_| {
+        bad_request_response(&format!("query parameter `{name}` must be an integer"))
+    })?;
+    match u32::try_from(parsed) {
+        Ok(value) => Ok(Some(value)),
+        Err(_) => Err(bad_request_response(
+            validate(parsed).expect_err("a value outside u32 is outside the documented range"),
+        )),
     }
 }
 
@@ -1017,7 +1030,7 @@ mod tests {
     fn test_parse_integer_valid() {
         let q = query(&[("width", "1024")]);
         assert_eq!(
-            parse_optional_integer_query(&q, "width").unwrap(),
+            parse_optional_integer_query(&q, "width", crate::core::validate_width_value).unwrap(),
             Some(1024)
         );
     }
@@ -1025,27 +1038,33 @@ mod tests {
     #[test]
     fn test_parse_integer_absent() {
         let q: BTreeMap<String, String> = BTreeMap::new();
-        assert_eq!(parse_optional_integer_query(&q, "width").unwrap(), None);
+        assert_eq!(
+            parse_optional_integer_query(&q, "width", crate::core::validate_width_value).unwrap(),
+            None
+        );
     }
 
     #[test]
     fn test_parse_integer_invalid() {
         let q = query(&[("width", "abc")]);
-        let err = parse_optional_integer_query(&q, "width").unwrap_err();
+        let err = parse_optional_integer_query(&q, "width", crate::core::validate_width_value)
+            .unwrap_err();
         assert_eq!(err.status, "400 Bad Request");
     }
 
     #[test]
     fn test_parse_integer_negative() {
         let q = query(&[("width", "-5")]);
-        let err = parse_optional_integer_query(&q, "width").unwrap_err();
+        let err = parse_optional_integer_query(&q, "width", crate::core::validate_width_value)
+            .unwrap_err();
         assert_eq!(err.status, "400 Bad Request");
     }
 
     #[test]
     fn test_parse_integer_overflow() {
         let q = query(&[("width", "99999999999999")]);
-        let err = parse_optional_integer_query(&q, "width").unwrap_err();
+        let err = parse_optional_integer_query(&q, "width", crate::core::validate_width_value)
+            .unwrap_err();
         assert_eq!(err.status, "400 Bad Request");
     }
 
