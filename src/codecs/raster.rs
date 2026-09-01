@@ -3072,31 +3072,40 @@ impl RetainedMetadata {
         self
     }
 
-    /// Retains metadata that can be preserved for the given output format.
+    /// Retains metadata the output format can carry, and names what it could not.
     ///
     /// - JPEG: EXIF, ICC, XMP (APP1 injection), IPTC (APP13 injection)
     /// - PNG: EXIF, ICC, XMP (iTXt injection). IPTC has no standard PNG embedding.
-    /// - WebP/AVIF: EXIF and ICC only (via encoder API or not at all).
-    fn retain_supported_keep_all(mut self, output_format: MediaType) -> Self {
-        match output_format {
-            MediaType::Jpeg => {
-                // All four metadata types are supported for JPEG output.
-            }
-            MediaType::Png => {
-                // XMP via iTXt injection. IPTC has no standard PNG embedding.
-                self.iptc_metadata = None;
-            }
-            MediaType::Webp => {
-                // ICCP/EXIF/XMP ride in RIFF chunks. IPTC has no WebP container chunk.
-                self.iptc_metadata = None;
-            }
-            _ => {
-                // AVIF: no post-encode injection support.
-                self.xmp_metadata = None;
-                self.iptc_metadata = None;
-            }
+    /// - WebP: EXIF, ICC, XMP in RIFF chunks. IPTC has no WebP container chunk.
+    /// - AVIF: no injection at all, and EXIF and ICC are left in place here so that the
+    ///   caller refuses the request outright rather than reporting a loss.
+    /// - Everything else, TIFF and BMP: no injection path for any of the four.
+    ///
+    /// A kind that was there and cannot travel is returned rather than dropped in silence:
+    /// the caller turns each into a `MetadataDropped` warning, which is what the caller of
+    /// truss reads to learn that the file it asked for is not quite what it got.
+    fn retain_supported(mut self, output_format: MediaType) -> (Self, Vec<MetadataKind>) {
+        let (exif, icc, xmp, iptc) = match output_format {
+            MediaType::Jpeg => (true, true, true, true),
+            MediaType::Png | MediaType::Webp => (true, true, true, false),
+            MediaType::Avif => (true, true, false, false),
+            _ => (false, false, false, false),
+        };
+
+        let mut dropped = Vec::new();
+        if !exif && self.exif_metadata.take().is_some() {
+            dropped.push(MetadataKind::Exif);
         }
-        self
+        if !icc && self.icc_profile.take().is_some() {
+            dropped.push(MetadataKind::Icc);
+        }
+        if !xmp && self.xmp_metadata.take().is_some() {
+            dropped.push(MetadataKind::Xmp);
+        }
+        if !iptc && self.iptc_metadata.take().is_some() {
+            dropped.push(MetadataKind::Iptc);
+        }
+        (self, dropped)
     }
 }
 
@@ -3120,28 +3129,18 @@ fn extract_retained_metadata(
         let _ = Orientation::remove_from_exif_chunk(exif_chunk);
     }
 
+    // The policy narrows the metadata to what the caller asked to keep; the format then
+    // narrows it to what it can carry. Only the second step loses something the caller
+    // wanted, so only it reports. Metadata that can be injected post-encode has its
+    // warning removed later by inject_metadata on success.
     let metadata = match metadata_policy {
         MetadataPolicy::StripAll => return Ok((None, warnings)),
         MetadataPolicy::PreserveIcc => metadata.retain_icc_only(),
         MetadataPolicy::PreserveExif => metadata.retain_exif_only(),
-        MetadataPolicy::KeepAll => {
-            // Emit warnings for metadata that will be dropped for this output format.
-            // Metadata that can be injected post-encode will have its warning removed
-            // later by inject_metadata on success.
-            if metadata.xmp_metadata.is_some()
-                && !matches!(
-                    output_format,
-                    MediaType::Jpeg | MediaType::Png | MediaType::Webp
-                )
-            {
-                warnings.push(TransformWarning::MetadataDropped(MetadataKind::Xmp));
-            }
-            if metadata.iptc_metadata.is_some() && !matches!(output_format, MediaType::Jpeg) {
-                warnings.push(TransformWarning::MetadataDropped(MetadataKind::Iptc));
-            }
-            metadata.retain_supported_keep_all(output_format)
-        }
+        MetadataPolicy::KeepAll => metadata,
     };
+    let (metadata, dropped) = metadata.retain_supported(output_format);
+    warnings.extend(dropped.into_iter().map(TransformWarning::MetadataDropped));
 
     if matches!(output_format, MediaType::Avif) && !metadata.is_empty() {
         return Err(TransformError::CapabilityMissing(
@@ -3333,6 +3332,32 @@ mod tests {
     fn encoded_png_has_alpha(bytes: &[u8]) -> bool {
         let decoder = PngDecoder::new(Cursor::new(bytes)).expect("decode png");
         decoder.color_type().has_alpha()
+    }
+
+    /// A PNG carrying an ICC profile, for the paths that only a PNG reaches.
+    fn png_artifact_with_icc(icc_profile: &[u8]) -> Artifact {
+        let image = image::RgbImage::from_pixel(4, 2, image::Rgb([10, 20, 30]));
+        let mut bytes = Vec::new();
+        let mut encoder = PngEncoder::new(&mut bytes);
+        encoder
+            .set_icc_profile(icc_profile.to_vec())
+            .expect("set png icc profile");
+        encoder
+            .write_image(&image, 4, 2, ColorType::Rgb8.into())
+            .expect("encode png");
+
+        Artifact::new(
+            bytes,
+            MediaType::Png,
+            ArtifactMetadata {
+                width: Some(4),
+                height: Some(2),
+                frame_count: 1,
+                duration: None,
+                has_alpha: Some(false),
+                orientation: None,
+            },
+        )
     }
 
     fn jpeg_artifact_with_metadata(
@@ -3871,6 +3896,8 @@ mod tests {
         assert_eq!(icc_profile, b"demo-icc-profile".to_vec());
     }
 
+    /// A lossless optimization drops the metadata it was told to drop without decoding the
+    /// scan, and keeps the colour profile, which an optimization keeps under every mode.
     #[test]
     fn transform_raster_lossless_jpeg_optimization_strips_metadata_without_reencoding() {
         let artifact = jpeg_artifact_with_metadata(4, 2, Some(1), Some(b"demo-icc-profile"));
@@ -3890,7 +3917,13 @@ mod tests {
 
         assert!(result.artifact.bytes.len() < input_len);
         assert_eq!(decoder.exif_metadata().expect("read jpeg exif"), None);
-        assert_eq!(decoder.icc_profile().expect("read jpeg icc"), None);
+        assert_eq!(
+            decoder
+                .icc_profile()
+                .expect("read jpeg icc")
+                .expect("retained icc"),
+            b"demo-icc-profile".to_vec()
+        );
     }
 
     #[test]
@@ -3916,6 +3949,163 @@ mod tests {
                 .expect("read jpeg icc")
                 .expect("retained icc"),
             b"demo-icc-profile".to_vec()
+        );
+    }
+
+    /// `auto` reaches the same lossy encoder, so it keeps the profile for the same reason.
+    ///
+    /// It is the default mode of `truss optimize`, so this is the command as documented in
+    /// the README rather than a mode a caller has to choose.
+    #[rstest]
+    #[case::auto(OptimizeMode::Auto)]
+    #[case::lossy(OptimizeMode::Lossy)]
+    fn an_optimized_jpeg_keeps_its_profile_whichever_mode_asked(#[case] optimize: OptimizeMode) {
+        let artifact = jpeg_artifact_with_metadata(4, 2, Some(1), Some(b"demo-icc-profile"));
+        let result = transform_raster(TransformRequest::new(
+            artifact,
+            TransformOptions {
+                format: Some(MediaType::Jpeg),
+                optimize,
+                ..TransformOptions::default()
+            },
+        ))
+        .expect("the optimization should succeed");
+
+        let mut decoder =
+            JpegDecoder::new(Cursor::new(&result.artifact.bytes)).expect("decode jpeg");
+
+        assert_eq!(
+            decoder
+                .icc_profile()
+                .expect("read jpeg icc")
+                .expect("retained icc"),
+            b"demo-icc-profile".to_vec(),
+            "{optimize:?} dropped the profile"
+        );
+    }
+
+    /// A lossless optimization keeps it too: the pixels survive the re-encode and the
+    /// profile is what says how to read them.
+    #[test]
+    fn a_losslessly_optimized_png_keeps_its_profile() {
+        let artifact = png_artifact_with_icc(b"demo-icc-profile");
+        let result = transform_raster(TransformRequest::new(
+            artifact,
+            TransformOptions {
+                format: Some(MediaType::Png),
+                optimize: OptimizeMode::Lossless,
+                ..TransformOptions::default()
+            },
+        ))
+        .expect("the optimization should succeed");
+
+        let mut decoder = PngDecoder::new(Cursor::new(&result.artifact.bytes)).expect("decode png");
+
+        assert_eq!(
+            decoder
+                .icc_profile()
+                .expect("read png icc")
+                .expect("retained icc"),
+            b"demo-icc-profile".to_vec()
+        );
+    }
+
+    /// A plain encode is not an optimization and strips what it was told to strip.
+    #[test]
+    fn an_unoptimized_encode_still_strips_the_profile() {
+        let artifact = jpeg_artifact_with_metadata(4, 2, Some(1), Some(b"demo-icc-profile"));
+        let result = transform_raster(TransformRequest::new(
+            artifact,
+            TransformOptions {
+                format: Some(MediaType::Jpeg),
+                optimize: OptimizeMode::None,
+                strip_metadata: true,
+                ..TransformOptions::default()
+            },
+        ))
+        .expect("the encode should succeed");
+
+        let mut decoder =
+            JpegDecoder::new(Cursor::new(&result.artifact.bytes)).expect("decode jpeg");
+
+        assert_eq!(decoder.icc_profile().expect("read jpeg icc"), None);
+    }
+
+    /// Metadata a caller asked to keep, for an output that cannot carry it, is reported.
+    ///
+    /// TIFF and BMP have no injection path for EXIF or an ICC profile, and dropping them
+    /// in silence is the one answer the pipeline does not give anywhere else: XMP and IPTC
+    /// raise this same warning, and AVIF refuses the request outright.
+    #[rstest]
+    #[case::tiff(MediaType::Tiff)]
+    #[case::bmp(MediaType::Bmp)]
+    fn metadata_an_output_cannot_carry_is_reported_rather_than_dropped(#[case] format: MediaType) {
+        let artifact = jpeg_artifact_with_metadata(4, 2, Some(1), Some(b"demo-icc-profile"));
+        let result = transform_raster(TransformRequest::new(
+            artifact,
+            TransformOptions {
+                format: Some(format),
+                strip_metadata: false,
+                ..TransformOptions::default()
+            },
+        ))
+        .expect("the encode should succeed");
+
+        let warnings: Vec<String> = result.warnings.iter().map(ToString::to_string).collect();
+
+        assert!(
+            warnings.iter().any(|w| w.contains("EXIF")),
+            "{format:?} dropped the EXIF without saying so: {warnings:?}"
+        );
+        assert!(
+            warnings.iter().any(|w| w.contains("ICC")),
+            "{format:?} dropped the profile without saying so: {warnings:?}"
+        );
+    }
+
+    /// The same silence under the other flag that names metadata to keep.
+    #[test]
+    fn a_preserved_exif_an_output_cannot_carry_is_reported() {
+        let artifact = jpeg_artifact_with_metadata(4, 2, Some(1), None);
+        let result = transform_raster(TransformRequest::new(
+            artifact,
+            TransformOptions {
+                format: Some(MediaType::Tiff),
+                preserve_exif: true,
+                strip_metadata: false,
+                ..TransformOptions::default()
+            },
+        ))
+        .expect("the encode should succeed");
+
+        let warnings: Vec<String> = result.warnings.iter().map(ToString::to_string).collect();
+
+        assert!(
+            warnings.iter().any(|w| w.contains("EXIF")),
+            "the EXIF went missing without a word: {warnings:?}"
+        );
+    }
+
+    /// A format that carries both says nothing, which is what keeps the warning meaningful.
+    #[rstest]
+    #[case::jpeg(MediaType::Jpeg)]
+    #[case::png(MediaType::Png)]
+    fn an_output_that_carries_the_metadata_warns_about_nothing(#[case] format: MediaType) {
+        let artifact = jpeg_artifact_with_metadata(4, 2, Some(1), Some(b"demo-icc-profile"));
+        let result = transform_raster(TransformRequest::new(
+            artifact,
+            TransformOptions {
+                format: Some(format),
+                strip_metadata: false,
+                ..TransformOptions::default()
+            },
+        ))
+        .expect("the encode should succeed");
+
+        assert!(
+            result.warnings.is_empty(),
+            "{format:?} carries both and should warn about neither: {:?}",
+            result.warnings
         );
     }
 
