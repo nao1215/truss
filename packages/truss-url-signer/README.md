@@ -71,7 +71,7 @@ The package exports one function:
 
 `options` supports:
 
-- `baseUrl`: externally visible `http` or `https` origin for truss
+- `baseUrl`: externally visible `http` or `https` base URL for truss. A path is kept, so `https://images.example.com/img` signs a request for a deployment served under that prefix; the path takes no part in the signature.
 - `source`: `{ kind: "path", path, version? }` or `{ kind: "url", url, version? }`
 - `transforms`: public query parameters such as `width`, `height`, `fit`, `format`, `quality`, `optimize`, `targetQuality`, `crop`, `blur`, `sharpen`, `grayscale`, and `withoutEnlargement`
 - `watermark`: optional `watermarkUrl` parameters
@@ -79,7 +79,7 @@ The package exports one function:
 - `method`: optional canonical HTTP method, default `GET`
 
 The package omits transform fields that would resolve to truss defaults, matching the Rust implementation. For the public contract and compatibility policy, see the repository's [Signed URL Specification](https://github.com/nao1215/truss/blob/main/docs/signed-url-spec.md).
-It also rejects request-invariant invalid combinations before signing, including `fit` / `position` without bounded resize, `quality` with `optimize=lossless`, invalid `targetQuality` matrices, invalid crop strings, and watermark opacity outside `1..=100`.
+It also rejects request-invariant invalid combinations before signing, including `fit` / `position` without bounded resize, `quality` with `optimize=lossless`, invalid `targetQuality` matrices, invalid crop strings, and watermark opacity outside `1..=100`. An empty `keyId`, `secret`, or source is rejected for the same reason: a server will not start with an empty key id or secret, so a URL carrying one can never verify.
 
 ## Runtime Notes
 
