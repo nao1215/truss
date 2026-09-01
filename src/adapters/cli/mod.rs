@@ -492,7 +492,7 @@ struct ClapConvertArgs {
     #[arg(long, value_parser = parse_media_type)]
     format: Option<MediaType>,
     /// Encoding quality for lossy formats (1-100)
-    #[arg(long)]
+    #[arg(long, value_parser = parse_quality)]
     quality: Option<u8>,
     /// Optimization mode (none, auto, lossless, lossy)
     #[arg(long, value_parser = parse_optimize_mode)]
@@ -571,7 +571,7 @@ struct ClapOptimizeArgs {
     #[arg(long, value_parser = parse_optimizable_media_type)]
     format: Option<MediaType>,
     /// Quality cap for lossy optimization (1-100)
-    #[arg(long)]
+    #[arg(long, value_parser = parse_quality)]
     quality: Option<u8>,
     /// Optimization mode (auto, lossless, lossy, none)
     #[arg(long = "mode", value_parser = parse_optimize_mode)]
@@ -683,7 +683,7 @@ struct ClapSignArgs {
     #[arg(long, value_parser = parse_media_type)]
     format: Option<MediaType>,
     /// Encoding quality for lossy formats
-    #[arg(long)]
+    #[arg(long, value_parser = parse_quality)]
     quality: Option<u8>,
     /// Optimization mode (none, auto, lossless, lossy)
     #[arg(long, value_parser = parse_optimize_mode)]
@@ -826,12 +826,31 @@ fn parse_sharpen(s: &str) -> Result<f32, String> {
     Ok(v)
 }
 
-fn parse_watermark_opacity(s: &str) -> Result<u8, String> {
-    let v: u8 = s
+/// Parses a quality, reporting the range truss documents whatever the number's width.
+///
+/// Parsed as an `i64` rather than as the `u8` the option is stored in, because clap would
+/// otherwise refuse 256 with `256 is not in 0..=255`, a range that is the integer's and not
+/// truss's, while 255 got `quality must be between 1 and 100`.
+fn parse_quality(s: &str) -> Result<u8, String> {
+    let value: i64 = s
         .parse()
-        .map_err(|_| format!("invalid watermark opacity: '{s}'"))?;
-    crate::core::validate_watermark_opacity(v).map_err(str::to_string)?;
-    Ok(v)
+        .map_err(|_| format!("quality must be a whole number, got '{s}'"))?;
+    // A value the option can hold is handed on for `TransformOptions::normalize` to judge,
+    // which keeps the failure class the CLI reported before and the one the server reports
+    // for the same number. One that cannot be held is refused here, with the sentence that
+    // check would have given rather than with the range of the integer holding it.
+    u8::try_from(value).map_err(|_| {
+        crate::core::validate_quality_value(value)
+            .expect_err("a value outside u8 is outside 1..=100")
+            .to_string()
+    })
+}
+
+fn parse_watermark_opacity(s: &str) -> Result<u8, String> {
+    let value: i64 = s
+        .parse()
+        .map_err(|_| format!("watermark opacity must be a whole number, got '{s}'"))?;
+    crate::core::validate_watermark_opacity_value(value).map_err(str::to_string)
 }
 
 fn parse_url_value(s: &str) -> Result<String, String> {
