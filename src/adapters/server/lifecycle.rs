@@ -16,13 +16,31 @@ pub(super) const SOCKET_WRITE_TIMEOUT: Duration = Duration::from_secs(60);
 ///
 /// This is a wall-clock budget for the whole header phase, not an inactivity timeout. A
 /// socket read timeout resets on every byte, so a client sending one header line every
-/// thirty seconds holds its worker forever: with a pool of `max(max_concurrent_transforms,
-/// WORKER_THREADS)` threads and a worker dedicated to a connection from accept to close,
-/// that many trickling connections take the whole server down, `/health/live` included,
-/// for the cost of a few bytes a minute. The budget is what makes the header phase end.
+/// thirty seconds holds its worker forever: with a pool of [`worker_pool_size`] threads and a
+/// worker dedicated to a connection from accept to close, that many trickling connections
+/// take the whole server down, `/health/live` included, for the cost of a few bytes a
+/// minute. The budget is what makes the header phase end.
 pub(super) const HEADER_READ_DEADLINE: Duration = Duration::from_secs(15);
-/// Number of worker threads for handling incoming connections concurrently.
+/// Number of worker threads held back for requests that are not transforms.
 const WORKER_THREADS: usize = 8;
+
+/// The size of the connection worker pool for a given transform limit.
+///
+/// A worker is dedicated to a connection from accept to close, so the pool has to be larger
+/// than the number of transforms that may run at once. Two things depend on that difference.
+/// A request that is not a transform — a health probe, `/metrics`, a request the cache can
+/// answer — needs a worker while every slot is taken, and a transform beyond the limit needs
+/// one in order to reach [`TransformSlot::try_acquire`](super::handler::TransformSlot) and be
+/// told to retry rather than waiting in the accept queue for a slot to free up.
+///
+/// Sizing the pool at the larger of the limit and [`WORKER_THREADS`] left that difference at
+/// zero for any limit of `WORKER_THREADS` or more, and the limit defaults to the machine's
+/// core count.
+fn worker_pool_size(max_concurrent_transforms: u64) -> usize {
+    usize::try_from(max_concurrent_transforms)
+        .unwrap_or(usize::MAX)
+        .saturating_add(WORKER_THREADS)
+}
 
 /// Serves requests until the listener stops producing connections.
 ///
@@ -66,29 +84,32 @@ pub fn serve(listener: TcpListener) -> io::Result<()> {
 /// be written to the socket.
 pub fn serve_with_config(listener: TcpListener, config: ServerConfig) -> io::Result<()> {
     let config = Arc::new(config);
-    let (sender, receiver) = std::sync::mpsc::channel::<TcpStream>();
+    // The instant of accept travels with the connection so that the wait for a worker is
+    // charged to the request rather than lost: a request answered instantly by a worker that
+    // took eleven seconds to reach it is not a request that took no time.
+    let (sender, receiver) = std::sync::mpsc::channel::<(TcpStream, Instant)>();
 
-    // Spawn a pool of worker threads sized to the configured concurrency limit
-    // (with a minimum of WORKER_THREADS to leave headroom for non-transform
-    // requests such as health checks and metrics).  Each thread pulls connections
-    // from the shared channel and handles them independently, so a slow request
+    // Spawn a pool of worker threads sized to the configured concurrency limit plus
+    // WORKER_THREADS of headroom for non-transform requests such as health checks and
+    // metrics, and for the transform that is turned away with a 503.  Each thread pulls
+    // connections from the shared channel and handles them independently, so a slow request
     // no longer blocks all other clients.
     let receiver = Arc::new(std::sync::Mutex::new(receiver));
-    let pool_size = (config.max_concurrent_transforms as usize).max(WORKER_THREADS);
+    let pool_size = worker_pool_size(config.max_concurrent_transforms);
     let mut workers = Vec::with_capacity(pool_size);
     for _ in 0..pool_size {
         let rx = Arc::clone(&receiver);
         let cfg = Arc::clone(&config);
         workers.push(std::thread::spawn(move || {
             loop {
-                let stream = {
+                let (stream, accepted_at) = {
                     let guard = rx.lock().expect("worker lock poisoned");
                     match guard.recv() {
-                        Ok(stream) => stream,
+                        Ok(accepted) => accepted,
                         Err(_) => break,
                     }
                 }; // MutexGuard dropped here — before handle_stream runs.
-                if let Err(err) = handle_stream(stream, &cfg) {
+                if let Err(err) = handle_stream(stream, accepted_at, &cfg) {
                     cfg.log_warn(&format!("failed to handle connection: {err}"));
                 }
             }
@@ -160,7 +181,7 @@ pub fn serve_with_config(listener: TcpListener, config: ServerConfig) -> io::Res
             Ok((stream, _addr)) => {
                 // Accepted connections are always blocking for the workers.
                 let _ = stream.set_nonblocking(false);
-                if sender.send(stream).is_err() {
+                if sender.send((stream, Instant::now())).is_err() {
                     break;
                 }
             }
@@ -243,7 +264,8 @@ pub fn serve_once(listener: TcpListener) -> io::Result<()> {
 /// be written to the socket.
 pub fn serve_once_with_config(listener: TcpListener, config: ServerConfig) -> io::Result<()> {
     let (stream, _) = listener.accept()?;
-    handle_stream(stream, &config)
+    let accepted_at = Instant::now();
+    handle_stream(stream, accepted_at, &config)
 }
 
 // ---------------------------------------------------------------------------
@@ -567,6 +589,23 @@ mod tests {
             GLOBAL_LOG_LEVEL.store(self.previous, Ordering::SeqCst);
             // SAFETY: `log_level` was allocated with Box::into_raw in the test setup above.
             unsafe { drop(Box::from_raw(self.log_level)) };
+        }
+    }
+
+    /// The pool has to exceed the transform limit at every limit, not only at small ones.
+    ///
+    /// Sizing it at the larger of the two left no worker for a health probe, and no worker
+    /// for the transform that should have been answered 503, whenever the limit reached
+    /// `WORKER_THREADS`. The limit defaults to the core count, so that was every ordinary
+    /// server.
+    #[test]
+    fn the_worker_pool_exceeds_the_transform_limit_at_every_limit() {
+        for limit in [1_u64, 2, 4, 7, 8, 9, 32, 1024] {
+            let pool = worker_pool_size(limit);
+            assert!(
+                pool >= limit as usize + WORKER_THREADS,
+                "limit {limit} sized the pool at {pool}"
+            );
         }
     }
 
