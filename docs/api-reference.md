@@ -81,6 +81,14 @@ Both private endpoints take their transform options from the request body: the `
 | `GET, HEAD /health/ready` | Readiness probe (returns 503 when draining, disk full, or memory limit exceeded) |
 | `GET, HEAD /metrics` | Prometheus metrics in text exposition format |
 
+## Requests and Connections
+
+A `HEAD` request answers with the headers its `GET` would have sent, including the `Content-Length` of the image that `GET` would have produced, so a caller can size a rendered variant without downloading it. No content follows the headers.
+
+Connections are persistent for HTTP/1.1 and close after one answer for earlier versions unless the client sends `Connection: keep-alive`. A client may pipeline: requests written into the same packet are answered in the order they were sent. `TRUSS_KEEP_ALIVE_MAX_REQUESTS` caps how many requests one connection serves.
+
+Requests must follow the HTTP/1.1 grammar. An HTTP/1.1 request with no `Host`, a repeated `Host`, `Authorization`, `Content-Length`, `Content-Type`, or `Transfer-Encoding` header, or a `Content-Length` that is not a run of digits, is answered `400 Bad Request`; `Transfer-Encoding` is answered `501 Not Implemented`, since this server frames bodies by `Content-Length` alone.
+
 ## Supported Formats
 
 | Input \ Output | JPEG | PNG | WebP | AVIF | BMP | TIFF | SVG |
