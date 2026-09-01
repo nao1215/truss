@@ -507,3 +507,213 @@ fn a_request_that_waited_for_a_worker_is_logged_with_the_wait() {
         .expect("server thread")
         .expect("serve_with_config");
 }
+
+/// Reads the status line and headers of one answer, then reports whether the server closed
+/// the connection. Reading only the head keeps the check independent of how long an idle
+/// keep-alive connection is held, which is the very thing under test.
+fn answer_head(addr: SocketAddr, request: &str) -> (String, Vec<u8>, bool) {
+    let mut stream = TcpStream::connect(addr).expect("connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("set read timeout");
+    stream
+        .write_all(request.as_bytes())
+        .expect("write raw request");
+    stream.flush().expect("flush");
+
+    let mut response = Vec::new();
+    let mut buf = [0u8; 1024];
+    let mut closed = false;
+    loop {
+        match stream.read(&mut buf) {
+            Ok(0) => {
+                closed = true;
+                break;
+            }
+            Ok(n) => {
+                response.extend_from_slice(&buf[..n]);
+                if response.windows(4).any(|w| w == b"\r\n\r\n") {
+                    // Keep draining for a short moment. Anything the server sends after the
+                    // headers is content, and a connection it means to keep is only
+                    // distinguishable from one it is about to drop by waiting for the close.
+                    stream
+                        .set_read_timeout(Some(Duration::from_millis(300)))
+                        .expect("shorten read timeout");
+                    loop {
+                        match stream.read(&mut buf) {
+                            Ok(0) => {
+                                closed = true;
+                                break;
+                            }
+                            Ok(n) => response.extend_from_slice(&buf[..n]),
+                            Err(_) => break,
+                        }
+                    }
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+
+    let split = response
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .expect("the answer has a header terminator");
+    let head = String::from_utf8_lossy(&response[..split]).into_owned();
+    let body = response[split + 4..].to_vec();
+    (head, body, closed)
+}
+
+/// A HEAD request that fails while the headers are still being parsed is still a HEAD
+/// request, so its answer must not carry content. The connection loop stripped the body on
+/// every path except the one that answers a request it could not read.
+#[test]
+#[serial]
+fn a_head_request_rejected_during_header_parsing_has_no_body() {
+    let storage = temp_dir("head-early-error");
+    let failing = [
+        "HEAD /health HTTP/1.1\r\nHost: a\r\nHost: b\r\n\r\n",
+        "HEAD /images:transform HTTP/1.1\r\nHost: a\r\nContent-Length: abc\r\n\r\n",
+        "HEAD /images:transform HTTP/1.1\r\nHost: a\r\nTransfer-Encoding: chunked\r\n\r\n",
+    ];
+
+    for request in failing {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let config = ServerConfig::new(storage.clone(), None);
+        let handle = thread::spawn(move || serve_once_with_config(listener, config));
+
+        let (head, body, _) = answer_head(addr, request);
+        let _ = handle.join().expect("join server thread");
+
+        assert!(
+            head.contains("Content-Length:"),
+            "the answer declares a length: {head}"
+        );
+        assert!(
+            body.is_empty(),
+            "a HEAD answer carried {} bytes of content: {head}",
+            body.len()
+        );
+    }
+}
+
+/// HTTP/1.0 has no persistent connections unless the client asks for one, so a finished
+/// HTTP/1.0 client must be told the connection closes rather than left holding a worker.
+#[test]
+#[serial]
+fn an_http_1_0_client_is_told_the_connection_closes() {
+    let storage = temp_dir("http-1-0-close");
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let config = ServerConfig::new(storage, None);
+    let handle = thread::spawn(move || serve_once_with_config(listener, config));
+
+    let (head, _, closed) = answer_head(addr, "GET /health/live HTTP/1.0\r\n\r\n");
+    let _ = handle.join().expect("join server thread");
+
+    assert!(
+        head.contains("Connection: close"),
+        "an HTTP/1.0 answer must not advertise keep-alive: {head}"
+    );
+    assert!(
+        closed,
+        "the server kept an HTTP/1.0 connection open: {head}"
+    );
+}
+
+/// `Connection` is a comma-separated list, so `close` counts wherever it appears in it. A
+/// client that asked to close and was answered keep-alive walks away from a socket the
+/// server keeps a worker parked on.
+#[test]
+#[serial]
+fn connection_close_is_honoured_inside_a_list() {
+    let storage = temp_dir("connection-list-close");
+    for value in ["close, TE", "keep-alive, close"] {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let config = ServerConfig::new(storage.clone(), None);
+        let handle = thread::spawn(move || serve_once_with_config(listener, config));
+
+        let request =
+            format!("GET /health/live HTTP/1.1\r\nHost: a\r\nConnection: {value}\r\n\r\n");
+        let (head, _, closed) = answer_head(addr, &request);
+        let _ = handle.join().expect("join server thread");
+
+        assert!(
+            head.contains("Connection: close"),
+            "Connection: {value} was not honoured: {head}"
+        );
+        assert!(closed, "Connection: {value} left the socket open: {head}");
+    }
+}
+
+/// An HTTP/1.1 request with no Host header is malformed. The duplicate was already
+/// rejected; the absence was served.
+#[test]
+#[serial]
+fn an_http_1_1_request_without_a_host_is_rejected() {
+    let storage = temp_dir("missing-host");
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let config = ServerConfig::new(storage, None);
+    let handle = thread::spawn(move || serve_once_with_config(listener, config));
+
+    let (head, _, _) = answer_head(addr, "GET /health HTTP/1.1\r\nConnection: close\r\n\r\n");
+    let _ = handle.join().expect("join server thread");
+
+    assert!(
+        head.starts_with("HTTP/1.1 400 Bad Request"),
+        "a request with no Host must be refused: {head}"
+    );
+}
+
+/// Two requests written in one packet get two answers. A client does not control how its
+/// bytes are packetised, so a server that answers only the first drops a request the client
+/// believes it sent and leaves it waiting on a connection the server means to keep open.
+#[test]
+#[serial]
+fn two_requests_written_in_one_packet_both_get_answers() {
+    let storage = temp_dir("pipelined-requests");
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let config = ServerConfig::new(storage, None);
+    let handle = thread::spawn(move || serve_once_with_config(listener, config));
+
+    let mut stream = TcpStream::connect(addr).expect("connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("set read timeout");
+    stream
+        .write_all(
+            b"GET /health/live HTTP/1.1\r\nHost: a\r\n\r\n\
+              GET /nope HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n",
+        )
+        .expect("write both requests in one packet");
+    stream.flush().expect("flush");
+
+    let mut response = Vec::new();
+    let mut buf = [0u8; 1024];
+    loop {
+        match stream.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => response.extend_from_slice(&buf[..n]),
+            Err(_) => break,
+        }
+    }
+    let _ = handle.join().expect("join server thread");
+
+    let text = String::from_utf8_lossy(&response);
+    let statuses: Vec<&str> = text
+        .match_indices("HTTP/1.1 ")
+        .map(|(index, _)| text[index..].lines().next().unwrap_or_default())
+        .collect();
+    assert_eq!(
+        statuses.len(),
+        2,
+        "both requests must be answered, saw: {statuses:?}"
+    );
+    assert!(statuses[0].contains("200 OK"), "{statuses:?}");
+    assert!(statuses[1].contains("404 Not Found"), "{statuses:?}");
+}
