@@ -33,6 +33,17 @@ use image::codecs::png::PngEncoder;
 use image::codecs::webp::WebPEncoder;
 use image::{ColorType, ImageEncoder, RgbaImage};
 use quick_xml::events::{BytesStart, Event};
+
+/// The sentence truss gives an SVG that does not parse, in place of the parser's own.
+///
+/// `SVG data parsing failed cause the root node was opened but never closed` and
+/// `attribute value not closed: \`"\` not found before end of input` are the XML parser's
+/// wording, its grammar, and its idea of what a caller needs to know. Both reached the
+/// CLI's stderr and the `detail` of the server's problem body, where they say nothing a
+/// caller of an image endpoint can act on beyond what one sentence says.
+fn svg_parse_failure() -> String {
+    "svg document is not well-formed XML".to_string()
+}
 use quick_xml::reader::Reader;
 use quick_xml::writer::Writer;
 use std::io::Cursor;
@@ -124,7 +135,7 @@ pub fn transform_svg(request: TransformRequest) -> Result<TransformResult, Trans
 
     // Parse the SVG tree once for both size determination and rasterization.
     let tree = resvg::usvg::Tree::from_str(&sanitized, &resvg::usvg::Options::default())
-        .map_err(|e| TransformError::DecodeFailed(format!("SVG parse error: {e}")))?;
+        .map_err(|_| TransformError::DecodeFailed(svg_parse_failure()))?;
 
     // The pipeline order is rotate then resize, so the size the fit mode is asked about is
     // the size of the rotated drawing, not of the drawing as it was written. Asking about
@@ -442,10 +453,8 @@ fn sanitize_svg(bytes: &[u8]) -> Result<String, TransformError> {
                     .write_event(event)
                     .map_err(|e| TransformError::DecodeFailed(format!("SVG write error: {e}")))?;
             }
-            Err(e) => {
-                return Err(TransformError::DecodeFailed(format!(
-                    "SVG parse error: {e}"
-                )));
+            Err(_) => {
+                return Err(TransformError::DecodeFailed(svg_parse_failure()));
             }
         }
     }

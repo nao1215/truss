@@ -377,7 +377,38 @@ fn decode_input(input: &Artifact) -> Result<DynamicImage, TransformError> {
     };
 
     image::load_from_memory_with_format(&input.bytes, image_format)
-        .map_err(|error| TransformError::DecodeFailed(error.to_string()))
+        .map_err(|error| decode_failure(input.media_type, &error))
+}
+
+/// The sentence truss gives a decode failure, in place of the decoder's own.
+///
+/// The decoder's `Display` names its internal error classes, carries its byte counters, and
+/// is written in its own grammar: `Format error decoding Jpeg: I/O errors Not enough bytes,
+/// expected 162 but found 19` reached the CLI's stderr and the `detail` of the server's
+/// problem body. `docs/problems.md` describes `decode-failed` as truss's own class, and
+/// every other class in that document is reached with a sentence truss wrote. The counters
+/// are also a small disclosure about bytes a caller of `/images/by-url` named but may not be
+/// able to reach, which is the shape #431 closed for the sniff message.
+///
+/// The classification is by the error's own variant rather than by reading its text, so
+/// nothing here depends on wording upstream may change. Truncation and corruption share a
+/// sentence because the variant does not separate them; the sniffers, which run first and
+/// have their own sentences for a file that ends early, catch most of that case before the
+/// decoder is reached at all.
+fn decode_failure(media_type: MediaType, error: &image::ImageError) -> TransformError {
+    let format = media_type.as_name();
+    TransformError::DecodeFailed(match error {
+        image::ImageError::Unsupported(_) => {
+            format!("{format} file uses a feature truss cannot decode")
+        }
+        image::ImageError::Limits(_) => {
+            format!("{format} file is larger than truss decodes")
+        }
+        image::ImageError::Decoding(_) | image::ImageError::IoError(_) => {
+            format!("{format} image data is incomplete or corrupt")
+        }
+        _ => format!("{format} file could not be decoded"),
+    })
 }
 
 /// Decodes an AVIF image using `rav1d` (pure Rust AV1 decoder) and `mp4parse` (ISOBMFF parser).
@@ -3280,8 +3311,11 @@ fn extract_retained_metadata(
 /// The four reads are the same for every container, so the format only decides which decoder
 /// to open. A failure here is a decode failure, not a metadata failure: the bytes claimed to
 /// be this format and were not.
-fn retained_metadata<D: ImageDecoder>(mut decoder: D) -> Result<RetainedMetadata, TransformError> {
-    let decode_failed = |error: image::ImageError| TransformError::DecodeFailed(error.to_string());
+fn retained_metadata<D: ImageDecoder>(
+    mut decoder: D,
+    media_type: MediaType,
+) -> Result<RetainedMetadata, TransformError> {
+    let decode_failed = |error: image::ImageError| decode_failure(media_type, &error);
     Ok(RetainedMetadata {
         exif_metadata: decoder.exif_metadata().map_err(decode_failed)?,
         icc_profile: decoder.icc_profile().map_err(decode_failed)?,
@@ -3297,11 +3331,18 @@ fn retained_metadata<D: ImageDecoder>(mut decoder: D) -> Result<RetainedMetadata
 /// them.
 fn read_input_metadata(input: &Artifact) -> Result<RetainedMetadata, TransformError> {
     let bytes = Cursor::new(&input.bytes);
-    let open_failed = |error: image::ImageError| TransformError::DecodeFailed(error.to_string());
-    match input.media_type {
-        MediaType::Jpeg => retained_metadata(JpegDecoder::new(bytes).map_err(open_failed)?),
-        MediaType::Png => retained_metadata(PngDecoder::new(bytes).map_err(open_failed)?),
-        MediaType::Webp => retained_metadata(WebPDecoder::new(bytes).map_err(open_failed)?),
+    let media_type = input.media_type;
+    let open_failed = |error: image::ImageError| decode_failure(media_type, &error);
+    match media_type {
+        MediaType::Jpeg => {
+            retained_metadata(JpegDecoder::new(bytes).map_err(open_failed)?, media_type)
+        }
+        MediaType::Png => {
+            retained_metadata(PngDecoder::new(bytes).map_err(open_failed)?, media_type)
+        }
+        MediaType::Webp => {
+            retained_metadata(WebPDecoder::new(bytes).map_err(open_failed)?, media_type)
+        }
         MediaType::Avif | MediaType::Svg | MediaType::Bmp | MediaType::Tiff | MediaType::Gif => {
             Ok(RetainedMetadata::default())
         }
@@ -6909,6 +6950,62 @@ mod tests {
         .expect("transform");
 
         assert_eq!(result.artifact.metadata.width, Some(32));
+    }
+
+    /// A decode failure reads as a sentence truss wrote, not as the decoder's.
+    ///
+    /// The upstream `Display` names its own error classes and carries its byte counters:
+    /// `Format error decoding Jpeg: I/O errors Not enough bytes, expected 162 but found 19`
+    /// reached the CLI's stderr and the `detail` of the server's problem body. The assertion
+    /// is the property rather than the wording, so a change to either side keeps it honest.
+    #[test]
+    fn a_decode_failure_reads_as_a_sentence_truss_wrote() {
+        const DECODER_WORDS: [&str; 7] = [
+            "Format error",
+            "IoError",
+            "Decoding error",
+            "I/O errors",
+            "The Decoder",
+            "Unsupported",
+            "Limits are exceeded",
+        ];
+
+        let sources: &[(&str, Vec<u8>)] = &[
+            ("png", crate::test_support::flat_png(32, 32)),
+            ("jpeg", flat_jpeg_artifact(32, 32).bytes),
+        ];
+
+        for (name, bytes) in sources {
+            // Cut inside the image data, past the header the sniffer reads, so the failure
+            // comes from the decoder rather than from truss's own container walk.
+            let cut = bytes.len() * 9 / 10;
+            let artifact = sniff_artifact(RawArtifact::new(bytes[..cut].to_vec(), None))
+                .expect("the header still sniffs");
+            let error = transform_raster(TransformRequest::new(
+                artifact,
+                TransformOptions {
+                    format: Some(MediaType::Png),
+                    ..TransformOptions::default()
+                },
+            ))
+            .expect_err("a truncated image does not decode");
+
+            let message = error.to_string();
+            for word in DECODER_WORDS {
+                assert!(
+                    !message.contains(word),
+                    "a truncated {name} answered with the decoder's own words: {message}"
+                );
+            }
+            assert!(
+                message.contains(*name),
+                "the message should name the format, got: {message}"
+            );
+            assert!(
+                !message.chars().any(|c| c.is_ascii_digit()),
+                "the message should not carry the decoder's counters, got: {message}"
+            );
+        }
     }
 
     /// The refusal has to name the condition that fired, not the category it sits in.
