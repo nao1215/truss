@@ -193,7 +193,8 @@ OPTIONS:
       --url <URL>          Fetch input from an HTTP(S) URL
       --format <FMT>       Output format: jpeg, png, webp, avif
                            (default: inferred from output extension or input format)
-      --mode <MODE>        Optimization mode: auto (default), lossless, lossy, none
+      --mode <MODE>        Optimization mode: auto (default), lossless, lossy
+                           For a plain re-encode with no optimization, use truss convert
                            lossless cannot rotate pixels, so a JPEG carrying an EXIF
                            orientation needs --keep-metadata or --preserve-exif
       --quality <1-100>    Optional quality cap for lossy optimization
@@ -573,8 +574,8 @@ struct ClapOptimizeArgs {
     /// Quality cap for lossy optimization (1-100)
     #[arg(long, value_parser = parse_quality)]
     quality: Option<u8>,
-    /// Optimization mode (auto, lossless, lossy, none)
-    #[arg(long = "mode", value_parser = parse_optimize_mode)]
+    /// Optimization mode (auto, lossless, lossy)
+    #[arg(long = "mode", value_parser = parse_optimizing_mode)]
     mode: Option<OptimizeMode>,
     /// Perceptual target for lossy optimization
     #[arg(long = "target-quality", value_parser = parse_target_quality)]
@@ -788,6 +789,24 @@ fn parse_optimizable_media_type(s: &str) -> Result<MediaType, String> {
 
 fn parse_optimize_mode(s: &str) -> Result<OptimizeMode, String> {
     OptimizeMode::from_str(s)
+}
+
+/// The modes `truss optimize` takes, which is every mode that optimizes.
+///
+/// `none` re-encodes without optimizing, which on a subcommand whose purpose is to shrink
+/// a file is a way to make it bigger: a deflate-compressed TIFF came back 13 times its
+/// size, and a lossless WebP twice. It also skipped the format check the other three
+/// apply, so a TIFF output passed when the format was inferred and failed when it was
+/// named. `truss convert` is the command for a plain re-encode, and `OptimizeMode::None`
+/// stays the default there and on the other three adapters, where it means what it says.
+fn parse_optimizing_mode(s: &str) -> Result<OptimizeMode, String> {
+    match OptimizeMode::from_str(s)? {
+        OptimizeMode::None => Err(
+            "`none` does not optimize; use `truss convert` for a plain re-encode, or one of auto, lossless, lossy"
+                .to_string(),
+        ),
+        mode => Ok(mode),
+    }
 }
 
 fn parse_target_quality(s: &str) -> Result<TargetQuality, String> {
@@ -1816,8 +1835,8 @@ mod tests {
     use super::serve::resolve_server_config;
     use super::{
         Command, ConvertCommand, EXIT_INPUT, EXIT_TRANSFORM, EXIT_USAGE, HelpTopic, InputSource,
-        OutputTarget, ServeCommand, SignCommand, flush_stdout, parse_args, preprocess_args,
-        run_with_io,
+        OutputTarget, ServeCommand, SignCommand, flush_stdout, parse_args, parse_optimize_mode,
+        parse_optimizing_mode, preprocess_args, run_with_io,
     };
     use crate::{
         Fit, MediaType, OptimizeMode, RawArtifact, SignedUrlSource, TransformOptions,
@@ -2853,6 +2872,30 @@ mod tests {
                 watermark_margin: None,
             })
         );
+    }
+
+    /// `truss optimize --mode none` re-encodes without optimizing, so it made files larger
+    /// on the one subcommand that promises the opposite, and it was the only mode that
+    /// reached an output format the others refuse. It is `truss convert` under a name that
+    /// says the reverse, so it is not a mode of this command.
+    #[test]
+    fn optimize_refuses_a_mode_that_does_not_optimize() {
+        let message =
+            parse_optimizing_mode("none").expect_err("`none` is not an optimization mode");
+        assert!(
+            message.contains("truss convert"),
+            "the refusal should name the command that does a plain re-encode: {message}"
+        );
+
+        for mode in ["auto", "lossless", "lossy"] {
+            assert!(
+                parse_optimizing_mode(mode).is_ok(),
+                "{mode} is an optimization mode"
+            );
+        }
+
+        // The value keeps its meaning everywhere else, including on `truss convert`.
+        assert_eq!(parse_optimize_mode("none"), Ok(OptimizeMode::None));
     }
 
     #[test]

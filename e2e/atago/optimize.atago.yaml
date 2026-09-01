@@ -254,13 +254,28 @@ scenarios:
             path: out.bin
             format: png
 
-  - name: mode none still re-encodes into the requested format
+  - name: mode none is refused because it does not optimize
     steps:
+      # A mode that re-encodes without optimizing made files larger on the one subcommand
+      # that promises the opposite, and it was the only mode that reached an output format
+      # the others refuse. The refusal names the command that does a plain re-encode.
       - fixture:
           file: in.png
           from: testdata/sample.png
       - run:
           command: truss optimize in.png -o none.webp --mode none
+      - assert:
+          exit_code: 1
+          stderr:
+            contains: "truss convert"
+
+  - name: convert is where a plain re-encode lives
+    steps:
+      - fixture:
+          file: in.png
+          from: testdata/sample.png
+      - run:
+          command: truss convert in.png -o none.webp --optimize none
       - assert:
           exit_code: 0
           image:
