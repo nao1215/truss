@@ -378,6 +378,11 @@ pub struct ServerConfig {
     /// `0` (the default) means unlimited — no size-based eviction is performed.
     /// Configurable via `TRUSS_CACHE_MAX_BYTES`.
     pub cache_max_bytes: u64,
+    /// Unix timestamp of the last cache eviction scan, shared by every request.
+    ///
+    /// The scan walks the whole cache directory, so it is throttled to one per minute. It
+    /// lives here rather than on the cache because the cache value is built per request.
+    pub(crate) cache_eviction_secs: Arc<AtomicU64>,
     /// `Cache-Control: max-age` value (in seconds) for public GET image responses.
     ///
     /// Defaults to `3600`. Operators can tune this
@@ -581,6 +586,7 @@ impl Clone for ServerConfig {
             allow_insecure_url_sources: self.allow_insecure_url_sources,
             cache_root: self.cache_root.clone(),
             cache_max_bytes: self.cache_max_bytes,
+            cache_eviction_secs: Arc::clone(&self.cache_eviction_secs),
             public_max_age_seconds: self.public_max_age_seconds,
             public_stale_while_revalidate_seconds: self.public_stale_while_revalidate_seconds,
             disable_accept_negotiation: self.disable_accept_negotiation,
@@ -851,6 +857,7 @@ impl ServerConfig {
             allow_insecure_url_sources: false,
             cache_root: None,
             cache_max_bytes: 0,
+            cache_eviction_secs: Arc::new(AtomicU64::new(0)),
             public_max_age_seconds: DEFAULT_PUBLIC_MAX_AGE_SECONDS,
             public_stale_while_revalidate_seconds: DEFAULT_PUBLIC_STALE_WHILE_REVALIDATE_SECONDS,
             disable_accept_negotiation: false,
@@ -1482,6 +1489,7 @@ impl ServerConfig {
             allow_insecure_url_sources,
             cache_root,
             cache_max_bytes,
+            cache_eviction_secs: Arc::new(AtomicU64::new(0)),
             public_max_age_seconds,
             public_stale_while_revalidate_seconds,
             disable_accept_negotiation: env_flag("TRUSS_DISABLE_ACCEPT_NEGOTIATION"),

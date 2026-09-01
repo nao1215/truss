@@ -422,6 +422,34 @@ scenarios:
             path: lossy.jpg
             max_size: 1653
 
+  - name: no mode returns more bytes than it was given for a WebP either
+    steps:
+      # The same promise in the other container the passthrough can return. The lossless
+      # WebP encoder truss reaches through the image crate is a plain one, so a picture
+      # libwebp compressed well came back two and a half times its size — 94 bytes in, 234
+      # out — with nothing said about it.
+      - run:
+          command: truss optimize "${fixtures}/libwebp-lossless.webp" -o auto.webp --mode auto
+      - assert:
+          exit_code: 0
+          file:
+            path: auto.webp
+            max_size: 94
+      - run:
+          command: truss optimize "${fixtures}/libwebp-lossless.webp" -o lossless.webp --mode lossless
+      - assert:
+          exit_code: 0
+          file:
+            path: lossless.webp
+            max_size: 94
+      - run:
+          command: truss optimize "${fixtures}/libwebp-lossless.webp" -o lossy.webp --mode lossy
+      - assert:
+          exit_code: 0
+          file:
+            path: lossy.webp
+            max_size: 94
+
   - name: naming a quality asks for that encode, so lossy re-encodes
     steps:
       - run:

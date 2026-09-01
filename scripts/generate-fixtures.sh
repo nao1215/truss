@@ -394,6 +394,25 @@ cat > "$DIR/svg-external-css.svg" << 'SVGEOF'
 </svg>
 SVGEOF
 
+echo "[bonus] libwebp-lossless.webp — a lossless WebP written by libwebp"
+# The lossless WebP encoder truss links through the image crate is a plain one, so its
+# output on any picture with structure is far larger than what libwebp writes. This fixture
+# is that other encoder's work, which is what a WebP arriving from a design tool or a build
+# pipeline looks like, and it is where a re-encode costs more than it saves.
+python3 -c "
+from PIL import Image
+
+width, height = 32, 24
+image = Image.new('RGB', (width, height))
+image.putdata([
+    ((x * 7 + y * 3) % 256, (x * x + y) % 256, (x + y * 11) % 256)
+    for y in range(height)
+    for x in range(width)
+])
+image.save('$DIR/libwebp-lossless.webp', 'WEBP', lossless=True)
+print('  wrote 32x24 lossless WebP from libwebp')
+"
+
 echo "[bonus] svg-minimal.svg — smallest valid SVG"
 cat > "$DIR/svg-minimal.svg" << 'SVGEOF'
 <svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"/>

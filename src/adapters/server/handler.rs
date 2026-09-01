@@ -1390,7 +1390,10 @@ pub(super) fn transform_source_bytes(
     let cache = config.cache_root.as_ref().map(|root| {
         TransformCache::new(root.clone())
             .with_log_handler(config.log_handler.clone())
-            .with_max_bytes(config.cache_max_bytes)
+            .with_eviction(
+                config.cache_max_bytes,
+                Arc::clone(&config.cache_eviction_secs),
+            )
     });
 
     if let Some(ref cache) = cache
