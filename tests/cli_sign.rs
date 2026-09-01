@@ -73,3 +73,62 @@ fn sign_command_generates_a_working_public_path_url() {
     assert_eq!(content_type, "image/jpeg");
     assert_eq!(artifact.media_type, MediaType::Jpeg);
 }
+
+/// `truss sign` refuses an option set the server refuses under every input, rather than
+/// minting a URL that is valid as a signature and dead as a request.
+///
+/// A signed URL is normally written somewhere other than where it is fetched, so a
+/// refusal that arrives at request time arrives without the process that produced it.
+/// `@nao1215/truss-url-signer` has always refused these at the call site; this is the
+/// signer inside the binary catching up.
+#[test]
+fn sign_command_refuses_options_the_server_would_always_refuse() {
+    let cases: [(&[&str], &str); 4] = [
+        (&["--fit", "cover"], "fit requires both width and height"),
+        (
+            &["--position", "center"],
+            "position requires both width and height",
+        ),
+        (&["--quality", "101"], "quality must be between 1 and 100"),
+        (&["--width", "0"], "width must be greater than zero"),
+    ];
+
+    for (args, message) in cases {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_truss"));
+        command
+            .arg("sign")
+            .arg("--base-url")
+            .arg("https://cdn.example.com")
+            .arg("--path")
+            .arg("/image.png")
+            .arg("--key-id")
+            .arg("public-dev")
+            .arg("--secret")
+            .arg("secret-value")
+            .arg("--expires")
+            .arg("4102444800");
+        for arg in args {
+            command.arg(arg);
+        }
+        let output = command.output().expect("run truss sign");
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+        assert!(
+            !output.status.success(),
+            "{args:?} must not produce a URL: {stdout}"
+        );
+        assert!(
+            stdout.trim().is_empty(),
+            "{args:?} must write nothing a caller could pipe onward: {stdout}"
+        );
+        assert!(
+            stderr.contains(message),
+            "{args:?} must name the rule it broke: {stderr}"
+        );
+        assert!(
+            stderr.contains("(invalid-options)"),
+            "{args:?} must report the class the same options get everywhere else: {stderr}"
+        );
+    }
+}

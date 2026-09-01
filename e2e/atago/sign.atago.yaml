@@ -125,3 +125,58 @@ scenarios:
             compare: [stdout, exit_code]
       - assert:
           exit_code: 0
+
+  # A signed URL is usually written somewhere other than where it is fetched, so an
+  # option set the server refuses under every input has to be refused here rather than
+  # at request time. Nothing may reach stdout: a URL there is a URL a caller pipes on.
+  - name: refuses a fit without both dimensions instead of signing it
+    steps:
+      - run:
+          command: truss sign --base-url "https://cdn.example.com" --path "/hero.jpg" --key-id "k1" --secret "s3cret" --expires 1700000000 --fit cover
+      - assert:
+          exit_code: 1
+          stdout:
+            equals: ""
+          stderr:
+            contains:
+              - "fit requires both width and height"
+              - "(invalid-options)"
+
+  - name: refuses a position without both dimensions instead of signing it
+    steps:
+      - run:
+          command: truss sign --base-url "https://cdn.example.com" --path "/hero.jpg" --key-id "k1" --secret "s3cret" --expires 1700000000 --position center
+      - assert:
+          exit_code: 1
+          stdout:
+            equals: ""
+          stderr:
+            contains:
+              - "position requires both width and height"
+              - "(invalid-options)"
+
+  - name: refuses a quality outside the encoder range instead of signing it
+    steps:
+      - run:
+          command: truss sign --base-url "https://cdn.example.com" --path "/hero.jpg" --key-id "k1" --secret "s3cret" --expires 1700000000 --quality 101
+      - assert:
+          exit_code: 1
+          stdout:
+            equals: ""
+          stderr:
+            contains:
+              - "quality must be between 1 and 100"
+              - "(invalid-options)"
+
+  - name: refuses a zero width instead of signing it
+    steps:
+      - run:
+          command: truss sign --base-url "https://cdn.example.com" --path "/hero.jpg" --key-id "k1" --secret "s3cret" --expires 1700000000 --width 0
+      - assert:
+          exit_code: 1
+          stdout:
+            equals: ""
+          stderr:
+            contains:
+              - "width must be greater than zero"
+              - "(invalid-options)"
