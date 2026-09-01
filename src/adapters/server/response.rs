@@ -325,6 +325,23 @@ impl ErrorClass {
     }
 }
 
+/// The sentence for a JSON body truss could not turn into `what`.
+///
+/// `serde_json` reports a document that is not JSON and a document that is JSON and does not
+/// match the schema through one error type, and one wording covered both, so a body with a
+/// single value out of range was described as invalid JSON and sent the caller looking for a
+/// syntax error that was not there. `classify` is what tells them apart.
+pub(super) fn json_parse_message(what: &str, error: &serde_json::Error) -> String {
+    match error.classify() {
+        serde_json::error::Category::Syntax | serde_json::error::Category::Eof => {
+            format!("{what} must be valid JSON: {error}")
+        }
+        serde_json::error::Category::Data | serde_json::error::Category::Io => {
+            format!("{what} does not match the expected shape: {error}")
+        }
+    }
+}
+
 pub(super) fn bad_request_response(message: &str) -> HttpResponse {
     problem_response(ErrorClass::InvalidRequest, message)
 }
