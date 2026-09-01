@@ -1758,10 +1758,21 @@ fn webp_bytes_satisfying_metadata_policy(
 
 /// The message for a lossless JPEG request that cannot be served as a passthrough.
 ///
-/// An EXIF orientation gets its own wording because it is the common reason — a phone
-/// photo carries one — and because the generic message blames "pixel transforms" the
-/// caller did not ask for, which sends readers looking for a flag they never passed.
+/// The conditions behind the passthrough are independent, and reporting the category they
+/// sit in rather than the one that fired sends readers looking for a flag they never
+/// passed. Two of them get their own wording. A non-JPEG input is the one a caller hits
+/// most, since converting into JPEG is the ordinary way to reach this command, and it is
+/// not a transform at all: lossless JPEG optimization copies the input's coefficients, so
+/// it needs coefficients to copy. An EXIF orientation is the other, because a phone photo
+/// carries one.
 fn lossless_jpeg_refusal(normalized: &NormalizedTransformRequest) -> String {
+    if normalized.input.media_type != MediaType::Jpeg {
+        return format!(
+            "lossless JPEG optimization copies the input's own coefficients, so it needs a jpeg input; this one is {}. Convert with a re-encoding optimize mode instead",
+            normalized.input.media_type.as_name()
+        );
+    }
+
     if normalized.options.auto_orient
         && !auto_orientation_is_noop(&normalized.input)
         && let Some(orientation) =
@@ -6898,6 +6909,51 @@ mod tests {
         .expect("transform");
 
         assert_eq!(result.artifact.metadata.width, Some(32));
+    }
+
+    /// The refusal has to name the condition that fired, not the category it sits in.
+    ///
+    /// Converting a PNG or a WebP into JPEG asks for no transform at all, and was answered
+    /// `only supported when no pixel transforms are applied`, which sends a reader looking
+    /// for a flag they never passed. The real condition is that copying a JPEG's
+    /// coefficients needs a JPEG to copy them from.
+    #[test]
+    fn a_lossless_jpeg_refusal_names_the_condition_that_fired() {
+        let webp = {
+            let image = RgbaImage::from_pixel(16, 16, Rgba([10, 20, 30, 255]));
+            let mut bytes = Vec::new();
+            WebPEncoder::new_lossless(&mut bytes)
+                .encode(image.as_raw(), 16, 16, image::ExtendedColorType::Rgba8)
+                .expect("encode webp");
+            bytes
+        };
+        let sources: &[(&str, Vec<u8>)] = &[
+            ("png", crate::test_support::flat_png(16, 16)),
+            ("webp", webp),
+        ];
+
+        for (name, bytes) in sources {
+            let artifact = sniff_artifact(RawArtifact::new(bytes.clone(), None)).expect("sniff");
+            let error = transform_raster(TransformRequest::new(
+                artifact,
+                TransformOptions {
+                    format: Some(MediaType::Jpeg),
+                    optimize: OptimizeMode::Lossless,
+                    ..TransformOptions::default()
+                },
+            ))
+            .expect_err("a non-JPEG input cannot be optimized losslessly into a JPEG");
+
+            let message = error.to_string();
+            assert!(
+                message.contains("jpeg input") || message.contains("JPEG input"),
+                "a {name} input should be told a JPEG is needed, got: {message}"
+            );
+            assert!(
+                !message.contains("pixel transforms"),
+                "a request with no transform should not be told one was applied, got: {message}"
+            );
+        }
     }
 
     /// The never-grow guarantee has to survive a PNG that carries metadata, which is most

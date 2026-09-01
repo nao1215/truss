@@ -142,7 +142,7 @@ scenarios:
           exit_code: 3
           stderr:
             contains:
-              - "animated GIF is not supported"
+              - "animated gif is not supported"
               - "3 frames"
 
   - name: optimize also refuses an animated GIF
@@ -152,7 +152,7 @@ scenarios:
       - assert:
           exit_code: 3
           stderr:
-            contains: "animated GIF is not supported"
+            contains: "animated gif is not supported"
 
   - name: "--format gif is rejected at the flag, with exit 1"
     steps:

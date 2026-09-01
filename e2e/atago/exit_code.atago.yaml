@@ -180,7 +180,7 @@ scenarios:
           exit_code: 3
           stderr:
             contains:
-              - "animated GIF is not supported"
+              - "animated gif is not supported"
               - "(unsupported-input-media-type)"
 
   - name: "exit 4: an output larger than the pixel budget"

@@ -1389,20 +1389,27 @@ pub struct Rgba8 {
 
 impl Rgba8 {
     /// Parses a hexadecimal RGB or RGBA color string without a leading `#`.
+    ///
+    /// Every rejection reads the same sentence, which names the shape truss accepts rather
+    /// than repeating the value back. `#ffffff` is the spelling a caller reaches for first,
+    /// since CSS, HTML, and every colour picker use it, and `unsupported color \`#ffffff\``
+    /// gave them nothing to correct. Naming the rule is what every other option here does.
     pub fn from_hex(value: &str) -> Result<Self, String> {
-        if !value.is_ascii() || (value.len() != 6 && value.len() != 8) {
-            return Err(format!("unsupported color `{value}`"));
+        fn rule(value: &str) -> String {
+            format!(
+                "unsupported color `{value}`: a color is six or eight hexadecimal digits with no leading `#`, as in ffffff or ffffffaa"
+            )
         }
 
-        let r = u8::from_str_radix(&value[0..2], 16)
-            .map_err(|_| format!("unsupported color `{value}`"))?;
-        let g = u8::from_str_radix(&value[2..4], 16)
-            .map_err(|_| format!("unsupported color `{value}`"))?;
-        let b = u8::from_str_radix(&value[4..6], 16)
-            .map_err(|_| format!("unsupported color `{value}`"))?;
+        if !value.is_ascii() || (value.len() != 6 && value.len() != 8) {
+            return Err(rule(value));
+        }
+
+        let r = u8::from_str_radix(&value[0..2], 16).map_err(|_| rule(value))?;
+        let g = u8::from_str_radix(&value[2..4], 16).map_err(|_| rule(value))?;
+        let b = u8::from_str_radix(&value[4..6], 16).map_err(|_| rule(value))?;
         let a = if value.len() == 8 {
-            u8::from_str_radix(&value[6..8], 16)
-                .map_err(|_| format!("unsupported color `{value}`"))?
+            u8::from_str_radix(&value[6..8], 16).map_err(|_| rule(value))?
         } else {
             u8::MAX
         };
@@ -4139,6 +4146,36 @@ mod tests {
             .expect("sniff animated gif");
 
         assert_eq!(artifact.metadata.frame_count, 5);
+    }
+
+    /// A rejected colour is told what a colour looks like.
+    ///
+    /// Every other option in truss names its own rule in the failure, and `--background`
+    /// answered every wrong spelling with the value repeated back. The assertion is the
+    /// property rather than the sentence: the message says how many digits and says that no
+    /// `#` is used, whatever wording carries it.
+    #[test]
+    fn a_rejected_color_is_told_what_a_color_looks_like() {
+        for value in [
+            "#ffffff", "fff", "white", "0xffffff", "FFFFFFF", "", "gggggg",
+        ] {
+            let message = Rgba8::from_hex(value).expect_err("not a color");
+            assert!(
+                message.contains("six or eight") && message.contains("hexadecimal"),
+                "{value:?} was not told the digit count: {message}"
+            );
+            assert!(
+                message.contains('#'),
+                "{value:?} was not told that no `#` is used: {message}"
+            );
+        }
+
+        for value in ["ffffff", "FFFFFF", "ffffffaa", "000000"] {
+            assert!(
+                Rgba8::from_hex(value).is_ok(),
+                "{value:?} should be a color"
+            );
+        }
     }
 
     #[test]
