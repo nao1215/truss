@@ -576,33 +576,74 @@ pub(super) fn validate_backend_endpoint_url(
     Ok(())
 }
 
+/// The address AWS, Azure, and most other providers answer instance metadata on.
+const METADATA_IPV4: Ipv4Addr = Ipv4Addr::new(169, 254, 169, 254);
+
+/// The AWS IMDSv2 IPv6 literal.
+const METADATA_IPV6: Ipv6Addr = Ipv6Addr::new(0xfd00, 0x0ec2, 0, 0, 0, 0, 0, 0x0254);
+
+/// Returns the IPv4 address an IPv6 address carries, in any of the three encodings that
+/// reach it.
+///
+/// IPv4-mapped (`::ffff:a.b.c.d`), the deprecated IPv4-compatible form (`::a.b.c.d`)
+/// which some stacks still route (RFC 4291 section 2.5.5.1), and 6to4 (`2002:a.b.c.d::`),
+/// which embeds the address in bits 16 to 48. Both callers need the same list: refusing a
+/// spelling in the deny-list and not in the metadata check is what let one of them decode
+/// three encodings while the other decoded one.
+fn embedded_ipv4(ip: Ipv6Addr) -> Option<Ipv4Addr> {
+    if let Some(mapped) = ip.to_ipv4_mapped() {
+        return Some(mapped);
+    }
+
+    let segments = ip.segments();
+    if segments[..6] == [0, 0, 0, 0, 0, 0] {
+        return Some(Ipv4Addr::new(
+            (segments[6] >> 8) as u8,
+            segments[6] as u8,
+            (segments[7] >> 8) as u8,
+            segments[7] as u8,
+        ));
+    }
+
+    if segments[0] == 0x2002 {
+        return Some(Ipv4Addr::new(
+            (segments[1] >> 8) as u8,
+            segments[1] as u8,
+            (segments[2] >> 8) as u8,
+            segments[2] as u8,
+        ));
+    }
+
+    None
+}
+
 /// Returns `true` when the URL targets a well-known cloud metadata service.
 ///
 /// Checked hostnames:
-/// - `169.254.169.254` (AWS / Azure / most clouds)
-/// - `metadata.google.internal` (GCP)
+/// - `169.254.169.254` (AWS / Azure / most clouds), in every spelling the `url` crate
+///   canonicalizes and in every IPv6 encoding that carries it
+/// - `metadata.google.internal` (GCP), with or without the trailing dot that makes a
+///   domain name absolute
 /// - `[fd00:ec2::254]` (AWS IMDSv2 IPv6)
+///
+/// This is the only check that runs when `allow_insecure_url_sources` is set, so a
+/// spelling it misses is a spelling with nothing behind it.
 fn is_cloud_metadata_host(url: &Url) -> bool {
-    // Explicit checks cover AWS/Azure (169.254.169.254), GCP
-    // (metadata.google.internal), and AWS IMDSv2 IPv6.  Other providers
-    // (DigitalOcean, Oracle, etc.) also use 169.254.169.254 and are
-    // therefore caught here.  Alibaba's 100.100.100.200 falls in the
-    // CGNAT range (100.64.0.0/10) and is rejected by `is_disallowed_ipv4`.
-    match url.host_str() {
-        Some("169.254.169.254" | "metadata.google.internal") => true,
-        _ => match url.host() {
-            // AWS IMDSv2 IPv6 literal
-            Some(url::Host::Ipv6(addr))
-                if addr == std::net::Ipv6Addr::new(0xfd00, 0x0ec2, 0, 0, 0, 0, 0, 0x0254) =>
-            {
-                true
-            }
-            // IPv4-mapped IPv6 (e.g. ::ffff:169.254.169.254)
-            Some(url::Host::Ipv6(addr)) => {
-                addr.to_ipv4_mapped() == Some(std::net::Ipv4Addr::new(169, 254, 169, 254))
-            }
-            _ => false,
-        },
+    // Other providers (DigitalOcean, Oracle, etc.) also use 169.254.169.254 and are
+    // therefore caught here.  Alibaba's 100.100.100.200 falls in the CGNAT range
+    // (100.64.0.0/10) and is rejected by `is_disallowed_ipv4`.
+    let host = url
+        .host_str()
+        .map(|host| host.strip_suffix('.').unwrap_or(host));
+    if matches!(host, Some("169.254.169.254" | "metadata.google.internal")) {
+        return true;
+    }
+
+    match url.host() {
+        Some(url::Host::Ipv6(addr)) => {
+            addr == METADATA_IPV6 || embedded_ipv4(addr) == Some(METADATA_IPV4)
+        }
+        _ => false,
     }
 }
 
@@ -633,38 +674,13 @@ pub(super) fn is_disallowed_ipv6(ip: Ipv6Addr) -> bool {
         return true;
     }
 
-    // Check IPv4-mapped addresses (e.g. ::ffff:127.0.0.1) against IPv4 rules
-    // to prevent SSRF bypass via mapped addresses.
-    if let Some(v4) = ip.to_ipv4_mapped() {
+    // An IPv4 address written as an IPv6 one is still that address, so the IPv4 rules
+    // decide it. `embedded_ipv4` covers the mapped, IPv4-compatible, and 6to4 spellings.
+    if let Some(v4) = embedded_ipv4(ip) {
         return is_disallowed_ipv4(v4);
     }
 
     let segments = ip.segments();
-
-    // Check deprecated IPv4-compatible addresses (e.g. ::127.0.0.1).
-    // Some network stacks still route these despite deprecation (RFC 4291 §2.5.5.1).
-    // Only applies when the upper 96 bits are zero and it's not IPv4-mapped.
-    if segments[..6] == [0, 0, 0, 0, 0, 0] {
-        let v4 = Ipv4Addr::new(
-            (segments[6] >> 8) as u8,
-            segments[6] as u8,
-            (segments[7] >> 8) as u8,
-            segments[7] as u8,
-        );
-        return is_disallowed_ipv4(v4);
-    }
-
-    // Block 6to4 addresses (2002::/16) which embed an IPv4 address in bits 16-48.
-    // An attacker can encode private IPs like 127.0.0.1 as 2002:7f00:0001::.
-    if segments[0] == 0x2002 {
-        let embedded = Ipv4Addr::new(
-            (segments[1] >> 8) as u8,
-            segments[1] as u8,
-            (segments[2] >> 8) as u8,
-            segments[2] as u8,
-        );
-        return is_disallowed_ipv4(embedded);
-    }
 
     // Block Teredo addresses (2001:0000::/32) which can tunnel to arbitrary IPv4.
     if segments[0] == 0x2001 && segments[1] == 0x0000 {
@@ -679,6 +695,7 @@ pub(super) fn is_disallowed_ipv6(ip: Ipv6Addr) -> bool {
 #[cfg(test)]
 mod redirect_tests {
     use super::*;
+    use rstest::rstest;
 
     #[test]
     fn is_redirect_status_recognizes_all_redirect_codes() {
@@ -1078,6 +1095,53 @@ mod redirect_tests {
     fn cloud_metadata_non_metadata_ip_is_allowed() {
         let url = Url::parse("http://169.254.169.253/something").unwrap();
         assert!(!is_cloud_metadata_host(&url));
+    }
+
+    /// Every spelling that reaches the same metadata endpoint has to be refused by the
+    /// same rule, because that rule is the only one that runs when
+    /// `TRUSS_ALLOW_INSECURE_URL_SOURCES` is set.
+    ///
+    /// A trailing dot makes a domain name absolute and resolves identically. The three
+    /// IPv6 forms below all carry 169.254.169.254: IPv4-mapped, the deprecated
+    /// IPv4-compatible form, and 6to4. The decimal, hexadecimal, and octal IPv4 forms
+    /// arrive here already canonicalized by the `url` crate, and are listed so a change
+    /// of parser cannot drop them silently.
+    #[rstest]
+    #[case("http://169.254.169.254/latest/meta-data")]
+    #[case("http://169.254.169.254./latest/meta-data")]
+    #[case("http://2852039166/latest/meta-data")]
+    #[case("http://0xa9fea9fe/latest/meta-data")]
+    #[case("http://0251.0376.0251.0376/latest/meta-data")]
+    #[case("http://metadata.google.internal/computeMetadata/v1/")]
+    #[case("http://metadata.google.internal./computeMetadata/v1/")]
+    #[case("http://[::ffff:169.254.169.254]/latest/meta-data")]
+    #[case("http://[::169.254.169.254]/latest/meta-data")]
+    #[case("http://[2002:a9fe:a9fe::]/latest/meta-data")]
+    #[case("http://[fd00:ec2::254]/latest/meta-data")]
+    #[case("http://[fd00:0ec2:0:0:0:0:0:0254]/latest/meta-data")]
+    fn cloud_metadata_spellings_are_all_blocked(#[case] value: &str) {
+        let url = Url::parse(value).expect("parse metadata URL");
+        assert!(
+            is_cloud_metadata_host(&url),
+            "{value} reaches a metadata endpoint and must be refused"
+        );
+    }
+
+    /// The negative half, so normalizing the trailing dot and decoding the embedded
+    /// IPv4 forms does not start refusing hosts that are not metadata endpoints.
+    #[rstest]
+    #[case("http://metadata.google.internal.example.com/")]
+    #[case("http://notmetadata.google.internal/")]
+    #[case("http://169.254.169.253/")]
+    #[case("http://[::ffff:169.254.169.253]/")]
+    #[case("http://[2002:a9fe:a9fd::]/")]
+    #[case("http://[fd00:ec2::255]/")]
+    fn cloud_metadata_lookalikes_are_not_blocked(#[case] value: &str) {
+        let url = Url::parse(value).expect("parse lookalike URL");
+        assert!(
+            !is_cloud_metadata_host(&url),
+            "{value} is not a metadata endpoint"
+        );
     }
 
     // ── Content-Encoding edge cases ──────────────────────────────────────
