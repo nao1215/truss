@@ -158,3 +158,67 @@ scenarios:
           exit_code: 1
           stderr:
             contains: "error:"
+
+  - name: the -- section prints the spellings that work
+    steps:
+      # Pinning the text and running it are two halves of one assertion: without this the
+      # scenario below would keep passing while the help kept printing something else.
+      - run:
+          command: truss convert --help
+      - assert:
+          exit_code: 0
+          stdout:
+            contains:
+              - "truss convert -o out.jpg -- -input.png"
+              - "truss convert input.png --output=-output.jpg"
+
+  - name: the command lines the -- section prints actually run
+    steps:
+      # The help is the only place truss explains how to name a file that starts with a
+      # dash, and both lines it printed were malformed: everything after -- is a
+      # positional, so `-- -input.png -o out.jpg` stranded the output flag, and `-o --`
+      # took the separator as its value. The section is checked by running what it prints
+      # now, rather than by searching the text for the strings it ought to contain.
+      - fixture:
+          file: "-input.png"
+          from: ${fixtures}/sample.png
+      - run:
+          command: truss convert -o out.jpg -- -input.png
+      - assert:
+          exit_code: 0
+          image:
+            path: out.jpg
+            format: jpeg
+      - run:
+          command: truss convert -input.png --output=-output.jpg
+      - assert:
+          exit_code: 0
+          image:
+            path: "-output.jpg"
+            format: jpeg
+
+  - name: the separator cannot carry an output flag after it
+    steps:
+      # The negative half. Everything after -- is a positional, so this is a usage error
+      # rather than a conversion, and the help must not print it as though it were one.
+      - fixture:
+          file: "-input.png"
+          from: ${fixtures}/sample.png
+      - run:
+          command: truss convert -- -input.png -o second.jpg
+      - assert:
+          exit_code: 1
+          stderr:
+            contains: "unexpected argument"
+
+  - name: inspect takes a dash-named file after the separator
+    steps:
+      - fixture:
+          file: "-weird-name.png"
+          from: ${fixtures}/sample.png
+      - run:
+          command: truss inspect -- -weird-name.png
+      - assert:
+          exit_code: 0
+          stdout:
+            contains: '"format": "png"'
