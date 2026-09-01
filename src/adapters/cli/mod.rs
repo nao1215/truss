@@ -477,10 +477,10 @@ struct ClapConvertArgs {
     #[arg(long)]
     url: Option<String>,
     /// Target width in pixels
-    #[arg(long)]
+    #[arg(long, value_parser = parse_width)]
     width: Option<u32>,
     /// Target height in pixels
-    #[arg(long)]
+    #[arg(long, value_parser = parse_height)]
     height: Option<u32>,
     /// How to fit into target dimensions (contain, cover, fill, inside)
     #[arg(long, value_parser = parse_fit)]
@@ -549,7 +549,7 @@ struct ClapConvertArgs {
     #[arg(long, value_parser = parse_watermark_opacity)]
     watermark_opacity: Option<u8>,
     /// Watermark margin in pixels (default: 10)
-    #[arg(long)]
+    #[arg(long, value_parser = parse_watermark_margin)]
     watermark_margin: Option<u32>,
     /// Show help for convert
     #[arg(short = 'h', long = "help")]
@@ -668,10 +668,10 @@ struct ClapSignArgs {
     #[arg(long)]
     expires: Option<u64>,
     /// Target width in pixels
-    #[arg(long)]
+    #[arg(long, value_parser = parse_width)]
     width: Option<u32>,
     /// Target height in pixels
-    #[arg(long)]
+    #[arg(long, value_parser = parse_height)]
     height: Option<u32>,
     /// How to fit into target dimensions
     #[arg(long, value_parser = parse_fit)]
@@ -740,7 +740,7 @@ struct ClapSignArgs {
     #[arg(long, value_parser = parse_watermark_opacity)]
     watermark_opacity: Option<u8>,
     /// Watermark margin from edge in pixels (default: 10)
-    #[arg(long)]
+    #[arg(long, value_parser = parse_watermark_margin)]
     watermark_margin: Option<u32>,
     /// Named transform preset to apply
     #[arg(long)]
@@ -831,6 +831,43 @@ fn parse_sharpen(s: &str) -> Result<f32, String> {
 /// Parsed as an `i64` rather than as the `u8` the option is stored in, because clap would
 /// otherwise refuse 256 with `256 is not in 0..=255`, a range that is the integer's and not
 /// truss's, while 255 got `quality must be between 1 and 100`.
+/// Parses a watermark margin the same way, so a number too large to be a count of pixels
+/// says so rather than naming the integer it would be stored in.
+fn parse_watermark_margin(s: &str) -> Result<u32, String> {
+    parse_dimension(
+        s,
+        "watermark margin",
+        crate::core::validate_watermark_margin_value,
+    )
+}
+
+/// Parses a width, reporting the rule truss documents whatever the number's width.
+///
+/// Parsed as an `i64` rather than as the `u32` the option is stored in, because clap would
+/// otherwise refuse 4294967296 with `4294967296 is not in 0..=4294967295`, the span of the
+/// integer rather than anything truss publishes.
+fn parse_width(s: &str) -> Result<u32, String> {
+    parse_dimension(s, "width", crate::core::validate_width_value)
+}
+
+/// The same for a height. See [`parse_width`].
+fn parse_height(s: &str) -> Result<u32, String> {
+    parse_dimension(s, "height", crate::core::validate_height_value)
+}
+
+fn parse_dimension(
+    s: &str,
+    axis: &str,
+    validate: fn(i64) -> Result<u32, &'static str>,
+) -> Result<u32, String> {
+    let value: i64 = s
+        .parse()
+        .map_err(|_| format!("{axis} must be a whole number of pixels, got '{s}'"))?;
+    // A value the option can hold is handed on for the transform to judge, which keeps the
+    // failure class the CLI reported before and the one the other adapters report.
+    validate(value).map_err(str::to_string)
+}
+
 fn parse_quality(s: &str) -> Result<u8, String> {
     let value: i64 = s
         .parse()

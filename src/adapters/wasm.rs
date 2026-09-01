@@ -23,8 +23,10 @@ use wasm_bindgen::prelude::*;
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WasmTransformOptions {
     /// The requested output width in pixels.
+    #[serde(default, deserialize_with = "crate::core::deserialize_width")]
     pub width: Option<u32>,
     /// The requested output height in pixels.
+    #[serde(default, deserialize_with = "crate::core::deserialize_height")]
     pub height: Option<u32>,
     /// The resize fit mode (`contain`, `cover`, `fill`, or `inside`).
     pub fit: Option<String>,
@@ -33,6 +35,7 @@ pub struct WasmTransformOptions {
     /// The requested output format (`jpeg`, `png`, `webp`, `avif`, `bmp`, `tiff`, or `svg`).
     pub format: Option<String>,
     /// The requested lossy quality from 1 to 100.
+    #[serde(default, deserialize_with = "crate::core::deserialize_quality")]
     pub quality: Option<u8>,
     /// Optimization mode (`none`, `auto`, `lossless`, or `lossy`).
     pub optimize: Option<String>,
@@ -44,6 +47,10 @@ pub struct WasmTransformOptions {
     ///
     /// Any integer works: negatives turn counter-clockwise and values past a full turn
     /// wrap, so `-90` and `270` mean the same thing.
+    #[serde(
+        default,
+        deserialize_with = "crate::core::deserialize_rotation_degrees"
+    )]
     pub rotate: Option<i32>,
     /// Whether EXIF auto-orientation should run. Defaults to `true`.
     pub auto_orient: Option<bool>,
@@ -590,6 +597,69 @@ mod tests {
     use super::*;
     use rstest::rstest;
     const WASM_DOCS: &str = include_str!("../../docs/wasm.md");
+
+    /// The browser is told the range truss documents, not the width of the integer the
+    /// option is stored in.
+    ///
+    /// The other three adapters were given this in v0.20.0 and the fourth was not, so
+    /// `quality: 256` threw `expected u8` here while the CLI and the server both answered
+    /// with the documented range.
+    #[rstest]
+    #[case(r#"{"quality":256}"#, "quality must be between 1 and 100")]
+    #[case(r#"{"quality":999999}"#, "quality must be between 1 and 100")]
+    #[case(
+        r#"{"width":4294967296}"#,
+        "width is too large to be a number of pixels"
+    )]
+    #[case(
+        r#"{"height":4294967296}"#,
+        "height is too large to be a number of pixels"
+    )]
+    fn an_out_of_range_option_reports_the_documented_rule(
+        #[case] options_json: &str,
+        #[case] expected: &str,
+    ) {
+        let error = serde_json::from_str::<WasmTransformOptions>(options_json)
+            .expect_err("the value is out of range")
+            .to_string();
+
+        assert!(error.contains(expected), "{error}");
+        for rust_type in ["u8", "u32", "i32", "0..="] {
+            assert!(
+                !error.contains(rust_type),
+                "a Rust integer is not the caller's vocabulary: {error}"
+            );
+        }
+    }
+
+    /// A value the field can hold reaches the transform, so its sentence comes from the
+    /// same place on every adapter rather than from this adapter's parser.
+    #[test]
+    fn a_quality_the_field_can_hold_is_judged_by_the_transform() {
+        let options = serde_json::from_str::<WasmTransformOptions>(r#"{"quality":101}"#)
+            .expect("101 fits the field");
+        assert_eq!(options.quality, Some(101));
+
+        let error = transform_browser_artifact(parity_source(), None, options)
+            .expect_err("101 is not a quality");
+        assert_eq!(
+            error.to_string(),
+            "invalid transform options: quality must be between 1 and 100"
+        );
+    }
+
+    /// An angle past a full turn wraps here too, which is what the option documents and
+    /// what the CLI and the server do.
+    #[test]
+    fn a_rotation_past_a_full_turn_is_taken_however_large_it_is() {
+        let options = serde_json::from_str::<WasmTransformOptions>(r#"{"rotate":9999999999}"#)
+            .expect("an angle past a full turn is an angle");
+
+        // Reduced before it is narrowed. Casting first and reducing after would give 127,
+        // which is the mistake this shape is easy to make.
+        assert_eq!(options.rotate, Some((9_999_999_999_i64 % 360) as i32));
+        assert_eq!(options.rotate, Some(279));
+    }
 
     // ── the browser answers what the library answers ─────────────────
 
