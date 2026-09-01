@@ -16,8 +16,7 @@ use super::http_parse;
 use super::lifecycle::{HEADER_READ_DEADLINE, SOCKET_READ_TIMEOUT, SOCKET_WRITE_TIMEOUT};
 use super::metrics::{RouteMetric, record_http_metrics, record_http_request_duration, status_code};
 use super::response::{
-    HttpResponse, NOT_FOUND_BODY, too_many_requests_response, write_response,
-    write_response_compressed,
+    HttpResponse, NOT_FOUND_BODY, ResponseWriteOptions, too_many_requests_response, write_response,
 };
 
 use subtle::ConstantTimeEq;
@@ -174,6 +173,9 @@ pub(super) fn handle_stream(
     let peer_ip = stream.peer_addr().ok().map(|addr| addr.ip());
 
     let mut requests_served: u64 = 0;
+    // What a client wrote past the end of one request belongs to the next one it sent, since
+    // a client controls neither how its bytes are packetised nor where a read stops.
+    let mut carried_over: Vec<u8> = Vec::new();
 
     loop {
         // The socket read timeout is an inactivity timeout and resets on every byte, so it
@@ -188,13 +190,19 @@ pub(super) fn handle_stream(
             &mut stream,
             config.max_upload_bytes,
             Some(header_deadline),
+            std::mem::take(&mut carried_over),
         ) {
             Ok(partial) => partial,
-            Err(response) => {
+            Err(error) => {
                 if requests_served > 0 {
                     return Ok(());
                 }
-                let _ = write_response(&mut stream, response, true);
+                let is_head = error.method.as_deref() == Some("HEAD");
+                let _ = write_response(
+                    &mut stream,
+                    error.response,
+                    ResponseWriteOptions::closing(is_head),
+                );
                 return Ok(());
             }
         };
@@ -234,12 +242,15 @@ pub(super) fn handle_stream(
         {
             let mut response = too_many_requests_response("rate limit exceeded — try again later");
             response.attach_request_id(&request_id);
-            response.strip_body_if_head(is_head);
             record_http_metrics(RouteMetric::Unknown, response.status);
             let sc = status_code(response.status).unwrap_or("unknown");
             let method_log = partial.method.clone();
             let path_log = partial.path().to_string();
-            let _ = write_response(&mut stream, response, true);
+            let _ = write_response(
+                &mut stream,
+                response,
+                ResponseWriteOptions::closing(is_head),
+            );
             record_http_request_duration(RouteMetric::Unknown, start);
             emit_access_log(
                 config,
@@ -264,10 +275,7 @@ pub(super) fn handle_stream(
             config.log_warn(&format!("failed to restore socket read timeout: {err}"));
         }
 
-        let client_wants_close = partial
-            .headers
-            .iter()
-            .any(|(name, value)| name == "connection" && value.eq_ignore_ascii_case("close"));
+        let wants_close = client_wants_close(&partial.version, &partial.headers);
 
         let accepts_gzip = config.enable_compression
             && http_parse::header_value(&partial.headers, "accept-encoding")
@@ -286,12 +294,15 @@ pub(super) fn handle_stream(
             let sc = status_code(response.status).unwrap_or("unknown");
             let method_log = partial.method.clone();
             let path_log = partial.path().to_string();
-            let _ = write_response_compressed(
+            let _ = write_response(
                 &mut stream,
                 response,
-                true,
-                accepts_gzip,
-                config.compression_level,
+                ResponseWriteOptions {
+                    close: true,
+                    is_head,
+                    accepts_gzip,
+                    compression_level: config.compression_level,
+                },
             );
             record_http_request_duration(RouteMetric::Unknown, start);
             emit_access_log(
@@ -336,17 +347,19 @@ pub(super) fn handle_stream(
 
             if let Some(mut response) = early_response {
                 response.attach_request_id(&request_id);
-                response.strip_body_if_head(is_head);
                 record_http_metrics(RouteMetric::Metrics, response.status);
                 let sc = status_code(response.status).unwrap_or("unknown");
                 let method_log = partial.method.clone();
                 let path_log = partial.path().to_string();
-                let _ = write_response_compressed(
+                let _ = write_response(
                     &mut stream,
                     response,
-                    true,
-                    accepts_gzip,
-                    config.compression_level,
+                    ResponseWriteOptions {
+                        close: true,
+                        is_head,
+                        accepts_gzip,
+                        compression_level: config.compression_level,
+                    },
                 );
                 record_http_request_duration(RouteMetric::Metrics, start);
                 emit_access_log(
@@ -383,17 +396,19 @@ pub(super) fn handle_stream(
 
             if let Some(mut response) = early_response {
                 response.attach_request_id(&request_id);
-                response.strip_body_if_head(is_head);
                 record_http_metrics(RouteMetric::Health, response.status);
                 let sc = status_code(response.status).unwrap_or("unknown");
                 let method_log = partial.method.clone();
                 let path_log = partial.path().to_string();
-                let _ = write_response_compressed(
+                let _ = write_response(
                     &mut stream,
                     response,
-                    true,
-                    accepts_gzip,
-                    config.compression_level,
+                    ResponseWriteOptions {
+                        close: true,
+                        is_head,
+                        accepts_gzip,
+                        compression_level: config.compression_level,
+                    },
                 );
                 record_http_request_duration(RouteMetric::Health, start);
                 emit_access_log(
@@ -417,18 +432,21 @@ pub(super) fn handle_stream(
         let method = partial.method.clone();
         let path = partial.path().to_string();
 
-        let request = match http_parse::read_request_body(&mut stream, partial) {
-            Ok(request) => request,
+        let (request, leftover) = match http_parse::read_request_body(&mut stream, partial) {
+            Ok(pair) => pair,
             Err(mut response) => {
                 response.attach_request_id(&request_id);
                 record_http_metrics(RouteMetric::Unknown, response.status);
                 let sc = status_code(response.status).unwrap_or("unknown");
-                let _ = write_response_compressed(
+                let _ = write_response(
                     &mut stream,
                     response,
-                    true,
-                    accepts_gzip,
-                    config.compression_level,
+                    ResponseWriteOptions {
+                        close: true,
+                        is_head,
+                        accepts_gzip,
+                        compression_level: config.compression_level,
+                    },
                 );
                 record_http_request_duration(RouteMetric::Unknown, start);
                 emit_access_log(
@@ -458,17 +476,18 @@ pub(super) fn handle_stream(
 
         let sc = status_code(response.status).unwrap_or("unknown");
 
-        response.strip_body_if_head(is_head);
-
         requests_served += 1;
-        let close_after = client_wants_close || requests_served >= config.keep_alive_max_requests;
+        let close_after = wants_close || requests_served >= config.keep_alive_max_requests;
 
-        write_response_compressed(
+        write_response(
             &mut stream,
             response,
-            close_after,
-            accepts_gzip,
-            config.compression_level,
+            ResponseWriteOptions {
+                close: close_after,
+                is_head,
+                accepts_gzip,
+                compression_level: config.compression_level,
+            },
         )?;
         record_http_request_duration(route, start);
 
@@ -489,7 +508,25 @@ pub(super) fn handle_stream(
         if close_after {
             return Ok(());
         }
+        carried_over = leftover;
     }
+}
+
+/// Decides whether the connection closes after this request.
+///
+/// Persistence is the default only from HTTP/1.1 onwards. An HTTP/1.0 client that sends no
+/// `Connection` header considers the exchange finished when it has read the answer, and
+/// keeping its socket open parks a worker thread on it until the header deadline expires.
+/// `Connection` is a comma-separated list, so `close` counts wherever it appears in one.
+fn client_wants_close(version: &str, headers: &[(String, String)]) -> bool {
+    let connection = http_parse::header_value(headers, "connection");
+    if connection.is_some_and(|value| http_parse::header_list_contains(value, "close")) {
+        return true;
+    }
+    if version.eq_ignore_ascii_case("HTTP/1.1") {
+        return false;
+    }
+    !connection.is_some_and(|value| http_parse::header_list_contains(value, "keep-alive"))
 }
 
 pub(super) fn route_request(
@@ -523,5 +560,44 @@ pub(super) fn classify_route(request: &http_parse::HttpRequest) -> RouteMetric {
         ("POST", "/images") => RouteMetric::Upload,
         ("GET" | "HEAD", "/metrics") => RouteMetric::Metrics,
         _ => RouteMetric::Unknown,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A connection is kept open only when the client's protocol version says persistence is
+    /// the default and the client did not ask to close. HTTP/1.0 has no persistent
+    /// connections unless the client opts in, and `Connection` is a comma-separated list, so
+    /// `close` counts wherever it appears in it.
+    #[test]
+    fn the_close_decision_reads_the_version_and_the_whole_connection_list() {
+        let cases: &[(&str, Option<&str>, bool)] = &[
+            ("HTTP/1.1", None, false),
+            ("HTTP/1.1", Some("keep-alive"), false),
+            ("HTTP/1.1", Some("close"), true),
+            ("HTTP/1.1", Some("Close"), true),
+            ("HTTP/1.1", Some("close, TE"), true),
+            ("HTTP/1.1", Some("keep-alive, close"), true),
+            ("HTTP/1.1", Some("TE"), false),
+            ("HTTP/1.0", None, true),
+            ("HTTP/1.0", Some("keep-alive"), false),
+            ("HTTP/1.0", Some("keep-alive, TE"), false),
+            ("HTTP/1.0", Some("close"), true),
+            ("HTTP/0.9", None, true),
+            ("BANANA", None, true),
+        ];
+
+        for &(version, connection, expected) in cases {
+            let headers: Vec<(String, String)> = connection
+                .map(|value| vec![("connection".to_string(), value.to_string())])
+                .unwrap_or_default();
+            assert_eq!(
+                client_wants_close(version, &headers),
+                expected,
+                "{version} with Connection: {connection:?}"
+            );
+        }
     }
 }

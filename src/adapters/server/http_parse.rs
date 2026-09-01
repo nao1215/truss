@@ -64,6 +64,34 @@ impl PartialHttpRequest {
     }
 }
 
+/// A request that could not be read, together with the method from its request line when
+/// that line parsed. The method decides whether the answer may carry content: a HEAD request
+/// that fails during header parsing is still a HEAD request, and RFC 9110 section 9.3.2
+/// forbids content in its response.
+#[derive(Debug)]
+pub(super) struct RequestReadError {
+    pub(super) method: Option<String>,
+    pub(super) response: HttpResponse,
+}
+
+impl From<HttpResponse> for RequestReadError {
+    fn from(response: HttpResponse) -> Self {
+        Self {
+            method: None,
+            response,
+        }
+    }
+}
+
+impl RequestReadError {
+    fn with_method(method: &str, response: HttpResponse) -> Self {
+        Self {
+            method: Some(method.to_string()),
+            response,
+        }
+    }
+}
+
 /// Reads only the HTTP request line and headers from `stream`, returning a
 /// [`PartialHttpRequest`]. Any bytes already buffered beyond the header
 /// terminator are stored in `overflow` so that `read_request_body` can
@@ -76,20 +104,30 @@ pub(super) fn read_request_headers<R>(
     stream: &mut R,
     max_upload_bytes: usize,
     deadline: Option<Instant>,
-) -> Result<PartialHttpRequest, HttpResponse>
+    carried_over: Vec<u8>,
+) -> Result<PartialHttpRequest, RequestReadError>
 where
     R: Read,
 {
-    let mut buffer = Vec::new();
+    let mut buffer = carried_over;
     let mut chunk = [0_u8; CHUNK_READ_SIZE];
     let header_end = loop {
+        // A client may write its next request in the same packet as the previous one, in
+        // which case the whole request is already in hand and there is nothing to read.
+        if let Some(index) = find_header_terminator(&buffer) {
+            if index > MAX_HEADER_BYTES {
+                return Err(payload_too_large_response("request headers are too large").into());
+            }
+            break index;
+        }
+
         // Checked before every read as well as after: the budget is for the header phase
         // as a whole, so a client that keeps the socket's own timeout alive by trickling
         // bytes still runs out of it.
         if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
-            return Err(request_timeout_response(
-                "the HTTP headers were not delivered in time",
-            ));
+            return Err(
+                request_timeout_response("the HTTP headers were not delivered in time").into(),
+            );
         }
 
         let read = stream.read(&mut chunk).map_err(|error| {
@@ -99,15 +137,20 @@ where
                 error.kind(),
                 std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
             ) {
-                request_timeout_response("the HTTP headers were not delivered in time")
+                RequestReadError::from(request_timeout_response(
+                    "the HTTP headers were not delivered in time",
+                ))
             } else {
-                internal_error_response(&format!("failed to read request: {error}"))
+                RequestReadError::from(internal_error_response(&format!(
+                    "failed to read request: {error}"
+                )))
             }
         })?;
         if read == 0 {
             return Err(bad_request_response(
                 "request ended before the HTTP headers were complete",
-            ));
+            )
+            .into());
         }
 
         buffer.extend_from_slice(&chunk[..read]);
@@ -116,31 +159,40 @@ where
         // header-size limit.  Body-size limits are checked after headers are
         // parsed (in `read_request_body`).
         if buffer.len() > MAX_HEADER_BYTES + max_upload_bytes {
-            return Err(payload_too_large_response("request is too large"));
+            return Err(payload_too_large_response("request is too large").into());
         }
 
         if let Some(index) = find_header_terminator(&buffer) {
             if index > MAX_HEADER_BYTES {
-                return Err(payload_too_large_response("request headers are too large"));
+                return Err(payload_too_large_response("request headers are too large").into());
             }
             break index;
         }
 
         if buffer.len() > MAX_HEADER_BYTES {
-            return Err(payload_too_large_response("request headers are too large"));
+            return Err(payload_too_large_response("request headers are too large").into());
         }
     };
 
-    let header_text = std::str::from_utf8(&buffer[..header_end])
-        .map_err(|_| bad_request_response("request headers must be valid UTF-8"))?;
+    let header_text = std::str::from_utf8(&buffer[..header_end]).map_err(|_| {
+        RequestReadError::from(bad_request_response("request headers must be valid UTF-8"))
+    })?;
     let mut lines = header_text.split("\r\n");
     let request_line = lines.next().unwrap_or_default();
     let (method, target, version) = parse_request_line(request_line)?;
-    let headers = parse_headers(lines)?;
-    let content_length = parse_content_length(&headers)?;
+
+    // Everything from here on knows the method, so a HEAD request that is refused still
+    // gets an answer shaped like a HEAD answer.
+    let fail = |response| RequestReadError::with_method(&method, response);
+
+    let headers = parse_headers(lines).map_err(fail)?;
+    require_host_when_the_version_demands_one(&version, &headers).map_err(fail)?;
+    let content_length = parse_content_length(&headers).map_err(fail)?;
     let max_body = max_body_for_headers(&headers, max_upload_bytes);
     if content_length > max_body {
-        return Err(payload_too_large_response("request body is too large"));
+        return Err(fail(payload_too_large_response(
+            "request body is too large",
+        )));
     }
 
     let overflow = buffer[(header_end + 4)..].to_vec();
@@ -157,20 +209,20 @@ where
 
 /// Reads the remaining body bytes for a [`PartialHttpRequest`] and assembles
 /// the final [`HttpRequest`].
+/// Reads the body and returns it with whatever followed it on the connection. The tail
+/// belongs to the next request: a client is allowed to write two requests into one packet,
+/// and how its bytes are packetised is not something it controls.
 pub(super) fn read_request_body<R>(
     stream: &mut R,
     partial: PartialHttpRequest,
-) -> Result<HttpRequest, HttpResponse>
+) -> Result<(HttpRequest, Vec<u8>), HttpResponse>
 where
     R: Read,
 {
+    let mut carry = Vec::new();
     let mut body = if partial.overflow.len() > partial.content_length {
         let mut overflow = partial.overflow;
-        let tail = overflow.split_off(partial.content_length);
-        // tail belongs to the next request on the kept-alive connection;
-        // currently we do not pipeline, so we discard it here, but at least
-        // we no longer lose the body bytes.
-        let _ = tail;
+        carry = overflow.split_off(partial.content_length);
         overflow
     } else {
         partial.overflow
@@ -188,16 +240,19 @@ where
     }
 
     if body.len() > partial.content_length {
-        body.truncate(partial.content_length);
+        carry.splice(0..0, body.drain(partial.content_length..));
     }
 
-    Ok(HttpRequest {
-        method: partial.method,
-        target: partial.target,
-        version: partial.version,
-        headers: partial.headers,
-        body,
-    })
+    Ok((
+        HttpRequest {
+            method: partial.method,
+            target: partial.target,
+            version: partial.version,
+            headers: partial.headers,
+            body,
+        },
+        carry,
+    ))
 }
 
 pub(super) fn parse_request_line(
@@ -279,6 +334,26 @@ where
     Ok(headers)
 }
 
+/// Rejects an HTTP/1.1 request that carries no usable `Host`, as RFC 9112 section 3.2
+/// requires. A `Host` that a proxy and the origin read differently is a request smuggling
+/// vector, which is why [`SINGLETON_HEADERS`] already refuses a duplicate; an absent one is
+/// the other half of the same rule. Earlier versions of the protocol did not require the
+/// header, so they are left alone.
+fn require_host_when_the_version_demands_one(
+    version: &str,
+    headers: &[(String, String)],
+) -> Result<(), HttpResponse> {
+    if !version.eq_ignore_ascii_case("HTTP/1.1") {
+        return Ok(());
+    }
+    match header_value(headers, "host") {
+        Some(value) if !value.trim().is_empty() => Ok(()),
+        _ => Err(bad_request_response(
+            "HTTP/1.1 requests must include a non-empty `host` header",
+        )),
+    }
+}
+
 pub(super) fn parse_content_length(headers: &[(String, String)]) -> Result<usize, HttpResponse> {
     // Duplicate content-length is already rejected by the SINGLETON_HEADERS check
     // in parse_headers, so we only need to find the first (and only) value here.
@@ -288,6 +363,15 @@ pub(super) fn parse_content_length(headers: &[(String, String)]) -> Result<usize
     else {
         return Ok(0);
     };
+
+    // RFC 9112 section 6.2 defines the value as 1*DIGIT. Rust's integer parser also takes a
+    // leading `+`, which would let truss and a proxy in front of it frame the same request
+    // differently, so the grammar is checked before the value is parsed.
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(bad_request_response(
+            "content-length must be a non-negative integer",
+        ));
+    }
 
     value
         .parse::<usize>()
@@ -384,6 +468,15 @@ pub(super) fn header_value<'a>(headers: &'a [(String, String)], name: &str) -> O
     headers
         .iter()
         .find_map(|(header_name, value)| (header_name == name).then_some(value.as_str()))
+}
+
+/// Returns `true` when `token` appears in a comma-separated header value such as
+/// `Connection`. The whole value is not the token: `close, TE` asks to close just as much as
+/// `close` does, and comparing the value whole missed it.
+pub(super) fn header_list_contains(header_value: &str, token: &str) -> bool {
+    header_value
+        .split(',')
+        .any(|item| item.trim().eq_ignore_ascii_case(token))
 }
 
 /// Returns `true` when the `Accept-Encoding` header value indicates that
@@ -654,6 +747,162 @@ mod tests {
         let headers = vec![("content-length".to_string(), "1.5".to_string())];
         let err = parse_content_length(&headers).unwrap_err();
         assert_eq!(err.status, "400 Bad Request");
+    }
+
+    #[test]
+    fn content_length_accepts_only_a_run_of_digits() {
+        // RFC 9112 section 6.2 defines the value as 1*DIGIT. Rust's integer parser is looser
+        // and takes a leading plus, which lets truss and a proxy in front of it frame the
+        // same request differently.
+        let accepted: &[(&str, usize)] = &[("0", 0), ("42", 42), ("0016", 16)];
+        for &(value, expected) in accepted {
+            let headers = vec![("content-length".to_string(), value.to_string())];
+            assert_eq!(
+                parse_content_length(&headers).expect(value),
+                expected,
+                "content-length: {value}"
+            );
+        }
+
+        let rejected = ["+16", "-1", "", "1 6", "1.5", "abc", "16px"];
+        for value in rejected {
+            let headers = vec![("content-length".to_string(), value.to_string())];
+            let err = parse_content_length(&headers).expect_err(value);
+            assert_eq!(err.status, "400 Bad Request", "content-length: {value}");
+        }
+    }
+
+    // ── Host ───────────────────────────────────────────────────────
+
+    #[test]
+    fn an_http_1_1_request_must_carry_a_host_and_an_older_one_need_not() {
+        // RFC 9112 section 3.2. The duplicate is already rejected; the absence was not.
+        let missing = read_request_headers(
+            &mut std::io::Cursor::new(b"GET /health HTTP/1.1\r\n\r\n".to_vec()),
+            DEFAULT_MAX_UPLOAD_BODY_BYTES,
+            None,
+            Vec::new(),
+        )
+        .unwrap_err();
+        assert_eq!(missing.response.status, "400 Bad Request");
+
+        let empty = read_request_headers(
+            &mut std::io::Cursor::new(b"GET /health HTTP/1.1\r\nHost:  \r\n\r\n".to_vec()),
+            DEFAULT_MAX_UPLOAD_BODY_BYTES,
+            None,
+            Vec::new(),
+        )
+        .unwrap_err();
+        assert_eq!(empty.response.status, "400 Bad Request");
+
+        let older = read_request_headers(
+            &mut std::io::Cursor::new(b"GET /health HTTP/1.0\r\n\r\n".to_vec()),
+            DEFAULT_MAX_UPLOAD_BODY_BYTES,
+            None,
+            Vec::new(),
+        );
+        assert!(older.is_ok(), "HTTP/1.0 does not require a Host header");
+    }
+
+    // ── the method on a failed read ────────────────────────────────
+
+    #[test]
+    fn a_request_that_fails_after_its_request_line_reports_the_method() {
+        // The connection loop needs the method to decide whether the answer may carry a
+        // body: a HEAD request that fails during header parsing still gets a HEAD response.
+        let failing: &[&[u8]] = &[
+            b"HEAD /health HTTP/1.1\r\nHost: a\r\nHost: b\r\n\r\n",
+            b"HEAD /transform HTTP/1.1\r\nHost: a\r\nContent-Length: abc\r\n\r\n",
+            b"HEAD /transform HTTP/1.1\r\nHost: a\r\nTransfer-Encoding: chunked\r\n\r\n",
+            b"HEAD /transform HTTP/1.1\r\nHost: a\r\nContent-Length: 999999999999\r\n\r\n",
+        ];
+        for raw in failing {
+            let err = read_request_headers(
+                &mut std::io::Cursor::new(raw.to_vec()),
+                DEFAULT_MAX_UPLOAD_BODY_BYTES,
+                None,
+                Vec::new(),
+            )
+            .unwrap_err();
+            assert_eq!(
+                err.method.as_deref(),
+                Some("HEAD"),
+                "{}",
+                String::from_utf8_lossy(raw)
+            );
+        }
+
+        // A request line that never parsed cannot name a method.
+        let unparsable = read_request_headers(
+            &mut std::io::Cursor::new(b"GET\r\nHost: a\r\n\r\n".to_vec()),
+            DEFAULT_MAX_UPLOAD_BODY_BYTES,
+            None,
+            Vec::new(),
+        )
+        .unwrap_err();
+        assert_eq!(unparsable.method, None);
+    }
+
+    // ── header_list_contains ───────────────────────────────────────
+
+    #[test]
+    fn a_comma_separated_header_is_read_one_token_at_a_time() {
+        let matching = [
+            "close",
+            "Close",
+            "close, TE",
+            "keep-alive, close",
+            " close ",
+        ];
+        for value in matching {
+            assert!(header_list_contains(value, "close"), "{value:?}");
+        }
+
+        let not_matching = ["", "TE", "keep-alive", "closely", "not-close", "close-me"];
+        for value in not_matching {
+            assert!(!header_list_contains(value, "close"), "{value:?}");
+        }
+
+        // An empty element is skipped rather than treated as a token.
+        assert!(header_list_contains("close,,TE", "close"));
+        assert!(!header_list_contains(",,", "close"));
+    }
+
+    // ── carried-over bytes ─────────────────────────────────────────
+
+    #[test]
+    fn a_second_request_in_the_same_buffer_is_kept_for_the_next_round() {
+        // A client may write two requests into one packet. The bytes past the first request
+        // belong to the second, and discarding them left the client waiting for an answer to
+        // a request the server had already thrown away.
+        let raw = b"GET /health HTTP/1.1\r\nHost: a\r\n\r\nGET /nope HTTP/1.1\r\nHost: a\r\n\r\n";
+        let mut stream = std::io::Cursor::new(raw.to_vec());
+
+        let first =
+            read_request_headers(&mut stream, DEFAULT_MAX_UPLOAD_BODY_BYTES, None, Vec::new())
+                .expect("the first request parses");
+        let (first, carry) = read_request_body(&mut stream, first).expect("the first body");
+        assert_eq!(first.path(), "/health");
+
+        let second = read_request_headers(&mut stream, DEFAULT_MAX_UPLOAD_BODY_BYTES, None, carry)
+            .expect("the second request parses from the carried-over bytes");
+        assert_eq!(second.path(), "/nope");
+    }
+
+    #[test]
+    fn a_body_and_the_request_after_it_are_told_apart() {
+        let raw = b"POST /images HTTP/1.1\r\nHost: a\r\nContent-Length: 5\r\n\r\nhelloGET /health HTTP/1.1\r\nHost: a\r\n\r\n";
+        let mut stream = std::io::Cursor::new(raw.to_vec());
+
+        let first =
+            read_request_headers(&mut stream, DEFAULT_MAX_UPLOAD_BODY_BYTES, None, Vec::new())
+                .expect("the first request parses");
+        let (first, carry) = read_request_body(&mut stream, first).expect("the first body");
+        assert_eq!(first.body, b"hello");
+
+        let second = read_request_headers(&mut stream, DEFAULT_MAX_UPLOAD_BODY_BYTES, None, carry)
+            .expect("the second request parses");
+        assert_eq!(second.path(), "/health");
     }
 
     // ── resolve_storage_path ───────────────────────────────────────
@@ -1120,13 +1369,15 @@ mod tests {
         let mut cursor = std::io::Cursor::new(raw.to_vec());
 
         let partial =
-            read_request_headers(&mut cursor, DEFAULT_MAX_UPLOAD_BODY_BYTES, None).unwrap();
+            read_request_headers(&mut cursor, DEFAULT_MAX_UPLOAD_BODY_BYTES, None, Vec::new())
+                .unwrap();
         assert_eq!(partial.method, "POST");
         assert_eq!(partial.target, "/upload");
         assert_eq!(partial.content_length, 5);
 
-        let req = read_request_body(&mut cursor, partial).unwrap();
+        let (req, leftover) = read_request_body(&mut cursor, partial).unwrap();
         assert_eq!(req.body, b"hello");
+        assert!(leftover.is_empty());
     }
 
     #[test]
@@ -1135,7 +1386,8 @@ mod tests {
         let mut cursor = std::io::Cursor::new(raw.to_vec());
 
         let partial =
-            read_request_headers(&mut cursor, DEFAULT_MAX_UPLOAD_BODY_BYTES, None).unwrap();
+            read_request_headers(&mut cursor, DEFAULT_MAX_UPLOAD_BODY_BYTES, None, Vec::new())
+                .unwrap();
         assert_eq!(partial.method, "GET");
         assert_eq!(partial.content_length, 0);
     }
@@ -1145,8 +1397,9 @@ mod tests {
         let raw = b"GET /health HTTP/1.1\r\nHost: loc";
         let mut cursor = std::io::Cursor::new(raw.to_vec());
         let err =
-            read_request_headers(&mut cursor, DEFAULT_MAX_UPLOAD_BODY_BYTES, None).unwrap_err();
-        assert_eq!(err.status, "400 Bad Request");
+            read_request_headers(&mut cursor, DEFAULT_MAX_UPLOAD_BODY_BYTES, None, Vec::new())
+                .unwrap_err();
+        assert_eq!(err.response.status, "400 Bad Request");
     }
 
     /// A reader that hands back one byte at a time and never finishes the headers.
@@ -1171,11 +1424,15 @@ mod tests {
         let mut trickle = Trickle { remaining: 0 };
         let deadline = Instant::now();
 
-        let error =
-            read_request_headers(&mut trickle, DEFAULT_MAX_UPLOAD_BODY_BYTES, Some(deadline))
-                .expect_err("a deadline in the past must end the read");
+        let error = read_request_headers(
+            &mut trickle,
+            DEFAULT_MAX_UPLOAD_BODY_BYTES,
+            Some(deadline),
+            Vec::new(),
+        )
+        .expect_err("a deadline in the past must end the read");
 
-        assert_eq!(error.status, "408 Request Timeout");
+        assert_eq!(error.response.status, "408 Request Timeout");
     }
 
     /// A deadline that has not passed does not interfere with a complete request.
@@ -1188,6 +1445,7 @@ mod tests {
             &mut cursor,
             DEFAULT_MAX_UPLOAD_BODY_BYTES,
             Some(Instant::now() + std::time::Duration::from_secs(60)),
+            Vec::new(),
         )
         .expect("a request that arrives in time is read");
 
@@ -1201,7 +1459,10 @@ mod tests {
         let raw = b"GET /health HTTP/1.1\r\nHost: localhost\r\n\r\n";
         let mut cursor = std::io::Cursor::new(raw.to_vec());
 
-        assert!(read_request_headers(&mut cursor, DEFAULT_MAX_UPLOAD_BODY_BYTES, None).is_ok());
+        assert!(
+            read_request_headers(&mut cursor, DEFAULT_MAX_UPLOAD_BODY_BYTES, None, Vec::new())
+                .is_ok()
+        );
     }
 
     // ── accepts_encoding ──────────────────────────────────────────
