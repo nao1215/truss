@@ -1263,15 +1263,6 @@ impl ServerConfig {
             signing_keys.extend(extra);
         }
 
-        if !signing_keys.is_empty() && public_base_url.is_none() {
-            eprintln!(
-                "truss: warning: signing keys are configured but TRUSS_PUBLIC_BASE_URL is not. \
-                 Behind a reverse proxy or CDN the Host header may differ from the externally \
-                 visible authority, causing signed URL verification to fail. Consider setting \
-                 TRUSS_PUBLIC_BASE_URL to the canonical external origin."
-            );
-        }
-
         let cache_root = env::var("TRUSS_CACHE_ROOT")
             .ok()
             .filter(|value| !value.is_empty())

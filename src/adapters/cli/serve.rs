@@ -123,6 +123,10 @@ pub(super) fn execute_serve(command: ServeCommand) -> Result<(), CliError> {
 pub(super) fn execute_validate<W: Write>(stdout: &mut W) -> Result<(), CliError> {
     match ServerConfig::from_env() {
         Ok(config) => {
+            // `validate` takes no flags, so the environment is the whole configuration, and
+            // the warning belongs here for the same reason it belongs after the overlay in
+            // `resolve_server_config`: it is asked of what the server would run with.
+            warn_about_a_missing_public_base_url(&config);
             ensure_storage_is_usable(&config)?;
             writeln!(stdout, "configuration is valid").map_err(|error| {
                 runtime_error(EXIT_RUNTIME, &format!("failed to write stdout: {error}"))
@@ -211,9 +215,35 @@ pub(super) fn resolve_server_config(command: ServeCommand) -> Result<ServerConfi
         config.allow_insecure_url_sources = true;
     }
 
+    warn_about_a_missing_public_base_url(&config);
     ensure_storage_is_usable(&config)?;
 
     Ok(config)
+}
+
+/// Warns when signing is on and nothing says what authority the URLs were signed for.
+///
+/// Asked of the assembled configuration rather than of the environment, because either
+/// half can come from either source: the keys from `TRUSS_SIGNING_KEYS` or from
+/// `--signed-url-key-id`, the authority from `TRUSS_PUBLIC_BASE_URL` or from
+/// `--public-base-url`. Reading only the environment made this fire for a base URL given
+/// on the command line and stay silent for keys given the same way, which is the form
+/// `truss serve --help` prints.
+///
+/// The failure it exists to prevent is a quiet one: behind a proxy the Host header is not
+/// the authority the URL was signed for, so every signed URL is answered 401 and nothing
+/// says why.
+fn warn_about_a_missing_public_base_url(config: &ServerConfig) {
+    if config.signing_keys.is_empty() || config.public_base_url.is_some() {
+        return;
+    }
+    // Startup, so `eprintln!` rather than the raw-descriptor writer the request path uses.
+    eprintln!(
+        "truss: warning: signing keys are configured but no public base URL is. Behind a \
+         reverse proxy or CDN the Host header may differ from the externally visible \
+         authority, causing signed URL verification to fail. Set TRUSS_PUBLIC_BASE_URL or \
+         pass --public-base-url with the canonical external origin."
+    );
 }
 
 #[cfg(test)]
