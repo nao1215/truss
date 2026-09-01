@@ -25,14 +25,6 @@ impl HttpResponse {
         }
     }
 
-    /// Clears the response body when `is_head` is true, ensuring HEAD
-    /// requests never carry a body per RFC 9110.
-    pub(super) fn strip_body_if_head(&mut self, is_head: bool) {
-        if is_head {
-            self.body = Vec::new();
-        }
-    }
-
     /// Records the request id on the response: as the `X-Request-Id` header and, for a
     /// problem body, as its `requestId` member too, so a body that is logged or forwarded on
     /// its own still matches the server's access log line. The member is RFC 9457's
@@ -122,22 +114,44 @@ fn is_compressible_content_type(ct: &str) -> bool {
     )
 }
 
+/// How one answer is framed on the wire.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct ResponseWriteOptions {
+    /// The connection closes after this answer.
+    pub(super) close: bool,
+    /// The request was a HEAD, so the answer describes content it does not send.
+    pub(super) is_head: bool,
+    /// The client accepts gzip.
+    pub(super) accepts_gzip: bool,
+    pub(super) compression_level: u32,
+}
+
+impl ResponseWriteOptions {
+    /// The framing for an answer written without content negotiation, which is every answer
+    /// the server decides before it has read a request it can route.
+    pub(super) fn closing(is_head: bool) -> Self {
+        Self {
+            close: true,
+            is_head,
+            accepts_gzip: false,
+            compression_level: 1,
+        }
+    }
+}
+
 pub(super) fn write_response(
     stream: &mut TcpStream,
     response: HttpResponse,
-    close: bool,
-) -> io::Result<()> {
-    write_response_compressed(stream, response, close, false, 1)
-}
-
-pub(super) fn write_response_compressed(
-    stream: &mut TcpStream,
-    response: HttpResponse,
-    close: bool,
-    accepts_gzip: bool,
-    compression_level: u32,
+    options: ResponseWriteOptions,
 ) -> io::Result<()> {
     use std::fmt::Write as FmtWrite;
+
+    let ResponseWriteOptions {
+        close,
+        is_head,
+        accepts_gzip,
+        compression_level,
+    } = options;
 
     let should_compress = accepts_gzip
         && response.body.len() >= MIN_COMPRESS_BYTES
@@ -154,11 +168,16 @@ pub(super) fn write_response_compressed(
         (response.body, false)
     };
 
+    // The declared length is the length of the content a GET would have received, which is
+    // also the one thing a HEAD request is asking for. It is read after the compression
+    // decision so that a compressed answer and a HEAD for the same resource agree.
+    let content_length = body.len();
+    let body = if is_head { Vec::new() } else { body };
+
     let connection_value = if close { "close" } else { "keep-alive" };
     let mut header = format!(
-        "HTTP/1.1 {}\r\nContent-Length: {}\r\nConnection: {connection_value}\r\n",
+        "HTTP/1.1 {}\r\nContent-Length: {content_length}\r\nConnection: {connection_value}\r\n",
         response.status,
-        body.len()
     );
 
     if let Some(content_type) = response.content_type {
@@ -1265,12 +1284,106 @@ mod tests {
         let mut client = std::net::TcpStream::connect(addr).unwrap();
         let (mut server_stream, _) = listener.accept().unwrap();
 
-        write_response_compressed(&mut server_stream, response, true, accepts_gzip, 1).unwrap();
+        write_response(
+            &mut server_stream,
+            response,
+            ResponseWriteOptions {
+                close: true,
+                is_head: false,
+                accepts_gzip,
+                compression_level: 1,
+            },
+        )
+        .unwrap();
         drop(server_stream);
 
         let mut buf = Vec::new();
         std::io::Read::read_to_end(&mut client, &mut buf).unwrap();
         buf
+    }
+
+    /// As `capture_response`, but for a chosen request method.
+    #[cfg(unix)]
+    fn capture_response_for_method(
+        response: HttpResponse,
+        accepts_gzip: bool,
+        is_head: bool,
+    ) -> Vec<u8> {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut client = std::net::TcpStream::connect(addr).unwrap();
+        let (mut server_stream, _) = listener.accept().unwrap();
+
+        write_response(
+            &mut server_stream,
+            response,
+            ResponseWriteOptions {
+                close: true,
+                is_head,
+                accepts_gzip,
+                compression_level: 1,
+            },
+        )
+        .unwrap();
+        drop(server_stream);
+
+        let mut buf = Vec::new();
+        std::io::Read::read_to_end(&mut client, &mut buf).unwrap();
+        buf
+    }
+
+    /// A HEAD answer reports the length a GET would have produced. RFC 9110 section 9.3.2
+    /// asks for the same header fields as the GET, and the length is the one question HEAD
+    /// is asked. Reporting zero told a caller nothing about the image it was sizing up.
+    #[cfg(unix)]
+    #[test]
+    fn a_head_answer_reports_the_length_a_get_would_have_sent() {
+        fn length_of(raw: &[u8]) -> (String, usize) {
+            let text = String::from_utf8_lossy(raw);
+            let head = text
+                .split("\r\n\r\n")
+                .next()
+                .expect("a header block")
+                .to_string();
+            let declared = head
+                .lines()
+                .find_map(|line| line.strip_prefix("Content-Length: "))
+                .expect("a declared length")
+                .trim()
+                .to_string();
+            let body_start = text.find("\r\n\r\n").expect("a terminator") + 4;
+            (declared, raw.len() - body_start)
+        }
+
+        // Small enough to be sent as is, and large enough to be compressed, since the length
+        // a GET would have sent differs between the two.
+        for body in [
+            b"{\"ok\":true}".to_vec(),
+            format!("{{\"data\":\"{}\"}}", "x".repeat(256)).into_bytes(),
+        ] {
+            for accepts_gzip in [false, true] {
+                let get = capture_response_for_method(
+                    HttpResponse::json("200 OK", body.clone()),
+                    accepts_gzip,
+                    false,
+                );
+                let head = capture_response_for_method(
+                    HttpResponse::json("200 OK", body.clone()),
+                    accepts_gzip,
+                    true,
+                );
+
+                let (get_declared, get_body) = length_of(&get);
+                let (head_declared, head_body) = length_of(&head);
+
+                assert_eq!(
+                    head_declared, get_declared,
+                    "HEAD must report the GET length (gzip={accepts_gzip})"
+                );
+                assert_eq!(head_body, 0, "a HEAD answer carries no content");
+                assert!(get_body > 0, "the GET answer carries its content");
+            }
+        }
     }
 
     #[cfg(unix)]

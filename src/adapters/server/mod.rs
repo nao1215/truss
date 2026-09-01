@@ -160,8 +160,9 @@ mod tests {
     /// Test-only convenience wrapper that reads headers + body in one shot,
     /// preserving the original `read_request` semantics for existing tests.
     fn read_request<R: Read>(stream: &mut R) -> Result<HttpRequest, HttpResponse> {
-        let partial = read_request_headers(stream, DEFAULT_MAX_UPLOAD_BODY_BYTES, None)?;
-        read_request_body(stream, partial)
+        let partial = read_request_headers(stream, DEFAULT_MAX_UPLOAD_BODY_BYTES, None, Vec::new())
+            .map_err(|error| error.response)?;
+        read_request_body(stream, partial).map(|(request, _leftover)| request)
     }
 
     fn png_bytes() -> Vec<u8> {
@@ -2663,6 +2664,7 @@ mod tests {
         let content_length = body.len();
         let raw = format!(
             "POST /images HTTP/1.1\r\n\
+             Host: localhost\r\n\
              Content-Type: multipart/form-data; boundary={boundary}\r\n\
              Content-Length: {content_length}\r\n\r\n"
         );
