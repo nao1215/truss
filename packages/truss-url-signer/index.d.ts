@@ -137,7 +137,14 @@ export interface SignedWatermarkParams {
  * Options for {@link signPublicUrl}.
  */
 export interface SignPublicUrlOptions {
-  /** Base URL of the truss server (e.g. `"https://images.example.com"`). */
+  /**
+   * Base URL of the truss server (e.g. `"https://images.example.com"`).
+   *
+   * A path is kept: `"https://images.example.com/img"` produces
+   * `https://images.example.com/img/images/by-path?...` for a deployment served under a
+   * prefix by a proxy that strips it. The path takes no part in the signature, which
+   * covers the endpoint path truss receives.
+   */
   baseUrl: string | URL;
   /** Image source — a storage path or a remote URL. */
   source: SignedUrlSource;
@@ -145,7 +152,7 @@ export interface SignPublicUrlOptions {
   transforms?: TransformQuery | undefined;
   /** Signing key identifier (must match a key configured on the server). */
   keyId: string;
-  /** HMAC shared secret corresponding to `keyId`. */
+  /** HMAC shared secret corresponding to `keyId`. Must not be empty. */
   secret: HmacSecret;
   /** Unix timestamp (seconds) at which the signed URL expires. */
   expires: number | bigint;

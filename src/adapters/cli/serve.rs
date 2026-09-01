@@ -123,6 +123,7 @@ pub(super) fn execute_serve(command: ServeCommand) -> Result<(), CliError> {
 pub(super) fn execute_validate<W: Write>(stdout: &mut W) -> Result<(), CliError> {
     match ServerConfig::from_env() {
         Ok(config) => {
+            ensure_storage_is_usable(&config)?;
             writeln!(stdout, "configuration is valid").map_err(|error| {
                 runtime_error(EXIT_RUNTIME, &format!("failed to write stdout: {error}"))
             })?;
@@ -138,6 +139,36 @@ pub(super) fn execute_validate<W: Write>(stdout: &mut W) -> Result<(), CliError>
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Refuses a configuration whose storage the server could not serve from.
+///
+/// [`crate::adapters::server::serve`] runs this before it accepts a connection, and the two
+/// CLI commands did not, so a storage root that resolved to a file bound a port and
+/// answered 500 to every transform while `truss validate` called the same configuration
+/// valid. A storage root that cannot be used is a fault in the configuration, so it is
+/// exit 1 here, the code `resolve_server_config` gives every other one.
+///
+/// For a cloud backend this reaches the endpoint, which is what makes it worth doing before
+/// the port is bound rather than after the first request.
+fn ensure_storage_is_usable(config: &ServerConfig) -> Result<(), CliError> {
+    for (ok, name) in server::storage_health_check(config) {
+        if ok {
+            continue;
+        }
+        let detail = if name == "storageRoot" {
+            format!(
+                "storage root `{}` is not a directory",
+                config.storage_root.display()
+            )
+        } else {
+            "the storage backend is not reachable — verify the endpoint, credentials, and \
+             the container or bucket"
+                .to_string()
+        };
+        return Err(usage_error(&format!("invalid configuration: {detail}")));
+    }
+    Ok(())
+}
 
 pub(super) fn resolve_server_config(command: ServeCommand) -> Result<ServerConfig, CliError> {
     // A configuration fault exits 1, the same code `truss validate` reports for the same
@@ -179,6 +210,8 @@ pub(super) fn resolve_server_config(command: ServeCommand) -> Result<ServerConfi
     if command.allow_insecure_url_sources {
         config.allow_insecure_url_sources = true;
     }
+
+    ensure_storage_is_usable(&config)?;
 
     Ok(config)
 }
@@ -262,6 +295,46 @@ mod tests {
 
         assert_eq!(error.exit_code, super::EXIT_RUNTIME);
         assert!(error.message.contains("failed to write stdout"));
+    }
+
+    /// A storage root that is a file resolves, so the configuration parses, and every
+    /// request under it fails.
+    ///
+    /// `serve_with_config` is reached without the check `serve` runs, so the port is bound
+    /// and each transform answers 500, while `/health/ready` reports `storageRoot: fail`.
+    /// `truss validate` exists to say so before any of that happens.
+    #[test]
+    #[serial]
+    fn a_storage_root_that_is_a_file_is_a_usage_error_from_validate_and_serve() {
+        let parent = tempfile::tempdir().expect("create tempdir");
+        let file = parent.path().join("root-is-a-file.png");
+        std::fs::write(&file, b"not a directory").expect("write the file");
+        let _storage_root_guard = EnvVarGuard::set_path("TRUSS_STORAGE_ROOT", &file);
+
+        let validate_error = execute_validate(&mut Vec::new())
+            .expect_err("a storage root that is a file is not one");
+        assert_eq!(validate_error.exit_code, super::EXIT_USAGE);
+        assert!(
+            validate_error.message.contains("storage root"),
+            "validate should say what it could not use, got: {}",
+            validate_error.message
+        );
+
+        let serve_error = execute_serve(ServeCommand {
+            bind_addr: Some("127.0.0.1:0".to_string()),
+            storage_root: Some(file.clone()),
+            public_base_url: None,
+            signed_url_key_id: None,
+            signed_url_secret: None,
+            allow_insecure_url_sources: false,
+        })
+        .expect_err("serve must not bind a port it cannot serve from");
+        assert_eq!(serve_error.exit_code, super::EXIT_USAGE);
+        assert!(
+            serve_error.message.contains("storage root"),
+            "serve should say the same thing, got: {}",
+            serve_error.message
+        );
     }
 
     #[test]

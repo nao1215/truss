@@ -99,6 +99,8 @@ Use the literal public endpoint path:
 - `/images/by-path`
 - `/images/by-url`
 
+This is the path truss receives, which is not always the path the URL was fetched with. A deployment served under a prefix by a proxy that strips it, such as `https://images.example.com/img/images/by-path`, signs `/images/by-path` and fetches the prefixed URL. Both official signers work this way: a path in the base URL is kept in the URL they emit and takes no part in the signature, so the same request signs identically whether or not the deployment has a prefix.
+
 ### 4. `CANONICAL_QUERY`
 
 Build the canonical query string as follows:
@@ -189,7 +191,7 @@ npm install @nao1215/truss-url-signer
 ```
 
 See [`packages/truss-url-signer`](../packages/truss-url-signer) for the package README and API reference.
-Both official signers, the npm package and `truss sign`, validate the same request-invariant option matrix as the server for public URL inputs such as `fit`, `position`, `quality`, `targetQuality`, watermark opacity, and crop syntax, and refuse to sign an option set the server would refuse under every input. Neither checks anything that depends on the source image, since a signer has none: a `crop` that falls outside the picture, or a watermark that leaves no room for its margin, is still the server's to refuse at request time.
+Both official signers, the npm package and `truss sign`, validate the same request-invariant option matrix as the server for public URL inputs such as `fit`, `position`, `quality`, `targetQuality`, watermark opacity, and crop syntax, and refuse to sign an option set the server would refuse under every input. They refuse an empty `keyId`, an empty `secret`, and an empty source for the same reason: a server will not start with an empty key id or secret in `TRUSS_SIGNING_KEYS`, and the routes refuse an empty `path` or `url`, so a URL carrying one is answered 401 or 400 for as long as it exists. Neither checks anything that depends on the source image, since a signer has none: a `crop` that falls outside the picture, or a watermark that leaves no room for its margin, is still the server's to refuse at request time.
 
 If you are implementing the signer yourself in another language, the equivalent flow in TypeScript is:
 

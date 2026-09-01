@@ -939,7 +939,7 @@ fn collect_resource_checks(config: &ServerConfig) -> (Vec<serde_json::Value>, bo
 
 /// Returns storage backend health checks (storage root existence and cloud
 /// backend reachability).
-pub(super) fn storage_health_check(config: &ServerConfig) -> Vec<(bool, &'static str)> {
+pub(crate) fn storage_health_check(config: &ServerConfig) -> Vec<(bool, &'static str)> {
     #[allow(unused_mut)]
     let mut checks = vec![(config.storage_root.is_dir(), "storageRoot")];
     #[cfg(feature = "s3")]

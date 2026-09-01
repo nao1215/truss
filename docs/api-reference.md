@@ -22,6 +22,8 @@ To validate the server configuration without starting the server (useful in CI/C
 truss validate
 ```
 
+It reads the same settings `truss serve` does and checks the storage the way the server checks it at startup: a storage root that is not a directory, or a cloud backend whose endpoint, credentials, or bucket do not work, exits 1 and names what failed. The backend check makes a request, so `truss validate` against S3, GCS, or Azure reaches the network.
+
 ## Quick Example
 
 ```sh

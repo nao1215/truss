@@ -98,6 +98,34 @@ pub fn sign_public_url(
     )
 }
 
+/// Names the reason a set of signing inputs can never produce a URL the server accepts.
+///
+/// A key id and a secret are refused by `ServerConfig::from_env`, which will not start a
+/// server whose `TRUSS_SIGNING_KEYS` holds an empty one, and an empty source is refused by
+/// the route that reads it, so a URL carrying any of them is answered 400 or 401 for as
+/// long as it exists. A signed URL is usually written somewhere other than where it is
+/// fetched, so the signer refuses them rather than the request.
+///
+/// The signer and `truss sign` both read this, the way both read
+/// [`TransformOptions::validate_without_input`] for the rules about the transform.
+pub(crate) fn signing_input_error(
+    key_id: &str,
+    secret: &str,
+    source: &SignedUrlSource,
+) -> Option<&'static str> {
+    if key_id.is_empty() {
+        return Some("key id must not be empty");
+    }
+    if secret.is_empty() {
+        return Some("secret must not be empty");
+    }
+    match source {
+        SignedUrlSource::Path { path, .. } if path.is_empty() => Some("path must not be empty"),
+        SignedUrlSource::Url { url, .. } if url.is_empty() => Some("url must not be empty"),
+        _ => None,
+    }
+}
+
 /// Like [`sign_public_url`] but allows the caller to specify the HTTP method
 /// included in the canonical string (e.g. `"GET"` or `"HEAD"`).
 #[allow(clippy::too_many_arguments)]
@@ -112,18 +140,30 @@ pub fn sign_public_url_with_method(
     watermark: Option<&SignedWatermarkParams>,
     preset: Option<&str>,
 ) -> Result<String, String> {
-    let base_url = Url::parse(base_url).map_err(|error| format!("base URL is invalid: {error}"))?;
+    let mut base_url =
+        Url::parse(base_url).map_err(|error| format!("base URL is invalid: {error}"))?;
     match base_url.scheme() {
         "http" | "https" => {}
         _ => return Err("base URL must use the http or https scheme".to_string()),
+    }
+    if let Some(reason) = signing_input_error(key_id, secret, &source) {
+        return Err(reason.to_string());
     }
 
     let route_path = match source {
         SignedUrlSource::Path { .. } => "/images/by-path",
         SignedUrlSource::Url { .. } => "/images/by-url",
     };
+    // The base URL may carry a path, which is a deployment served under a prefix by a
+    // proxy that strips it before truss sees the request. Resolving an absolute route path
+    // against it would drop the prefix, so the base path is given a trailing slash and the
+    // route is joined onto it as a relative reference.
+    if !base_url.path().ends_with('/') {
+        let with_slash = format!("{}/", base_url.path());
+        base_url.set_path(&with_slash);
+    }
     let mut endpoint = base_url
-        .join(route_path)
+        .join(route_path.trim_start_matches('/'))
         .map_err(|error| format!("failed to resolve the public endpoint URL: {error}"))?;
     let authority = url_authority(&endpoint)?;
     let mut query = signed_source_query(source);
@@ -146,11 +186,14 @@ pub fn sign_public_url_with_method(
     query.insert("keyId".to_string(), key_id.to_string());
     query.insert("expires".to_string(), expires.to_string());
 
+    // REQUEST_PATH in `docs/signed-url-spec.md` is the literal endpoint path, which is what
+    // truss receives after a proxy has stripped whatever prefix the base URL carried. It is
+    // therefore the route rather than the path of the URL being emitted.
     let canonical = format!(
         "{}\n{}\n{}\n{}",
         method.to_ascii_uppercase(),
         authority,
-        endpoint.path(),
+        route_path,
         canonical_query_without_signature(&query)
     );
     let mut mac = HmacSha256::new_from_slice(secret.as_bytes())
@@ -332,6 +375,115 @@ mod tests {
 
         assert!(url.contains("optimize=lossy"));
         assert!(url.contains("targetQuality=ssim%3A0.98"));
+    }
+
+    /// The three inputs the server can never accept, whatever the request carries.
+    ///
+    /// An empty key id and an empty secret are refused by the configuration parser before
+    /// a server binds a port, and an empty path is refused by the by-path route, so a URL
+    /// carrying one of them is a URL that will be answered 400 or 401 for as long as it
+    /// exists.
+    #[test]
+    fn sign_public_url_refuses_inputs_no_server_can_accept() {
+        let sign = |key_id: &str, secret: &str, source: SignedUrlSource| {
+            sign_public_url(
+                "https://images.example.com",
+                source,
+                &TransformOptions::default(),
+                key_id,
+                secret,
+                1_900_000_000,
+                None,
+                None,
+            )
+        };
+        let path = |path: &str| SignedUrlSource::Path {
+            path: path.to_string(),
+            version: None,
+        };
+
+        assert_eq!(
+            sign("", "secret-value", path("/image.png")),
+            Err("key id must not be empty".to_string())
+        );
+        assert_eq!(
+            sign("public-demo", "", path("/image.png")),
+            Err("secret must not be empty".to_string())
+        );
+        assert_eq!(
+            sign("public-demo", "secret-value", path("")),
+            Err("path must not be empty".to_string())
+        );
+        assert_eq!(
+            sign(
+                "public-demo",
+                "secret-value",
+                SignedUrlSource::Url {
+                    url: String::new(),
+                    version: None,
+                },
+            ),
+            Err("url must not be empty".to_string())
+        );
+        assert!(sign("public-demo", "secret-value", path("/image.png")).is_ok());
+    }
+
+    /// A base URL with a path prefix points at a deployment behind a proxy that serves
+    /// truss under it, and the prefix has to survive into the emitted URL.
+    ///
+    /// The signature must not move: the canonical string carries the literal endpoint path
+    /// the server sees after the proxy has stripped the prefix, which is what
+    /// `docs/signed-url-spec.md` calls REQUEST_PATH.
+    #[test]
+    fn sign_public_url_keeps_a_path_in_the_base_url() {
+        let sign = |base_url: &str| {
+            sign_public_url(
+                base_url,
+                SignedUrlSource::Path {
+                    path: "image.png".to_string(),
+                    version: None,
+                },
+                &TransformOptions::default(),
+                "public-demo",
+                "secret-value",
+                1_900_000_000,
+                None,
+                None,
+            )
+            .expect("sign")
+        };
+
+        let plain = sign("https://images.example.com");
+        let signature = |url: &str| {
+            url.split("signature=")
+                .nth(1)
+                .expect("a signature")
+                .split('&')
+                .next()
+                .expect("the signature value")
+                .to_string()
+        };
+
+        for base in [
+            "https://images.example.com/img",
+            "https://images.example.com/img/",
+        ] {
+            let prefixed = sign(base);
+            assert!(
+                prefixed.starts_with("https://images.example.com/img/images/by-path?"),
+                "the prefix has to reach the emitted URL, got: {prefixed}"
+            );
+            assert_eq!(
+                signature(&prefixed),
+                signature(&plain),
+                "the canonical string carries the endpoint path, not the base URL's"
+            );
+        }
+
+        assert!(
+            sign("https://images.example.com/")
+                .starts_with("https://images.example.com/images/by-path?")
+        );
     }
 
     #[test]

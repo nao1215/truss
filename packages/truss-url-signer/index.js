@@ -41,10 +41,13 @@ export function signPublicUrl(options) {
   pushNonEmptyString(queryEntries, "keyId", options.keyId);
   queryEntries.push(["expires", normalizeExpires(options.expires)]);
 
+  // REQUEST_PATH in docs/signed-url-spec.md is the literal endpoint path, which is what
+  // truss receives after a proxy has stripped whatever prefix the base URL carried, so it
+  // is the route rather than the path of the URL being returned.
   const canonical = [
     normalizeMethod(options.method),
     urlAuthority(endpoint),
-    endpoint.pathname,
+    routePathForSource(source),
     encodeSortedQuery(queryEntries),
   ].join("\n");
 
@@ -57,7 +60,17 @@ export function signPublicUrl(options) {
 }
 
 function resolveEndpoint(baseUrl, source) {
-  return new URL(routePathForSource(source), normalizeBaseUrl(baseUrl));
+  const base = normalizeBaseUrl(baseUrl);
+
+  // A base URL may carry a path, which is a deployment served under a prefix by a proxy
+  // that strips it before truss sees the request. Resolving an absolute route against it
+  // would drop the prefix, so the base path gets a trailing slash and the route is joined
+  // onto it as a relative reference.
+  if (!base.pathname.endsWith("/")) {
+    base.pathname = `${base.pathname}/`;
+  }
+
+  return new URL(routePathForSource(source).replace(/^\//, ""), base);
 }
 
 function normalizeBaseUrl(baseUrl) {
@@ -189,6 +202,17 @@ function normalizeExpires(expires) {
 function normalizeSecret(secret) {
   if (secret === undefined || secret === null) {
     throw new TypeError("secret must be provided");
+  }
+
+  // A server refuses to start with an empty secret in TRUSS_SIGNING_KEYS, so a URL signed
+  // with one can never verify. An empty environment variable is what this looks like in a
+  // build script.
+  const empty =
+    typeof secret === "string"
+      ? secret.length === 0
+      : (secret.byteLength ?? 0) === 0;
+  if (empty) {
+    throw new TypeError("secret must be a non-empty string");
   }
 
   return secret;

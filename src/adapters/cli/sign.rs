@@ -113,6 +113,15 @@ where
         ));
     }
 
+    // The credentials and the source are refused here for the reason the transform options
+    // are refused in `sign_from_clap`: a signed URL is read somewhere other than where it
+    // was written, so a URL no server can accept has to fail at the process that mints it.
+    if let Some(reason) =
+        server::signing_input_error(&command.key_id, &command.secret, &command.source)
+    {
+        return Err(usage_error(reason));
+    }
+
     let watermark_params =
         command
             .watermark_url
@@ -178,6 +187,51 @@ mod tests {
             watermark_opacity: None,
             watermark_margin: None,
             preset: None,
+        }
+    }
+
+    /// The signer refuses a key id, a secret, or a path that is empty, which is what an
+    /// unset shell variable expands to and what no server can ever accept.
+    #[test]
+    fn execute_sign_refuses_credentials_and_a_source_the_server_cannot_accept() {
+        let cases: [(SignCommand, &str); 3] = [
+            (
+                SignCommand {
+                    key_id: String::new(),
+                    ..base_command()
+                },
+                "key id must not be empty",
+            ),
+            (
+                SignCommand {
+                    secret: String::new(),
+                    ..base_command()
+                },
+                "secret must not be empty",
+            ),
+            (
+                SignCommand {
+                    source: SignedUrlSource::Path {
+                        path: String::new(),
+                        version: None,
+                    },
+                    ..base_command()
+                },
+                "path must not be empty",
+            ),
+        ];
+
+        for (command, message) in cases {
+            let mut stdout = Vec::new();
+            let error = execute_sign(command, &mut stdout).expect_err("the signer must refuse it");
+
+            assert_eq!(error.exit_code, crate::adapters::cli::EXIT_USAGE);
+            assert!(
+                error.message.contains(message),
+                "expected {message:?}, got: {}",
+                error.message
+            );
+            assert!(stdout.is_empty(), "nothing is written for a refusal");
         }
     }
 

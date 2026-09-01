@@ -464,3 +464,51 @@ test("preserveExif implies stripMetadata=false, matching `truss sign --preserve-
   });
   assert.equal(contradictory, expected, "preserveExif wins over an explicit strip");
 });
+
+test("keeps a path in the base URL and signs the endpoint path regardless", () => {
+  const options = {
+    source: { kind: "path", path: "image.png" },
+    transforms: { width: 800, format: "webp" },
+    keyId: "public-demo",
+    secret: "secret-value",
+    expires: 1900000000,
+  };
+  const plain = signPublicUrl({ ...options, baseUrl: "https://images.example.com" });
+  const signature = (url) => new URL(url).searchParams.get("signature");
+
+  for (const baseUrl of [
+    "https://images.example.com/img",
+    "https://images.example.com/img/",
+  ]) {
+    const prefixed = signPublicUrl({ ...options, baseUrl });
+
+    assert.equal(new URL(prefixed).pathname, "/img/images/by-path");
+    assert.equal(
+      signature(prefixed),
+      signature(plain),
+      "REQUEST_PATH is the endpoint the server sees, so the signature does not move",
+    );
+  }
+
+  assert.equal(
+    new URL(signPublicUrl({ ...options, baseUrl: "https://images.example.com/" })).pathname,
+    "/images/by-path",
+  );
+});
+
+test("refuses a secret no server can be configured with", () => {
+  const options = {
+    baseUrl: "https://images.example.com",
+    source: { kind: "path", path: "image.png" },
+    keyId: "public-demo",
+    expires: 1900000000,
+  };
+
+  assert.throws(() => signPublicUrl({ ...options, secret: "" }), {
+    message: "secret must be a non-empty string",
+  });
+  assert.throws(() => signPublicUrl({ ...options, secret: new Uint8Array(0) }), {
+    message: "secret must be a non-empty string",
+  });
+  assert.doesNotThrow(() => signPublicUrl({ ...options, secret: "s" }));
+});
