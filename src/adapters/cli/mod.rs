@@ -288,8 +288,7 @@ ENVIRONMENT VARIABLES:
 
     #[cfg(feature = "s3")]
     s.push_str(
-        "\
-  TRUSS_S3_BUCKET                     Default S3 bucket name (required when backend=s3)
+        "  TRUSS_S3_BUCKET                     Default S3 bucket name (required when backend=s3)
   TRUSS_S3_FORCE_PATH_STYLE           Use path-style S3 addressing (set to 1/true/yes/on for MinIO, etc.)
   AWS_ACCESS_KEY_ID                   AWS access key for S3 authentication
   AWS_SECRET_ACCESS_KEY               AWS secret key for S3 authentication
@@ -300,8 +299,7 @@ ENVIRONMENT VARIABLES:
 
     #[cfg(feature = "gcs")]
     s.push_str(
-        "\
-  TRUSS_GCS_BUCKET                    Default GCS bucket name (required when backend=gcs)
+        "  TRUSS_GCS_BUCKET                    Default GCS bucket name (required when backend=gcs)
   TRUSS_GCS_ENDPOINT                  Custom GCS endpoint URL (for testing with fake-gcs-server, etc.)
   GOOGLE_APPLICATION_CREDENTIALS      Path to GCS service account JSON key file
 ",
@@ -309,8 +307,7 @@ ENVIRONMENT VARIABLES:
 
     #[cfg(feature = "azure")]
     s.push_str(
-        "\
-  TRUSS_AZURE_CONTAINER               Default Azure container name (required when backend=azure)
+        "  TRUSS_AZURE_CONTAINER               Default Azure container name (required when backend=azure)
   TRUSS_AZURE_ENDPOINT                Custom Azure Blob endpoint URL (for Azurite, etc.)
   AZURE_STORAGE_ACCOUNT_NAME          Storage account name (derives endpoint when TRUSS_AZURE_ENDPOINT is unset)
 ",
@@ -318,8 +315,7 @@ ENVIRONMENT VARIABLES:
 
     #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
     s.push_str(
-        "\
-  TRUSS_STORAGE_TIMEOUT_SECS          Download timeout for storage backends in seconds (default: 30, range: 1-300)
+        "  TRUSS_STORAGE_TIMEOUT_SECS          Download timeout for storage backends in seconds (default: 30, range: 1-300)
 ",
     );
 
@@ -830,9 +826,7 @@ fn parse_watermark_opacity(s: &str) -> Result<u8, String> {
     let v: u8 = s
         .parse()
         .map_err(|_| format!("invalid watermark opacity: '{s}'"))?;
-    if !(1..=100).contains(&v) {
-        return Err("watermark opacity must be between 1 and 100".to_string());
-    }
+    crate::core::validate_watermark_opacity(v).map_err(str::to_string)?;
     Ok(v)
 }
 
@@ -2338,6 +2332,35 @@ mod tests {
     }
 
     // ===== Additional test: help serve =====
+
+    /// Every environment variable in the serve help sits in one column.
+    ///
+    /// The rows are written in blocks behind feature gates, and a block opened with a
+    /// backslash line continuation loses the indentation of its first line along with
+    /// the newline, so the first name in each gated block printed flush left in exactly
+    /// the builds the release ships. Asserting the shape of the whole section rather
+    /// than four names catches a block added later.
+    #[test]
+    fn help_serve_keeps_every_environment_variable_in_one_column() {
+        let help = super::help_serve();
+        let misaligned: Vec<&str> = help
+            .lines()
+            .skip_while(|line| !line.starts_with("ENVIRONMENT VARIABLES:"))
+            .filter(|line| {
+                let trimmed = line.trim_start();
+                trimmed.starts_with("TRUSS_")
+                    || trimmed.starts_with("AWS_")
+                    || trimmed.starts_with("AZURE_")
+                    || trimmed.starts_with("GOOGLE_")
+            })
+            .filter(|line| !line.starts_with("  ") || line.starts_with("   "))
+            .collect();
+
+        assert!(
+            misaligned.is_empty(),
+            "every environment variable row is indented two spaces, found: {misaligned:#?}"
+        );
+    }
 
     #[test]
     fn help_serve_shows_serve_help() {

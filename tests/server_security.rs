@@ -479,3 +479,53 @@ fn slow_header_client_is_answered_rather_than_held() {
         "unexpected response: {response}"
     );
 }
+
+/// The metadata block is the only rule left standing when
+/// `TRUSS_ALLOW_INSECURE_URL_SOURCES` is set, so every spelling of an endpoint has to be
+/// refused by it and not merely by the deny-list that the flag turns off.
+///
+/// A trailing dot makes a domain name absolute and resolves identically; `::a.b.c.d` and
+/// `2002:a.b.c.d::` carry the same IPv4 address as `::ffff:a.b.c.d`. Asserting the detail
+/// rather than the status is what separates a refusal by this rule from a fetch that
+/// happened to fail.
+#[test]
+fn metadata_spellings_are_refused_even_when_insecure_sources_are_allowed() {
+    let spellings = [
+        "http://169.254.169.254/latest/meta-data",
+        "http://169.254.169.254./latest/meta-data",
+        "http://metadata.google.internal/computeMetadata/v1/",
+        "http://metadata.google.internal./computeMetadata/v1/",
+        "http://[::ffff:169.254.169.254]/latest/meta-data",
+        "http://[::169.254.169.254]/latest/meta-data",
+        "http://[2002:a9fe:a9fe::]/latest/meta-data",
+        "http://[fd00:ec2::254]/latest/meta-data",
+    ];
+
+    for spelling in spellings {
+        let storage_root = temp_dir("metadata-spellings");
+        let (addr, handle) = spawn_server(
+            ServerConfig::new(storage_root, Some("secret".to_string()))
+                .with_insecure_url_sources(true),
+        );
+        let request_body = format!(
+            r#"{{"source":{{"kind":"url","url":"{spelling}"}},"options":{{"format":"png"}}}}"#
+        );
+        let response = send_transform_request(addr, &request_body, Some("secret"));
+
+        handle
+            .join()
+            .expect("join server thread")
+            .expect("serve one request");
+
+        let (header, _, body) = split_response(&response);
+        let body = String::from_utf8_lossy(&body);
+        assert!(
+            header.starts_with("HTTP/1.1 403"),
+            "{spelling} must be refused by the metadata rule: {header}\n{body}"
+        );
+        assert!(
+            body.contains("cloud metadata"),
+            "{spelling} must be refused for being a metadata endpoint: {body}"
+        );
+    }
+}

@@ -71,6 +71,15 @@ pub(super) fn sign_from_clap(args: ClapSignArgs) -> Result<Command, CliError> {
     .into_options()
     .map_err(map_transform_error)?;
 
+    // A signed URL is usually written somewhere other than where it is fetched, so an
+    // option set no server would serve has to be refused here rather than at request
+    // time, where the process that produced it is long gone. `@nao1215/truss-url-signer`
+    // has always refused these at the call site; this is the same list, read from the
+    // core rather than restated.
+    options
+        .validate_without_input()
+        .map_err(map_transform_error)?;
+
     Ok(Command::Sign(SignCommand {
         base_url,
         source,

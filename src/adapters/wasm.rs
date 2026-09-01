@@ -417,11 +417,8 @@ fn resolve_wasm_watermark(
         .transpose()?
         .unwrap_or(Position::BottomRight);
     let opacity = watermark_options.opacity.unwrap_or(50);
-    if opacity == 0 || opacity > 100 {
-        return Err(TransformError::InvalidOptions(
-            "watermark opacity must be between 1 and 100".to_string(),
-        ));
-    }
+    crate::core::validate_watermark_opacity(opacity)
+        .map_err(|message| TransformError::InvalidOptions(message.to_string()))?;
     let margin = watermark_options.margin.unwrap_or(10);
 
     Ok(WatermarkInput {

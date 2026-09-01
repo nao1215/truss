@@ -869,7 +869,6 @@ impl Default for TransformOptions {
 }
 
 impl TransformOptions {
-    /// Normalizes and validates the options against the input media type.
     /// The first option set on this request that an SVG passthrough cannot honour.
     ///
     /// `fit`, `position`, and `withoutEnlargement` are absent from the list because the rules
@@ -894,10 +893,16 @@ impl TransformOptions {
         None
     }
 
-    pub fn normalize(
-        self,
-        input_media_type: MediaType,
-    ) -> Result<NormalizedTransformOptions, TransformError> {
+    /// Checks every rule that the options decide between themselves, with no input.
+    ///
+    /// [`Self::normalize`] runs this first and then goes on to the rules that need the
+    /// resolved output format, which for an absent `format` comes from the input. Callers
+    /// that hold no input run this on its own: the HTTP server refuses a request here
+    /// rather than after fetching the source, and `truss sign` refuses to put an option
+    /// set into a signed URL that no server would serve. Keeping the two apart is what
+    /// lets one list of rules answer for callers that have an image and callers that do
+    /// not.
+    pub(crate) fn validate_without_input(&self) -> Result<(), TransformError> {
         validate_dimension("width", self.width)?;
         validate_dimension("height", self.height)?;
         validate_quality(self.quality)?;
@@ -940,6 +945,23 @@ impl TransformOptions {
                 "preserveExif requires stripMetadata to be false".to_string(),
             ));
         }
+
+        Ok(())
+    }
+
+    /// Normalizes and validates the options against the input media type.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TransformError::InvalidOptions`] when the options contradict each other
+    /// or the output format they resolve to.
+    pub fn normalize(
+        self,
+        input_media_type: MediaType,
+    ) -> Result<NormalizedTransformOptions, TransformError> {
+        self.validate_without_input()?;
+
+        let has_bounded_resize = self.width.is_some() && self.height.is_some();
 
         // An explicit `format: Some(Gif)` is a different request from an absent one, and is
         // rejected by `codecs::transform` rather than quietly rewritten here.
@@ -1805,12 +1827,24 @@ fn validate_sharpen(value: Option<f32>) -> Result<(), TransformError> {
     Ok(())
 }
 
-fn validate_watermark(wm: &WatermarkInput) -> Result<(), TransformError> {
-    if wm.opacity == 0 || wm.opacity > 100 {
-        return Err(TransformError::InvalidOptions(
-            "watermark opacity must be between 1 and 100".to_string(),
-        ));
+/// Checks the watermark opacity, which every adapter reads before it has an image.
+///
+/// The CLI checks it while parsing a flag, the HTTP server before fetching the watermark
+/// URL, and the Wasm package while reading its options object, so the rule is needed in
+/// four places and the message has to be the same in all of them.
+/// Returns the message to report, so each adapter keeps its own error type and its own
+/// failure class while the sentence the caller reads is written once.
+pub(crate) fn validate_watermark_opacity(opacity: u8) -> Result<(), &'static str> {
+    if opacity == 0 || opacity > 100 {
+        return Err("watermark opacity must be between 1 and 100");
     }
+
+    Ok(())
+}
+
+fn validate_watermark(wm: &WatermarkInput) -> Result<(), TransformError> {
+    validate_watermark_opacity(wm.opacity)
+        .map_err(|message| TransformError::InvalidOptions(message.to_string()))?;
 
     if !wm.image.media_type.is_raster() {
         return Err(TransformError::InvalidOptions(
@@ -3221,6 +3255,70 @@ mod tests {
         assert_eq!(
             err,
             TransformError::InvalidOptions("fit requires both width and height".to_string())
+        );
+    }
+
+    /// Every rule the options settle between themselves gives the same message whether
+    /// it is reached through `normalize`, which has an input, or through
+    /// `validate_without_input`, which is what the HTTP server and `truss sign` call.
+    /// Two lists would drift; one list read twice cannot.
+    #[rstest]
+    #[case(
+        TransformOptions { width: Some(300), fit: Some(Fit::Contain), ..TransformOptions::default() },
+        "fit requires both width and height"
+    )]
+    #[case(
+        TransformOptions { height: Some(300), position: Some(Position::Top), ..TransformOptions::default() },
+        "position requires both width and height"
+    )]
+    #[case(
+        TransformOptions { without_enlargement: true, ..TransformOptions::default() },
+        "withoutEnlargement requires width or height"
+    )]
+    #[case(
+        TransformOptions { width: Some(0), ..TransformOptions::default() },
+        "width must be greater than zero"
+    )]
+    #[case(
+        TransformOptions { height: Some(0), ..TransformOptions::default() },
+        "height must be greater than zero"
+    )]
+    #[case(
+        TransformOptions { quality: Some(101), format: Some(MediaType::Jpeg), ..TransformOptions::default() },
+        "quality must be between 1 and 100"
+    )]
+    #[case(
+        TransformOptions { blur: Some(200.0), ..TransformOptions::default() },
+        "blur sigma must be between 0.1 and 100.0"
+    )]
+    #[case(
+        TransformOptions { sharpen: Some(500.0), ..TransformOptions::default() },
+        "sharpen sigma must be between 0.1 and 100.0"
+    )]
+    #[case(
+        TransformOptions {
+            crop: Some(crate::CropRegion { x: 0, y: 0, width: 0, height: 0 }),
+            ..TransformOptions::default()
+        },
+        "crop width and height must be greater than zero"
+    )]
+    fn the_input_independent_rules_answer_the_same_through_either_door(
+        #[case] options: TransformOptions,
+        #[case] message: &str,
+    ) {
+        let expected = TransformError::InvalidOptions(message.to_string());
+
+        assert_eq!(
+            options
+                .validate_without_input()
+                .expect_err("the options contradict each other whatever the input is"),
+            expected
+        );
+        assert_eq!(
+            options
+                .normalize(MediaType::Jpeg)
+                .expect_err("normalize runs the same list first"),
+            expected
         );
     }
 

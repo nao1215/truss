@@ -268,3 +268,89 @@ fn typescript_signer_matches_rust_head_canonicalization_with_preset_and_watermar
 
     assert_eq!(js_signed_url, rust_signed_url);
 }
+
+/// The two official signers refuse the same option sets.
+///
+/// They already agree on the canonical string they produce for a valid request. What
+/// drifted is what they accept: the npm package validated the request-invariant matrix
+/// while `truss sign` serialized whatever it was handed, so the CLI minted URLs that
+/// answer 400 at request time, long after the process that wrote them has gone.
+#[test]
+fn both_signers_refuse_the_same_always_invalid_option_sets() {
+    if !node_is_available() {
+        eprintln!("skipping: node is not available");
+        return;
+    }
+
+    let cases: [(&[&str], serde_json::Value, &str); 4] = [
+        (
+            &["--fit", "cover"],
+            json!({"fit": "cover"}),
+            "fit requires both width and height",
+        ),
+        (
+            &["--position", "center"],
+            json!({"position": "center"}),
+            "position requires both width and height",
+        ),
+        (
+            &["--quality", "101"],
+            json!({"quality": 101}),
+            "quality must be between 1 and 100",
+        ),
+        (
+            &["--width", "0"],
+            json!({"width": 0}),
+            "width must be greater than zero",
+        ),
+    ];
+
+    for (cli_args, transforms, message) in cases {
+        let node = run_typescript_signer(json!({
+            "baseUrl": "https://cdn.example.com",
+            "source": {"kind": "path", "path": "/image.png"},
+            "transforms": transforms,
+            "keyId": "public-dev",
+            "secret": "secret-value",
+            "expires": 4_102_444_800_u64,
+        }));
+        assert!(
+            !node.status.success(),
+            "the npm signer must refuse {cli_args:?}: {}",
+            String::from_utf8_lossy(&node.stdout)
+        );
+        assert!(
+            String::from_utf8_lossy(&node.stderr).contains(message),
+            "the npm signer names the rule for {cli_args:?}: {}",
+            String::from_utf8_lossy(&node.stderr)
+        );
+
+        let mut command = Command::new(env!("CARGO_BIN_EXE_truss"));
+        command
+            .arg("sign")
+            .arg("--base-url")
+            .arg("https://cdn.example.com")
+            .arg("--path")
+            .arg("/image.png")
+            .arg("--key-id")
+            .arg("public-dev")
+            .arg("--secret")
+            .arg("secret-value")
+            .arg("--expires")
+            .arg("4102444800");
+        for arg in cli_args {
+            command.arg(arg);
+        }
+        let cli = command.output().expect("run truss sign");
+        assert!(
+            !cli.status.success(),
+            "truss sign must refuse {cli_args:?}: {}",
+            String::from_utf8_lossy(&cli.stdout)
+        );
+        assert!(
+            String::from_utf8_lossy(&cli.stderr).contains(message),
+            "truss sign names the same rule for {cli_args:?}: {}",
+            String::from_utf8_lossy(&cli.stderr)
+        );
+    }
+}

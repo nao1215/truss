@@ -567,3 +567,59 @@ fn accept_application_json_on_public_endpoint_returns_406() {
         "non-image Accept should return 406, got: {header}"
     );
 }
+
+/// Returns a URL whose port had a listener just long enough to be handed out and has
+/// none now, so any connection to it is refused immediately.
+fn url_on_a_closed_port() -> String {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind to reserve a port");
+    let addr = listener.local_addr().expect("reserved port");
+    drop(listener);
+    format!("http://{addr}/source.png")
+}
+
+/// An option set the transform refuses under every input is refused before the source
+/// is fetched.
+///
+/// Nothing is listening on the port below, so a `502` naming the connection is proof
+/// that truss went out to the origin for a request it was always going to turn down.
+/// For a `by-url` source that is a request to somebody else's server, and for a storage
+/// backend it is a billed GET, spent on an answer that cannot change.
+#[test]
+fn public_get_refuses_invalid_options_before_fetching_the_remote_source() {
+    let storage_root = temp_dir("invalid-options-no-fetch");
+    let source_url = url_on_a_closed_port();
+    let (addr, handle) = spawn_server(
+        ServerConfig::new(storage_root, Some("secret".to_string()))
+            .with_signed_url_credentials("public-dev", "secret-value")
+            .with_insecure_url_sources(true),
+    );
+    let target = signed_target(
+        "/images/by-url",
+        BTreeMap::from([
+            ("url".to_string(), source_url),
+            ("keyId".to_string(), "public-dev".to_string()),
+            ("expires".to_string(), "4102444800".to_string()),
+            ("format".to_string(), "png".to_string()),
+            ("fit".to_string(), "cover".to_string()),
+        ]),
+        "cdn.example.com",
+        "secret-value",
+    );
+    let response = send_public_get_request(addr, &target, "cdn.example.com");
+
+    handle
+        .join()
+        .expect("join server thread")
+        .expect("serve one request");
+
+    let (header, _, body) = split_response(&response);
+    let body = String::from_utf8_lossy(&body);
+    assert!(
+        header.starts_with("HTTP/1.1 400 Bad Request"),
+        "an always-invalid option set is the caller's error, not the origin's: {header}\n{body}"
+    );
+    assert!(
+        body.contains("fit requires both width and height"),
+        "the refusal names the option rather than the fetch: {body}"
+    );
+}

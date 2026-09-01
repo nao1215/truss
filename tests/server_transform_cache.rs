@@ -438,3 +438,131 @@ fn serve_once_carries_transform_warnings_as_headers_on_miss_and_hit() {
         "nothing to warn about: {applied_header}"
     );
 }
+
+/// An option set the transform refuses under every input stays refused when the cache
+/// already holds the entry an equivalent valid request wrote.
+///
+/// `fit` and `position` are the two options `compute_cache_key` leaves out when width and
+/// height are not both present, so a request carrying an invalid `fit` hashes to the key of
+/// the valid request without it. With the option check running inside the transform, after
+/// the lookup, the same signed URL answered 400 on a cold cache and 200 on a warm one, and
+/// which of the two a caller saw was decided by what some other client had asked for.
+#[test]
+fn serve_once_public_get_refuses_fit_without_both_dimensions_on_a_warm_cache() {
+    let storage_root = temp_dir("fit-without-dimensions");
+    fs::write(storage_root.join("image.png"), png_bytes()).expect("write source fixture");
+    let cache_root = temp_dir("fit-without-dimensions-cache");
+    let config = ServerConfig::new(storage_root, Some("secret".to_string()))
+        .with_signed_url_credentials("public-dev", "secret-value")
+        .with_cache_root(cache_root);
+
+    let valid_query = BTreeMap::from([
+        ("path".to_string(), "/image.png".to_string()),
+        ("keyId".to_string(), "public-dev".to_string()),
+        ("expires".to_string(), "4102444800".to_string()),
+        ("format".to_string(), "png".to_string()),
+    ]);
+    let mut invalid_query = valid_query.clone();
+    invalid_query.insert("fit".to_string(), "cover".to_string());
+
+    let warm_target = signed_target(
+        "/images/by-path",
+        valid_query,
+        "cdn.example.com",
+        "secret-value",
+    );
+    let invalid_target = signed_target(
+        "/images/by-path",
+        invalid_query,
+        "cdn.example.com",
+        "secret-value",
+    );
+
+    let (addr, handle) = spawn_server(config.clone());
+    let warm_up = send_public_get_request(addr, &warm_target, "cdn.example.com");
+    handle
+        .join()
+        .expect("join server thread")
+        .expect("serve one request");
+    let (warm_header, _, _) = split_response(&warm_up);
+    assert!(
+        warm_header.starts_with("HTTP/1.1 200 OK"),
+        "the warm-up request must write a cache entry: {warm_header}"
+    );
+
+    let (addr, handle) = spawn_server(config);
+    let response = send_public_get_request(addr, &invalid_target, "cdn.example.com");
+    handle
+        .join()
+        .expect("join server thread")
+        .expect("serve one request");
+
+    let (header, _, body) = split_response(&response);
+    let body = String::from_utf8_lossy(&body);
+    assert!(
+        header.starts_with("HTTP/1.1 400 Bad Request"),
+        "fit without both dimensions is refused whatever the cache holds: {header}\n{body}"
+    );
+    assert!(
+        body.contains("fit requires both width and height"),
+        "the refusal names the rule the caller broke: {body}"
+    );
+}
+
+/// The same rule for `position`, which shares the conditional the cache key uses.
+#[test]
+fn serve_once_public_get_refuses_position_without_both_dimensions_on_a_warm_cache() {
+    let storage_root = temp_dir("position-without-dimensions");
+    fs::write(storage_root.join("image.png"), png_bytes()).expect("write source fixture");
+    let cache_root = temp_dir("position-without-dimensions-cache");
+    let config = ServerConfig::new(storage_root, Some("secret".to_string()))
+        .with_signed_url_credentials("public-dev", "secret-value")
+        .with_cache_root(cache_root);
+
+    let valid_query = BTreeMap::from([
+        ("path".to_string(), "/image.png".to_string()),
+        ("keyId".to_string(), "public-dev".to_string()),
+        ("expires".to_string(), "4102444800".to_string()),
+        ("format".to_string(), "png".to_string()),
+    ]);
+    let mut invalid_query = valid_query.clone();
+    invalid_query.insert("position".to_string(), "center".to_string());
+
+    let warm_target = signed_target(
+        "/images/by-path",
+        valid_query,
+        "cdn.example.com",
+        "secret-value",
+    );
+    let invalid_target = signed_target(
+        "/images/by-path",
+        invalid_query,
+        "cdn.example.com",
+        "secret-value",
+    );
+
+    let (addr, handle) = spawn_server(config.clone());
+    let _ = send_public_get_request(addr, &warm_target, "cdn.example.com");
+    handle
+        .join()
+        .expect("join server thread")
+        .expect("serve one request");
+
+    let (addr, handle) = spawn_server(config);
+    let response = send_public_get_request(addr, &invalid_target, "cdn.example.com");
+    handle
+        .join()
+        .expect("join server thread")
+        .expect("serve one request");
+
+    let (header, _, body) = split_response(&response);
+    let body = String::from_utf8_lossy(&body);
+    assert!(
+        header.starts_with("HTTP/1.1 400 Bad Request"),
+        "position without both dimensions is refused whatever the cache holds: {header}\n{body}"
+    );
+    assert!(
+        body.contains("position requires both width and height"),
+        "the refusal names the rule the caller broke: {body}"
+    );
+}
