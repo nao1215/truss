@@ -1883,17 +1883,12 @@ fn validate_sharpen(value: Option<f32>) -> Result<(), TransformError> {
     Ok(())
 }
 
-/// Checks the watermark opacity, which every adapter reads before it has an image.
-///
-/// The CLI checks it while parsing a flag, the HTTP server before fetching the watermark
-/// URL, and the Wasm package while reading its options object, so the rule is needed in
-/// four places and the message has to be the same in all of them.
-/// Returns the message to report, so each adapter keeps its own error type and its own
-/// failure class while the sentence the caller reads is written once.
 /// The range a watermark opacity has to be in, checked against a number of any width.
 ///
 /// The sibling of [`validate_quality_value`], and there for the same reason: 256 is not a
-/// `u8`, and saying so names an integer type rather than the range truss publishes.
+/// `u8`, and saying so names an integer type rather than the range truss publishes. Only
+/// the two adapters that parse a caller's text need it, so it is gated the way they are.
+#[cfg(any(feature = "cli", feature = "server"))]
 pub(crate) fn validate_watermark_opacity_value(value: i64) -> Result<u8, &'static str> {
     match value {
         1..=100 => Ok(value as u8),
@@ -1901,6 +1896,14 @@ pub(crate) fn validate_watermark_opacity_value(value: i64) -> Result<u8, &'stati
     }
 }
 
+/// Checks the watermark opacity, which every adapter reads before it has an image.
+///
+/// The CLI checks it while parsing a flag, the HTTP server before fetching the watermark
+/// URL, and the Wasm package while reading its options object, so the rule is needed in
+/// four places and the message has to be the same in all of them.
+///
+/// Returns the message to report, so each adapter keeps its own error type and its own
+/// failure class while the sentence the caller reads is written once.
 pub(crate) fn validate_watermark_opacity(opacity: u8) -> Result<(), &'static str> {
     if opacity == 0 || opacity > 100 {
         return Err("watermark opacity must be between 1 and 100");
