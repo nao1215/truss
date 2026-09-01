@@ -142,6 +142,9 @@ scenarios:
           stderr:
             contains: "error:"
 
+  # The message here is a decoder's own wording, which ends with a newline. The class has
+  # to stay on the same line as the message it belongs to, so the regex is anchored with a
+  # character class that a line break cannot satisfy.
   - name: "exit 4: converting a truncated JPEG"
     steps:
       - run:
@@ -152,6 +155,7 @@ scenarios:
             contains:
               - "error:"
               - "(decode-failed)"
+            matches: "error: [^\\n]*\\(decode-failed\\)"
 
   # Exit 1 covers two classes, and the class is what tells them apart: a command line that
   # does not parse is invalid-request, options the pipeline refuses are invalid-options.

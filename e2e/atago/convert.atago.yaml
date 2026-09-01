@@ -169,3 +169,28 @@ scenarios:
           exit_code: 1
           stderr:
             contains: "exactly one input"
+
+  # The output is replaced through a temporary file so a write that fails partway cannot
+  # leave a half-written image where a whole one was. The temporary file must be gone
+  # afterwards: `created: []` is what says the directory holds nothing but the output.
+  - name: replacing an existing output leaves nothing beside it
+    steps:
+      - fixture:
+          file: in.png
+          from: testdata/sample.png
+      - fixture:
+          file: out.png
+          from: testdata/sample.png
+      - run:
+          command: truss convert in.png -o out.png --width 2
+      - assert:
+          exit_code: 0
+          changes:
+            created: []
+            modified:
+              - out.png
+            deleted: []
+          image:
+            path: out.png
+            format: png
+            width: 2
