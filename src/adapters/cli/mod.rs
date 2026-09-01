@@ -103,9 +103,11 @@ USAGE:
     truss <INPUT> -o <OUTPUT> [OPTIONS]
     truss --url <URL> -o <OUTPUT> [OPTIONS]
 
-  Use -- to separate options from file paths starting with -:
-    truss convert -- -input.png -o out.jpg
-    truss convert input.png -o -- -output.jpg
+  For a file whose name starts with -, put the options first and end them with --,
+  or write the path with a ./ prefix. An output cannot be escaped with --, because
+  -o takes the next argument whatever it looks like; assign it with = instead:
+    truss convert -o out.jpg -- -input.png
+    truss convert input.png --output=-output.jpg
 
 OPTIONS:
   -o, --output <OUTPUT>    Output file path, or - for stdout (required)
