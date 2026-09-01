@@ -722,7 +722,10 @@ impl FromStr for TargetQuality {
         let (metric, raw_value) = value.split_once(':').ok_or_else(|| {
             "targetQuality must be <metric>:<value>, for example ssim:0.98".to_string()
         })?;
-        let metric = QualityMetric::from_str(&metric.to_ascii_lowercase())?;
+        // Spelled the way every other named value in the vocabulary is: `fit`, `position`,
+        // `format`, and the optimize mode all match what the caller wrote, so a metric that
+        // accepted any case was the one flag whose lesson did not carry to the next.
+        let metric = QualityMetric::from_str(metric)?;
         let value = raw_value
             .parse::<f32>()
             .map_err(|_| format!("target quality value must be a number, got `{raw_value}`"))?;
@@ -2937,6 +2940,34 @@ mod tests {
     use image::codecs::avif::AvifEncoder;
     use image::{ColorType, ImageEncoder, Rgba, RgbaImage};
     use rstest::rstest;
+
+    /// One spelling per named value, across every parser that takes one.
+    ///
+    /// The vocabulary is what a caller learns once and reuses: `--fit cover` teaches that
+    /// these values are written as the documentation writes them, and a metric that also
+    /// took `SSIM` was the one place that lesson did not hold.
+    #[test]
+    fn a_named_value_has_one_spelling() {
+        use std::str::FromStr;
+
+        assert!(MediaType::from_str("jpeg").is_ok());
+        assert!(MediaType::from_str("JPEG").is_err());
+        assert!(Fit::from_str("cover").is_ok());
+        assert!(Fit::from_str("COVER").is_err());
+        assert!(Position::from_str("center").is_ok());
+        assert!(Position::from_str("CENTER").is_err());
+        assert!(OptimizeMode::from_str("lossless").is_ok());
+        assert!(OptimizeMode::from_str("LOSSLESS").is_err());
+        assert!(TargetQuality::from_str("ssim:0.98").is_ok());
+        assert_eq!(
+            TargetQuality::from_str("SSIM:0.98"),
+            Err("unsupported target quality metric `SSIM`".to_string())
+        );
+        assert_eq!(
+            TargetQuality::from_str("Psnr:42"),
+            Err("unsupported target quality metric `Psnr`".to_string())
+        );
+    }
 
     /// A message that is already one trimmed line is what it was.
     #[cfg(any(feature = "server", feature = "wasm"))]
