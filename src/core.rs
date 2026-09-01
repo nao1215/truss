@@ -1344,8 +1344,12 @@ impl FromStr for Rotation {
     type Err = String;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value.parse::<i32>() {
-            Ok(degrees) => Ok(Self::from_degrees(degrees)),
+        // Parsed wide and reduced before it is narrowed. An angle past a full turn wraps,
+        // which is what this type documents, so how many turns it is past does not change
+        // the answer; parsing straight into `i32` made a large multiple of 360 report that
+        // it was not a whole number, which it is.
+        match value.parse::<i64>() {
+            Ok(degrees) => Ok(Self::from_degrees((degrees % 360) as i32)),
             Err(_) => Err(format!(
                 "unsupported rotation `{value}`: expected a whole number of degrees"
             )),
@@ -1809,13 +1813,26 @@ fn validate_dimension(name: &str, value: Option<u32>) -> Result<(), TransformErr
 }
 
 fn validate_quality(value: Option<u8>) -> Result<(), TransformError> {
-    if matches!(value, Some(0 | 101..=u8::MAX)) {
-        return Err(TransformError::InvalidOptions(
-            "quality must be between 1 and 100".to_string(),
-        ));
+    match value {
+        Some(value) => validate_quality_value(i64::from(value))
+            .map(|_| ())
+            .map_err(|message| TransformError::InvalidOptions(message.to_string())),
+        None => Ok(()),
     }
+}
 
-    Ok(())
+/// The range a quality has to be in, checked against a number of any width.
+///
+/// A caller types a number, not a `u8`, and refusing 256 with the span of the integer it
+/// would be stored in tells them a limit that is not truss's: `--quality 255` was answered
+/// `quality must be between 1 and 100` while `--quality 256` was answered
+/// `256 is not in 0..=255`, and the server said `expected u8`. Every adapter parses wide and
+/// asks this, so one option has one limit and one sentence.
+pub(crate) fn validate_quality_value(value: i64) -> Result<u8, &'static str> {
+    match value {
+        1..=100 => Ok(value as u8),
+        _ => Err("quality must be between 1 and 100"),
+    }
 }
 
 fn validate_target_quality(value: Option<TargetQuality>) -> Result<(), TransformError> {
@@ -1873,6 +1890,17 @@ fn validate_sharpen(value: Option<f32>) -> Result<(), TransformError> {
 /// four places and the message has to be the same in all of them.
 /// Returns the message to report, so each adapter keeps its own error type and its own
 /// failure class while the sentence the caller reads is written once.
+/// The range a watermark opacity has to be in, checked against a number of any width.
+///
+/// The sibling of [`validate_quality_value`], and there for the same reason: 256 is not a
+/// `u8`, and saying so names an integer type rather than the range truss publishes.
+pub(crate) fn validate_watermark_opacity_value(value: i64) -> Result<u8, &'static str> {
+    match value {
+        1..=100 => Ok(value as u8),
+        _ => Err("watermark opacity must be between 1 and 100"),
+    }
+}
+
 pub(crate) fn validate_watermark_opacity(opacity: u8) -> Result<(), &'static str> {
     if opacity == 0 || opacity > 100 {
         return Err("watermark opacity must be between 1 and 100");
@@ -2943,6 +2971,7 @@ mod tests {
         Artifact, ArtifactMetadata, Dimensions, Fit, MediaType, MetadataPolicy, OptimizeMode,
         Position, QualityMetric, RawArtifact, Rgba8, Rotation, TargetQuality, TransformError,
         TransformOptions, TransformRequest, exif_orientation, sniff_artifact,
+        validate_quality_value, validate_watermark_opacity_value,
     };
     #[cfg(feature = "avif")]
     use image::codecs::avif::AvifEncoder;
@@ -4356,6 +4385,63 @@ mod tests {
                 "declared media type does not match detected media type".to_string()
             )
         );
+    }
+
+    /// A number a caller typed is not yet a `u8`, so the range they are told has to be the
+    /// range truss documents rather than the span of the integer it would be stored in.
+    ///
+    /// `--quality 255` was answered `quality must be between 1 and 100` and `--quality 256`
+    /// was answered `256 is not in 0..=255`, which is two limits for one option.
+    #[test]
+    fn a_quality_outside_the_documented_range_reports_that_range_at_any_width() {
+        for value in [0_i64, 101, 255, 256, 999_999, -1, i64::MAX, i64::MIN] {
+            assert_eq!(
+                validate_quality_value(value),
+                Err("quality must be between 1 and 100"),
+                "{value}"
+            );
+        }
+        for value in [1_i64, 50, 100] {
+            assert_eq!(validate_quality_value(value), Ok(value as u8), "{value}");
+        }
+    }
+
+    /// The same for the watermark opacity, which is the other option of this shape.
+    #[test]
+    fn a_watermark_opacity_outside_the_documented_range_reports_that_range_at_any_width() {
+        for value in [0_i64, 101, 255, 256, -1, i64::MAX] {
+            assert_eq!(
+                validate_watermark_opacity_value(value),
+                Err("watermark opacity must be between 1 and 100"),
+                "{value}"
+            );
+        }
+        assert_eq!(validate_watermark_opacity_value(50), Ok(50));
+    }
+
+    /// An angle past a full turn wraps, which is what the flag documents, and a big one is
+    /// no different from a small one.
+    ///
+    /// `--rotate 9999999999` was refused with `expected a whole number of degrees`, which
+    /// it is; the real limit was that the value had to fit an `i32`, and nothing said so.
+    #[test]
+    fn a_rotation_past_a_full_turn_wraps_however_large_it_is() {
+        use std::str::FromStr;
+        assert_eq!(
+            Rotation::from_str("9999999999").expect("a whole number of degrees"),
+            Rotation::from_str("279").expect("279")
+        );
+        assert_eq!(
+            Rotation::from_str("-9999999999").expect("a whole number of degrees"),
+            Rotation::from_str("81").expect("81")
+        );
+        assert_eq!(
+            Rotation::from_str("2147483648").expect("one past i32"),
+            Rotation::from_str(&(2147483648_i64 % 360).to_string()).expect("wrapped")
+        );
+        // A value that is not a whole number is still refused, and says so.
+        let error = Rotation::from_str("1.5").expect_err("not a whole number");
+        assert!(error.contains("whole number of degrees"), "{error}");
     }
 
     #[test]
