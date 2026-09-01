@@ -49,7 +49,9 @@ mod signing;
 pub use config::StorageBackend;
 pub use config::{DEFAULT_BIND_ADDR, DEFAULT_STORAGE_ROOT, LogHandler, LogLevel, ServerConfig};
 pub use handler::TransformOptionsPayload;
+pub(crate) use handler::storage_health_check;
 pub use lifecycle::{serve, serve_once, serve_once_with_config, serve_with_config};
+pub(crate) use signing::signing_input_error;
 pub use signing::{
     SignedUrlSource, SignedWatermarkParams, bind_addr, sign_public_url, sign_public_url_with_method,
 };
