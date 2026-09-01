@@ -326,6 +326,17 @@ where
 ///
 /// This is what `server::cache` does for a cache entry, for the same reason.
 ///
+/// Only a destination that is a regular file is replaced this way. A rename unlinks
+/// whatever was there, which is right for an image being overwritten and wrong for
+/// everything else a path can name: a named pipe became a regular file and the process
+/// reading it received nothing, and a symbolic link was unlinked while the file it pointed
+/// at was left alone. Those destinations are written through, which is what naming them
+/// means, and they give up the partial-write protection they could never have had.
+///
+/// A destination the caller may not write is refused rather than replaced. A rename is
+/// governed by the directory, so the file's own mode stopped nothing once the write became
+/// atomic, and `0o400` on a file is how a caller says not to touch it.
+///
 /// The mode of an existing destination is copied onto the temporary file before the
 /// rename, since the new file would otherwise carry the umask rather than the permissions
 /// the destination was given. A directory that will not take a temporary file, which on
@@ -333,6 +344,10 @@ where
 /// replaceable, falls back to writing the destination directly: it is the write that was
 /// done before, and refusing it would take away something that works today.
 fn replace_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    if !is_replaceable_destination(path) {
+        return fs::write(path, bytes);
+    }
+    refuse_a_destination_the_caller_may_not_write(path)?;
     let Some(temporary) = temporary_sibling(path) else {
         return fs::write(path, bytes);
     };
@@ -351,6 +366,41 @@ fn replace_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         let _ = fs::remove_file(&temporary);
     }
     outcome
+}
+
+/// Fails with the error a direct write would have given for a destination that exists and
+/// cannot be opened for writing.
+///
+/// A rename asks the directory for permission and never asks the file, so once the write
+/// became atomic a mode of `0o400` stopped nothing: the contents changed, the mode was
+/// copied back onto the replacement, and the command exited 0. Opening the destination is
+/// what answers the question the same way the kernel does, for the caller's own identity
+/// and for whatever the file system enforces beyond the mode bits.
+///
+/// The handle is opened without truncating and dropped immediately, so a destination that
+/// is writable is left exactly as it was for the replacement to swap out.
+fn refuse_a_destination_the_caller_may_not_write(path: &Path) -> std::io::Result<()> {
+    match fs::OpenOptions::new().write(true).open(path) {
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+/// Reports whether the destination is one a rename may stand in for.
+///
+/// A path that names nothing yet, or names a regular file, is replaced. A symbolic link, a
+/// named pipe, a socket, or a device is written through instead: the caller named that
+/// object, and replacing it would destroy it. `symlink_metadata` is what answers the
+/// question, because `metadata` follows a link and would report the target's kind.
+///
+/// A path whose metadata cannot be read is treated as replaceable, so that the write goes
+/// on to fail with the error the file system gives rather than being diverted here.
+fn is_replaceable_destination(path: &Path) -> bool {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata.file_type().is_file(),
+        Err(error) => error.kind() == std::io::ErrorKind::NotFound,
+    }
 }
 
 /// Builds the path of the temporary file a replacement is written to.
@@ -499,6 +549,132 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
 
         assert_eq!(mode, 0o640, "the mode of the replaced file is kept");
+    }
+
+    /// A named pipe is written through, not replaced.
+    ///
+    /// The replacement renames a temporary file over the destination, and a rename unlinks
+    /// whatever was there, so `-o pipe` turned the pipe into a regular file: truss exited 0
+    /// and the process reading the pipe received nothing and stayed blocked.
+    #[cfg(unix)]
+    #[test]
+    fn a_named_pipe_destination_is_written_through() {
+        use std::io::Read;
+        use std::os::unix::fs::FileTypeExt;
+
+        let dir = temp_dir("write-fifo");
+        let destination = dir.join("pipe.png");
+        let path = std::ffi::CString::new(destination.as_os_str().as_encoded_bytes())
+            .expect("a path with no interior nul");
+        // SAFETY: the path is a valid C string and 0o600 is a valid mode.
+        let made = unsafe { libc::mkfifo(path.as_ptr(), 0o600) };
+        assert_eq!(made, 0, "create the fifo");
+
+        // The reader reports through a channel rather than a join, because a replacement
+        // turns the pipe into a regular file and leaves this open blocked forever; a
+        // regression has to fail in bounded time rather than hang the suite.
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let reader_path = destination.clone();
+        std::thread::spawn(move || {
+            let seen = fs::File::open(&reader_path).and_then(|mut file| {
+                let mut seen = Vec::new();
+                file.read_to_end(&mut seen).map(|_| seen)
+            });
+            let _ = sender.send(seen);
+        });
+
+        let mut stdout = Vec::new();
+        write_output_bytes(OutputTarget::Path(destination.clone()), b"new", &mut stdout)
+            .expect("the write succeeds");
+        let seen = receiver
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the reader has to see the write rather than wait on a pipe nobody holds")
+            .expect("read the fifo");
+
+        let still_a_fifo = fs::metadata(&destination)
+            .expect("stat the destination")
+            .file_type()
+            .is_fifo();
+        let _ = fs::remove_dir_all(&dir);
+
+        assert_eq!(
+            seen, b"new",
+            "the bytes have to reach whoever is reading the pipe"
+        );
+        assert!(
+            still_a_fifo,
+            "a pipe is a destination to write through, not to replace"
+        );
+    }
+
+    /// A symbolic link is followed, not replaced.
+    ///
+    /// Writing to a path that is a link updates what the link points at, which is how a
+    /// `latest.png -> dated.png` name is kept. The replacement unlinked the link instead
+    /// and left the target untouched.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_destination_is_followed() {
+        let dir = temp_dir("write-symlink");
+        let target = dir.join("dated.png");
+        let link = dir.join("latest.png");
+        fs::write(&target, b"old").expect("write the target");
+        std::os::unix::fs::symlink(&target, &link).expect("make the link");
+
+        let mut stdout = Vec::new();
+        write_output_bytes(OutputTarget::Path(link.clone()), b"new", &mut stdout)
+            .expect("the write succeeds");
+
+        let still_a_link = fs::symlink_metadata(&link)
+            .expect("stat the link")
+            .file_type()
+            .is_symlink();
+        let target_content = fs::read(&target).expect("read the target");
+        let _ = fs::remove_dir_all(&dir);
+
+        assert!(
+            still_a_link,
+            "the link is what the caller named, and it stays a link"
+        );
+        assert_eq!(
+            target_content, b"new",
+            "what the link points at is what was written"
+        );
+    }
+
+    /// A destination the caller may not write is refused, as it was before the write
+    /// became atomic.
+    ///
+    /// A rename is governed by the directory, so a mode of 0o400 on the file stopped
+    /// nothing: truss exited 0 and the contents changed while the mode still read 0o400.
+    #[cfg(unix)]
+    #[test]
+    fn a_read_only_destination_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = temp_dir("write-read-only-file");
+        let destination = dir.join("out.png");
+        fs::write(&destination, b"old").expect("write the destination");
+        fs::set_permissions(&destination, fs::Permissions::from_mode(0o400))
+            .expect("seal the file");
+
+        let mut stdout = Vec::new();
+        let result =
+            write_output_bytes(OutputTarget::Path(destination.clone()), b"new", &mut stdout);
+        let content = fs::read(&destination).expect("read the destination");
+
+        let _ = fs::set_permissions(&destination, fs::Permissions::from_mode(0o600));
+        let _ = fs::remove_dir_all(&dir);
+
+        if unsafe { libc::geteuid() } == 0 {
+            // Root ignores the mode, and there is nothing to assert.
+            return;
+        }
+        assert!(
+            result.is_err(),
+            "a file the caller may not write is not written"
+        );
+        assert_eq!(content, b"old", "and its contents are left alone");
     }
 
     /// A directory that cannot be written to is still a directory whose files can be
