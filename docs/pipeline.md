@@ -57,7 +57,7 @@ with the same Lanczos3 filter; they differ in what the output size ends up being
 |---|---|---|
 | `contain` | `min(tw/w, th/h)` | exactly the box, padded with `background` |
 | `inside` | `min(tw/w, th/h)` | the scaled content, no padding |
-| `cover` | `max(tw/w, th/h)` | exactly the box, cropped at `position` |
+| `cover` | `max(tw/w, th/h)` | exactly the box, cropped at `position` (see `without_enlargement` below) |
 | `fill` | per axis | exactly the box |
 
 `contain` and `inside` compute the same scale. The only difference is that `contain` pads the
@@ -68,6 +68,14 @@ result out to the box and `inside` returns it, which is why a 640x427 source bou
 `1.0` (and, for `fill`, clamps each target axis to the source), which is meaningful for every
 mode and for a single-axis resize. `contain` still reports the full box, because padding out
 to the requested size is what `contain` means; only the content inside stops growing.
+
+`cover` is the other mode whose output size the flag changes, and it is the one worth stating
+because the table above says `cover` returns exactly the box. A crop cannot return more canvas
+than there is content, so with the scale clamped the output is the box intersected with the
+source: a 100x50 source asked for 200x200 comes back 100x50, and asked for 200x40 it comes back
+100x40, which is a ratio the source never had. A caller who needs `cover` to keep its fixed
+size, which is what a grid of thumbnails needs, should leave `without_enlargement` off and let
+a small source scale up, or use `contain`, which pads to the box under either setting.
 
 `resolved_output_dimensions` is the single place these rules live. Both the resize itself and
 the `MAX_OUTPUT_PIXELS` check read from it, so the limit is always applied to the size that
