@@ -136,7 +136,7 @@ Behind a CDN or reverse proxy every connection arrives from the proxy, so withou
 | Endpoint | Purpose |
 |----------|---------|
 | `GET, HEAD /health/live` | Liveness probe (always returns 200) |
-| `GET, HEAD /health/ready` | Readiness probe (returns 503 when draining, disk full, or memory limit exceeded) |
+| `GET, HEAD /health/ready` | Readiness probe (returns 503 when draining, when every transform slot is taken, when the cache disk is below its minimum free bytes, or when RSS is over its limit) |
 
 Configure health thresholds with:
 - `TRUSS_HEALTH_CACHE_MIN_FREE_BYTES` -- minimum free bytes on cache disk

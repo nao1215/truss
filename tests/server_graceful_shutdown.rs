@@ -1,13 +1,16 @@
-//! Graceful shutdown integration tests (issue #83).
+//! Server lifecycle integration tests.
 //!
-//! These tests verify that the server correctly handles the shutdown sequence:
+//! These cover the parts of `serve_with_config` that `serve_once_with_config` cannot reach,
+//! which is the worker pool and the shutdown sequence:
+//! - A request that is not a transform is answered while every transform slot is taken.
+//! - A transform beyond the limit is answered 503 rather than made to wait.
 //! - The `draining` flag causes `/health/ready` to return 503.
 //! - In-flight requests complete before the server exits.
 //! - The `serve_with_config` function terminates when a signal is received.
 
 mod common;
 
-use common::{split_response, temp_dir};
+use common::{large_png_bytes, split_response, status_code, temp_dir};
 use serial_test::serial;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -308,4 +311,199 @@ fn connections_are_refused_once_the_drain_window_has_elapsed() {
         TcpStream::connect(addr).is_err(),
         "the listener must be closed once the drain window has elapsed"
     );
+}
+
+/// Opens a connection, sends a request line and one header, and leaves it unterminated so
+/// the worker stays in the header phase until the connection is dropped.
+///
+/// This holds a worker without spending any CPU, which is what makes the pool-size
+/// assertions below deterministic on a loaded CI machine.
+fn hold_a_worker(addr: SocketAddr) -> TcpStream {
+    let mut stream = TcpStream::connect(addr).expect("connect");
+    stream
+        .write_all(b"GET /health/live HTTP/1.1\r\nHost: localhost\r\n")
+        .expect("write partial request");
+    stream.flush().expect("flush");
+    stream
+}
+
+/// A health probe is answered while every worker a transform could occupy is busy.
+///
+/// The pool used to be `max(max_concurrent_transforms, WORKER_THREADS)`, which is the
+/// transform limit itself for any limit of eight or more, and the limit defaults to the
+/// machine's core count. Eight busy connections then left nothing to read the probe's
+/// socket, so `/health/live` answered only once a transform had finished — measured at
+/// eleven seconds against a limit of eight on a 32-core machine, which a liveness probe
+/// reads as a dead process.
+#[cfg(unix)]
+#[test]
+#[serial]
+fn a_health_probe_is_answered_while_every_transform_worker_is_busy() {
+    let storage = temp_dir("pool-health-headroom");
+    let mut config = ServerConfig::new(storage, None);
+    config.max_concurrent_transforms = 8;
+    config.shutdown_drain_secs = 0;
+
+    let draining = Arc::clone(&config.draining);
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let handle = thread::spawn(move || serve_with_config(listener, config));
+    thread::sleep(Duration::from_millis(200));
+
+    let held: Vec<TcpStream> = (0..8).map(|_| hold_a_worker(addr)).collect();
+    thread::sleep(Duration::from_millis(200));
+
+    let live = probe_with_deadline(addr, "/health/live", Duration::from_secs(2)).expect(
+        "a liveness probe must not wait behind the transform workers for the header deadline",
+    );
+    assert!(
+        live.starts_with("HTTP/1.1 200"),
+        "expected 200 for liveness, got: {live}"
+    );
+
+    drop(held);
+    draining.store(true, Ordering::SeqCst);
+    let _ = TcpStream::connect(addr);
+    handle
+        .join()
+        .expect("server thread")
+        .expect("serve_with_config");
+}
+
+/// A transform beyond the limit is told to retry rather than made to wait for a slot.
+///
+/// `try_acquire` runs inside a worker, so with as many workers as slots a request could not
+/// reach it until a slot was already free and the 503 never fired. Twenty-four concurrent
+/// transforms against eight slots answered twenty-four times 200, the excess after up to
+/// 12.4 seconds; the same burst against seven slots, one below `WORKER_THREADS`, answered
+/// seventeen times 503 in about five milliseconds each.
+#[cfg(unix)]
+#[test]
+#[serial]
+fn a_transform_beyond_the_limit_is_refused_rather_than_queued() {
+    let storage = temp_dir("pool-transform-503");
+    std::fs::write(storage.join("source.png"), large_png_bytes()).expect("write source");
+    let mut config = ServerConfig::new(storage, Some("test-token".to_string()));
+    config.max_concurrent_transforms = 8;
+    config.shutdown_drain_secs = 0;
+
+    let draining = Arc::clone(&config.draining);
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let handle = thread::spawn(move || serve_with_config(listener, config));
+    thread::sleep(Duration::from_millis(200));
+
+    // Every request asks for a different width so none of them shares an answer, and the
+    // output is large enough that a slot is held for longer than it takes the rest of the
+    // burst to arrive.
+    let workers: Vec<_> = (0..24)
+        .map(|i| {
+            thread::spawn(move || {
+                let body = format!(
+                    r#"{{"source":{{"kind":"path","path":"source.png"}},"options":{{"width":{},"height":2000,"fit":"fill","format":"png"}}}}"#,
+                    1900 + i
+                );
+                let response = common::send_transform_request(addr, &body, Some("test-token"));
+                let (header, _, _) = split_response(&response);
+                status_code(&header)
+            })
+        })
+        .collect();
+
+    let statuses: Vec<u16> = workers
+        .into_iter()
+        .map(|worker| worker.join().expect("request thread"))
+        .collect();
+
+    let refused = statuses.iter().filter(|status| **status == 503).count();
+    assert!(
+        refused > 0,
+        "a burst of 24 transforms against 8 slots must refuse some of them, got {statuses:?}"
+    );
+    assert!(
+        statuses.iter().filter(|status| **status == 200).count() > 0,
+        "the slots that exist must still be used, got {statuses:?}"
+    );
+
+    draining.store(true, Ordering::SeqCst);
+    let _ = TcpStream::connect(addr);
+    handle
+        .join()
+        .expect("server thread")
+        .expect("serve_with_config");
+}
+
+/// The wait for a worker is charged to the request that waited.
+///
+/// `latency_ms` and `truss_http_request_duration_seconds` both start from the same instant,
+/// and it used to be the moment the request's headers finished parsing, which is after the
+/// connection has left the accept queue. Three probes a client measured at 10.97 seconds
+/// were logged as `"latency_ms":0`, so the backlog a saturated server actually has was
+/// invisible in the only two places an operator looks.
+#[cfg(unix)]
+#[test]
+#[serial]
+fn a_request_that_waited_for_a_worker_is_logged_with_the_wait() {
+    let storage = temp_dir("pool-latency-queue");
+    let mut config = ServerConfig::new(storage, None);
+    config.max_concurrent_transforms = 1;
+    config.shutdown_drain_secs = 0;
+
+    let lines: Arc<std::sync::Mutex<Vec<String>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = Arc::clone(&lines);
+    config.log_handler = Some(Arc::new(move |msg: &str| {
+        sink.lock().expect("log sink").push(msg.to_string());
+    }));
+
+    let draining = Arc::clone(&config.draining);
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let handle = thread::spawn(move || serve_with_config(listener, config));
+    thread::sleep(Duration::from_millis(200));
+
+    // One more connection than the pool holds, so the probe below finds no free worker.
+    let held: Vec<TcpStream> = (0..16).map(|_| hold_a_worker(addr)).collect();
+    thread::sleep(Duration::from_millis(200));
+
+    let probe =
+        thread::spawn(move || probe_with_deadline(addr, "/health/live", Duration::from_secs(10)));
+    thread::sleep(Duration::from_millis(700));
+    drop(held);
+
+    let live = probe
+        .join()
+        .expect("probe thread")
+        .expect("the probe must be answered once a worker frees up");
+    assert!(
+        live.starts_with("HTTP/1.1 200"),
+        "expected 200 for liveness, got: {live}"
+    );
+
+    let logged: Vec<String> = lines
+        .lock()
+        .expect("log sink")
+        .iter()
+        .filter(|line| line.contains("\"path\":\"/health/live\""))
+        .cloned()
+        .collect();
+    let entry = logged
+        .last()
+        .expect("the liveness probe must appear in the access log");
+    let latency: u64 = entry
+        .split("\"latency_ms\":")
+        .nth(1)
+        .and_then(|rest| rest.split(',').next())
+        .and_then(|value| value.trim().parse().ok())
+        .unwrap_or_else(|| panic!("no latency_ms in {entry}"));
+    assert!(
+        latency >= 400,
+        "a probe that waited about 700ms for a worker was logged as {latency}ms: {entry}"
+    );
+
+    draining.store(true, Ordering::SeqCst);
+    let _ = TcpStream::connect(addr);
+    handle
+        .join()
+        .expect("server thread")
+        .expect("serve_with_config");
 }
