@@ -11,7 +11,8 @@
 //! **Atomic writes:** Cache entries are written to a temporary file (with a unique
 //! PID + counter suffix) then renamed atomically. This ensures readers never see
 //! partial data. Corrupted entries (detected during reads) are cleaned up
-//! automatically.
+//! automatically, and a temporary file whose writer was killed before the rename is
+//! removed by the next eviction scan once it is old enough that nothing can still hold it.
 //!
 //! **mtime-based TTL:** Staleness is determined by file modification time rather
 //! than an embedded timestamp. This keeps the on-disk format simple (media-type
@@ -19,10 +20,11 @@
 //!
 //! **Optional size-based eviction:** When `TRUSS_CACHE_MAX_BYTES` is set to a
 //! positive value, the cache performs LRU-style eviction after writes. Eviction
-//! scans are throttled to at most once per 60 seconds to avoid expensive
-//! directory walks on every cache write. When the variable is unset or `0`, no
-//! size-based eviction is performed and operators should use external tools
-//! (e.g., `tmpwatch`, `tmpreaper`, cron) for disk management.
+//! scans are throttled to at most once per 60 seconds, by a timestamp the server holds
+//! rather than the cache value, which is built per request; a throttle stored in the value
+//! would start at zero every time and walk the whole tree on every write. When the
+//! variable is unset or `0`, no size-based eviction is performed and operators should use
+//! external tools (e.g., `tmpwatch`, `tmpreaper`, cron) for disk management.
 
 use super::LogHandler;
 use crate::MediaType;
@@ -31,6 +33,7 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -74,7 +77,11 @@ pub(super) struct TransformCache {
     /// Maximum total cache size in bytes. `0` means unlimited (no eviction).
     pub(super) max_bytes: u64,
     /// Unix timestamp of the last eviction scan, used to throttle scans.
-    last_eviction_secs: AtomicU64,
+    ///
+    /// Shared rather than owned, because the server builds one of these per request: a
+    /// timestamp that lived in the value would start at zero every time and the walk the
+    /// throttle exists to bound would run on every write.
+    last_eviction_secs: Arc<AtomicU64>,
 }
 
 /// The result of a cache lookup.
@@ -153,7 +160,7 @@ impl TransformCache {
             ttl: Duration::from_secs(DEFAULT_CACHE_TTL_SECONDS),
             log_handler: None,
             max_bytes: 0,
-            last_eviction_secs: AtomicU64::new(0),
+            last_eviction_secs: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -162,8 +169,13 @@ impl TransformCache {
         self
     }
 
-    pub(super) fn with_max_bytes(mut self, max_bytes: u64) -> Self {
+    /// Enables size-based eviction against a budget, throttled by a shared timestamp.
+    ///
+    /// The timestamp has to outlive this value and be the same one every cache over this
+    /// root reads, which is why it is a parameter rather than a field this sets on its own.
+    pub(super) fn with_eviction(mut self, max_bytes: u64, last_eviction: Arc<AtomicU64>) -> Self {
         self.max_bytes = max_bytes;
+        self.last_eviction_secs = last_eviction;
         self
     }
 
@@ -348,7 +360,16 @@ impl TransformCache {
     /// Performs the eviction scan and removal. Returns an error only if the
     /// top-level directory walk cannot be started.
     fn evict_to_limit(&self) -> io::Result<()> {
-        let mut entries = collect_cache_entries(&self.root)?;
+        let mut orphans = Vec::new();
+        let mut entries = collect_cache_entries(&self.root, &mut orphans)?;
+        for orphan in orphans {
+            if fs::remove_file(&orphan).is_ok() {
+                self.log(&format!(
+                    "truss: cache eviction: removed abandoned temporary file {}",
+                    orphan.display()
+                ));
+            }
+        }
         let total_size: u64 = entries.iter().map(|e| e.size).sum();
         if total_size <= self.max_bytes {
             return Ok(());
@@ -384,38 +405,66 @@ struct CacheEntry {
     mtime: Duration,
 }
 
+/// How long a temporary file may sit before its writer is presumed gone.
+///
+/// A write holds one for as long as it takes to put the body on the disk, which is
+/// milliseconds; nothing that is still running holds one for an hour. The margin is wide
+/// because the cost of guessing wrong is deleting the file a live writer is about to
+/// rename, and because a second truss process may share the root.
+const ABANDONED_TEMP_FILE_SECS: u64 = DEFAULT_CACHE_TTL_SECONDS;
+
 /// Recursively collects all regular files under `root` with their size and
-/// modification time. Temp files (containing `.tmp.`) are skipped.
-fn collect_cache_entries(root: &Path) -> io::Result<Vec<CacheEntry>> {
+/// modification time.
+///
+/// A temp file from a write that is still in flight is neither returned nor counted, since
+/// it is not an entry yet and its writer is about to rename it. One old enough that its
+/// writer cannot still be running is a different thing: an abrupt stop between
+/// `File::create` and `fs::rename` leaves bytes nothing else will ever remove, so those
+/// paths are collected into `orphans` for the caller to delete.
+fn collect_cache_entries(root: &Path, orphans: &mut Vec<PathBuf>) -> io::Result<Vec<CacheEntry>> {
     let mut entries = Vec::new();
-    collect_entries_recursive(root, &mut entries);
+    collect_entries_recursive(root, &mut entries, orphans);
     Ok(entries)
 }
 
-fn collect_entries_recursive(dir: &Path, entries: &mut Vec<CacheEntry>) {
+fn collect_entries_recursive(
+    dir: &Path,
+    entries: &mut Vec<CacheEntry>,
+    orphans: &mut Vec<PathBuf>,
+) {
     let Ok(read_dir) = fs::read_dir(dir) else {
         return;
     };
     for entry in read_dir.flatten() {
         let path = entry.path();
         if path.is_dir() {
-            collect_entries_recursive(&path, entries);
+            collect_entries_recursive(&path, entries, orphans);
         } else if path.is_file() {
-            // Skip temp files from in-flight writes.
-            if let Some(name) = path.file_name().and_then(|n| n.to_str())
-                && name.contains(".tmp.")
-            {
+            let Ok(meta) = fs::metadata(&path) else {
                 continue;
-            }
-            if let Ok(meta) = fs::metadata(&path) {
-                let size = meta.len();
-                let mtime = meta
+            };
+            let is_temp = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|name| name.contains(".tmp."));
+            if is_temp {
+                let abandoned = meta
                     .modified()
                     .ok()
-                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                    .unwrap_or(Duration::ZERO);
-                entries.push(CacheEntry { path, size, mtime });
+                    .and_then(|t| t.elapsed().ok())
+                    .is_some_and(|age| age.as_secs() > ABANDONED_TEMP_FILE_SECS);
+                if abandoned {
+                    orphans.push(path);
+                }
+                continue;
             }
+            let size = meta.len();
+            let mtime = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .unwrap_or(Duration::ZERO);
+            entries.push(CacheEntry { path, size, mtime });
         }
     }
 }
@@ -854,10 +903,27 @@ mod tests {
         hex::encode(digest)
     }
 
+    /// The entries an eviction scan would consider, without the orphan list it also fills.
+    fn scan_entries(root: &Path) -> Vec<CacheEntry> {
+        collect_cache_entries(root, &mut Vec::new()).expect("scan")
+    }
+
+    /// A throttle of its own, for a test that wants every write to scan.
+    fn new_clock() -> Arc<AtomicU64> {
+        Arc::new(AtomicU64::new(0))
+    }
+
+    fn unix_now() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+    }
+
     #[test]
     fn eviction_removes_oldest_entries_when_over_limit() {
         let dir = tempfile::tempdir().unwrap();
-        let cache = TransformCache::new(dir.path().to_path_buf()).with_max_bytes(200);
+        let cache = TransformCache::new(dir.path().to_path_buf()).with_eviction(200, new_clock());
 
         // Write four entries, each ~60 bytes on disk (header + body).
         // Total will exceed 200 bytes after all writes.
@@ -875,17 +941,12 @@ mod tests {
         let _ = cache.evict_to_limit();
 
         // Collect remaining files.
-        let remaining: Vec<_> = collect_cache_entries(dir.path())
-            .unwrap()
+        let remaining: Vec<_> = scan_entries(dir.path())
             .into_iter()
             .map(|e| e.path)
             .collect();
 
-        let total_size: u64 = collect_cache_entries(dir.path())
-            .unwrap()
-            .iter()
-            .map(|e| e.size)
-            .sum();
+        let total_size: u64 = scan_entries(dir.path()).iter().map(|e| e.size).sum();
 
         assert!(
             total_size <= 200,
@@ -898,17 +959,110 @@ mod tests {
         );
     }
 
+    /// The scan is throttled across the cache values that share a root, not within one of
+    /// them. The server builds a `TransformCache` per request, so a counter that lived in
+    /// the value alone started at zero every time and every write walked the whole tree.
+    #[test]
+    fn an_eviction_scan_is_throttled_across_cache_values() {
+        let dir = tempfile::tempdir().unwrap();
+        let clock = new_clock();
+        let root = dir.path().to_path_buf();
+        let body = vec![0u8; 100];
+
+        // The first write scans, finds the root under the limit, and claims the interval.
+        TransformCache::new(root.clone())
+            .with_eviction(300, Arc::clone(&clock))
+            .put(&test_key(0), MediaType::Jpeg, &body, &[]);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        // The second write puts the root over the limit and must not scan again yet.
+        TransformCache::new(root.clone())
+            .with_eviction(300, Arc::clone(&clock))
+            .put(&test_key(1), MediaType::Jpeg, &body, &[]);
+        TransformCache::new(root.clone())
+            .with_eviction(300, Arc::clone(&clock))
+            .put(&test_key(2), MediaType::Jpeg, &body, &[]);
+
+        let entries = scan_entries(dir.path());
+        assert_eq!(
+            entries.len(),
+            3,
+            "a write inside the interval must not walk the tree, whatever the total is"
+        );
+    }
+
+    /// The other half of the same rule: once the interval has passed the scan runs again,
+    /// so the throttle bounds how often the walk happens rather than turning it off.
+    #[test]
+    fn an_eviction_scan_runs_again_once_the_interval_has_passed() {
+        let dir = tempfile::tempdir().unwrap();
+        let clock = new_clock();
+        let root = dir.path().to_path_buf();
+        let body = vec![0u8; 100];
+
+        TransformCache::new(root.clone())
+            .with_eviction(150, Arc::clone(&clock))
+            .put(&test_key(0), MediaType::Jpeg, &body, &[]);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        clock.store(
+            unix_now().saturating_sub(EVICTION_INTERVAL_SECS + 1),
+            Ordering::Relaxed,
+        );
+        TransformCache::new(root.clone())
+            .with_eviction(150, Arc::clone(&clock))
+            .put(&test_key(1), MediaType::Jpeg, &body, &[]);
+
+        let total: u64 = scan_entries(dir.path()).iter().map(|e| e.size).sum();
+        assert!(
+            total <= 150,
+            "the scan must run once the interval has passed, but {total} bytes remain"
+        );
+    }
+
+    /// A temp file whose writer is gone is bytes on the disk the budget is meant to bound,
+    /// and skipping it by name meant nothing ever counted it and nothing ever removed it.
+    #[test]
+    fn an_eviction_scan_removes_a_temp_file_whose_writer_is_gone() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = TransformCache::new(dir.path().to_path_buf()).with_eviction(300, new_clock());
+
+        let orphan = cache.entry_path(&test_key(0)).with_extension("tmp.12345.0");
+        fs::create_dir_all(orphan.parent().expect("parent")).unwrap();
+        fs::write(&orphan, vec![0u8; 5_000]).unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&orphan)
+            .unwrap()
+            .set_modified(
+                std::time::SystemTime::now()
+                    - Duration::from_secs(DEFAULT_CACHE_TTL_SECONDS)
+                    - Duration::from_secs(60),
+            )
+            .unwrap();
+
+        cache.put(&test_key(1), MediaType::Jpeg, &[0u8; 100], &[]);
+
+        assert!(
+            !orphan.exists(),
+            "an interrupted write must not strand its bytes forever"
+        );
+        let total: u64 = scan_entries(dir.path()).iter().map(|e| e.size).sum();
+        assert!(
+            total <= 300,
+            "the root holds {total} bytes against a budget of 300"
+        );
+    }
+
     #[test]
     fn no_eviction_when_max_bytes_is_zero() {
         let dir = tempfile::tempdir().unwrap();
-        let cache = TransformCache::new(dir.path().to_path_buf()).with_max_bytes(0);
+        let cache = TransformCache::new(dir.path().to_path_buf()).with_eviction(0, new_clock());
 
         let body = vec![0u8; 100];
         for i in 0..5 {
             cache.put(&test_key(i), MediaType::Jpeg, &body, &[]);
         }
 
-        let entries = collect_cache_entries(dir.path()).unwrap();
+        let entries = scan_entries(dir.path());
         assert_eq!(
             entries.len(),
             5,
@@ -920,14 +1074,15 @@ mod tests {
     fn no_eviction_when_under_limit() {
         let dir = tempfile::tempdir().unwrap();
         // Set a very generous limit.
-        let cache = TransformCache::new(dir.path().to_path_buf()).with_max_bytes(1_000_000);
+        let cache =
+            TransformCache::new(dir.path().to_path_buf()).with_eviction(1_000_000, new_clock());
 
         let body = vec![0u8; 50];
         for i in 0..3 {
             cache.put(&test_key(i), MediaType::Jpeg, &body, &[]);
         }
 
-        let entries = collect_cache_entries(dir.path()).unwrap();
+        let entries = scan_entries(dir.path());
         assert_eq!(
             entries.len(),
             3,
@@ -986,6 +1141,8 @@ mod tests {
         }
     }
 
+    /// The pair to the test above: the two cases differ only in age, and a write that is
+    /// still running must not have its temp file counted or removed underneath it.
     #[test]
     fn collect_cache_entries_skips_temp_files() {
         let dir = tempfile::tempdir().unwrap();
@@ -1003,7 +1160,7 @@ mod tests {
         let tmp_path = path.with_extension("tmp.12345.0");
         fs::write(&tmp_path, b"partial").unwrap();
 
-        let entries = collect_cache_entries(dir.path()).unwrap();
+        let entries = scan_entries(dir.path());
         assert_eq!(entries.len(), 1, "temp files should be excluded from scan");
     }
 }
