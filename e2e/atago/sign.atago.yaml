@@ -180,3 +180,64 @@ scenarios:
             contains:
               - "width must be greater than zero"
               - "(invalid-options)"
+
+  # An unset shell variable expands to the empty string, so these are what a typo in a
+  # variable name produces in a build script. A server refuses to start with an empty key
+  # id or secret, and the by-path route refuses an empty path, so each of these URLs would
+  # be answered 400 or 401 for as long as it existed.
+  - name: refuses an empty key id instead of signing it
+    steps:
+      - run:
+          command: truss sign --base-url "https://cdn.example.com" --path "/hero.jpg" --key-id "" --secret "s3cret" --expires 1700000000
+      - assert:
+          exit_code: 1
+          stdout:
+            equals: ""
+          stderr:
+            contains:
+              - "key id must not be empty"
+              - "(invalid-request)"
+
+  - name: refuses an empty secret instead of signing it
+    steps:
+      - run:
+          command: truss sign --base-url "https://cdn.example.com" --path "/hero.jpg" --key-id "k1" --secret "" --expires 1700000000
+      - assert:
+          exit_code: 1
+          stdout:
+            equals: ""
+          stderr:
+            contains:
+              - "secret must not be empty"
+              - "(invalid-request)"
+
+  - name: refuses an empty path instead of signing it
+    steps:
+      - run:
+          command: truss sign --base-url "https://cdn.example.com" --path "" --key-id "k1" --secret "s3cret" --expires 1700000000
+      - assert:
+          exit_code: 1
+          stdout:
+            equals: ""
+          stderr:
+            contains:
+              - "path must not be empty"
+              - "(invalid-request)"
+
+  # A base URL with a path is a deployment served under a prefix by a proxy that strips it
+  # before truss sees the request. The prefix belongs in the URL; the signature is over the
+  # endpoint path the server receives, so it is the same one the prefix-free base URL gives.
+  - name: keeps a path in the base URL and signs the endpoint path regardless
+    steps:
+      - run:
+          command: truss sign --base-url "https://cdn.example.com/img" --path "/hero.jpg" --key-id "k1" --secret "s3cret" --expires 1700000000
+      - assert:
+          exit_code: 0
+          stdout:
+            contains: "https://cdn.example.com/img/images/by-path?"
+      - run:
+          command: truss sign --base-url "https://cdn.example.com" --path "/hero.jpg" --key-id "k1" --secret "s3cret" --expires 1700000000
+      - assert:
+          exit_code: 0
+          stdout:
+            contains: "https://cdn.example.com/images/by-path?"

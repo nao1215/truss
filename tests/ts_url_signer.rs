@@ -354,3 +354,152 @@ fn both_signers_refuse_the_same_always_invalid_option_sets() {
         );
     }
 }
+
+/// The credentials and the source neither signer should mint a URL for.
+///
+/// A server refuses to start with an empty key id or secret in `TRUSS_SIGNING_KEYS`, and
+/// the by-path route refuses an empty `path`, so a URL carrying one is answered 400 or 401
+/// for as long as it exists. Each signer says so in its own vocabulary, `--key-id` on the
+/// command line and `keyId` in JavaScript, which is why the messages are asserted per side
+/// rather than shared.
+#[test]
+fn both_signers_refuse_credentials_and_a_source_no_server_accepts() {
+    if !node_is_available() {
+        eprintln!("skipping: node is not available");
+        return;
+    }
+
+    let cases: [(&str, &str, &str, &str, &str); 3] = [
+        ("--key-id", "", "keyId", "key id must not be empty", "keyId"),
+        (
+            "--secret",
+            "",
+            "secret",
+            "secret must not be empty",
+            "secret must be a non-empty string",
+        ),
+        ("--path", "", "path", "path must not be empty", "path"),
+    ];
+
+    for (flag, value, field, cli_message, node_message) in cases {
+        let mut input = json!({
+            "baseUrl": "https://cdn.example.com",
+            "source": {"kind": "path", "path": "/image.png"},
+            "keyId": "public-dev",
+            "secret": "secret-value",
+            "expires": 4_102_444_800_u64,
+        });
+        if field == "path" {
+            input["source"]["path"] = json!(value);
+        } else {
+            input[field] = json!(value);
+        }
+
+        let node = run_typescript_signer(input);
+        assert!(
+            !node.status.success(),
+            "the npm signer must refuse an empty {field}: {}",
+            String::from_utf8_lossy(&node.stdout)
+        );
+        assert!(
+            String::from_utf8_lossy(&node.stderr).contains(node_message),
+            "the npm signer names the field for an empty {field}: {}",
+            String::from_utf8_lossy(&node.stderr)
+        );
+
+        let mut arguments = vec![
+            ("--base-url", "https://cdn.example.com"),
+            ("--path", "/image.png"),
+            ("--key-id", "public-dev"),
+            ("--secret", "secret-value"),
+            ("--expires", "4102444800"),
+        ];
+        for argument in &mut arguments {
+            if argument.0 == flag {
+                argument.1 = value;
+            }
+        }
+
+        let mut command = Command::new(env!("CARGO_BIN_EXE_truss"));
+        command.arg("sign");
+        for (name, argument) in arguments {
+            command.arg(name).arg(argument);
+        }
+        let cli = command.output().expect("run truss sign");
+        assert!(
+            !cli.status.success(),
+            "truss sign must refuse {flag} '': {}",
+            String::from_utf8_lossy(&cli.stdout)
+        );
+        assert!(
+            String::from_utf8_lossy(&cli.stderr).contains(cli_message),
+            "truss sign names the rule for {flag} '': {}",
+            String::from_utf8_lossy(&cli.stderr)
+        );
+        assert!(
+            cli.stdout.is_empty(),
+            "truss sign writes no URL when it refuses"
+        );
+    }
+}
+
+/// A base URL with a path prefix is a deployment behind a proxy that serves truss under
+/// it, and both signers have to emit the same URL for it, with the same signature the
+/// prefix-free base URL produces.
+#[test]
+fn both_signers_keep_a_path_in_the_base_url() {
+    if !node_is_available() {
+        eprintln!("skipping: node is not available");
+        return;
+    }
+
+    let input = |base_url: &str| {
+        json!({
+            "baseUrl": base_url,
+            "source": {"kind": "path", "path": "/image.png"},
+            "keyId": "public-dev",
+            "secret": "secret-value",
+            "expires": 4_102_444_800_u64,
+        })
+    };
+
+    let node_prefixed = sign_with_typescript_package(input("https://cdn.example.com/img"));
+    let node_plain = sign_with_typescript_package(input("https://cdn.example.com"));
+
+    let rust_prefixed = sign_public_url_with_method(
+        "GET",
+        "https://cdn.example.com/img",
+        SignedUrlSource::Path {
+            path: "/image.png".to_string(),
+            version: None,
+        },
+        &TransformOptions::default(),
+        "public-dev",
+        "secret-value",
+        4_102_444_800,
+        None,
+        None,
+    )
+    .expect("sign with the Rust signer");
+
+    assert_eq!(node_prefixed, rust_prefixed);
+    assert_eq!(
+        Url::parse(&rust_prefixed).expect("parse").path(),
+        "/img/images/by-path"
+    );
+
+    let signature = |url: &str| {
+        Url::parse(url)
+            .expect("parse")
+            .query_pairs()
+            .find(|(name, _)| name == "signature")
+            .expect("a signature")
+            .1
+            .into_owned()
+    };
+    assert_eq!(
+        signature(&node_prefixed),
+        signature(&node_plain),
+        "the canonical string carries the endpoint path, not the base URL's"
+    );
+}
