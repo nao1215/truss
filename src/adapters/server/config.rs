@@ -3,8 +3,38 @@ use super::TransformOptionsPayload;
 use super::azure;
 #[cfg(feature = "gcs")]
 use super::gcs;
-/// Default maximum number of concurrent transforms allowed.
-pub(super) const DEFAULT_MAX_CONCURRENT_TRANSFORMS: u64 = 64;
+/// The narrowest and widest values `TRUSS_MAX_CONCURRENT_TRANSFORMS` accepts.
+///
+/// The default derived from the machine is clamped to the same range the environment
+/// variable is parsed against, so a configured value and a derived one cannot disagree
+/// about what is allowed.
+pub(super) const MIN_CONCURRENT_TRANSFORMS: u64 = 1;
+pub(super) const MAX_CONCURRENT_TRANSFORMS: u64 = 1024;
+
+/// The number of concurrent transforms assumed when the machine will not say how many
+/// cores it has.
+pub(super) const FALLBACK_MAX_CONCURRENT_TRANSFORMS: u64 = 4;
+
+/// The default number of transforms allowed to run at once, one per core.
+///
+/// This used to be a flat 64 on every machine. A transform is CPU work from end to end, so
+/// admitting more of them than the machine can run does not make the server faster: measured
+/// on a 32-core machine with AVIF output, throughput was the same at 32 in flight and at 64,
+/// while the median latency went from 19 to 30 seconds and the 95th percentile from 25 to
+/// 79. With the default 30 second deadline that is not merely slower, it is a failure: half
+/// of a 128 request run was answered `413` after its encode had already finished, so the
+/// work was done and then thrown away. Admitting one per core keeps each accepted request
+/// near its unloaded latency and turns the excess into an immediate `503`, which says retry
+/// rather than too large and says it before the CPU is spent.
+///
+/// A cache hit is answered before a transform slot is taken, so this limit does not apply to
+/// traffic the cache can serve.
+pub(super) fn default_max_concurrent_transforms() -> u64 {
+    let cores = std::thread::available_parallelism()
+        .map(|count| count.get() as u64)
+        .unwrap_or(FALLBACK_MAX_CONCURRENT_TRANSFORMS);
+    cores.clamp(MIN_CONCURRENT_TRANSFORMS, MAX_CONCURRENT_TRANSFORMS)
+}
 #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
 use super::remote::STORAGE_DOWNLOAD_TIMEOUT_SECS;
 #[cfg(feature = "s3")]
@@ -388,7 +418,9 @@ pub struct ServerConfig {
     pub log_level: Arc<AtomicU8>,
     /// Maximum number of concurrent image transforms.
     ///
-    /// Configurable via `TRUSS_MAX_CONCURRENT_TRANSFORMS`. Defaults to 64.
+    /// Configurable via `TRUSS_MAX_CONCURRENT_TRANSFORMS`. Defaults to one per core, since
+    /// a transform is CPU work from end to end and admitting more than the machine can run
+    /// makes every one of them slower without making the server faster.
     pub max_concurrent_transforms: u64,
     /// Per-transform wall-clock deadline in seconds.
     ///
@@ -825,7 +857,7 @@ impl ServerConfig {
             format_preference: Vec::new(),
             log_handler: None,
             log_level: Arc::new(AtomicU8::new(LogLevel::Info as u8)),
-            max_concurrent_transforms: DEFAULT_MAX_CONCURRENT_TRANSFORMS,
+            max_concurrent_transforms: default_max_concurrent_transforms(),
             transform_deadline_secs: DEFAULT_TRANSFORM_DEADLINE_SECS,
             max_input_pixels: DEFAULT_MAX_INPUT_PIXELS,
             max_upload_bytes: DEFAULT_MAX_UPLOAD_BODY_BYTES,
@@ -1106,7 +1138,7 @@ impl ServerConfig {
     /// - `AZURE_STORAGE_ACCOUNT_NAME`: Azure storage account name (used to derive the default
     ///   endpoint when `TRUSS_AZURE_ENDPOINT` is not set).
     /// - `TRUSS_MAX_CONCURRENT_TRANSFORMS`: maximum number of concurrent image transforms
-    ///   (default: 64, range: 1–1024). Requests exceeding this limit are rejected with 503.
+    ///   (default: one per core, range: 1–1024). Requests exceeding this limit are rejected with 503.
     /// - `TRUSS_TRANSFORM_DEADLINE_SECS`: per-transform wall-clock deadline in seconds
     ///   (default: 30, range: 1–300). Transforms exceeding this deadline are cancelled.
     /// - `TRUSS_MAX_INPUT_PIXELS`: maximum number of input image pixels allowed before decode
@@ -1249,9 +1281,12 @@ impl ServerConfig {
 
         let allow_insecure_url_sources = env_flag("TRUSS_ALLOW_INSECURE_URL_SOURCES");
 
-        let max_concurrent_transforms =
-            parse_env_u64_ranged("TRUSS_MAX_CONCURRENT_TRANSFORMS", 1, 1024)?
-                .unwrap_or(DEFAULT_MAX_CONCURRENT_TRANSFORMS);
+        let max_concurrent_transforms = parse_env_u64_ranged(
+            "TRUSS_MAX_CONCURRENT_TRANSFORMS",
+            MIN_CONCURRENT_TRANSFORMS,
+            MAX_CONCURRENT_TRANSFORMS,
+        )?
+        .unwrap_or_else(default_max_concurrent_transforms);
 
         let transform_deadline_secs =
             parse_env_u64_ranged("TRUSS_TRANSFORM_DEADLINE_SECS", 1, 300)?

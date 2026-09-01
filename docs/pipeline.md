@@ -19,9 +19,9 @@ decode → auto-orient → rotate → crop → resize → blur → sharpen → g
 | 7 | **Sharpen** | `sharpen` set | Unsharp mask with the given sigma (0.1–100.0). |
 | 8 | **Grayscale** | `grayscale == true` | Collapse the color channels to luminance (Rec. 601 weights), preserving alpha. Runs before the watermark so an overlay keeps its own colors, and after the stages that fill with `background`, so rotation corners and `fit=contain` padding are desaturated along with the image. |
 | 9 | **Watermark** | `watermark` provided | Alpha-composite a watermark image at the specified position, opacity, and margin. |
-| 10 | **Encode** | — | Encode to the output format (JPEG, PNG, WebP, AVIF, BMP, TIFF) with optional quality and metadata injection. GIF is not an output format. |
+| 10 | **Encode** | — | Encode to the output format (JPEG, PNG, WebP, AVIF, BMP, TIFF) with optional quality and metadata injection. GIF is not an output format. AVIF picks its encoder speed from the output size: outputs up to 2 megapixels use the setting truss has always used, and larger ones use faster settings, because at the pixel ceiling the slow setting takes minutes. |
 
-Each stage checks the optional deadline (server: 30 s) and returns `TransformError::LimitExceeded` if exceeded.
+Each stage checks the optional deadline (server: 30 s) and returns `TransformError::LimitExceeded` if exceeded. The check happens between stages, so a stage already running is not interrupted and a transform can return after the deadline rather than at it. Encoding is where that shows, since no encoder truss calls can be stopped part way.
 
 ## The order is fixed
 
