@@ -149,7 +149,8 @@ OPTIONS:
       --without-enlargement
                            Never scale an image up. A source already within the requested
                            size keeps that size. Combines with any --fit; contain still
-                           pads out to the full box
+                           pads out to the full box, and cover returns the box intersected
+                           with the source rather than the whole box
       --watermark <FILE>   Watermark image to composite onto the output (raster-only, not supported for SVG inputs)
       --watermark-position <POS>  Watermark placement (default: bottom-right; raster-only)
                            center, top, right, bottom, left,
@@ -1477,8 +1478,68 @@ fn class_for_io_error(error: &io::Error) -> ErrorClass {
 const CLI_FETCH_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 /// Timeout for receiving the full response body from a remote source.
 const CLI_FETCH_BODY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+/// How many redirects a `--url` fetch follows before giving up.
+///
+/// The same number the server allows, so a URL that works against one works against the
+/// other.
+const CLI_FETCH_MAX_REDIRECTS: u32 = 5;
+
+/// Refuses a URL truss may not fetch, whichever hop of a redirect chain named it.
+///
+/// A command line is expected to fetch from the machine it runs on, so the private and
+/// loopback ranges the server refuses are allowed here. The metadata endpoints are not:
+/// `docs/configuration.md` calls them blocked whatever else is configured, no workflow
+/// fetches an image from one, and the URL that reaches one is chosen by whatever server
+/// answered the previous hop rather than by whoever typed the command.
+///
+/// The name is checked, and so are the addresses it resolves to, which covers a host that
+/// points at a metadata address without spelling it. A host whose answer changes between
+/// this lookup and the agent's own is not covered: the server closes that with DNS pinning,
+/// which it can only do because it refuses every private address, and this adapter does not.
+fn refuse_disallowed_fetch_target(url: &str) -> Result<(), CliError> {
+    let parsed = url::Url::parse(url).map_err(|error| {
+        classified_error(
+            ErrorClass::BadGateway,
+            EXIT_IO,
+            &format!("failed to fetch {url}: not a valid URL: {error}"),
+        )
+    })?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(classified_error(
+            ErrorClass::BadGateway,
+            EXIT_IO,
+            &format!(
+                "failed to fetch {url}: a redirect to a `{}` URL is not followed",
+                parsed.scheme()
+            ),
+        ));
+    }
+    let named_metadata = crate::core::remote_policy::is_cloud_metadata_host(&parsed);
+    // A host name under someone else's control can resolve to a metadata address without
+    // spelling it, so the addresses it resolves to are checked as well.
+    let resolves_to_metadata = !named_metadata
+        && parsed
+            .socket_addrs(|| Some(if parsed.scheme() == "https" { 443 } else { 80 }))
+            .map(|addrs| {
+                addrs
+                    .iter()
+                    .any(|addr| crate::core::remote_policy::is_cloud_metadata_ip(addr.ip()))
+            })
+            .unwrap_or(false);
+    if named_metadata || resolves_to_metadata {
+        return Err(classified_error(
+            ErrorClass::BadGateway,
+            EXIT_IO,
+            &format!("failed to fetch {url}: the URL points to a cloud metadata service"),
+        ));
+    }
+    Ok(())
+}
 
 /// Fetches `--url` input.
+///
+/// Redirects are followed here rather than inside the agent so that every hop is checked:
+/// the caller chooses the first URL and a remote server chooses the rest.
 ///
 /// Every failure here is the remote end's, which the server names `bad-gateway`; the CLI
 /// keeps its I/O exit code (2) and adds that class.
@@ -1489,17 +1550,55 @@ fn read_url_bytes(url: &str) -> Result<Vec<u8>, CliError> {
         .timeout_connect(Some(CLI_FETCH_CONNECT_TIMEOUT))
         .timeout_recv_body(Some(CLI_FETCH_BODY_TIMEOUT))
         .http_status_as_error(false)
+        .max_redirects(0)
         .build();
     let agent = ureq::Agent::new_with_config(config);
-    let response = agent
-        .get(url)
-        .call()
-        .map_err(|error| fetch_failed(format!("failed to fetch {url}: {error}")))?;
 
-    let status = response.status().as_u16();
+    let mut current = url.to_string();
+    let mut response = None;
+    for _ in 0..=CLI_FETCH_MAX_REDIRECTS {
+        refuse_disallowed_fetch_target(&current)?;
+        let hop = agent
+            .get(&current)
+            .call()
+            .map_err(|error| fetch_failed(format!("failed to fetch {current}: {error}")))?;
+        let status = hop.status().as_u16();
+        if matches!(status, 301 | 302 | 303 | 307 | 308) {
+            let location = hop
+                .headers()
+                .get("Location")
+                .and_then(|value: &ureq::http::HeaderValue| value.to_str().ok())
+                .ok_or_else(|| {
+                    fetch_failed(format!(
+                        "failed to fetch {current}: HTTP {status} without a Location header"
+                    ))
+                })?;
+            let base = url::Url::parse(&current).map_err(|error| {
+                fetch_failed(format!(
+                    "failed to fetch {current}: not a valid URL: {error}"
+                ))
+            })?;
+            let next = base.join(location).map_err(|error| {
+                fetch_failed(format!(
+                    "failed to fetch {current}: redirect to an unusable URL: {error}"
+                ))
+            })?;
+            current = next.into();
+            continue;
+        }
+        response = Some((hop, status));
+        break;
+    }
+
+    let Some((response, status)) = response else {
+        return Err(fetch_failed(format!(
+            "failed to fetch {url}: more than {CLI_FETCH_MAX_REDIRECTS} redirects"
+        )));
+    };
+
     if status >= 400 {
         return Err(fetch_failed(format!(
-            "failed to fetch {url}: HTTP {status}"
+            "failed to fetch {current}: HTTP {status}"
         )));
     }
 
