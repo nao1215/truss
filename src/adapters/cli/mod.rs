@@ -153,7 +153,9 @@ OPTIONS:
                            size keeps that size. Combines with any --fit; contain still
                            pads out to the full box, and cover returns the box intersected
                            with the source rather than the whole box
-      --watermark <FILE>   Watermark image to composite onto the output (raster-only, not supported for SVG inputs)
+      --watermark <FILE|URL>
+                           Watermark image to composite onto the output, from a file or an
+                           HTTP(S) URL (raster-only, not supported for SVG inputs)
       --watermark-position <POS>  Watermark placement (default: bottom-right; raster-only)
                            center, top, right, bottom, left,
                            top-left, top-right, bottom-left, bottom-right
