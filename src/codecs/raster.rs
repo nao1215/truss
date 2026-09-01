@@ -5803,6 +5803,35 @@ mod tests {
         assert_eq!(output_size((16, 16), None, Some(200), None, true), (16, 16));
     }
 
+    /// A source smaller than the box on one axis only, which is where `cover` surprises.
+    ///
+    /// The mode returns the box intersected with the source, so the output can have a
+    /// ratio the source never had: 100x50 asked for 200x40 comes back 100x40. That is what
+    /// `docs/pipeline.md` describes, against a table that says `cover` is exactly the box.
+    #[test]
+    fn cover_without_enlargement_returns_the_box_intersected_with_the_source() {
+        assert_eq!(
+            output_size((100, 50), Some(200), Some(40), Some(Fit::Cover), true),
+            (100, 40)
+        );
+        assert_eq!(
+            output_size((100, 50), Some(40), Some(200), Some(Fit::Cover), true),
+            (40, 50)
+        );
+        // The box is reached on both axes when the source is large enough for it.
+        assert_eq!(
+            output_size((300, 100), Some(200), Some(40), Some(Fit::Cover), true),
+            (200, 40)
+        );
+        // Contain answers the same three requests with the box, which is the contrast.
+        for (w, h) in [(200, 40), (40, 200)] {
+            assert_eq!(
+                output_size((100, 50), Some(w), Some(h), Some(Fit::Contain), true),
+                (w, h)
+            );
+        }
+    }
+
     #[test]
     fn without_enlargement_does_not_shrink_what_already_fits() {
         // A source larger than the box is still reduced; the flag only removes upscaling.

@@ -1128,6 +1128,8 @@ components:
         requested bounds keeps its own size.
         Independent of `fit`, and meaningful for a single-axis resize too. `contain` still
         pads out to the full requested box; only the content inside it stops growing.
+        `cover` returns the requested box intersected with the source instead of the whole
+        box, because a crop cannot return more canvas than there is content.
         Requires `width` or `height`.
       schema:
         type: boolean

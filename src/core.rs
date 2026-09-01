@@ -15,6 +15,10 @@ use avif::{avif_orientation, has_avif_brand, sniff_avif};
 mod avif;
 #[cfg(any(feature = "server", feature = "wasm"))]
 pub(crate) mod error_class;
+/// Gated with the `url` crate the address rules parse with, which the server feature brings
+/// in and which the two adapters that fetch are the only users of.
+#[cfg(feature = "server")]
+pub(crate) mod remote_policy;
 
 /// Maximum number of pixels in the output image (width × height).
 ///
@@ -1954,14 +1958,13 @@ fn detect_artifact(bytes: &[u8]) -> Result<(MediaType, ArtifactMetadata), Transf
         return Ok((MediaType::Svg, sniff_svg(bytes)));
     }
 
-    let preview_len = bytes.len().min(16);
-    let hex_preview: String = bytes[..preview_len]
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect::<Vec<_>>()
-        .join(" ");
+    // The length and nothing else. This message used to carry the first sixteen bytes in
+    // hexadecimal, which is a useful thing to say about a file the operator named and a
+    // disclosure about a URL fetched on somebody's behalf: the CLI printed it for
+    // `--url`, and the server returned it to the caller in the `detail` of its problem
+    // body. The core cannot tell the two apart, so it says neither.
     Err(TransformError::UnsupportedInputMediaType(format!(
-        "unknown file signature ({} bytes, header: [{hex_preview}])",
+        "unknown file signature ({} bytes)",
         bytes.len()
     )))
 }
@@ -4367,8 +4370,8 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("4 bytes"), "should include file size: {msg}");
         assert!(
-            msg.contains("01 02 03 04"),
-            "should include hex preview: {msg}"
+            !msg.contains("01 02 03 04"),
+            "the bytes themselves are content, and this message reaches whoever named a URL: {msg}"
         );
     }
 
