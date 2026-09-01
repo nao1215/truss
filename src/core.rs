@@ -1531,6 +1531,38 @@ pub enum TransformError {
     LimitExceeded(String),
 }
 
+/// Folds a message onto a single trimmed line.
+///
+/// Every adapter presents a failure as one line of text: the CLI writes
+/// `error: <message> (<class>)`, the HTTP server puts the message in an RFC 9457 `detail`,
+/// and `@nao1215/truss-wasm` hands it to a browser. Some of those messages come from a
+/// decoder in a dependency, whose wording truss does not choose and which may end with a
+/// newline or hold one in the middle, so the line break is taken out where the message is
+/// rendered rather than at each of the thirty places one can enter from.
+///
+/// A message that is already one trimmed line is returned untouched. `server::cache` does
+/// the same to a warning before it goes on an entry's header line, for the same reason.
+///
+/// A build with neither the server nor the Wasm adapter, which is the library on its own,
+/// renders no message and does not compile this.
+#[cfg(any(feature = "server", feature = "wasm"))]
+pub(crate) fn single_line(message: &str) -> std::borrow::Cow<'_, str> {
+    let trimmed = message.trim();
+    if !trimmed.contains(breaks_a_line) {
+        return std::borrow::Cow::Borrowed(trimmed);
+    }
+    std::borrow::Cow::Owned(trimmed.split_whitespace().collect::<Vec<_>>().join(" "))
+}
+
+/// Reports whether a character would move a message off its line.
+///
+/// A space is what the message already reads as between two words, so only the ones that
+/// end the line or move the cursor count.
+#[cfg(any(feature = "server", feature = "wasm"))]
+fn breaks_a_line(c: char) -> bool {
+    (c.is_whitespace() && c != ' ') || c.is_control()
+}
+
 impl fmt::Display for TransformError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -2899,10 +2931,36 @@ mod tests {
         Position, QualityMetric, RawArtifact, Rgba8, Rotation, TargetQuality, TransformError,
         TransformOptions, TransformRequest, exif_orientation, sniff_artifact,
     };
+    #[cfg(any(feature = "server", feature = "wasm"))]
+    use super::single_line;
     #[cfg(feature = "avif")]
     use image::codecs::avif::AvifEncoder;
     use image::{ColorType, ImageEncoder, Rgba, RgbaImage};
     use rstest::rstest;
+
+    /// A message that is already one trimmed line is what it was.
+    #[cfg(any(feature = "server", feature = "wasm"))]
+    #[test]
+    fn single_line_leaves_a_line_alone() {
+        assert_eq!(
+            single_line("quality must be between 1 and 100"),
+            "quality must be between 1 and 100"
+        );
+        assert_eq!(single_line(""), "");
+    }
+
+    /// The wording a decoder in a dependency produced, which ends with a newline.
+    #[cfg(any(feature = "server", feature = "wasm"))]
+    #[test]
+    fn single_line_folds_a_message_that_leaves_its_line() {
+        assert_eq!(
+            single_line("Format error decoding Jpeg: Not enough bytes\n"),
+            "Format error decoding Jpeg: Not enough bytes"
+        );
+        assert_eq!(single_line("first\nsecond"), "first second");
+        assert_eq!(single_line("first\r\n\tsecond"), "first second");
+        assert_eq!(single_line("  padded  "), "padded");
+    }
 
     fn jpeg_artifact() -> Artifact {
         Artifact::new(vec![1, 2, 3], MediaType::Jpeg, ArtifactMetadata::default())

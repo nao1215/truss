@@ -425,7 +425,7 @@ pub(super) fn problem_detail_body(class: ErrorClass, detail: &str) -> Vec<u8> {
         "type": class.uri(),
         "title": class.title(),
         "status": status,
-        "detail": detail,
+        "detail": crate::core::single_line(detail),
     }))
     .expect("serialize problem detail body");
     body.push(b'\n');
@@ -492,6 +492,22 @@ mod tests {
     fn test_problem_detail_body_ends_with_newline() {
         let body = problem_detail_body(ErrorClass::InternalError, "boom");
         assert_eq!(*body.last().unwrap(), b'\n');
+    }
+
+    /// A message from a decoder in a dependency can carry a newline, which the CLI cannot
+    /// print on one line and a reader of the JSON has no use for.
+    #[test]
+    fn problem_detail_body_folds_a_detail_that_leaves_its_line() {
+        let body = problem_detail_body(
+            ErrorClass::DecodeFailed,
+            "Format error decoding Jpeg: Not enough bytes\n",
+        );
+        let value: serde_json::Value = serde_json::from_slice(&body).expect("parse the body");
+
+        assert_eq!(
+            value["detail"],
+            "Format error decoding Jpeg: Not enough bytes"
+        );
     }
 
     #[test]
