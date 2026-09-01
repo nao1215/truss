@@ -1883,6 +1883,122 @@ fn validate_sharpen(value: Option<f32>) -> Result<(), TransformError> {
     Ok(())
 }
 
+/// Reads a quality of any width and judges it by the range truss publishes.
+///
+/// Deserializing straight into the `u8` the field holds makes `serde` refuse 256 with
+/// `invalid value: integer 256, expected u8`, which names a Rust type and a limit that is
+/// not truss's. Both the HTTP payload and the Wasm options object read this, so the two
+/// answer the same way.
+pub(crate) fn deserialize_quality<'de, D>(deserializer: D) -> Result<Option<u8>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    // A value the field can hold is handed on for `normalize` to judge, so 101 reads the
+    // same sentence from the same place on every adapter. Only a value too large to be
+    // held is refused here, with the sentence that check would have given.
+    deserialize_ranged(deserializer, |value| match u8::try_from(value) {
+        Ok(quality) => Ok(quality),
+        Err(_) => {
+            Err(validate_quality_value(value).expect_err("a value outside u8 is outside 1..=100"))
+        }
+    })
+}
+
+/// Reads a width of any width and judges it by [`validate_width_value`].
+pub(crate) fn deserialize_width<'de, D>(deserializer: D) -> Result<Option<u32>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_ranged(deserializer, validate_width_value)
+}
+
+/// Reads a height of any width and judges it by [`validate_height_value`].
+pub(crate) fn deserialize_height<'de, D>(deserializer: D) -> Result<Option<u32>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_ranged(deserializer, validate_height_value)
+}
+
+fn deserialize_ranged<'de, D, T>(
+    deserializer: D,
+    validate: impl FnOnce(i64) -> Result<T, &'static str>,
+) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize as _;
+    use serde::de::Error as _;
+    match Option::<i64>::deserialize(deserializer)? {
+        None => Ok(None),
+        Some(value) => validate(value).map(Some).map_err(D::Error::custom),
+    }
+}
+
+/// Reads a rotation of any width and reduces it to a single turn.
+///
+/// The option documents that an angle past a full turn wraps, and the CLI takes any whole
+/// number of degrees; deserializing into `i32` made the two adapters that do it refuse what
+/// the CLI accepts.
+pub(crate) fn deserialize_rotation_degrees<'de, D>(deserializer: D) -> Result<Option<i32>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize as _;
+    Ok(Option::<i64>::deserialize(deserializer)?.map(|degrees| (degrees % 360) as i32))
+}
+
+/// The rules a width has to satisfy before any image has been read.
+///
+/// A number that fits is handed back so that the rules needing the image report it where
+/// they always did, with the class they always had: zero is `width must be greater than
+/// zero` from `normalize`, and a size past `MAX_OUTPUT_PIXELS` is the pixel count the
+/// transform reports. Only a number that cannot be a count of pixels at all is refused
+/// here, and it says which of the two things is wrong rather than naming the integer it
+/// would have been stored in.
+pub(crate) fn validate_width_value(value: i64) -> Result<u32, &'static str> {
+    dimension_value(
+        value,
+        "width must be greater than zero",
+        "width is too large to be a number of pixels",
+    )
+}
+
+/// The same for a height. See [`validate_width_value`].
+pub(crate) fn validate_height_value(value: i64) -> Result<u32, &'static str> {
+    dimension_value(
+        value,
+        "height must be greater than zero",
+        "height is too large to be a number of pixels",
+    )
+}
+
+/// The rules a watermark margin has to satisfy before any image has been read.
+///
+/// Zero is a margin, so only a negative number and one too large to be a count of pixels are
+/// refused here; a margin that leaves the watermark no room is reported by the pipeline,
+/// which names the sizes involved.
+#[cfg(any(feature = "cli", feature = "server"))]
+pub(crate) fn validate_watermark_margin_value(value: i64) -> Result<u32, &'static str> {
+    dimension_value(
+        value,
+        "watermark margin must not be negative",
+        "watermark margin is too large to be a number of pixels",
+    )
+}
+
+fn dimension_value(
+    value: i64,
+    not_positive: &'static str,
+    too_large: &'static str,
+) -> Result<u32, &'static str> {
+    match u32::try_from(value) {
+        Ok(pixels) => Ok(pixels),
+        Err(_) if value <= 0 => Err(not_positive),
+        Err(_) => Err(too_large),
+    }
+}
+
 /// The range a watermark opacity has to be in, checked against a number of any width.
 ///
 /// The sibling of [`validate_quality_value`], and there for the same reason: 256 is not a
@@ -2974,7 +3090,8 @@ mod tests {
         Artifact, ArtifactMetadata, Dimensions, Fit, MediaType, MetadataPolicy, OptimizeMode,
         Position, QualityMetric, RawArtifact, Rgba8, Rotation, TargetQuality, TransformError,
         TransformOptions, TransformRequest, exif_orientation, sniff_artifact,
-        validate_quality_value, validate_watermark_opacity_value,
+        validate_height_value, validate_quality_value, validate_watermark_opacity_value,
+        validate_width_value,
     };
     #[cfg(feature = "avif")]
     use image::codecs::avif::AvifEncoder;
@@ -4406,6 +4523,47 @@ mod tests {
         }
         for value in [1_i64, 50, 100] {
             assert_eq!(validate_quality_value(value), Ok(value as u8), "{value}");
+        }
+    }
+
+    /// A dimension that cannot be a number of pixels says which of the two things is wrong,
+    /// and never names the integer it would be stored in.
+    ///
+    /// `--width 4294967296` was answered `4294967296 is not in 0..=4294967295`, the span of
+    /// a `u32`, while `--quality 256` had been given the documented range in v0.20.0.
+    #[test]
+    fn a_dimension_that_cannot_be_a_pixel_count_says_which_half_is_wrong() {
+        for value in [1_i64, 2, 100, u32::MAX as i64] {
+            assert_eq!(validate_width_value(value), Ok(value as u32), "{value}");
+            assert_eq!(validate_height_value(value), Ok(value as u32), "{value}");
+        }
+        // Zero fits, and is reported where it always was, with the class it always had.
+        assert_eq!(validate_width_value(0), Ok(0));
+        assert_eq!(validate_height_value(0), Ok(0));
+
+        for value in [-1_i64, i64::MIN] {
+            assert_eq!(
+                validate_width_value(value),
+                Err("width must be greater than zero"),
+                "{value}"
+            );
+            assert_eq!(
+                validate_height_value(value),
+                Err("height must be greater than zero"),
+                "{value}"
+            );
+        }
+        for value in [u32::MAX as i64 + 1, i64::MAX] {
+            assert_eq!(
+                validate_width_value(value),
+                Err("width is too large to be a number of pixels"),
+                "{value}"
+            );
+            assert_eq!(
+                validate_height_value(value),
+                Err("height is too large to be a number of pixels"),
+                "{value}"
+            );
         }
     }
 
