@@ -292,7 +292,6 @@ impl AvifInspection {
 /// # Errors
 ///
 /// Returns [`TransformError::DecodeFailed`] when the container cannot be walked.
-#[cfg(feature = "avif")]
 /// Reports whether the file carries metadata items a strip policy would remove.
 ///
 /// The passthrough that keeps `optimize` from returning more bytes than it was given needs
@@ -334,6 +333,7 @@ pub(crate) fn avif_carries_metadata(bytes: &[u8]) -> bool {
     walk(bytes)
 }
 
+#[cfg(feature = "avif")]
 pub(crate) fn avif_clean_aperture(
     bytes: &[u8],
 ) -> Result<Option<AvifCleanAperture>, TransformError> {

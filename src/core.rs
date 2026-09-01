@@ -6,7 +6,10 @@ use std::str::FromStr;
 use std::time::Duration;
 
 #[cfg(feature = "avif")]
-pub(crate) use avif::{avif_carries_metadata, avif_clean_aperture};
+pub(crate) use avif::avif_clean_aperture;
+// Not gated with the decoder: `smaller_passthrough` is compiled in every build and reads
+// this, and the container walk needs no decoder anyway.
+pub(crate) use avif::avif_carries_metadata;
 use avif::{avif_orientation, has_avif_brand, sniff_avif};
 
 // The shared failure vocabulary is only read by the adapters, so a build with none of them

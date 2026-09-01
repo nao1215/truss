@@ -287,11 +287,10 @@ pub fn transform_svg(request: TransformRequest) -> Result<TransformResult, Trans
     // The crop follows the rotation and precedes the resize, which is where the pipeline
     // puts it. The rectangle was scaled into the render space above.
     let rgba_image = match scaled_crop {
-        Some(crop) => crate::codecs::raster::crop_to_region(
-            image::DynamicImage::ImageRgba8(rgba_image),
-            crop,
-        )?
-        .into_rgba8(),
+        Some(crop) => {
+            crate::codecs::raster::apply_crop(image::DynamicImage::ImageRgba8(rgba_image), crop)?
+                .into_rgba8()
+        }
         None => rgba_image,
     };
 
@@ -341,7 +340,7 @@ pub fn transform_svg(request: TransformRequest) -> Result<TransformResult, Trans
     // The watermark is the last stage before the encode, after the grayscale, so an overlay
     // keeps its own colours. The raster codec owns the compositing and the fit check.
     let rgba_image = match normalized.watermark {
-        Some(ref watermark) => crate::codecs::raster::composite_watermark(
+        Some(ref watermark) => crate::codecs::raster::apply_watermark(
             image::DynamicImage::ImageRgba8(rgba_image),
             watermark,
         )?
