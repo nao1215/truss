@@ -1596,9 +1596,12 @@ fn smaller_passthrough(normalized: &NormalizedTransformRequest, encoded: &[u8]) 
         MediaType::Png => png_bytes_satisfying_metadata_policy(
             &normalized.input.bytes,
             normalized.options.metadata_policy,
-        )?
-        .to_vec(),
+        )?,
         MediaType::Webp => webp_bytes_satisfying_metadata_policy(
+            &normalized.input.bytes,
+            normalized.options.metadata_policy,
+        )?,
+        MediaType::Avif => avif_bytes_satisfying_metadata_policy(
             &normalized.input.bytes,
             normalized.options.metadata_policy,
         )?,
@@ -1608,18 +1611,25 @@ fn smaller_passthrough(normalized: &NormalizedTransformRequest, encoded: &[u8]) 
     (candidate.len() < encoded.len()).then_some(candidate)
 }
 
-/// Returns the PNG unchanged when it carries no metadata the policy would remove.
+/// Returns the PNG with the metadata chunks the policy removes taken out, or `None` when
+/// the container cannot be walked.
 ///
-/// This never rewrites the container. Either the file already satisfies the policy and can
-/// be handed back byte for byte, or it does not and the re-encode stands: filtering chunks
-/// would mean deciding what every ancillary chunk means, and that is a larger contract than
-/// "do not make the file bigger" needs.
+/// This used to decline whenever the file carried anything the policy would strip, on the
+/// grounds that filtering chunks would mean deciding what every ancillary chunk means. That
+/// is a larger contract than this needs and it left the size guarantee holding only for a
+/// PNG with no metadata at all, which almost nothing writes: ImageMagick, GIMP, Photoshop,
+/// and optipng all add a text chunk, and a 16-colour indexed PNG carrying one came back 42
+/// percent larger than it arrived. No such decision is required, because the chunks truss
+/// treats as metadata are a closed set named right here: one of those is dropped and
+/// everything else is copied, which is what "the policy says nothing about it" means. It is
+/// also what [`webp_bytes_satisfying_metadata_policy`] already does for the other container
+/// with an ancillary chunk space.
 fn png_bytes_satisfying_metadata_policy(
     bytes: &[u8],
     metadata_policy: MetadataPolicy,
-) -> Option<&[u8]> {
+) -> Option<Vec<u8>> {
     if metadata_policy == MetadataPolicy::KeepAll {
-        return Some(bytes);
+        return Some(bytes.to_vec());
     }
 
     // The chunks truss treats as metadata: an ICC profile, EXIF, and the three text forms
@@ -1635,17 +1645,40 @@ fn png_bytes_satisfying_metadata_policy(
 
     // Past the 8-byte PNG signature; a shorter input never reaches here, because it would
     // not have sniffed as a PNG.
+    let mut kept_bytes = Vec::with_capacity(bytes.len());
+    kept_bytes.extend_from_slice(bytes.get(..8)?);
     let mut offset = 8;
     while offset + 8 <= bytes.len() {
         let length = u32::from_be_bytes(bytes.get(offset..offset + 4)?.try_into().ok()?) as usize;
         let chunk_type: &[u8; 4] = bytes.get(offset + 4..offset + 8)?.try_into().ok()?;
-        if chunk_type != kept && METADATA_CHUNKS.contains(&chunk_type) {
-            return None;
+        let end = offset.checked_add(12)?.checked_add(length)?;
+        let chunk = bytes.get(offset..end)?;
+        if chunk_type == kept || !METADATA_CHUNKS.contains(&chunk_type) {
+            kept_bytes.extend_from_slice(chunk);
         }
         if chunk_type == b"IEND" {
-            return Some(bytes);
+            return Some(kept_bytes);
         }
-        offset = offset.checked_add(12)?.checked_add(length)?;
+        offset = end;
+    }
+
+    None
+}
+
+/// Returns the AVIF unchanged when it carries no metadata the policy would remove.
+///
+/// AVIF is the one output format truss cannot write metadata into at all: the encoder
+/// refuses `--keep-metadata` with `metadata retention is not implemented for avif output`,
+/// so the only policies that reach here are the ones that strip. That leaves nothing to
+/// rewrite and only a question to answer, which is whether the input has anything to strip.
+/// Without this arm an AVIF re-encode was never compared against the bytes it came from,
+/// and a small AVIF came back larger than it arrived.
+fn avif_bytes_satisfying_metadata_policy(
+    bytes: &[u8],
+    metadata_policy: MetadataPolicy,
+) -> Option<Vec<u8>> {
+    if metadata_policy == MetadataPolicy::KeepAll || !crate::core::avif_carries_metadata(bytes) {
+        return Some(bytes.to_vec());
     }
 
     None
@@ -6867,6 +6900,81 @@ mod tests {
         assert_eq!(result.artifact.metadata.width, Some(32));
     }
 
+    /// The never-grow guarantee has to survive a PNG that carries metadata, which is most
+    /// PNGs: ImageMagick, GIMP, Photoshop, and optipng all write a text chunk. Declining to
+    /// build a candidate when one is present left the re-encode standing however large it
+    /// was, so a 16-colour indexed PNG came back 42 percent bigger under the default policy.
+    #[test]
+    fn optimizing_a_png_that_carries_metadata_does_not_grow_it() {
+        for chunk in [b"tEXt", b"zTXt", b"iTXt", b"iCCP", b"eXIf"] {
+            let mut bytes = noisy_indexed_png_bytes();
+            let iend = bytes.len() - 12;
+            let mut with_metadata = bytes.split_off(iend);
+            push_png_chunk(
+                &mut bytes,
+                chunk,
+                b"truss\0some metadata worth several bytes",
+            );
+            bytes.append(&mut with_metadata);
+            let input_length = bytes.len();
+
+            let artifact = sniff_artifact(RawArtifact::new(bytes, None)).expect("sniff png");
+            for mode in [OptimizeMode::Auto, OptimizeMode::Lossless] {
+                let optimized = optimize_bytes(artifact.clone(), mode);
+                assert!(
+                    optimized.len() <= input_length,
+                    "{} {mode}: {input_length} became {}",
+                    String::from_utf8_lossy(chunk),
+                    optimized.len()
+                );
+                // Every optimize mode resolves to `PreserveIcc`, which keeps the profile on
+                // purpose so the re-encode does not shift the colours. The other four are
+                // metadata the policy removes, and they have to be gone.
+                if chunk != b"iCCP" {
+                    assert!(
+                        !optimized
+                            .windows(4)
+                            .any(|window| window == chunk.as_slice()),
+                        "{} {mode}: the chunk the policy strips is still there",
+                        String::from_utf8_lossy(chunk)
+                    );
+                }
+            }
+        }
+    }
+
+    /// An AVIF had no arm in the passthrough at all, so its re-encode was never compared
+    /// against the input and could come back larger.
+    #[cfg(feature = "avif")]
+    #[test]
+    fn optimizing_an_avif_does_not_grow_it() {
+        // Encoded at a low quality so the file is small, which is the shape that made the
+        // missing arm visible: a small AVIF re-encodes larger than it arrived.
+        let mut state = 0x2545_F491_4F6C_DD1D_u64;
+        let source = image::RgbaImage::from_fn(64, 48, |_, _| {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1);
+            let value = (state >> 33) as u8;
+            image::Rgba([value, value.wrapping_mul(3), value.wrapping_add(97), 255])
+        });
+        let mut bytes = Vec::new();
+        image::codecs::avif::AvifEncoder::new_with_speed_quality(&mut bytes, 10, 5)
+            .write_image(source.as_raw(), 64, 48, image::ExtendedColorType::Rgba8)
+            .expect("encode avif");
+        let input_length = bytes.len();
+        let artifact = sniff_artifact(RawArtifact::new(bytes, None)).expect("sniff avif");
+
+        for mode in [OptimizeMode::Auto, OptimizeMode::Lossy] {
+            let optimized = optimize_bytes(artifact.clone(), mode);
+            assert!(
+                optimized.len() <= input_length,
+                "{mode}: {input_length} became {}",
+                optimized.len()
+            );
+        }
+    }
+
     /// An indexed PNG has no encoder here, so it comes back as truecolour and grows.
     /// Handing back the input keeps both the size and the colour model.
     #[test]
@@ -6916,8 +7024,8 @@ mod tests {
         ] {
             assert_eq!(
                 png_bytes_satisfying_metadata_policy(&clean, policy),
-                Some(clean.as_slice()),
-                "a PNG with no metadata satisfies {policy:?}"
+                Some(clean.clone()),
+                "a PNG with no metadata is handed back unchanged under {policy:?}"
             );
         }
 
@@ -6925,7 +7033,7 @@ mod tests {
         insert_png_text_chunk(&mut with_text, b"a comment");
         assert_eq!(
             png_bytes_satisfying_metadata_policy(&with_text, MetadataPolicy::KeepAll),
-            Some(with_text.as_slice()),
+            Some(with_text.clone()),
             "keeping everything is satisfied by anything"
         );
         for policy in [
@@ -6933,10 +7041,11 @@ mod tests {
             MetadataPolicy::PreserveIcc,
             MetadataPolicy::PreserveExif,
         ] {
+            let kept = png_bytes_satisfying_metadata_policy(&with_text, policy)
+                .expect("the container is walkable");
             assert_eq!(
-                png_bytes_satisfying_metadata_policy(&with_text, policy),
-                None,
-                "{policy:?} removes the text chunk, so the file has to be re-encoded"
+                kept, clean,
+                "{policy:?} removes the text chunk and leaves the rest alone"
             );
         }
     }
@@ -6952,6 +7061,49 @@ mod tests {
             png_bytes_satisfying_metadata_policy(&truncated, MetadataPolicy::StripAll),
             None
         );
+    }
+
+    /// A 16-colour indexed PNG whose indices are noise, so the palette is doing real work.
+    ///
+    /// The flat fixture beside this one re-encodes smaller than it started, which makes the
+    /// never-grow guarantee hold for the wrong reason. A picture the palette compresses and
+    /// a truecolour re-encode does not is what puts the guarantee under load.
+    fn noisy_indexed_png_bytes() -> Vec<u8> {
+        let mut bytes = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+        let mut ihdr = Vec::new();
+        ihdr.extend_from_slice(&64u32.to_be_bytes());
+        ihdr.extend_from_slice(&48u32.to_be_bytes());
+        ihdr.extend_from_slice(&[8, 3, 0, 0, 0]);
+        push_png_chunk(&mut bytes, b"IHDR", &ihdr);
+
+        let mut palette = Vec::new();
+        for index in 0..16u8 {
+            palette.extend_from_slice(&[index * 17, 255 - index * 17, index * 9]);
+        }
+        push_png_chunk(&mut bytes, b"PLTE", &palette);
+
+        // A fixed-seed linear congruential sequence, so the fixture is the same on every run.
+        let mut state = 0x2545_F491_4F6C_DD1D_u64;
+        let mut raw = Vec::new();
+        for _ in 0..48u32 {
+            // The per-row filter byte, which is zero because the row is stored as it is.
+            raw.extend_from_slice(&[0]);
+            for _ in 0..64u32 {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1);
+                raw.push(((state >> 33) % 16) as u8);
+            }
+        }
+        let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::best());
+        std::io::Write::write_all(&mut encoder, &raw).expect("deflate");
+        push_png_chunk(
+            &mut bytes,
+            b"IDAT",
+            &encoder.finish().expect("finish deflate"),
+        );
+        push_png_chunk(&mut bytes, b"IEND", &[]);
+        bytes
     }
 
     /// A 4-colour indexed PNG, written by hand so the test carries its own fixture.
