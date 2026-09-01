@@ -876,3 +876,117 @@ fn serve_once_rejects_a_json_transform_that_carries_an_unknown_query_name() {
         "the refusal names what was sent: {body}"
     );
 }
+
+/// The number a caller sent is judged against the range truss publishes, not against the
+/// width of the integer it is stored in.
+///
+/// `{"quality": 255}` was answered `quality must be between 1 and 100` and
+/// `{"quality": 256}` was answered `invalid value: integer 256, expected u8`, so one option
+/// had two limits and the one at 256 named a Rust type the API never mentions.
+#[test]
+#[serial]
+fn an_out_of_range_quality_reports_the_documented_range_at_any_width() {
+    let storage = temp_dir("quality-range");
+    fs::write(storage.join("source.png"), common::png_bytes()).expect("write source");
+    let config = ServerConfig::new(storage, Some("secret".to_string()));
+    let (addr, handle) = spawn_server(config);
+
+    let body = r#"{"source":{"kind":"path","path":"source.png"},"options":{"format":"jpeg","quality":256}}"#;
+    let response = send_transform_request(addr, body, Some("secret"));
+    handle
+        .join()
+        .expect("join server thread")
+        .expect("serve one request");
+
+    let (header, _content_type, body) = split_response(&response);
+    let detail = String::from_utf8_lossy(&body);
+    assert!(header.starts_with("HTTP/1.1 400"), "{header}");
+    assert!(
+        detail.contains("quality must be between 1 and 100"),
+        "the documented range is what a caller can act on: {detail}"
+    );
+    assert!(
+        !detail.contains("u8"),
+        "the integer the option is stored in is not the caller's vocabulary: {detail}"
+    );
+}
+
+/// An angle past a full turn wraps, and how many turns it is past does not change that.
+///
+/// The CLI takes `--rotate 9999999999`; the server refused it with `expected i32`, so the
+/// two adapters disagreed about a value the option's own documentation accepts.
+#[test]
+#[serial]
+fn a_rotation_past_a_full_turn_is_taken_however_large_it_is() {
+    let storage = temp_dir("rotate-wide");
+    fs::write(storage.join("source.png"), common::png_bytes()).expect("write source");
+    let config = ServerConfig::new(storage, Some("secret".to_string()));
+    let (addr, handle) = spawn_server(config);
+
+    let body = r#"{"source":{"kind":"path","path":"source.png"},"options":{"format":"png","rotate":9999999999}}"#;
+    let response = send_transform_request(addr, body, Some("secret"));
+    handle
+        .join()
+        .expect("join server thread")
+        .expect("serve one request");
+
+    let (header, _content_type, _body) = split_response(&response);
+    assert!(
+        header.starts_with("HTTP/1.1 200"),
+        "9999999999 degrees wraps to 279, which is a rotation: {header}"
+    );
+}
+
+/// A body that parses as JSON is not described as one that does not.
+///
+/// Every serde failure was prefixed `request body must be valid JSON`, so a caller who sent
+/// a syntactically perfect document with one value out of range was sent to look for a
+/// syntax error that was not there.
+#[test]
+#[serial]
+fn a_valid_json_body_with_a_bad_value_is_not_called_invalid_json() {
+    let storage = temp_dir("json-classify-data");
+    fs::write(storage.join("source.png"), common::png_bytes()).expect("write source");
+    let config = ServerConfig::new(storage, Some("secret".to_string()));
+    let (addr, handle) = spawn_server(config);
+
+    let body = r#"{"source":{"kind":"path","path":"source.png"},"options":{"width":"wide"}}"#;
+    let response = send_transform_request(addr, body, Some("secret"));
+    handle
+        .join()
+        .expect("join server thread")
+        .expect("serve one request");
+
+    let (header, _content_type, body) = split_response(&response);
+    let detail = String::from_utf8_lossy(&body);
+    assert!(header.starts_with("HTTP/1.1 400"), "{header}");
+    assert!(
+        !detail.contains("must be valid JSON"),
+        "the document is valid JSON; what is wrong is the value: {detail}"
+    );
+}
+
+/// The other half: a body that really is malformed still says so, so the sentence keeps
+/// meaning something.
+#[test]
+#[serial]
+fn a_malformed_body_is_still_called_invalid_json() {
+    let storage = temp_dir("json-classify-syntax");
+    let config = ServerConfig::new(storage, Some("secret".to_string()));
+    let (addr, handle) = spawn_server(config);
+
+    let body = r#"{"source":{"kind":"path","path":"a.png"} "options":{}}"#;
+    let response = send_transform_request(addr, body, Some("secret"));
+    handle
+        .join()
+        .expect("join server thread")
+        .expect("serve one request");
+
+    let (header, _content_type, body) = split_response(&response);
+    let detail = String::from_utf8_lossy(&body);
+    assert!(header.starts_with("HTTP/1.1 400"), "{header}");
+    assert!(
+        detail.contains("must be valid JSON"),
+        "a body that is not JSON is exactly what that sentence is for: {detail}"
+    );
+}
