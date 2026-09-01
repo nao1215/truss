@@ -1598,6 +1598,10 @@ fn smaller_passthrough(normalized: &NormalizedTransformRequest, encoded: &[u8]) 
             normalized.options.metadata_policy,
         )?
         .to_vec(),
+        MediaType::Webp => webp_bytes_satisfying_metadata_policy(
+            &normalized.input.bytes,
+            normalized.options.metadata_policy,
+        )?,
         _ => return None,
     };
 
@@ -1645,6 +1649,78 @@ fn png_bytes_satisfying_metadata_policy(
     }
 
     None
+}
+
+/// The WebP container with the metadata chunks the policy names removed, or `None` when
+/// the file is not a WebP truss can rewrite.
+///
+/// Unlike PNG, whose ancillary chunk space is open-ended, a WebP carries metadata in three
+/// chunks the container specification names: `ICCP`, `EXIF`, and `XMP `. Dropping the ones
+/// the policy removes is therefore a decision about a closed set rather than about every
+/// chunk an encoder might have written, which is why this rewrites the container where
+/// `png_bytes_satisfying_metadata_policy` declines to.
+///
+/// The result is the input's own pixels, so it is far smaller than a re-encode: the lossless
+/// WebP encoder reached through the `image` crate is a plain one, and a picture libwebp
+/// compressed well comes back two and a half times its size.
+fn webp_bytes_satisfying_metadata_policy(
+    bytes: &[u8],
+    metadata_policy: MetadataPolicy,
+) -> Option<Vec<u8>> {
+    const ICC_FLAG: u8 = 0x20;
+    const EXIF_FLAG: u8 = 0x08;
+    const XMP_FLAG: u8 = 0x04;
+
+    if metadata_policy == MetadataPolicy::KeepAll {
+        return Some(bytes.to_vec());
+    }
+
+    // Each entry is a chunk the policy may remove, paired with the VP8X flag that
+    // advertises it, so the flags and the chunks cannot fall out of step.
+    let removed: &[(&[u8; 4], u8)] = match metadata_policy {
+        MetadataPolicy::PreserveIcc => &[(b"EXIF", EXIF_FLAG), (b"XMP ", XMP_FLAG)],
+        MetadataPolicy::PreserveExif => &[(b"ICCP", ICC_FLAG), (b"XMP ", XMP_FLAG)],
+        MetadataPolicy::StripAll => &[
+            (b"ICCP", ICC_FLAG),
+            (b"EXIF", EXIF_FLAG),
+            (b"XMP ", XMP_FLAG),
+        ],
+        MetadataPolicy::KeepAll => &[],
+    };
+
+    let chunks = parse_webp_chunks(bytes).ok()?;
+    let is_removed = |fourcc: &[u8; 4]| removed.iter().any(|(name, _)| *name == fourcc);
+    if !chunks.iter().any(|chunk| is_removed(&chunk.fourcc)) {
+        // Nothing to drop, so the file already satisfies the policy byte for byte.
+        return Some(bytes.to_vec());
+    }
+
+    let mut body = Vec::with_capacity(bytes.len());
+    for chunk in &chunks {
+        if is_removed(&chunk.fourcc) {
+            continue;
+        }
+        let payload = bytes.get(chunk.start..chunk.end)?;
+        if &chunk.fourcc == b"VP8X" {
+            // A VP8X that still advertises a chunk that is gone makes the file invalid.
+            let mut vp8x = payload.to_vec();
+            let flags = vp8x.first_mut()?;
+            for (_, flag) in removed {
+                *flags &= !flag;
+            }
+            push_webp_chunk(&mut body, b"VP8X", &vp8x);
+            continue;
+        }
+        push_webp_chunk(&mut body, &chunk.fourcc, payload);
+    }
+
+    let riff_size = u32::try_from(body.len() + 4).ok()?;
+    let mut out = Vec::with_capacity(body.len() + 12);
+    out.extend_from_slice(b"RIFF");
+    out.extend_from_slice(&riff_size.to_le_bytes());
+    out.extend_from_slice(b"WEBP");
+    out.extend_from_slice(&body);
+    Some(out)
 }
 
 /// The message for a lossless JPEG request that cannot be served as a passthrough.
@@ -3275,6 +3351,10 @@ mod tests {
 
     /// A flat-colour JPEG written by an encoder that is not this crate's.
     const FLAT_JPEG: &[u8] = include_bytes!("../../integration/fixtures/flat.jpg");
+    /// A lossless WebP written by libwebp, which compresses it far better than the plain
+    /// encoder the image crate offers.
+    const LIBWEBP_LOSSLESS: &[u8] =
+        include_bytes!("../../integration/fixtures/libwebp-lossless.webp");
 
     /// Reads a RIFF chunk payload straight out of a WebP container.
     fn webp_chunk_payload(bytes: &[u8], fourcc: &[u8; 4]) -> Option<Vec<u8>> {
@@ -4277,6 +4357,89 @@ mod tests {
         assert_eq!(
             result.warnings,
             vec![TransformWarning::MetadataDropped(MetadataKind::Iptc)]
+        );
+    }
+
+    /// The rewrite drops exactly the chunks the policy names and leaves the container
+    /// readable, so the input's own pixels stay a legal answer for a policy that strips.
+    #[rstest]
+    #[case(MetadataPolicy::StripAll, &[])]
+    #[case(MetadataPolicy::PreserveIcc, &[b"ICCP"])]
+    #[case(MetadataPolicy::PreserveExif, &[b"EXIF"])]
+    fn webp_bytes_satisfying_metadata_policy_drops_only_what_the_policy_names(
+        #[case] policy: MetadataPolicy,
+        #[case] kept: &[&[u8; 4]],
+    ) {
+        use super::{inject_webp_metadata, webp_bytes_satisfying_metadata_policy};
+
+        let plain = transform_raster(TransformRequest::new(
+            png_artifact(9, 5, Rgba([10, 20, 30, 255])),
+            TransformOptions {
+                format: Some(MediaType::Webp),
+                quality: Some(80),
+                ..TransformOptions::default()
+            },
+        ))
+        .expect("encode lossy webp")
+        .artifact
+        .bytes;
+        let carrying = inject_webp_metadata(&plain, Some(b"icc"), Some(b"exif"), Some(b"xmp"))
+            .expect("inject");
+
+        let rewritten = webp_bytes_satisfying_metadata_policy(&carrying, policy)
+            .expect("a WebP container truss wrote is one it can rewrite");
+
+        for fourcc in [b"ICCP", b"EXIF", b"XMP "] {
+            assert_eq!(
+                webp_chunk_payload(&rewritten, fourcc).is_some(),
+                kept.contains(&fourcc),
+                "{}",
+                String::from_utf8_lossy(fourcc)
+            );
+        }
+        let vp8x = webp_chunk_payload(&rewritten, b"VP8X").expect("VP8X chunk");
+        // ICC (0x20) | EXIF (0x08) | XMP (0x04): a flag for a chunk that is gone would
+        // make the file invalid.
+        assert_eq!(
+            vp8x[0] & 0x2C,
+            kept.iter().fold(0u8, |flags, fourcc| flags
+                | match *fourcc {
+                    b"ICCP" => 0x20,
+                    b"EXIF" => 0x08,
+                    _ => 0x04,
+                }),
+        );
+        assert!(rewritten.len() < carrying.len());
+        image::load_from_memory(&rewritten).expect("the rewritten container still decodes");
+    }
+
+    /// A policy that keeps everything has nothing to drop, so the file is its own answer.
+    #[test]
+    fn webp_bytes_satisfying_metadata_policy_returns_a_kept_file_byte_for_byte() {
+        use super::{inject_webp_metadata, webp_bytes_satisfying_metadata_policy};
+
+        let plain = transform_raster(TransformRequest::new(
+            png_artifact(9, 5, Rgba([10, 20, 30, 255])),
+            TransformOptions {
+                format: Some(MediaType::Webp),
+                quality: Some(80),
+                ..TransformOptions::default()
+            },
+        ))
+        .expect("encode lossy webp")
+        .artifact
+        .bytes;
+        let carrying = inject_webp_metadata(&plain, Some(b"icc"), Some(b"exif"), Some(b"xmp"))
+            .expect("inject");
+
+        assert_eq!(
+            webp_bytes_satisfying_metadata_policy(&carrying, MetadataPolicy::KeepAll).as_deref(),
+            Some(&carrying[..])
+        );
+        // And so does a file that carries none of the three, whatever the policy is.
+        assert_eq!(
+            webp_bytes_satisfying_metadata_policy(&plain, MetadataPolicy::StripAll).as_deref(),
+            Some(&plain[..])
         );
     }
 
@@ -6410,6 +6573,12 @@ mod tests {
         // or a phone looks like, and is where a re-encode costs more than it saves.
         let mut inputs = vec![
             sniff_artifact(RawArtifact::new(FLAT_JPEG.to_vec(), None)).expect("sniff flat.jpg"),
+            // The same argument in the other container the passthrough can return. The
+            // lossless WebP encoder reached through the image crate is a plain one, so a
+            // picture libwebp compressed well comes back from a re-encode two and a half
+            // times its size.
+            sniff_artifact(RawArtifact::new(LIBWEBP_LOSSLESS.to_vec(), None))
+                .expect("sniff libwebp-lossless.webp"),
         ];
         for size in [32, 64, 128, 256] {
             inputs.push(flat_jpeg_artifact(size, size));
