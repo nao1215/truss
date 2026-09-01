@@ -155,7 +155,11 @@ pub(super) fn emit_access_log(config: &ServerConfig, entry: &AccessLogEntry<'_>)
     );
 }
 
-pub(super) fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io::Result<()> {
+pub(super) fn handle_stream(
+    mut stream: TcpStream,
+    accepted_at: Instant,
+    config: &ServerConfig,
+) -> io::Result<()> {
     // Prevent slow or stalled clients from blocking the accept loop indefinitely.
     if let Err(err) = stream.set_read_timeout(Some(SOCKET_READ_TIMEOUT)) {
         config.log_warn(&format!("failed to set socket read timeout: {err}"));
@@ -195,9 +199,19 @@ pub(super) fn handle_stream(mut stream: TcpStream, config: &ServerConfig) -> io:
             }
         };
 
-        // Start timing after headers are read so latency reflects server
-        // processing time, not client send / socket-wait time.
-        let start = Instant::now();
+        // The first request on a connection is charged from the moment the connection was
+        // accepted, because everything between then and here is the server: the wait for a
+        // free worker, which on a saturated server is most of what the client experiences,
+        // and the header read, which the deadline bounds. Charging from here instead logged
+        // an eleven-second liveness probe as zero milliseconds and reported the same in
+        // `truss_http_request_duration_seconds`, which `docs/prometheus.md` calls end to
+        // end. Later requests on a keep-alive connection waited for no worker, and the idle
+        // time before them is not part of any request, so they are charged from here.
+        let start = if requests_served == 0 {
+            accepted_at
+        } else {
+            Instant::now()
+        };
 
         let request_id =
             extract_request_id(&partial.headers).unwrap_or_else(|| Uuid::new_v4().to_string());
