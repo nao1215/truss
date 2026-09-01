@@ -388,54 +388,55 @@ mod tests {
         path
     }
 
-    /// A write that fails leaves the destination as it was.
+    /// A replacement swaps a new file in rather than emptying the old one.
     ///
-    /// `RLIMIT_FSIZE` of zero makes every write fail with `EFBIG` while the open that
-    /// truncates the file still succeeds, which is the shape a full disk and a filled
-    /// quota have: the destination is emptied and then nothing is written into it. The
-    /// limit is process-wide, so the test is serial and restores what it changed.
+    /// `fs::write` opens the destination and truncates it, so a write that stops partway,
+    /// on a full disk or a filled quota, leaves a file shorter than the image it held. The
+    /// bytes go to a temporary file and are renamed over the destination instead, which
+    /// this checks by the inode: a truncating write keeps it, a rename replaces it. The
+    /// process-wide file size limit would reproduce the partial write directly, and it is
+    /// not used here because it applies to every test running beside this one.
     #[cfg(unix)]
     #[test]
-    #[serial_test::serial]
-    fn a_failed_write_leaves_the_previous_file_in_place() {
-        let dir = temp_dir("write-failure");
-        let destination = dir.join("out.png");
-        let previous = b"the bytes that were already there".to_vec();
-        fs::write(&destination, &previous).expect("write the destination");
+    fn replacing_a_file_swaps_it_in_rather_than_truncating_it() {
+        use std::os::unix::fs::MetadataExt;
 
-        let previous_signal = unsafe { libc::signal(libc::SIGXFSZ, libc::SIG_IGN) };
-        let mut original = libc::rlimit {
-            rlim_cur: 0,
-            rlim_max: 0,
-        };
-        assert_eq!(
-            unsafe { libc::getrlimit(libc::RLIMIT_FSIZE, &mut original) },
-            0,
-            "read the current file size limit"
-        );
-        let zero = libc::rlimit {
-            rlim_cur: 0,
-            rlim_max: original.rlim_max,
-        };
-        assert_eq!(
-            unsafe { libc::setrlimit(libc::RLIMIT_FSIZE, &zero) },
-            0,
-            "forbid writing any bytes"
-        );
+        let dir = temp_dir("write-swap");
+        let destination = dir.join("out.png");
+        fs::write(&destination, b"the bytes that were already there").expect("write it");
+        let before = fs::metadata(&destination).expect("stat it").ino();
 
         let mut stdout = Vec::new();
-        let result = write_output_bytes(
-            OutputTarget::Path(destination.clone()),
-            b"a new image that cannot be written",
-            &mut stdout,
+        write_output_bytes(OutputTarget::Path(destination.clone()), b"new", &mut stdout)
+            .expect("the write succeeds");
+
+        let after = fs::metadata(&destination).expect("stat it again").ino();
+        let content = fs::read(&destination).expect("read it back");
+        let _ = fs::remove_dir_all(&dir);
+
+        assert_eq!(content, b"new");
+        assert_ne!(
+            before, after,
+            "the destination was written in place, so a failure partway would truncate it"
         );
+    }
 
-        unsafe {
-            libc::setrlimit(libc::RLIMIT_FSIZE, &original);
-            libc::signal(libc::SIGXFSZ, previous_signal);
-        }
+    /// A replacement that cannot be completed leaves the destination alone and takes its
+    /// temporary file with it.
+    #[test]
+    fn a_replacement_that_fails_leaves_nothing_behind() {
+        let dir = temp_dir("write-failure");
+        // A non-empty directory cannot be renamed over, and it is a destination whose
+        // contents are observable afterwards.
+        let destination = dir.join("occupied");
+        fs::create_dir(&destination).expect("create the destination directory");
+        fs::write(destination.join("inside"), b"still here").expect("fill it");
 
-        let after = fs::read(&destination).expect("read the destination back");
+        let mut stdout = Vec::new();
+        let result =
+            write_output_bytes(OutputTarget::Path(destination.clone()), b"new", &mut stdout);
+
+        let inside = fs::read(destination.join("inside")).expect("read what was inside");
         let leftovers: Vec<PathBuf> = fs::read_dir(&dir)
             .expect("list the directory")
             .filter_map(|entry| entry.ok().map(|entry| entry.path()))
@@ -444,52 +445,11 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
 
         assert!(result.is_err(), "the write failed and has to say so");
-        assert_eq!(
-            after, previous,
-            "a failed write must not replace the file it was going to overwrite"
-        );
+        assert_eq!(inside, b"still here");
         assert!(
             leftovers.is_empty(),
             "a failed write left files behind: {leftovers:?}"
         );
-    }
-
-    /// The same failure with the input and the output being one file, which is the case
-    /// where the bytes exist nowhere else.
-    #[cfg(unix)]
-    #[test]
-    #[serial_test::serial]
-    fn a_failed_in_place_write_leaves_the_only_copy_alone() {
-        let dir = temp_dir("write-failure-in-place");
-        let path = dir.join("photo.png");
-        let previous = crate::test_support::flat_png(4, 3);
-        fs::write(&path, &previous).expect("write the only copy");
-
-        let previous_signal = unsafe { libc::signal(libc::SIGXFSZ, libc::SIG_IGN) };
-        let mut original = libc::rlimit {
-            rlim_cur: 0,
-            rlim_max: 0,
-        };
-        unsafe { libc::getrlimit(libc::RLIMIT_FSIZE, &mut original) };
-        let zero = libc::rlimit {
-            rlim_cur: 0,
-            rlim_max: original.rlim_max,
-        };
-        unsafe { libc::setrlimit(libc::RLIMIT_FSIZE, &zero) };
-
-        let mut stdout = Vec::new();
-        let result = write_output_bytes(OutputTarget::Path(path.clone()), b"smaller", &mut stdout);
-
-        unsafe {
-            libc::setrlimit(libc::RLIMIT_FSIZE, &original);
-            libc::signal(libc::SIGXFSZ, previous_signal);
-        }
-
-        let after = fs::read(&path).expect("read the file back");
-        let _ = fs::remove_dir_all(&dir);
-
-        assert!(result.is_err());
-        assert_eq!(after, previous, "the source was the destination");
     }
 
     /// A successful write replaces the file and leaves nothing beside it.

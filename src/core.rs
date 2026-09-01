@@ -1892,8 +1892,13 @@ fn validate_watermark(wm: &WatermarkInput) -> Result<(), TransformError> {
 
 /// Resolves the metadata flags into the policy the pipeline applies.
 ///
-/// A lossy re-encode of a profile-tagged image renders with the wrong colors if the profile
-/// is dropped, so a strip request is upgraded to "keep the ICC profile only" for lossy output.
+/// Re-encoding a profile-tagged image renders it in the wrong colors if the profile is
+/// dropped, so a strip request is upgraded to "keep the ICC profile only" whenever an
+/// optimization was asked for. The pixels surviving the encode does not change that: a
+/// lossless optimization writes the same picture and the profile is what says how to read
+/// it. `OptimizeMode::None` is left alone, since that is what a plain `truss convert` does
+/// and stripping is what its flag says.
+///
 /// The upgrade is limited to formats that can actually carry a profile: turning it on for a
 /// format that cannot made `--strip-metadata` fail with "cannot preserve metadata", which left
 /// no flag combination that worked (<https://github.com/nao1215/truss/issues/279>).
@@ -1905,7 +1910,7 @@ fn normalize_metadata_policy(
 ) -> MetadataPolicy {
     if preserve_exif {
         MetadataPolicy::PreserveExif
-    } else if strip_metadata && optimize == OptimizeMode::Lossy && format.supports_icc_profile() {
+    } else if strip_metadata && optimize != OptimizeMode::None && format.supports_icc_profile() {
         MetadataPolicy::PreserveIcc
     } else if strip_metadata {
         MetadataPolicy::StripAll
@@ -3270,6 +3275,48 @@ mod tests {
         .expect("normalize lossy optimize metadata policy");
 
         assert_eq!(normalized.metadata_policy, MetadataPolicy::PreserveIcc);
+    }
+
+    /// Every optimization mode re-encodes, and a profile dropped by any of them renders
+    /// the picture in the wrong colors. Only `none`, which is what `truss convert` does
+    /// when nobody asks for an optimization, strips the way the flag says.
+    #[rstest]
+    #[case::none(OptimizeMode::None, MetadataPolicy::StripAll)]
+    #[case::auto(OptimizeMode::Auto, MetadataPolicy::PreserveIcc)]
+    #[case::lossless(OptimizeMode::Lossless, MetadataPolicy::PreserveIcc)]
+    #[case::lossy(OptimizeMode::Lossy, MetadataPolicy::PreserveIcc)]
+    fn an_optimization_keeps_the_profile_a_plain_encode_strips(
+        #[case] optimize: OptimizeMode,
+        #[case] expected: MetadataPolicy,
+    ) {
+        let normalized = TransformOptions {
+            optimize,
+            strip_metadata: true,
+            format: Some(MediaType::Jpeg),
+            ..TransformOptions::default()
+        }
+        .normalize(MediaType::Jpeg)
+        .expect("normalize the metadata policy");
+
+        assert_eq!(normalized.metadata_policy, expected);
+    }
+
+    /// A format that cannot carry a profile has nothing to preserve, and asking for it
+    /// there is what made `--strip-metadata` fail outright before the upgrade was limited
+    /// to formats that can take one. AVIF is the only such format an optimization mode
+    /// reaches: TIFF and BMP refuse the mode itself.
+    #[test]
+    fn an_optimization_strips_for_a_format_that_carries_no_profile() {
+        let normalized = TransformOptions {
+            optimize: OptimizeMode::Auto,
+            strip_metadata: true,
+            format: Some(MediaType::Avif),
+            ..TransformOptions::default()
+        }
+        .normalize(MediaType::Jpeg)
+        .expect("normalize the metadata policy");
+
+        assert_eq!(normalized.metadata_policy, MetadataPolicy::StripAll);
     }
 
     #[test]

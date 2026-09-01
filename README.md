@@ -364,10 +364,11 @@ By default, truss strips all metadata for smaller and safer output.
 | `--auto-orient` (default) | Apply EXIF orientation tag and reset it |
 | `--no-auto-orient` | Skip EXIF orientation correction |
 
-Lossy optimization (`--mode lossy`, or `--optimize lossy` on `convert`) keeps the ICC profile
-even under `--strip-metadata`: dropping it would make the re-encoded image render with shifted
-colors. Use `--preserve-exif` if you want the profile gone. Formats that cannot carry a profile
-(AVIF, BMP, TIFF) strip it as asked.
+An optimization — `truss optimize` in any mode, or `--optimize auto`, `lossless`, or `lossy`
+on `convert` — keeps the ICC profile even under `--strip-metadata`: dropping it would make the
+re-encoded image render with shifted colors. A plain `truss convert` with no optimization
+strips it as asked, and `--preserve-exif` drops it under every mode. Formats that cannot carry
+a profile (AVIF, BMP, TIFF) strip it as asked.
 
 Metadata support per output format:
 
@@ -377,6 +378,13 @@ Metadata support per output format:
 | PNG | yes | yes | yes | no |
 | WebP | yes | yes | yes | no |
 | AVIF | no | no | no | no |
+| BMP | no | no | no | no |
+| TIFF | no | no | no | no |
+
+Asking to keep metadata an output format cannot carry is not silent: the request succeeds and
+each kind that did not survive is reported as a `warning:` line on stderr, as a `Truss-Warning`
+response header from the server, and in `warnings` from the Wasm package. AVIF is the exception
+and refuses the request instead, because it has no way to carry any of the four.
 
 ```sh
 # Keep all metadata (useful for archival)

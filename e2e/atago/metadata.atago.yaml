@@ -424,3 +424,53 @@ scenarios:
           file:
             path: lossless.webp
             contains: "ICCP"
+
+  # The profile is what says how to read the pixels, so an optimization keeps it under
+  # every mode rather than only under lossy. `optimize` with no --mode is `auto`, which is
+  # the command the README documents and the one that used to drop it.
+  - name: an optimization keeps the ICC profile whichever mode asked
+    steps:
+      - run:
+          command: truss optimize "${fixtures}/icc-profile.jpg" -o auto.jpg
+      - assert:
+          exit_code: 0
+          file:
+            path: auto.jpg
+            contains: "ICC_PROFILE"
+      - run:
+          command: truss optimize "${fixtures}/icc-profile.jpg" -o lossy.jpg --mode lossy
+      - assert:
+          exit_code: 0
+          file:
+            path: lossy.jpg
+            contains: "ICC_PROFILE"
+
+  # A plain convert is not an optimization and strips what the flag says.
+  - name: a plain convert still strips the profile it was told to strip
+    steps:
+      - run:
+          command: truss convert "${fixtures}/icc-profile.jpg" -o plain.jpg --strip-metadata
+      - assert:
+          exit_code: 0
+          file:
+            path: plain.jpg
+            not_contains: "ICC_PROFILE"
+
+  # TIFF and BMP have no way to carry either kind, and saying nothing is the one answer the
+  # pipeline gives nowhere else: XMP and IPTC warn, and AVIF refuses.
+  - name: metadata a TIFF output cannot carry is named on stderr
+    steps:
+      - run:
+          command: truss convert "${fixtures}/icc-profile.jpg" -o meta.tiff --format tiff --keep-metadata
+      - assert:
+          exit_code: 0
+          stderr:
+            contains:
+              - "warning:"
+              - "ICC profile"
+      - run:
+          command: truss convert "${fixtures}/exif-rotated.jpg" -o meta2.tiff --format tiff --keep-metadata --no-auto-orient
+      - assert:
+          exit_code: 0
+          stderr:
+            contains: "EXIF"
