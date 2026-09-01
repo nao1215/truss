@@ -52,9 +52,13 @@ pub fn transform(request: TransformRequest) -> Result<TransformResult, Transform
         return Err(TransformError::UnsupportedOutputMediaType(MediaType::Gif));
     }
 
-    if request.input.media_type == MediaType::Gif && request.input.metadata.frame_count > 1 {
+    // The rule is about frames, not about one container. Gating it on GIF let an animated
+    // WebP, an APNG, and an animated AVIF through, where the decoder kept the first frame
+    // and the caller was told nothing.
+    if request.input.metadata.frame_count > 1 {
         return Err(TransformError::UnsupportedInputMediaType(format!(
-            "animated GIF is not supported ({} frames); truss transforms single-frame images only",
+            "animated {} is not supported ({} frames); truss transforms single-frame images only",
+            request.input.media_type.as_name(),
             request.input.metadata.frame_count
         )));
     }
@@ -68,6 +72,51 @@ mod tests {
     use crate::core::{
         Artifact, ArtifactMetadata, MediaType, TransformError, TransformOptions, TransformRequest,
     };
+
+    fn animated_artifact(media_type: MediaType, signature: &[u8], frame_count: u32) -> Artifact {
+        Artifact::new(
+            signature.to_vec(),
+            media_type,
+            ArtifactMetadata {
+                width: Some(4),
+                height: Some(4),
+                frame_count,
+                duration: None,
+                has_alpha: Some(false),
+                orientation: None,
+            },
+        )
+    }
+
+    /// The rule the GIF message states is about frames, not about GIF. A picture that has
+    /// more than one of them is refused whatever container it arrived in, or the container
+    /// decides whether the caller is told their animation was reduced to a still.
+    #[test]
+    fn a_multi_frame_input_is_refused_whatever_its_container() {
+        let cases: &[(MediaType, &[u8])] = &[
+            (MediaType::Gif, b"GIF89a"),
+            (MediaType::Png, b"\x89PNG\r\n\x1a\n"),
+            (MediaType::Webp, b"RIFF\0\0\0\0WEBP"),
+            (MediaType::Avif, b"\0\0\0\x18ftypavis"),
+        ];
+
+        for &(media_type, signature) in cases {
+            let error = transform(TransformRequest::new(
+                animated_artifact(media_type, signature, 4),
+                TransformOptions {
+                    format: Some(MediaType::Png),
+                    ..TransformOptions::default()
+                },
+            ))
+            .expect_err("a multi-frame input should be refused, not reduced to one frame");
+
+            assert!(
+                matches!(error, TransformError::UnsupportedInputMediaType(ref message)
+                    if message.contains("4 frames")),
+                "{media_type:?} was not refused for having frames: {error}"
+            );
+        }
+    }
 
     fn gif_artifact(frame_count: u32) -> Artifact {
         // The dispatcher decides on the media type and metadata alone, before any decode,
@@ -100,7 +149,7 @@ mod tests {
         match error {
             TransformError::UnsupportedInputMediaType(message) => {
                 assert!(
-                    message.contains("animated GIF") && message.contains("12 frames"),
+                    message.contains("animated gif") && message.contains("12 frames"),
                     "the error should name the format and the frame count, got: {message}"
                 );
             }

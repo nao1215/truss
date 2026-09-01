@@ -39,11 +39,42 @@ pub(super) fn sniff_avif(bytes: &[u8]) -> Result<ArtifactMetadata, TransformErro
     Ok(ArtifactMetadata {
         width: dimensions.map(|(width, _)| width),
         height: dimensions.map(|(_, height)| height),
-        frame_count: 1,
+        // An animated AVIF is a moving-image sequence, and the container says so in its
+        // brands rather than in a property: `avis` is the sequence brand. The frames live in
+        // a `moov` track, which nothing here reads, so this records that there is more than
+        // one of them without claiming how many.
+        frame_count: if declares_image_sequence(&bytes[8..]) {
+            2
+        } else {
+            1
+        },
         duration: None,
         has_alpha: inspection.has_alpha(),
         orientation: inspection.orientation(),
     })
+}
+
+/// Reports whether the brand list names the AVIF image-sequence brand.
+fn declares_image_sequence(bytes: &[u8]) -> bool {
+    if bytes.len() < 4 {
+        return false;
+    }
+
+    if &bytes[0..4] == b"avis" {
+        return true;
+    }
+
+    // Past the major brand and the minor version, the rest of the box is the compatible
+    // brand list, four bytes each.
+    let mut offset = 8;
+    while offset + 4 <= bytes.len() {
+        if &bytes[offset..offset + 4] == b"avis" {
+            return true;
+        }
+        offset += 4;
+    }
+
+    false
 }
 
 pub(super) fn has_avif_brand(bytes: &[u8]) -> bool {
@@ -262,6 +293,47 @@ impl AvifInspection {
 ///
 /// Returns [`TransformError::DecodeFailed`] when the container cannot be walked.
 #[cfg(feature = "avif")]
+/// Reports whether the file carries metadata items a strip policy would remove.
+///
+/// The passthrough that keeps `optimize` from returning more bytes than it was given needs
+/// to know this before it can hand an AVIF back: handing back a file that still carries its
+/// EXIF would satisfy the size guarantee by breaking the metadata one. Metadata lives in
+/// `meta` as items whose `infe` entry names an item type, `Exif` for an EXIF block and
+/// `mime` for XMP, so the walk stops at the item list rather than reading the items.
+pub(crate) fn avif_carries_metadata(bytes: &[u8]) -> bool {
+    fn walk(bytes: &[u8]) -> bool {
+        let mut offset = 0;
+        while offset + 8 <= bytes.len() {
+            let Ok((box_type, payload, next_offset)) = parse_mp4_box(bytes, offset) else {
+                return false;
+            };
+            match box_type {
+                // A full box: four bytes of version and flags before the children.
+                b"meta" => {
+                    if payload.len() >= 4 && walk(&payload[4..]) {
+                        return true;
+                    }
+                }
+                b"iinf" => {
+                    if payload.windows(4).any(|window| window == b"Exif")
+                        || payload.windows(4).any(|window| window == b"mime")
+                    {
+                        return true;
+                    }
+                }
+                _ => {}
+            }
+            if next_offset <= offset {
+                return false;
+            }
+            offset = next_offset;
+        }
+        false
+    }
+
+    walk(bytes)
+}
+
 pub(crate) fn avif_clean_aperture(
     bytes: &[u8],
 ) -> Result<Option<AvifCleanAperture>, TransformError> {
