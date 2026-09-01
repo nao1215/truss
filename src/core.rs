@@ -2926,13 +2926,13 @@ fn read_u64_be(bytes: &[u8]) -> Result<u64, TransformError> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(any(feature = "server", feature = "wasm"))]
+    use super::single_line;
     use super::{
         Artifact, ArtifactMetadata, Dimensions, Fit, MediaType, MetadataPolicy, OptimizeMode,
         Position, QualityMetric, RawArtifact, Rgba8, Rotation, TargetQuality, TransformError,
         TransformOptions, TransformRequest, exif_orientation, sniff_artifact,
     };
-    #[cfg(any(feature = "server", feature = "wasm"))]
-    use super::single_line;
     #[cfg(feature = "avif")]
     use image::codecs::avif::AvifEncoder;
     use image::{ColorType, ImageEncoder, Rgba, RgbaImage};
