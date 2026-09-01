@@ -1175,6 +1175,17 @@ fn apply_grayscale(image: DynamicImage) -> DynamicImage {
     image.grayscale()
 }
 
+/// Takes the region the crop names out of the image.
+///
+/// Called from both codecs: an SVG rasterized to a raster format joins this pipeline, and
+/// the crop it gets is this one, so a rectangle means the same thing whichever the source.
+pub(crate) fn crop_to_region(
+    image: DynamicImage,
+    crop: CropRegion,
+) -> Result<DynamicImage, TransformError> {
+    apply_crop(image, crop)
+}
+
 fn apply_crop(image: DynamicImage, crop: CropRegion) -> Result<DynamicImage, TransformError> {
     let (iw, ih) = image.dimensions();
     if crop.x.saturating_add(crop.width) > iw || crop.y.saturating_add(crop.height) > ih {
@@ -1262,6 +1273,17 @@ pub(crate) fn apply_resize(
 
 /// Composites a watermark image onto the main image at the given position,
 /// opacity, and margin.
+/// Composites the watermark onto the image.
+///
+/// Called from both codecs, so an overlay lands in the same place at the same opacity
+/// whether the source was a raster file or a drawing.
+pub(crate) fn composite_watermark(
+    image: DynamicImage,
+    watermark: &WatermarkInput,
+) -> Result<DynamicImage, TransformError> {
+    apply_watermark(image, watermark)
+}
+
 fn apply_watermark(
     image: DynamicImage,
     watermark: &WatermarkInput,

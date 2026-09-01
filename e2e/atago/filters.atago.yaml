@@ -241,19 +241,57 @@ scenarios:
       - assert:
           exit_code: 1
           stderr:
-            contains: "blur is not supported for SVG inputs"
+            contains: "blur is not supported with SVG output"
       - run:
           command: truss convert in.svg -o out.svg --sharpen 2
       - assert:
           exit_code: 1
           stderr:
-            contains: "sharpen is not supported for SVG inputs"
+            contains: "sharpen is not supported with SVG output"
       - run:
           command: truss convert in.svg -o out.svg --crop 0,0,4,4
       - assert:
           exit_code: 1
           stderr:
-            contains: "crop is not supported for SVG inputs"
+            contains: "crop is not supported with SVG output"
+
+  - name: a rasterized SVG reaches the filter stages
+    steps:
+      # docs/pipeline.md says a drawing with a raster output is rasterized and joins the
+      # raster pipeline. Rotation and grayscale already did; blur, sharpen, crop, and the
+      # watermark were refused before the rasterization they run after.
+      - fixture:
+          file: in.svg
+          from: ${fixtures}/svg-minimal.svg
+      - run:
+          command: truss convert in.svg -o plain.png --format png --width 40 --height 40
+      - assert:
+          exit_code: 0
+      - run:
+          command: truss convert in.svg -o blurred.png --format png --width 40 --height 40 --blur 2
+      - assert:
+          exit_code: 0
+          image:
+            path: blurred.png
+            format: png
+            width: 40
+            height: 40
+      - run:
+          command: truss convert in.svg -o sharpened.png --format png --width 40 --height 40 --sharpen 2
+      - assert:
+          exit_code: 0
+          image:
+            path: sharpened.png
+            format: png
+      - run:
+          command: truss convert in.svg -o cropped.png --format png --crop 0,0,1,1
+      - assert:
+          exit_code: 0
+          image:
+            path: cropped.png
+            format: png
+            width: 1
+            height: 1
 
   - name: the geometry options are refused for an SVG output, by name
     steps:

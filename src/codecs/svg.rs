@@ -34,6 +34,56 @@ use image::codecs::webp::WebPEncoder;
 use image::{ColorType, ImageEncoder, RgbaImage};
 use quick_xml::events::{BytesStart, Event};
 
+/// Maps a crop rectangle from the drawing's own coordinates into the space it is rasterized
+/// in, and returns the size the whole drawing has to be rasterized at.
+///
+/// The fit mode was asked about the region the crop keeps, so that region has to come out at
+/// `region_render`. The whole drawing is therefore rasterized at the same scale, and the
+/// rectangle is scaled with it. Both dimensions use one scale, taken from whichever axis the
+/// region is measured on more precisely, so the drawing is not stretched.
+fn scale_crop_into_render_space(
+    crop: crate::core::CropRegion,
+    intrinsic: (u32, u32),
+    region_render: (u32, u32),
+) -> ((u32, u32), Option<crate::core::CropRegion>) {
+    let scale_x = f64::from(region_render.0) / f64::from(crop.width.max(1));
+    let scale_y = f64::from(region_render.1) / f64::from(crop.height.max(1));
+    let scale = if scale_x.is_finite() && scale_y.is_finite() {
+        (scale_x + scale_y) / 2.0
+    } else {
+        1.0
+    };
+
+    let scaled = |value: u32| -> u32 {
+        let scaled = (f64::from(value) * scale).round();
+        if scaled < 1.0 {
+            1
+        } else if scaled > f64::from(u32::MAX) {
+            u32::MAX
+        } else {
+            scaled as u32
+        }
+    };
+
+    let full = (scaled(intrinsic.0), scaled(intrinsic.1));
+    // The rectangle is clamped to the buffer it will be taken from, so rounding cannot put
+    // its far edge past the last pixel.
+    let x = scaled(crop.x).min(full.0.saturating_sub(1));
+    let y = scaled(crop.y).min(full.1.saturating_sub(1));
+    let width = scaled(crop.width).min(full.0 - x);
+    let height = scaled(crop.height).min(full.1 - y);
+
+    (
+        full,
+        Some(crate::core::CropRegion {
+            x,
+            y,
+            width,
+            height,
+        }),
+    )
+}
+
 /// The sentence truss gives an SVG that does not parse, in place of the parser's own.
 ///
 /// `SVG data parsing failed cause the root node was opened but never closed` and
@@ -83,27 +133,6 @@ use std::time::Instant;
 /// ```
 #[must_use = "this function returns the transform result without side effects"]
 pub fn transform_svg(request: TransformRequest) -> Result<TransformResult, TransformError> {
-    if request.options.blur.is_some() {
-        return Err(TransformError::InvalidOptions(
-            "blur is not supported for SVG inputs".to_string(),
-        ));
-    }
-    if request.options.sharpen.is_some() {
-        return Err(TransformError::InvalidOptions(
-            "sharpen is not supported for SVG inputs".to_string(),
-        ));
-    }
-    if request.watermark.is_some() {
-        return Err(TransformError::InvalidOptions(
-            "watermark is not supported for SVG inputs".to_string(),
-        ));
-    }
-    if request.options.crop.is_some() {
-        return Err(TransformError::InvalidOptions(
-            "crop is not supported for SVG inputs".to_string(),
-        ));
-    }
-
     let normalized = request.normalize()?;
     let deadline = normalized.options.deadline;
     let start = deadline.map(|_| Instant::now());
@@ -115,6 +144,23 @@ pub fn transform_svg(request: TransformRequest) -> Result<TransformResult, Trans
     }
 
     if normalized.options.format == MediaType::Svg {
+        // With SVG output there is no pipeline: the document is handed back as its author
+        // wrote it, so a stage that asks for different pixels cannot be honoured. The
+        // stages that ask for a different picture are refused in `normalize`; these four
+        // are the ones that need pixels to work on.
+        for (requested, name) in [
+            (normalized.options.blur.is_some(), "blur"),
+            (normalized.options.sharpen.is_some(), "sharpen"),
+            (normalized.watermark.is_some(), "watermark"),
+            (normalized.options.crop.is_some(), "crop"),
+        ] {
+            if requested {
+                return Err(TransformError::InvalidOptions(format!(
+                    "{name} is not supported with SVG output; choose a raster output format such as png"
+                )));
+            }
+        }
+
         // Sanitize-only: return the sanitized SVG.
         return Ok(TransformResult {
             artifact: Artifact::new(
@@ -148,25 +194,56 @@ pub fn transform_svg(request: TransformRequest) -> Result<TransformResult, Trans
         normalized.options.rotate.as_degrees(),
     );
 
+    // A crop runs before the resize, so the size the fit mode is asked about is the size of
+    // the region the crop keeps. The rectangle is in the coordinate space of the rotated
+    // drawing at its own size, which is the size `truss inspect` reports.
+    let cropped_intrinsic = match normalized.options.crop {
+        Some(crop) => {
+            if crop.x.saturating_add(crop.width) > rotated_intrinsic.0
+                || crop.y.saturating_add(crop.height) > rotated_intrinsic.1
+            {
+                return Err(TransformError::InvalidOptions(format!(
+                    "crop region {}x{}+{}+{} exceeds image bounds {}x{}",
+                    crop.width,
+                    crop.height,
+                    crop.x,
+                    crop.y,
+                    rotated_intrinsic.0,
+                    rotated_intrinsic.1
+                )));
+            }
+            (crop.width, crop.height)
+        }
+        None => rotated_intrinsic,
+    };
+
     // The drawing is rasterized at the size the fit mode scales the content to, not at the
     // requested box, so the scale stays uniform on both axes and the padding or cropping the
     // mode calls for is done afterwards by the same helpers the raster codec uses. Drawing
     // straight into the box would be `fill` whatever was asked for.
     let rotated_render = crate::codecs::raster::resize_content_size(
-        rotated_intrinsic,
+        cropped_intrinsic,
         normalized.options.width,
         normalized.options.height,
         normalized.options.fit,
         normalized.options.without_enlargement,
     );
+    // With a crop the region the fit was asked about is a part of the drawing, so the whole
+    // drawing has to be rasterized at the scale that region needs, and the rectangle scaled
+    // with it. Rasterizing the drawing at its own size and enlarging afterwards would throw
+    // away the resolution a vector source is kept for.
+    let (rotated_render_full, scaled_crop) = match normalized.options.crop {
+        Some(crop) => scale_crop_into_render_space(crop, rotated_intrinsic, rotated_render),
+        None => (rotated_render, None),
+    };
     let render = pre_rotation_render_size(
-        rotated_render,
+        rotated_render_full,
         intrinsic,
         rotated_intrinsic,
         normalized.options.rotate.as_degrees(),
     );
     let canvas = crate::codecs::raster::resolved_output_dimensions(
-        rotated_intrinsic,
+        cropped_intrinsic,
         normalized.options.width,
         normalized.options.height,
         normalized.options.fit,
@@ -207,6 +284,17 @@ pub fn transform_svg(request: TransformRequest) -> Result<TransformResult, Trans
         .into_rgba8()
     };
 
+    // The crop follows the rotation and precedes the resize, which is where the pipeline
+    // puts it. The rectangle was scaled into the render space above.
+    let rgba_image = match scaled_crop {
+        Some(crop) => crate::codecs::raster::crop_to_region(
+            image::DynamicImage::ImageRgba8(rgba_image),
+            crop,
+        )?
+        .into_rgba8(),
+        None => rgba_image,
+    };
+
     // The buffer is already the content size, so every resize inside this call is a no-op and
     // what it contributes is the padding for `contain` and the crop for `cover`, with the
     // requested anchor and background.
@@ -222,6 +310,25 @@ pub fn transform_svg(request: TransformRequest) -> Result<TransformResult, Trans
     )
     .into_rgba8();
 
+    // Blur and sharpen follow the resize, which is where the pipeline puts them, and they
+    // are the same calls the raster codec makes on the same buffer type.
+    let rgba_image = match normalized.options.blur {
+        Some(sigma) => image::DynamicImage::ImageRgba8(rgba_image)
+            .blur(sigma)
+            .into_rgba8(),
+        None => rgba_image,
+    };
+    let rgba_image = match normalized.options.sharpen {
+        Some(sigma) => image::DynamicImage::ImageRgba8(rgba_image)
+            .unsharpen(sigma, 1)
+            .into_rgba8(),
+        None => rgba_image,
+    };
+
+    if let (Some(start), Some(limit)) = (start, deadline) {
+        crate::codecs::raster::check_deadline(start.elapsed(), limit, "filter")?;
+    }
+
     // Desaturate after rotation so the operation order matches the raster pipeline.
     let rgba_image = if normalized.options.grayscale {
         image::DynamicImage::ImageRgba8(rgba_image)
@@ -230,6 +337,21 @@ pub fn transform_svg(request: TransformRequest) -> Result<TransformResult, Trans
     } else {
         rgba_image
     };
+
+    // The watermark is the last stage before the encode, after the grayscale, so an overlay
+    // keeps its own colours. The raster codec owns the compositing and the fit check.
+    let rgba_image = match normalized.watermark {
+        Some(ref watermark) => crate::codecs::raster::composite_watermark(
+            image::DynamicImage::ImageRgba8(rgba_image),
+            watermark,
+        )?
+        .into_rgba8(),
+        None => rgba_image,
+    };
+
+    if let (Some(start), Some(limit)) = (start, deadline) {
+        crate::codecs::raster::check_deadline(start.elapsed(), limit, "watermark")?;
+    }
 
     // Formats without an alpha channel need the transparency resolved before the encoder
     // sees it. The raster codec owns that rule too, so both paths flatten the same way.
@@ -2231,40 +2353,205 @@ mod tests {
         assert!(!is_dangerous_css_url("data:image/png;base64,abc"));
     }
 
+    /// A rasterized SVG reaches the pixel stages, which is what `docs/pipeline.md` says
+    /// happens: the drawing is rasterized and joins the raster pipeline. Rotation at an
+    /// arbitrary angle and grayscale already did; blur, sharpen, crop, and watermark were
+    /// refused before the rasterization they run after, which cut the pipeline in two places
+    /// for one input class and in none for the others.
     #[test]
-    fn svg_rejects_blur() {
-        let input = sniff_artifact(RawArtifact::new(simple_svg(), None)).unwrap();
-        let request = TransformRequest::new(
+    fn a_rasterized_svg_reaches_the_pixel_stages() {
+        let plain = render_svg_to_png(TransformOptions {
+            format: Some(MediaType::Png),
+            width: Some(40),
+            height: Some(40),
+            ..TransformOptions::default()
+        });
+
+        let cases: &[(&str, TransformOptions)] = &[
+            (
+                "blur",
+                TransformOptions {
+                    format: Some(MediaType::Png),
+                    width: Some(40),
+                    height: Some(40),
+                    blur: Some(3.0),
+                    ..TransformOptions::default()
+                },
+            ),
+            (
+                "sharpen",
+                TransformOptions {
+                    format: Some(MediaType::Png),
+                    width: Some(40),
+                    height: Some(40),
+                    sharpen: Some(3.0),
+                    ..TransformOptions::default()
+                },
+            ),
+        ];
+
+        for (name, options) in cases {
+            let produced = render_svg_to_png(options.clone());
+            assert_ne!(
+                produced, plain,
+                "{name} was accepted but changed nothing about the picture"
+            );
+        }
+    }
+
+    /// A crop takes its bite before the resize, so the output is the box that was asked for
+    /// and the picture in it is the region that was named.
+    #[test]
+    fn a_rasterized_svg_can_be_cropped() {
+        let input = sniff_artifact(RawArtifact::new(contrasting_svg(), None)).unwrap();
+        let result = transform_svg(TransformRequest::new(
             input,
             TransformOptions {
                 format: Some(MediaType::Png),
-                blur: Some(2.0),
+                crop: Some(crate::core::CropRegion {
+                    x: 0,
+                    y: 0,
+                    width: 20,
+                    height: 10,
+                }),
+                width: Some(20),
+                height: Some(10),
+                fit: Some(crate::core::Fit::Fill),
                 ..TransformOptions::default()
             },
+        ))
+        .expect("a crop of a rasterized SVG");
+
+        assert_eq!(result.artifact.metadata.width, Some(20));
+        assert_eq!(result.artifact.metadata.height, Some(10));
+
+        // The region that was named is the region that comes back: the top-left quarter of
+        // this drawing holds the black bar, and the bottom-right does not.
+        let top_left = decoded_pixels(&result.artifact.bytes);
+        let bottom_right = decoded_pixels(
+            &transform_svg(TransformRequest::new(
+                sniff_artifact(RawArtifact::new(contrasting_svg(), None)).unwrap(),
+                TransformOptions {
+                    format: Some(MediaType::Png),
+                    crop: Some(crate::core::CropRegion {
+                        x: 20,
+                        y: 30,
+                        width: 20,
+                        height: 10,
+                    }),
+                    width: Some(20),
+                    height: Some(10),
+                    fit: Some(crate::core::Fit::Fill),
+                    ..TransformOptions::default()
+                },
+            ))
+            .expect("the other corner")
+            .artifact
+            .bytes,
         );
-        let err = transform_svg(request).unwrap_err();
-        assert!(
-            matches!(err, TransformError::InvalidOptions(ref msg) if msg.contains("blur")),
-            "expected InvalidOptions about blur, got: {err}"
+        assert_ne!(
+            top_left, bottom_right,
+            "two different regions of the drawing gave the same picture"
         );
     }
 
+    fn decoded_pixels(png: &[u8]) -> Vec<u8> {
+        image::load_from_memory(png)
+            .expect("decode png")
+            .to_rgba8()
+            .into_raw()
+    }
+
+    /// A crop rectangle is measured against the drawing's own size, which is the size
+    /// `truss inspect` reports, and one that runs past it is refused with the raster
+    /// pipeline's own message.
     #[test]
-    fn svg_rejects_sharpen() {
-        let input = sniff_artifact(RawArtifact::new(simple_svg(), None)).unwrap();
-        let request = TransformRequest::new(
+    fn a_crop_past_the_drawing_is_refused() {
+        let input = sniff_artifact(RawArtifact::new(contrasting_svg(), None)).unwrap();
+        let error = transform_svg(TransformRequest::new(
             input,
             TransformOptions {
                 format: Some(MediaType::Png),
-                sharpen: Some(2.0),
+                crop: Some(crate::core::CropRegion {
+                    x: 90,
+                    y: 90,
+                    width: 50,
+                    height: 50,
+                }),
                 ..TransformOptions::default()
             },
-        );
-        let err = transform_svg(request).unwrap_err();
+        ))
+        .expect_err("a crop past the drawing is out of bounds");
+
         assert!(
-            matches!(err, TransformError::InvalidOptions(ref msg) if msg.contains("sharpen")),
-            "expected InvalidOptions about sharpen, got: {err}"
+            matches!(error, TransformError::InvalidOptions(ref message)
+                if message.contains("exceeds image bounds")),
+            "expected the pipeline's own out-of-bounds message, got: {error}"
         );
+    }
+
+    /// With SVG output there is no pipeline at all, so the four stay refused there.
+    #[test]
+    fn svg_output_still_refuses_the_pixel_stages() {
+        let cases: &[(&str, TransformOptions)] = &[
+            (
+                "blur",
+                TransformOptions {
+                    format: Some(MediaType::Svg),
+                    blur: Some(2.0),
+                    ..TransformOptions::default()
+                },
+            ),
+            (
+                "sharpen",
+                TransformOptions {
+                    format: Some(MediaType::Svg),
+                    sharpen: Some(2.0),
+                    ..TransformOptions::default()
+                },
+            ),
+            (
+                "crop",
+                TransformOptions {
+                    format: Some(MediaType::Svg),
+                    crop: Some(crate::core::CropRegion {
+                        x: 0,
+                        y: 0,
+                        width: 10,
+                        height: 10,
+                    }),
+                    ..TransformOptions::default()
+                },
+            ),
+        ];
+
+        for (name, options) in cases {
+            let input = sniff_artifact(RawArtifact::new(simple_svg(), None)).unwrap();
+            let error = transform_svg(TransformRequest::new(input, options.clone()))
+                .expect_err("SVG output cannot honour a pixel stage");
+            assert!(
+                matches!(error, TransformError::InvalidOptions(ref message)
+                    if message.contains(name)),
+                "{name} should be refused for SVG output, got: {error}"
+            );
+        }
+    }
+
+    /// A drawing with an edge in it, since a filter leaves a uniform colour alone.
+    fn contrasting_svg() -> Vec<u8> {
+        b"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"40\" height=\"40\">\
+          <rect width=\"40\" height=\"40\" fill=\"white\"/>\
+          <rect x=\"4\" y=\"4\" width=\"16\" height=\"32\" fill=\"black\"/>\
+          <circle cx=\"30\" cy=\"12\" r=\"7\" fill=\"red\"/></svg>"
+            .to_vec()
+    }
+
+    fn render_svg_to_png(options: TransformOptions) -> Vec<u8> {
+        let input = sniff_artifact(RawArtifact::new(contrasting_svg(), None)).unwrap();
+        transform_svg(TransformRequest::new(input, options))
+            .expect("rasterize svg")
+            .artifact
+            .bytes
     }
 
     #[test]
