@@ -3750,10 +3750,15 @@ mod tests {
 
     // ===== A path argument that is not valid UTF-8 =====
 
-    /// A file name on Unix is a byte string, so `truss convert` has to take one whatever
+    /// A file name on Linux is a byte string, so `truss convert` has to take one whatever
     /// bytes it holds. Reading the arguments as `String` panicked before the command line
     /// was parsed, which no adapter could report and no exit code covered.
-    #[cfg(unix)]
+    ///
+    /// Only Linux runs this: APFS refuses to create a name that is not valid UTF-8, with
+    /// `EILSEQ`, so the fixture cannot exist on macOS, and a Windows name is UTF-16. The
+    /// panic itself was not filesystem-specific, and the flag-value case below covers the
+    /// platforms this one skips.
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_non_utf8_input_path_is_converted_rather_than_refused() {
         use std::os::unix::ffi::OsStringExt;
@@ -3800,8 +3805,9 @@ mod tests {
     }
 
     /// The bytes have to survive on the way out as well: a lossy conversion of the path
-    /// would write to a name nobody asked for and report success.
-    #[cfg(unix)]
+    /// would write to a name nobody asked for and report success. Linux only, for the
+    /// reason the test above gives.
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_non_utf8_output_path_is_written_under_exactly_those_bytes() {
         use std::os::unix::ffi::OsStringExt;
