@@ -194,3 +194,117 @@ fn serve_startup_summary_includes_state_info() {
     );
     assert!(combined.contains("cache: disabled"), "{combined}");
 }
+
+/// Starts `truss serve`, reads the startup output, and stops it.
+///
+/// Both streams are wanted: the summary goes to standard output and the warnings to
+/// standard error, and what is asserted below is which of them appears.
+fn serve_startup_output(args: &[&str], env: &[(&str, &str)]) -> (String, String) {
+    let storage_root = common::temp_dir("serve-warning");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_truss"));
+    command
+        .arg("serve")
+        .arg("--bind")
+        .arg("127.0.0.1:0")
+        .arg("--storage-root")
+        .arg(&storage_root)
+        .args(args)
+        .env_remove("TRUSS_SIGNED_URL_KEY_ID")
+        .env_remove("TRUSS_SIGNED_URL_SECRET")
+        .env_remove("TRUSS_SIGNING_KEYS")
+        .env_remove("TRUSS_PUBLIC_BASE_URL")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    for (name, value) in env {
+        command.env(name, value);
+    }
+    let mut child = command.spawn().expect("spawn truss serve");
+
+    let stdout_handle = child.stdout.take().expect("take child stdout");
+    let mut stdout = BufReader::new(stdout_handle);
+    let mut lines = Vec::new();
+    for _ in 0..5 {
+        let mut line = String::new();
+        if stdout.read_line(&mut line).expect("read startup line") == 0 {
+            break;
+        }
+        lines.push(line.trim_end().to_string());
+    }
+
+    child.kill().expect("kill serve process");
+    let output = child.wait_with_output().expect("collect serve output");
+    let _ = fs::remove_dir_all(&storage_root);
+
+    (
+        lines.join("\n"),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
+/// The warning exists so that signing behind a proxy does not fail as an unexplained 401,
+/// and it was computed before the serve flags were applied, so it read a configuration the
+/// server does not run with.
+///
+/// Keys named on the command line are keys, and the warning has to see them. This is the
+/// example printed by `truss serve --help`.
+#[test]
+fn keys_from_flags_without_a_base_url_warn() {
+    let (stdout, stderr) = serve_startup_output(
+        &[
+            "--signed-url-key-id",
+            "mykey",
+            "--signed-url-secret",
+            "s3cret",
+        ],
+        &[],
+    );
+
+    assert!(
+        stdout.contains("signed URL verification: enabled"),
+        "the flags have to take effect: {stdout}"
+    );
+    assert!(
+        stderr.contains("public base URL"),
+        "signing without a base URL is the case the warning exists for: {stderr}"
+    );
+}
+
+/// The other direction: a base URL named on the command line is a base URL, and the
+/// warning has to stop telling the operator to set what they have set.
+#[test]
+fn a_base_url_from_a_flag_silences_the_warning() {
+    let (stdout, stderr) = serve_startup_output(
+        &["--public-base-url", "https://cdn.example.com"],
+        &[
+            ("TRUSS_SIGNED_URL_KEY_ID", "mykey"),
+            ("TRUSS_SIGNED_URL_SECRET", "s3cret"),
+        ],
+    );
+
+    assert!(
+        stdout.contains("signed URL verification: enabled"),
+        "the keys have to take effect: {stdout}"
+    );
+    assert!(
+        !stderr.contains("public base URL") && !stderr.contains("TRUSS_PUBLIC_BASE_URL"),
+        "the base URL is configured, so nothing should ask for it: {stderr}"
+    );
+}
+
+/// Signing with no base URL from either source still warns, which is the case that worked
+/// before and has to keep working.
+#[test]
+fn keys_from_the_environment_without_a_base_url_still_warn() {
+    let (_stdout, stderr) = serve_startup_output(
+        &[],
+        &[
+            ("TRUSS_SIGNED_URL_KEY_ID", "mykey"),
+            ("TRUSS_SIGNED_URL_SECRET", "s3cret"),
+        ],
+    );
+
+    assert!(
+        stderr.contains("public base URL"),
+        "the environment-only case is the one that already warned: {stderr}"
+    );
+}
