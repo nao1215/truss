@@ -369,15 +369,28 @@ pub(super) fn parse_optional_integer_query(
     }
 }
 
+/// Reads a query parameter that ends up in a `u8`, judging what does not fit by `validate`.
+///
+/// Parsing straight into `u8` made `quality=256` answered `query parameter `quality` must be
+/// an integer`, which it is. A value that fits is handed on so the transform reports it with
+/// the class it always did; one that does not is refused with the sentence the range check
+/// would have given, rather than with a claim about integers.
 pub(super) fn parse_optional_u8_query(
     query: &BTreeMap<String, String>,
     name: &str,
+    validate: fn(i64) -> Result<u8, &'static str>,
 ) -> Result<Option<u8>, HttpResponse> {
-    match query.get(name) {
-        Some(value) => value.parse::<u8>().map(Some).map_err(|_| {
-            bad_request_response(&format!("query parameter `{name}` must be an integer"))
-        }),
-        None => Ok(None),
+    let Some(value) = query.get(name) else {
+        return Ok(None);
+    };
+    let parsed: i64 = value.parse().map_err(|_| {
+        bad_request_response(&format!("query parameter `{name}` must be an integer"))
+    })?;
+    match u8::try_from(parsed) {
+        Ok(value) => Ok(Some(value)),
+        Err(_) => Err(bad_request_response(
+            validate(parsed).expect_err("a value outside u8 is outside the documented range"),
+        )),
     }
 }
 
@@ -1041,26 +1054,36 @@ mod tests {
     #[test]
     fn test_parse_u8_valid() {
         let q = query(&[("quality", "80")]);
-        assert_eq!(parse_optional_u8_query(&q, "quality").unwrap(), Some(80));
+        assert_eq!(
+            parse_optional_u8_query(&q, "quality", crate::core::validate_quality_value).unwrap(),
+            Some(80)
+        );
     }
 
     #[test]
     fn test_parse_u8_absent() {
         let q: BTreeMap<String, String> = BTreeMap::new();
-        assert_eq!(parse_optional_u8_query(&q, "quality").unwrap(), None);
+        assert_eq!(
+            parse_optional_u8_query(&q, "quality", crate::core::validate_quality_value).unwrap(),
+            None
+        );
     }
 
     #[test]
     fn test_parse_u8_overflow() {
         let q = query(&[("quality", "256")]);
-        let err = parse_optional_u8_query(&q, "quality").unwrap_err();
+        let err = parse_optional_u8_query(&q, "quality", crate::core::validate_quality_value)
+            .unwrap_err();
         assert_eq!(err.status, "400 Bad Request");
     }
 
     #[test]
     fn test_parse_u8_boundary_max() {
         let q = query(&[("quality", "255")]);
-        assert_eq!(parse_optional_u8_query(&q, "quality").unwrap(), Some(255));
+        assert_eq!(
+            parse_optional_u8_query(&q, "quality", crate::core::validate_quality_value).unwrap(),
+            Some(255)
+        );
     }
 
     // ── parse_optional_float_query ──

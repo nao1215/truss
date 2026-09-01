@@ -59,8 +59,9 @@ pub(super) fn parse_upload_request(
                 } else {
                     serde_json::from_slice::<super::TransformOptionsPayload>(part_body).map_err(
                         |error| {
-                            bad_request_response(&format!(
-                                "multipart upload `options` field must contain valid JSON: {error}"
+                            bad_request_response(&super::response::json_parse_message(
+                                "multipart upload `options` field",
+                                &error,
                             ))
                         },
                     )?
