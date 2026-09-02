@@ -371,7 +371,7 @@ An optimization — `truss optimize` in any mode, or `--optimize auto`, `lossles
 on `convert` — keeps the ICC profile even under `--strip-metadata`: dropping it would make the
 re-encoded image render with shifted colors. A plain `truss convert` with no optimization
 strips it as asked, and `--preserve-exif` drops it under every mode. Formats that cannot carry
-a profile (AVIF, BMP, TIFF) strip it as asked.
+a profile (BMP, TIFF) strip it as asked.
 
 Metadata support per output format:
 
@@ -380,14 +380,16 @@ Metadata support per output format:
 | JPEG | yes | yes | yes | yes |
 | PNG | yes | yes | yes | no |
 | WebP | yes | yes | yes | no |
-| AVIF | no | no | no | no |
+| AVIF | yes | yes | no | no |
 | BMP | no | no | no | no |
 | TIFF | no | no | no | no |
 
 Asking to keep metadata an output format cannot carry is not silent: the request succeeds and
 each kind that did not survive is reported as a `warning:` line on stderr, as a `Truss-Warning`
-response header from the server, and in `warnings` from the Wasm package. AVIF is the exception
-and refuses the request instead, because it has no way to carry any of the four.
+response header from the server, and in `warnings` from the Wasm package. AVIF keeps EXIF as an
+item of its own and the profile as a `colr` property, both written into the container after the
+encode; XMP would be a third item and IPTC has no place in the container, so those two are
+reported as dropped like anywhere else.
 
 ```sh
 # Keep all metadata (useful for archival)

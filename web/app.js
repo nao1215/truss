@@ -501,7 +501,9 @@ function refreshMetadataState() {
   const format = elements.format.value;
   const keepOption = elements.metadataMode.querySelector('option[value="keep"]');
   const exifOption = elements.metadataMode.querySelector('option[value="exif"]');
-  const allowMetadataRetention = format !== "avif" && format !== "bmp" && format !== "svg";
+  // AVIF carries EXIF and a profile since v0.23.0; BMP and SVG carry neither, and asking for
+  // retention on those is a request whose answer is a warning rather than a file.
+  const allowMetadataRetention = format !== "bmp" && format !== "svg";
 
   keepOption.disabled = !allowMetadataRetention;
   exifOption.disabled = !allowMetadataRetention;
