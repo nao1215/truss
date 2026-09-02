@@ -125,7 +125,7 @@ truss supports graceful shutdown for zero-downtime deployments. The `TRUSS_SHUTD
 
 On Kubernetes, set `terminationGracePeriodSeconds` >= drain + 20 (e.g. `35` for the default 10 s drain).
 
-The drain is started by `SIGTERM` or `SIGINT` on Unix, and by Ctrl+C on Windows. Windows does not deliver `SIGTERM`, so a service manager or a container runtime that stops the process there terminates it without a drain and in-flight requests are dropped. The published container image is Linux.
+The drain is started by `SIGTERM` or `SIGINT` on Unix. On Windows it is started by a console control event, which is what the operating system delivers in place of the signals it does not raise: Ctrl+C, Ctrl+Break, the console window being closed, the user logging off, and the system shutting down. Windows still never raises `SIGTERM`, so nothing depends on it. The last three of those five are terminating events, where the operating system kills the process as soon as the handler returns and allows only a few seconds before it stops asking — about five, set by the `HungAppTimeout` and `WaitToKillServiceTimeout` registry values — so truss holds the process open for up to four seconds waiting for the drain and the drain there is best effort. Ctrl+C and Ctrl+Break are not terminating, so the full `TRUSS_SHUTDOWN_DRAIN_SECS` window applies to them as it does on Unix. The published container image is Linux.
 
 ## Rate Limiting
 

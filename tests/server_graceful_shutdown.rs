@@ -10,7 +10,9 @@
 
 mod common;
 
-use common::{large_png_bytes, split_response, status_code, temp_dir};
+#[cfg(unix)]
+use common::large_png_bytes;
+use common::{split_response, status_code, temp_dir};
 use serial_test::serial;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -716,4 +718,110 @@ fn two_requests_written_in_one_packet_both_get_answers() {
     );
     assert!(statuses[0].contains("200 OK"), "{statuses:?}");
     assert!(statuses[1].contains("404 Not Found"), "{statuses:?}");
+}
+
+/// A console control event drains the server on Windows, which no signal does.
+///
+/// `SIGTERM` is a constant the C runtime defines and Windows never raises, and `SIGINT` reaches
+/// only Ctrl+C in a console, so before the console control handler existed every other way of
+/// stopping the process cut it off mid-request. This delivers the event the operating system
+/// actually sends, to a child in a process group of its own so the test runner is not signalled
+/// with it, and asserts the two things the drain is for: readiness reports draining, and the
+/// process leaves on its own rather than being killed.
+#[cfg(windows)]
+mod windows_console_ctrl {
+    use std::io::{BufRead, BufReader};
+    use std::net::SocketAddr;
+    use std::os::windows::process::CommandExt;
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    /// `CREATE_NEW_PROCESS_GROUP`: the child becomes the root of its own group, so a control
+    /// event addressed to that group reaches it and not the process sending it.
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+    const CTRL_BREAK_EVENT: u32 = 1;
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GenerateConsoleCtrlEvent(event: u32, process_group_id: u32) -> i32;
+    }
+
+    /// The status line of a readiness probe, as a number.
+    fn ready_status(addr: SocketAddr) -> u16 {
+        let response = super::send_health_ready(addr);
+        let (header, _, _) = super::split_response(&response);
+        super::status_code(&header)
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn a_console_control_event_drains_the_server() {
+        let storage_root = super::temp_dir("windows-ctrl-drain");
+        let mut child = Command::new(env!("CARGO_BIN_EXE_truss"))
+            .arg("--bind")
+            .arg("127.0.0.1:0")
+            .arg("--storage-root")
+            .arg(&storage_root)
+            .env("TRUSS_SHUTDOWN_DRAIN_SECS", "2")
+            .creation_flags(CREATE_NEW_PROCESS_GROUP)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn truss serve");
+
+        let mut stdout = BufReader::new(child.stdout.take().expect("take child stdout"));
+        let mut line = String::new();
+        stdout
+            .read_line(&mut line)
+            .expect("read the listening line");
+        let addr: SocketAddr = line
+            .trim()
+            .rsplit_once("http://")
+            .map(|(_, addr)| addr.trim().to_string())
+            .and_then(|addr| addr.parse().ok())
+            .unwrap_or_else(|| panic!("the first line names the address, got {line:?}"));
+
+        // Ready before the event, so a 503 afterwards is the drain rather than a server that
+        // never came up.
+        assert_eq!(
+            ready_status(addr),
+            200,
+            "the server is ready before the control event"
+        );
+
+        // SAFETY: an FFI call with two integers and no pointers. The group id is the child's
+        // process id, which is the group's, because it was created as the root of one.
+        let delivered = unsafe { GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, child.id()) };
+        assert_ne!(
+            delivered,
+            0,
+            "GenerateConsoleCtrlEvent failed: {}",
+            std::io::Error::last_os_error()
+        );
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut draining = false;
+        while Instant::now() < deadline && !draining {
+            draining = ready_status(addr) == 503;
+            if !draining {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
+        assert!(draining, "readiness reports draining after the event");
+
+        let exit_deadline = Instant::now() + Duration::from_secs(30);
+        let status = loop {
+            match child.try_wait().expect("wait for the server") {
+                Some(status) => break status,
+                None if Instant::now() >= exit_deadline => {
+                    child.kill().ok();
+                    panic!("the server did not exit after the control event");
+                }
+                None => std::thread::sleep(Duration::from_millis(100)),
+            }
+        };
+
+        let _ = std::fs::remove_dir_all(&storage_root);
+        assert!(status.success(), "the server left on its own: {status:?}");
+    }
 }

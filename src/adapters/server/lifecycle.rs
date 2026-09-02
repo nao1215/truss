@@ -5,7 +5,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, Ordering};
 use std::time::{Duration, Instant};
 
-use super::config::{LogLevel, ServerConfig};
+#[cfg(unix)]
+use super::config::LogLevel;
+use super::config::ServerConfig;
 use super::handler::TransformOptionsPayload;
 use super::routing::handle_stream;
 use super::stderr_write;
@@ -221,6 +223,10 @@ pub fn serve_with_config(listener: TcpListener, config: ServerConfig) -> io::Res
 
     config.log("shutdown: complete");
     close_shutdown_pipe(shutdown_read_fd, shutdown_write_fd);
+    // A console control handler for a close, a log-off or a system shutdown is holding the
+    // process open until this is set; everything the drain was for has happened by now.
+    #[cfg(windows)]
+    SHUTDOWN_COMPLETE.store(true, Ordering::SeqCst);
     Ok(())
 }
 
@@ -342,11 +348,13 @@ fn close_shutdown_pipe(read_fd: i32, write_fd: i32) {
 fn close_shutdown_pipe(_read_fd: i32, _write_fd: i32) {}
 
 /// Global write-end of the shutdown pipe, written to from the signal handler.
+#[cfg(unix)]
 static SHUTDOWN_PIPE_WR: AtomicI32 = AtomicI32::new(-1);
 /// Global draining flag set by the signal handler.
 static GLOBAL_DRAINING: std::sync::atomic::AtomicPtr<AtomicBool> =
     std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
 /// Global log level, cycled by SIGUSR1 (Unix only).
+#[cfg(unix)]
 static GLOBAL_LOG_LEVEL: std::sync::atomic::AtomicPtr<AtomicU8> =
     std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
 
@@ -423,29 +431,104 @@ extern "C" fn signal_handler(_sig: libc::c_int) {
     }
 }
 
+/// Set once the accept loop has finished draining, so a console control handler that the
+/// operating system is timing knows it can let the process go.
 #[cfg(windows)]
-fn install_signal_handler(draining: Arc<AtomicBool>, _write_fd: i32, _log_level: Arc<AtomicU8>) {
-    // Store the draining pointer in the global so the signal handler can set it.
-    let ptr = Arc::into_raw(draining).cast_mut();
-    GLOBAL_DRAINING.store(ptr, Ordering::SeqCst);
+static SHUTDOWN_COMPLETE: AtomicBool = AtomicBool::new(false);
 
-    // On Windows, register a SIGINT handler (Ctrl+C) via the C runtime.
-    // The accept loop checks `draining` in the WouldBlock branch.
-    unsafe {
-        libc::signal(libc::SIGINT, windows_signal_handler as libc::sighandler_t);
+/// How long a close, log-off or shutdown handler waits for the drain before returning.
+///
+/// Returning from the handler for one of those three is what lets Windows terminate the
+/// process, so the wait is the drain. Windows itself allows about five seconds before it kills
+/// the process regardless — the exact figure is the `WaitToKillServiceTimeout` and
+/// `HungAppTimeout` registry values — so waiting past that would only be waiting to be killed.
+#[cfg(windows)]
+const CONSOLE_CLOSE_DRAIN_BUDGET: Duration = Duration::from_secs(4);
+
+#[cfg(windows)]
+mod console_ctrl {
+    //! The console control events Windows delivers in place of the signals it does not raise.
+    //!
+    //! `SIGTERM` is a constant the C runtime defines and the operating system never raises, so
+    //! a handler for it never runs; `SIGINT` is raised, but only for Ctrl+C in a console, which
+    //! left every other way of stopping the process terminating it without a drain. These are
+    //! declared here rather than pulled in with a Windows binding crate, because the two
+    //! functions and the five constants below are the whole of what the server needs.
+
+    pub(super) type Bool = i32;
+    pub(super) type Dword = u32;
+
+    pub(super) const TRUE: Bool = 1;
+    /// Says the handler did not handle the event, which passes it to the next one in the chain
+    /// and, if none takes it, to the default terminator.
+    pub(super) const FALSE: Bool = 0;
+
+    /// Ctrl+C in a console. The process keeps running after the handler returns.
+    pub(super) const CTRL_C_EVENT: Dword = 0;
+    /// Ctrl+Break in a console, and what `GenerateConsoleCtrlEvent` sends to a process group.
+    /// The process keeps running after the handler returns.
+    pub(super) const CTRL_BREAK_EVENT: Dword = 1;
+    /// The console window was closed. Windows terminates the process when the handler returns.
+    pub(super) const CTRL_CLOSE_EVENT: Dword = 2;
+    /// The user is logging off. Windows terminates the process when the handler returns.
+    pub(super) const CTRL_LOGOFF_EVENT: Dword = 5;
+    /// The system is shutting down. Windows terminates the process when the handler returns.
+    pub(super) const CTRL_SHUTDOWN_EVENT: Dword = 6;
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        pub(super) fn SetConsoleCtrlHandler(
+            handler: Option<unsafe extern "system" fn(Dword) -> Bool>,
+            add: Bool,
+        ) -> Bool;
     }
 }
 
 #[cfg(windows)]
-extern "C" fn windows_signal_handler(_sig: libc::c_int) {
+fn install_signal_handler(draining: Arc<AtomicBool>, _write_fd: i32, _log_level: Arc<AtomicU8>) {
+    // Store the draining pointer in the global so the control handler can set it.
+    let ptr = Arc::into_raw(draining).cast_mut();
+    GLOBAL_DRAINING.store(ptr, Ordering::SeqCst);
+
+    // SAFETY: the handler is a plain `extern "system"` function with no state of its own; the
+    // pointer above is leaked for the process lifetime, which is what makes reading it in the
+    // handler sound.
+    unsafe {
+        console_ctrl::SetConsoleCtrlHandler(Some(console_ctrl_handler), console_ctrl::TRUE);
+    }
+}
+
+/// Starts the drain for every console control event Windows delivers.
+///
+/// Returning `TRUE` says the event is handled, which for Ctrl+C and Ctrl+Break stops the
+/// default terminator and lets the accept loop drain on its own schedule. For a window close, a
+/// log-off and a system shutdown, returning is itself what lets Windows terminate the process,
+/// so the handler waits for the drain instead of returning immediately, up to the budget the
+/// operating system allows before it stops asking.
+#[cfg(windows)]
+unsafe extern "system" fn console_ctrl_handler(event: console_ctrl::Dword) -> console_ctrl::Bool {
+    let terminating = match event {
+        console_ctrl::CTRL_C_EVENT | console_ctrl::CTRL_BREAK_EVENT => false,
+        console_ctrl::CTRL_CLOSE_EVENT
+        | console_ctrl::CTRL_LOGOFF_EVENT
+        | console_ctrl::CTRL_SHUTDOWN_EVENT => true,
+        // An event this does not know is one for another handler to answer.
+        _ => return console_ctrl::FALSE,
+    };
+
     let ptr = GLOBAL_DRAINING.load(Ordering::SeqCst);
     if !ptr.is_null() {
         unsafe { (*ptr).store(true, Ordering::SeqCst) };
     }
-    // Re-register the handler since Windows resets to SIG_DFL after each signal.
-    unsafe {
-        libc::signal(libc::SIGINT, windows_signal_handler as libc::sighandler_t);
+
+    if terminating {
+        let deadline = Instant::now() + CONSOLE_CLOSE_DRAIN_BUDGET;
+        while !SHUTDOWN_COMPLETE.load(Ordering::SeqCst) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
+
+    console_ctrl::TRUE
 }
 
 // ---------------------------------------------------------------------------
