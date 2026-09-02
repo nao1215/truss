@@ -704,10 +704,15 @@ impl FromStr for QualityMetric {
 
 /// A perceptual quality target used when binary-searching a lossy encode quality.
 ///
-/// The search runs over `1..=quality` when a `quality` is given and `1..=100` otherwise,
-/// and returns the lowest quality whose score meets `value`. When none does, the highest
-/// quality in the range is returned together with a
-/// [`TransformWarning::TargetQualityNotReached`] naming the score it reached.
+/// The search is a binary search over `1..=quality` when a `quality` is given and `1..=100`
+/// otherwise, and it assumes the score rises with the quality setting. Encoders do not
+/// promise that: rate control changes quantization as the setting moves, and a perceptual
+/// score against the original can fall a little on the way up. So the quality returned is
+/// one whose score meets `value` rather than necessarily the least one that would, and where
+/// no probed quality meets it, the top of the range is returned together with a
+/// [`TransformWarning::TargetQualityNotReached`] naming the score that encode reached.
+/// Guaranteeing the minimum would mean scanning the range at an encode, a decode, and a
+/// metric per step, against the handful the search makes.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TargetQuality {
     /// The requested quality metric.
@@ -1682,15 +1687,17 @@ pub enum TransformWarning {
         /// The EXIF orientation value the input carried.
         orientation: u16,
     },
-    /// The lossy encode could not reach the requested quality target, so the output scores
-    /// below it. Raised only for a target the caller named, never for the one `auto` picks
-    /// on its own, and never when the input's own bytes were handed back.
+    /// No quality the search probed reached the requested target, so the output scores below
+    /// it. Raised only for a target the caller named, never for the one `auto` picks on its
+    /// own, and never when the input's own bytes were handed back. The search samples the
+    /// quality range rather than walking it, so this says no probed quality reached the
+    /// target rather than that none would; see [`TargetQuality`].
     TargetQualityNotReached {
         /// The target that was asked for.
         target: TargetQuality,
-        /// The best score the search reached.
+        /// The score the returned encode reached, which is the one at `quality`.
         achieved: f32,
-        /// The quality the best score was reached at: the `quality` cap when one was given,
+        /// The quality of the encode returned: the `quality` cap when one was given,
         /// otherwise 100.
         quality: u8,
     },
@@ -1716,12 +1723,12 @@ impl fmt::Display for TransformWarning {
                 if *quality < 100 {
                     write!(
                         f,
-                        "the lossy encode could not reach {target} within the quality cap of {quality}: the best it reached was {metric} {achieved:.3}. Raise the cap or lower the target"
+                        "the lossy encode did not reach {target} within the quality cap of {quality}: at that quality it reached {metric} {achieved:.3}. Raise the cap or lower the target"
                     )
                 } else {
                     write!(
                         f,
-                        "the lossy encode could not reach {target} even at quality 100: the best it reached was {metric} {achieved:.3}. Lower the target"
+                        "the lossy encode did not reach {target} at quality 100, where it reached {metric} {achieved:.3}. The quality range is sampled rather than scanned, so a setting the search did not try may still reach it; lower the target for one it will find"
                     )
                 }
             }
