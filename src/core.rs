@@ -7,6 +7,9 @@ use std::time::Duration;
 
 #[cfg(feature = "avif")]
 pub(crate) use avif::avif_clean_aperture;
+// Not gated with the decoder: `smaller_passthrough` is compiled in every build and reads
+// this, and the container walk needs no decoder anyway.
+pub(crate) use avif::avif_carries_metadata;
 use avif::{avif_orientation, has_avif_brand, sniff_avif};
 
 // The shared failure vocabulary is only read by the adapters, so a build with none of them
@@ -1389,20 +1392,27 @@ pub struct Rgba8 {
 
 impl Rgba8 {
     /// Parses a hexadecimal RGB or RGBA color string without a leading `#`.
+    ///
+    /// Every rejection reads the same sentence, which names the shape truss accepts rather
+    /// than repeating the value back. `#ffffff` is the spelling a caller reaches for first,
+    /// since CSS, HTML, and every colour picker use it, and `unsupported color \`#ffffff\``
+    /// gave them nothing to correct. Naming the rule is what every other option here does.
     pub fn from_hex(value: &str) -> Result<Self, String> {
-        if !value.is_ascii() || (value.len() != 6 && value.len() != 8) {
-            return Err(format!("unsupported color `{value}`"));
+        fn rule(value: &str) -> String {
+            format!(
+                "unsupported color `{value}`: a color is six or eight hexadecimal digits with no leading `#`, as in ffffff or ffffffaa"
+            )
         }
 
-        let r = u8::from_str_radix(&value[0..2], 16)
-            .map_err(|_| format!("unsupported color `{value}`"))?;
-        let g = u8::from_str_radix(&value[2..4], 16)
-            .map_err(|_| format!("unsupported color `{value}`"))?;
-        let b = u8::from_str_radix(&value[4..6], 16)
-            .map_err(|_| format!("unsupported color `{value}`"))?;
+        if !value.is_ascii() || (value.len() != 6 && value.len() != 8) {
+            return Err(rule(value));
+        }
+
+        let r = u8::from_str_radix(&value[0..2], 16).map_err(|_| rule(value))?;
+        let g = u8::from_str_radix(&value[2..4], 16).map_err(|_| rule(value))?;
+        let b = u8::from_str_radix(&value[4..6], 16).map_err(|_| rule(value))?;
         let a = if value.len() == 8 {
-            u8::from_str_radix(&value[6..8], 16)
-                .map_err(|_| format!("unsupported color `{value}`"))?
+            u8::from_str_radix(&value[6..8], 16).map_err(|_| rule(value))?
         } else {
             u8::MAX
         };
@@ -2623,20 +2633,75 @@ fn sniff_png(bytes: &[u8]) -> Result<ArtifactMetadata, TransformError> {
     let width = read_u32_be(&bytes[16..20])?;
     let height = read_u32_be(&bytes[20..24])?;
     let color_type = bytes[25];
+    let ancillary = png_ancillary_facts(bytes);
     let has_alpha = match color_type {
+        // These two carry an alpha channel, and `tRNS` is not allowed alongside one.
         4 | 6 => Some(true),
-        0 | 2 | 3 => Some(false),
+        // These three have no alpha channel and may still be transparent: the
+        // specification puts that transparency in a `tRNS` chunk, as a transparent grey
+        // value, a transparent colour, or a per-entry palette alpha table. Reading only
+        // IHDR calls a transparent palette PNG opaque while the same picture as a GIF,
+        // whose sniffer walks the blocks, is called transparent.
+        0 | 2 | 3 => Some(ancillary.has_trns),
         _ => None,
     };
 
     Ok(ArtifactMetadata {
         width: Some(width),
         height: Some(height),
-        frame_count: 1,
+        frame_count: ancillary.frame_count,
         duration: None,
         has_alpha,
         orientation: exif_orientation(MediaType::Png, bytes),
     })
+}
+
+/// What the chunks after IHDR say about transparency and animation.
+struct PngAncillaryFacts {
+    has_trns: bool,
+    frame_count: u32,
+}
+
+/// Walks the chunk list for the two facts IHDR does not carry.
+///
+/// Both chunks are required to precede the image data, so the walk stops at the first
+/// `IDAT` and a file carrying neither pays for a few chunk headers. A length that runs off
+/// the end ends the walk with whatever was read: this reports facts about a file the
+/// decoder has not seen yet, and a malformed chunk list is the decoder's to refuse.
+fn png_ancillary_facts(bytes: &[u8]) -> PngAncillaryFacts {
+    let mut facts = PngAncillaryFacts {
+        has_trns: false,
+        frame_count: 1,
+    };
+
+    // Past the 8-byte signature and the IHDR chunk, whose length is fixed at 13.
+    let mut offset = 8 + 12 + 13;
+    while offset + 8 <= bytes.len() {
+        let Ok(length) = read_u32_be(&bytes[offset..offset + 4]) else {
+            break;
+        };
+        let chunk_type = &bytes[offset + 4..offset + 8];
+        match chunk_type {
+            b"IDAT" | b"IEND" => break,
+            b"tRNS" => facts.has_trns = true,
+            // An APNG announces its frame count here, before the image data.
+            b"acTL" if length >= 4 => {
+                if let Ok(frames) = read_u32_be(&bytes[offset + 8..offset + 12]) {
+                    facts.frame_count = frames.max(1);
+                }
+            }
+            _ => {}
+        }
+        let Some(next) = offset
+            .checked_add(12)
+            .and_then(|next| next.checked_add(length as usize))
+        else {
+            break;
+        };
+        offset = next;
+    }
+
+    facts
 }
 
 /// Reads the EXIF Orientation tag out of any container that can carry one.
@@ -2944,14 +3009,42 @@ fn sniff_webp(bytes: &[u8]) -> Result<ArtifactMetadata, TransformError> {
         };
 
         // The EXIF chunk follows the image data, so it is read from the whole file rather
-        // than from the chunk this loop stopped at.
+        // than from the chunk this loop stopped at. The frames are counted the same way,
+        // since `ANMF` chunks also follow the header this loop stopped at.
         metadata.orientation = exif_orientation(MediaType::Webp, bytes);
+        if metadata.frame_count > 1 {
+            metadata.frame_count = count_webp_frames(bytes).max(2);
+        }
         return Ok(metadata);
     }
 
     Err(TransformError::DecodeFailed(
         "webp file is missing an image chunk".to_string(),
     ))
+}
+
+/// Counts the `ANMF` chunks of an animated WebP, each of which holds one frame.
+fn count_webp_frames(bytes: &[u8]) -> u32 {
+    let mut frames = 0_u32;
+    let mut offset = 12;
+    while offset + 8 <= bytes.len() {
+        let Ok(size) = read_u32_le(&bytes[offset + 4..offset + 8]) else {
+            break;
+        };
+        if &bytes[offset..offset + 4] == b"ANMF" {
+            frames = frames.saturating_add(1);
+        }
+        let size = size as usize;
+        let Some(next) = offset
+            .checked_add(8)
+            .and_then(|next| next.checked_add(size))
+            .and_then(|next| next.checked_add(size % 2))
+        else {
+            break;
+        };
+        offset = next;
+    }
+    frames
 }
 
 fn sniff_webp_vp8x(bytes: &[u8]) -> Result<ArtifactMetadata, TransformError> {
@@ -2964,17 +3057,24 @@ fn sniff_webp_vp8x(bytes: &[u8]) -> Result<ArtifactMetadata, TransformError> {
     let flags = bytes[0];
     let width = read_u24_le(&bytes[4..7])? + 1;
     let height = read_u24_le(&bytes[7..10])? + 1;
-    let has_alpha = Some(flags & 0b0001_0000 != 0);
+    let has_alpha = Some(flags & VP8X_ALPHA_FLAG != 0);
+    // The frames themselves are counted by the caller, which has the whole file; this
+    // records only that there is more than one of them, which is what the flag states.
+    let frame_count = u32::from(flags & VP8X_ANIMATION_FLAG != 0) + 1;
 
     Ok(ArtifactMetadata {
         width: Some(width),
         height: Some(height),
-        frame_count: 1,
+        frame_count,
         duration: None,
         has_alpha,
         orientation: None,
     })
 }
+
+/// The VP8X feature flags this sniffer reads, in the bit positions the container gives them.
+const VP8X_ALPHA_FLAG: u8 = 0b0001_0000;
+const VP8X_ANIMATION_FLAG: u8 = 0b0000_0010;
 
 fn sniff_webp_vp8(bytes: &[u8]) -> Result<ArtifactMetadata, TransformError> {
     if bytes.len() < 10 {
@@ -3168,6 +3268,24 @@ mod tests {
         bytes.push(0);
         bytes.push(0);
         bytes.push(0);
+        bytes.extend_from_slice(&0_u32.to_be_bytes());
+        bytes
+    }
+
+    /// A PNG signature, an IHDR, and whatever chunks the caller wants after it.
+    ///
+    /// The sniffers read headers rather than pixels, so a file with no IDAT is enough to
+    /// describe every fact they report.
+    fn png_bytes_with_chunks(color_type: u8, chunks: &[(&[u8; 4], Vec<u8>)]) -> Vec<u8> {
+        let mut bytes = png_ihdr_bytes(8, 8, color_type);
+        for (chunk_type, data) in chunks {
+            bytes.extend_from_slice(&(data.len() as u32).to_be_bytes());
+            bytes.extend_from_slice(*chunk_type);
+            bytes.extend_from_slice(data);
+            bytes.extend_from_slice(&0_u32.to_be_bytes());
+        }
+        bytes.extend_from_slice(&0_u32.to_be_bytes());
+        bytes.extend_from_slice(b"IEND");
         bytes.extend_from_slice(&0_u32.to_be_bytes());
         bytes
     }
@@ -4031,6 +4149,176 @@ mod tests {
             .expect("sniff animated gif");
 
         assert_eq!(artifact.metadata.frame_count, 5);
+    }
+
+    /// A rejected colour is told what a colour looks like.
+    ///
+    /// Every other option in truss names its own rule in the failure, and `--background`
+    /// answered every wrong spelling with the value repeated back. The assertion is the
+    /// property rather than the sentence: the message says how many digits and says that no
+    /// `#` is used, whatever wording carries it.
+    #[test]
+    fn a_rejected_color_is_told_what_a_color_looks_like() {
+        for value in [
+            "#ffffff", "fff", "white", "0xffffff", "FFFFFFF", "", "gggggg",
+        ] {
+            let message = Rgba8::from_hex(value).expect_err("not a color");
+            assert!(
+                message.contains("six or eight") && message.contains("hexadecimal"),
+                "{value:?} was not told the digit count: {message}"
+            );
+            assert!(
+                message.contains('#'),
+                "{value:?} was not told that no `#` is used: {message}"
+            );
+        }
+
+        for value in ["ffffff", "FFFFFF", "ffffffaa", "000000"] {
+            assert!(
+                Rgba8::from_hex(value).is_ok(),
+                "{value:?} should be a color"
+            );
+        }
+    }
+
+    #[test]
+    fn sniff_artifact_detects_an_animated_avif() {
+        // An animated AVIF is a moving-image sequence, and the container says so in its
+        // brands: `avis` is the sequence brand, which `is_avif_brand` already accepts as a
+        // reason to call the file an AVIF at all.
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&24_u32.to_be_bytes());
+        bytes.extend_from_slice(b"ftyp");
+        bytes.extend_from_slice(b"avis");
+        bytes.extend_from_slice(&0_u32.to_be_bytes());
+        bytes.extend_from_slice(b"avis");
+        bytes.extend_from_slice(b"avif");
+        let artifact =
+            sniff_artifact(RawArtifact::new(bytes, None)).expect("sniff an animated avif");
+
+        assert!(
+            artifact.metadata.frame_count > 1,
+            "an animated avif reported {} frames",
+            artifact.metadata.frame_count
+        );
+    }
+
+    #[test]
+    fn sniff_artifact_counts_the_frames_of_an_animated_avif() {
+        // The frames are samples of a `moov` track, and the count is in `stsz`. The refusal
+        // prints the number, so a placeholder there would state a count nothing measured.
+        fn mp4_box(box_type: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+            let mut out = ((payload.len() + 8) as u32).to_be_bytes().to_vec();
+            out.extend_from_slice(box_type);
+            out.extend_from_slice(payload);
+            out
+        }
+
+        let mut stsz = vec![0_u8; 4];
+        stsz.extend_from_slice(&0_u32.to_be_bytes());
+        stsz.extend_from_slice(&7_u32.to_be_bytes());
+        let stbl = mp4_box(b"stbl", &mp4_box(b"stsz", &stsz));
+        let minf = mp4_box(b"minf", &stbl);
+        let mdia = mp4_box(b"mdia", &minf);
+        let trak = mp4_box(b"trak", &mdia);
+        let moov = mp4_box(b"moov", &trak);
+
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&24_u32.to_be_bytes());
+        bytes.extend_from_slice(b"ftyp");
+        bytes.extend_from_slice(b"avis");
+        bytes.extend_from_slice(&0_u32.to_be_bytes());
+        bytes.extend_from_slice(b"avis");
+        bytes.extend_from_slice(b"avif");
+        bytes.extend_from_slice(&moov);
+
+        let artifact =
+            sniff_artifact(RawArtifact::new(bytes, None)).expect("sniff an animated avif");
+
+        assert_eq!(artifact.metadata.frame_count, 7);
+    }
+
+    #[test]
+    fn sniff_artifact_counts_the_frames_of_an_animated_png() {
+        // An APNG announces its frame count in an `acTL` chunk before the image data. The
+        // IHDR says nothing about it, so a sniffer that stops there calls the file static.
+        let mut actl = Vec::new();
+        actl.extend_from_slice(&4_u32.to_be_bytes());
+        actl.extend_from_slice(&0_u32.to_be_bytes());
+        let artifact = sniff_artifact(RawArtifact::new(
+            png_bytes_with_chunks(2, &[(b"acTL", actl)]),
+            None,
+        ))
+        .expect("sniff an animated png");
+
+        assert_eq!(artifact.metadata.frame_count, 4);
+    }
+
+    #[test]
+    fn sniff_artifact_counts_the_frames_of_an_animated_webp() {
+        // Bit 1 of the VP8X flags is the animation flag, beside the alpha flag at bit 4 that
+        // the sniffer already reads, and the frames follow in `ANMF` chunks.
+        const ANIMATION: u8 = 0b0000_0010;
+        let mut bytes = webp_vp8x_bytes(8, 8, ANIMATION);
+        for _ in 0..3 {
+            bytes.extend_from_slice(b"ANMF");
+            bytes.extend_from_slice(&0_u32.to_le_bytes());
+        }
+        let riff_len = (bytes.len() - 8) as u32;
+        bytes[4..8].copy_from_slice(&riff_len.to_le_bytes());
+        let artifact =
+            sniff_artifact(RawArtifact::new(bytes, None)).expect("sniff an animated webp");
+
+        assert!(
+            artifact.metadata.frame_count > 1,
+            "an animated webp reported {} frames",
+            artifact.metadata.frame_count
+        );
+    }
+
+    #[test]
+    fn sniff_artifact_reads_png_transparency_from_a_trns_chunk() {
+        // Colour types 0, 2, and 3 have no alpha channel and may still be transparent: the
+        // PNG specification puts that transparency in a `tRNS` chunk. Reading only IHDR
+        // calls a transparent palette PNG opaque while the same picture as a GIF is not.
+        let cases: &[(u8, Vec<u8>, bool)] = &[
+            (0, vec![0x00, 0x01], true),
+            (2, vec![0x00, 0x01, 0x00, 0x02, 0x00, 0x03], true),
+            (3, vec![0x00, 0xFF], true),
+            (0, Vec::new(), false),
+            (2, Vec::new(), false),
+            (3, Vec::new(), false),
+        ];
+
+        for (color_type, trns, expected) in cases {
+            let chunks: Vec<(&[u8; 4], Vec<u8>)> = if trns.is_empty() {
+                Vec::new()
+            } else {
+                vec![(b"tRNS", trns.clone())]
+            };
+            let artifact = sniff_artifact(RawArtifact::new(
+                png_bytes_with_chunks(*color_type, &chunks),
+                None,
+            ))
+            .expect("sniff png");
+
+            assert_eq!(
+                artifact.metadata.has_alpha,
+                Some(*expected),
+                "color type {color_type} with {} bytes of tRNS",
+                trns.len()
+            );
+        }
+
+        // A colour type that carries its own alpha channel is unaffected.
+        for color_type in [4_u8, 6] {
+            let artifact = sniff_artifact(RawArtifact::new(
+                png_bytes_with_chunks(color_type, &[]),
+                None,
+            ))
+            .expect("sniff png");
+            assert_eq!(artifact.metadata.has_alpha, Some(true));
+        }
     }
 
     #[test]

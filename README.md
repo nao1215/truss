@@ -192,17 +192,18 @@ truss photo.gif -o thumb.webp --width 320 --format webp
 truss inspect upload.gif
 ```
 
-Animated GIF is refused rather than reduced to its first frame:
+An animation is refused rather than reduced to its first frame, whether it arrived as a
+GIF, an animated WebP, an APNG, or an animated AVIF:
 
 ```sh
 $ truss convert animated.gif -o out.png
-error: animated GIF is not supported (3 frames); truss transforms single-frame images only
+error: animated gif is not supported (3 frames); truss transforms single-frame images only
 $ echo $?
 3
 ```
 
 Silently returning frame one with exit code 0 would give a caller no way to notice the
-animation was discarded. `truss inspect` still reads animated GIFs and reports
+animation was discarded. `truss inspect` still reads all four and reports
 `"isAnimated": true`, so a pipeline can branch on that before converting.
 
 #### Resize & fit modes

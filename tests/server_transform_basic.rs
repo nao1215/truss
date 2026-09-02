@@ -163,7 +163,7 @@ fn serve_once_rejects_an_animated_gif_source() {
     );
     let text = String::from_utf8_lossy(&body);
     assert!(
-        text.contains("animated GIF is not supported"),
+        text.contains("animated gif is not supported"),
         "the response should say why, got: {text}"
     );
 }

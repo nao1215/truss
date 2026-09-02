@@ -230,7 +230,7 @@ scenarios:
       - assert:
           exit_code: 1
           stderr:
-            contains: "watermark is not supported for SVG inputs"
+            contains: "watermark is not supported with SVG output"
 
   # The margin has no ceiling of its own on any adapter: the pipeline refuses any margin
   # that leaves the watermark no room, and it names the sizes involved. The HTTP server

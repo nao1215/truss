@@ -225,3 +225,128 @@ fn an_unrecognized_remote_body_is_not_echoed_back() {
         "the length is still worth reporting: {stderr}"
     );
 }
+
+/// As `spawn_http_server`, but it gives up rather than waiting for a request that a broken
+/// build will never send. A test that hangs cannot report a regression.
+fn spawn_bounded_http_server(
+    body: Vec<u8>,
+    content_type: &'static str,
+) -> (String, thread::JoinHandle<bool>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+    listener
+        .set_nonblocking(true)
+        .expect("configure the listener");
+    let addr = listener.local_addr().expect("server addr");
+    let url = format!("http://{addr}/image");
+
+    let handle = thread::spawn(move || {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while std::time::Instant::now() < deadline {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    stream.set_nonblocking(false).expect("blocking stream");
+                    let mut request = [0_u8; 1024];
+                    let _ = stream.read(&mut request);
+                    let header = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    stream.write_all(header.as_bytes()).expect("write headers");
+                    stream.write_all(&body).expect("write body");
+                    stream.flush().expect("flush response");
+                    return true;
+                }
+                Err(ref error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(std::time::Duration::from_millis(20));
+                }
+                Err(error) => panic!("accept failed: {error}"),
+            }
+        }
+        false
+    });
+
+    (url, handle)
+}
+
+/// A watermark can come from a URL, the way the input already can.
+///
+/// The server composites a watermark it fetches; the CLI read one only from the filesystem,
+/// so `--watermark https://…` was reported as a missing file. The address rules are the ones
+/// `--url` already applies, so a metadata endpoint is refused here too.
+#[test]
+fn convert_composites_a_watermark_fetched_from_a_url() {
+    let watermark = {
+        use image::ImageEncoder;
+        let image = image::RgbaImage::from_pixel(8, 6, image::Rgba([0, 0, 255, 200]));
+        let mut bytes = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut bytes)
+            .write_image(image.as_raw(), 8, 6, image::ExtendedColorType::Rgba8)
+            .expect("encode watermark");
+        bytes
+    };
+    let (url, handle) = spawn_bounded_http_server(watermark, "image/png");
+
+    let source = temp_file_path("watermark-url-source");
+    fs::write(&source, common::large_png_bytes()).expect("write source");
+    let output_path = temp_file_path("watermark-url-out");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_truss"))
+        .arg("convert")
+        .arg(&source)
+        .arg("-o")
+        .arg(&output_path)
+        .arg("--format")
+        .arg("png")
+        .arg("--watermark")
+        .arg(&url)
+        .output()
+        .expect("run truss convert");
+    let served = handle.join().expect("join fixture server");
+
+    assert!(
+        served,
+        "the watermark URL was never fetched: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.status.success(),
+        "a URL watermark should be fetched, got: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let produced = fs::read(&output_path).expect("read output");
+    let artifact = sniff_artifact(RawArtifact::new(produced, None)).expect("sniff output");
+    assert_eq!(artifact.media_type, MediaType::Png);
+
+    let _ = fs::remove_file(&source);
+    let _ = fs::remove_file(&output_path);
+}
+
+/// The address rules that guard `--url` guard the watermark too.
+#[test]
+fn convert_refuses_a_watermark_url_that_points_at_a_metadata_endpoint() {
+    let source = temp_file_path("watermark-metadata-source");
+    fs::write(&source, common::png_bytes()).expect("write source");
+    let output_path = temp_file_path("watermark-metadata-out");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_truss"))
+        .arg("convert")
+        .arg(&source)
+        .arg("-o")
+        .arg(&output_path)
+        .arg("--format")
+        .arg("png")
+        .arg("--watermark")
+        .arg("http://169.254.169.254/latest/meta-data/")
+        .output()
+        .expect("run truss convert");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("metadata"),
+        "the refusal should name the metadata service, got: {stderr}"
+    );
+
+    let _ = fs::remove_file(&source);
+    let _ = fs::remove_file(&output_path);
+}

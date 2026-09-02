@@ -110,9 +110,10 @@ raster output format to transform the drawing.
 
 GIF has no output column: truss decodes it but never encodes it, so `format=gif` returns
 `415 Unsupported Media Type`. A GIF request that does not name a format is served as PNG
-rather than echoing the input format back. An animated GIF is rejected with `415`, naming the
-frame count, instead of being reduced to its first frame; the CLI `truss inspect` still reads
-animated GIFs and reports `isAnimated`.
+rather than echoing the input format back. A source with more than one frame is rejected with
+`415`, naming the format and the frame count, instead of being reduced to its first frame;
+that covers GIF, animated WebP, APNG, and animated AVIF, and the CLI `truss inspect` reports
+`isAnimated` for all of them.
 
 ## Choosing the Output Format
 

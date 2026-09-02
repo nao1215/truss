@@ -10,12 +10,36 @@ use super::{
     ClapConvertArgs, ClapOptimizeArgs, CliError, Command, ConvertCommand, EXIT_IO, EXIT_RUNTIME,
     EXIT_USAGE, HelpTopic, InputSource, OutputTarget, TransformFields, class_for_io_error,
     classified_error, convert_error, convert_usage, is_dash, map_transform_error, optimize_error,
-    optimize_usage, read_input_bytes, runtime_error, validate_url,
+    optimize_usage, read_input_bytes, read_url_bytes, runtime_error, validate_url,
 };
 
 // ---------------------------------------------------------------------------
 // Clap -> Command conversion
 // ---------------------------------------------------------------------------
+
+/// Reads the watermark image, from a URL when the value is one and from the filesystem
+/// otherwise.
+///
+/// The fetch is the one `--url` uses, so the address rules, the redirect limit, and the size
+/// cap are the ones already written rather than a second copy of them. A value that is not
+/// valid UTF-8 cannot be a URL, so it is a path, which is also what a caller who named a file
+/// with an unusual encoding meant.
+fn read_watermark_bytes(watermark: &Path) -> Result<Vec<u8>, CliError> {
+    if let Some(value) = watermark.to_str()
+        && (value.starts_with("http://") || value.starts_with("https://"))
+    {
+        validate_url(value, "--watermark")?;
+        return read_url_bytes(value);
+    }
+
+    fs::read(watermark).map_err(|error| {
+        classified_error(
+            class_for_io_error(&error),
+            EXIT_IO,
+            &format!("failed to read watermark {}: {error}", watermark.display()),
+        )
+    })
+}
 
 pub(super) fn convert_from_clap(args: ClapConvertArgs) -> Result<Command, CliError> {
     if args.help {
@@ -72,7 +96,7 @@ pub(super) fn convert_from_clap(args: ClapConvertArgs) -> Result<Command, CliErr
             class: ErrorClass::InvalidRequest,
             message: "--watermark-position, --watermark-opacity, and --watermark-margin require --watermark".to_string(),
             usage: Some(convert_usage().to_string()),
-            hint: Some("provide --watermark <path> when using watermark options".to_string()),
+            hint: Some("provide --watermark <file or URL> when using watermark options".to_string()),
         });
     }
     let watermark_position = args.watermark_position;
@@ -223,13 +247,7 @@ where
     }
 
     let watermark = if let Some(ref wm_path) = command.watermark_path {
-        let wm_bytes = fs::read(wm_path).map_err(|error| {
-            classified_error(
-                class_for_io_error(&error),
-                EXIT_IO,
-                &format!("failed to read watermark {}: {error}", wm_path.display()),
-            )
-        })?;
+        let wm_bytes = read_watermark_bytes(wm_path)?;
         let wm_artifact = sniff_artifact(RawArtifact::new(wm_bytes, None)).map_err(|error| {
             let mut failure = map_transform_error(error);
             failure.message = format!(

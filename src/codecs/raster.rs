@@ -377,7 +377,30 @@ fn decode_input(input: &Artifact) -> Result<DynamicImage, TransformError> {
     };
 
     image::load_from_memory_with_format(&input.bytes, image_format)
-        .map_err(|error| TransformError::DecodeFailed(error.to_string()))
+        .map_err(|error| decode_failure(input.media_type, &error))
+}
+
+/// The sentence truss gives a decode failure, in place of the decoder's own.
+///
+/// `docs/problems.md` describes `decode-failed` as truss's own class, and every other class
+/// in that document is reached with a sentence truss wrote. The classification reads the
+/// error's variant rather than its text, so nothing here depends on wording upstream may
+/// change; truncation and corruption share a sentence because the variant does not separate
+/// them, and the sniffers run first and have their own for a file that ends early.
+fn decode_failure(media_type: MediaType, error: &image::ImageError) -> TransformError {
+    let format = media_type.as_name();
+    TransformError::DecodeFailed(match error {
+        image::ImageError::Unsupported(_) => {
+            format!("{format} file uses a feature truss cannot decode")
+        }
+        image::ImageError::Limits(_) => {
+            format!("{format} file is larger than truss decodes")
+        }
+        image::ImageError::Decoding(_) | image::ImageError::IoError(_) => {
+            format!("{format} image data is incomplete or corrupt")
+        }
+        _ => format!("{format} file could not be decoded"),
+    })
 }
 
 /// Decodes an AVIF image using `rav1d` (pure Rust AV1 decoder) and `mp4parse` (ISOBMFF parser).
@@ -1144,7 +1167,14 @@ fn apply_grayscale(image: DynamicImage) -> DynamicImage {
     image.grayscale()
 }
 
-fn apply_crop(image: DynamicImage, crop: CropRegion) -> Result<DynamicImage, TransformError> {
+/// Takes the region the crop names out of the image.
+///
+/// Called from both codecs: an SVG rasterized to a raster format joins this pipeline, and
+/// the crop it gets is this one, so a rectangle means the same thing whichever the source.
+pub(crate) fn apply_crop(
+    image: DynamicImage,
+    crop: CropRegion,
+) -> Result<DynamicImage, TransformError> {
     let (iw, ih) = image.dimensions();
     if crop.x.saturating_add(crop.width) > iw || crop.y.saturating_add(crop.height) > ih {
         return Err(TransformError::InvalidOptions(format!(
@@ -1231,7 +1261,11 @@ pub(crate) fn apply_resize(
 
 /// Composites a watermark image onto the main image at the given position,
 /// opacity, and margin.
-fn apply_watermark(
+/// Composites the watermark onto the image.
+///
+/// Called from both codecs, so an overlay lands in the same place at the same opacity
+/// whether the source was a raster file or a drawing.
+pub(crate) fn apply_watermark(
     image: DynamicImage,
     watermark: &WatermarkInput,
 ) -> Result<DynamicImage, TransformError> {
@@ -1596,9 +1630,12 @@ fn smaller_passthrough(normalized: &NormalizedTransformRequest, encoded: &[u8]) 
         MediaType::Png => png_bytes_satisfying_metadata_policy(
             &normalized.input.bytes,
             normalized.options.metadata_policy,
-        )?
-        .to_vec(),
+        )?,
         MediaType::Webp => webp_bytes_satisfying_metadata_policy(
+            &normalized.input.bytes,
+            normalized.options.metadata_policy,
+        )?,
+        MediaType::Avif => avif_bytes_satisfying_metadata_policy(
             &normalized.input.bytes,
             normalized.options.metadata_policy,
         )?,
@@ -1608,18 +1645,21 @@ fn smaller_passthrough(normalized: &NormalizedTransformRequest, encoded: &[u8]) 
     (candidate.len() < encoded.len()).then_some(candidate)
 }
 
-/// Returns the PNG unchanged when it carries no metadata the policy would remove.
+/// Returns the PNG with the metadata chunks the policy removes taken out, or `None` when
+/// the container cannot be walked.
 ///
-/// This never rewrites the container. Either the file already satisfies the policy and can
-/// be handed back byte for byte, or it does not and the re-encode stands: filtering chunks
-/// would mean deciding what every ancillary chunk means, and that is a larger contract than
-/// "do not make the file bigger" needs.
+/// The chunks truss treats as metadata are the closed set named right here: one of those is
+/// dropped and every other chunk is copied through, which is what "the policy says nothing
+/// about it" means, and it is what [`webp_bytes_satisfying_metadata_policy`] already does for
+/// the other container with an ancillary chunk space. Declining to produce a candidate at all
+/// when the file carried something to strip left the size guarantee holding only for a PNG
+/// with no metadata, which almost nothing writes.
 fn png_bytes_satisfying_metadata_policy(
     bytes: &[u8],
     metadata_policy: MetadataPolicy,
-) -> Option<&[u8]> {
+) -> Option<Vec<u8>> {
     if metadata_policy == MetadataPolicy::KeepAll {
-        return Some(bytes);
+        return Some(bytes.to_vec());
     }
 
     // The chunks truss treats as metadata: an ICC profile, EXIF, and the three text forms
@@ -1635,17 +1675,40 @@ fn png_bytes_satisfying_metadata_policy(
 
     // Past the 8-byte PNG signature; a shorter input never reaches here, because it would
     // not have sniffed as a PNG.
+    let mut kept_bytes = Vec::with_capacity(bytes.len());
+    kept_bytes.extend_from_slice(bytes.get(..8)?);
     let mut offset = 8;
     while offset + 8 <= bytes.len() {
         let length = u32::from_be_bytes(bytes.get(offset..offset + 4)?.try_into().ok()?) as usize;
         let chunk_type: &[u8; 4] = bytes.get(offset + 4..offset + 8)?.try_into().ok()?;
-        if chunk_type != kept && METADATA_CHUNKS.contains(&chunk_type) {
-            return None;
+        let end = offset.checked_add(12)?.checked_add(length)?;
+        let chunk = bytes.get(offset..end)?;
+        if chunk_type == kept || !METADATA_CHUNKS.contains(&chunk_type) {
+            kept_bytes.extend_from_slice(chunk);
         }
         if chunk_type == b"IEND" {
-            return Some(bytes);
+            return Some(kept_bytes);
         }
-        offset = offset.checked_add(12)?.checked_add(length)?;
+        offset = end;
+    }
+
+    None
+}
+
+/// Returns the AVIF unchanged when it carries no metadata the policy would remove.
+///
+/// AVIF is the one output format truss cannot write metadata into at all: the encoder
+/// refuses `--keep-metadata` with `metadata retention is not implemented for avif output`,
+/// so the only policies that reach here are the ones that strip. That leaves nothing to
+/// rewrite and only a question to answer, which is whether the input has anything to strip.
+/// Without this arm an AVIF re-encode was never compared against the bytes it came from,
+/// and a small AVIF came back larger than it arrived.
+fn avif_bytes_satisfying_metadata_policy(
+    bytes: &[u8],
+    metadata_policy: MetadataPolicy,
+) -> Option<Vec<u8>> {
+    if metadata_policy == MetadataPolicy::KeepAll || !crate::core::avif_carries_metadata(bytes) {
+        return Some(bytes.to_vec());
     }
 
     None
@@ -1725,10 +1788,21 @@ fn webp_bytes_satisfying_metadata_policy(
 
 /// The message for a lossless JPEG request that cannot be served as a passthrough.
 ///
-/// An EXIF orientation gets its own wording because it is the common reason — a phone
-/// photo carries one — and because the generic message blames "pixel transforms" the
-/// caller did not ask for, which sends readers looking for a flag they never passed.
+/// The conditions behind the passthrough are independent, and reporting the category they
+/// sit in rather than the one that fired sends readers looking for a flag they never
+/// passed. Two of them get their own wording. A non-JPEG input is the one a caller hits
+/// most, since converting into JPEG is the ordinary way to reach this command, and it is
+/// not a transform at all: lossless JPEG optimization copies the input's coefficients, so
+/// it needs coefficients to copy. An EXIF orientation is the other, because a phone photo
+/// carries one.
 fn lossless_jpeg_refusal(normalized: &NormalizedTransformRequest) -> String {
+    if normalized.input.media_type != MediaType::Jpeg {
+        return format!(
+            "lossless JPEG optimization copies the input's own coefficients, so it needs a jpeg input; this one is {}. Convert with a re-encoding optimize mode instead",
+            normalized.input.media_type.as_name()
+        );
+    }
+
     if normalized.options.auto_orient
         && !auto_orientation_is_noop(&normalized.input)
         && let Some(orientation) =
@@ -3236,8 +3310,11 @@ fn extract_retained_metadata(
 /// The four reads are the same for every container, so the format only decides which decoder
 /// to open. A failure here is a decode failure, not a metadata failure: the bytes claimed to
 /// be this format and were not.
-fn retained_metadata<D: ImageDecoder>(mut decoder: D) -> Result<RetainedMetadata, TransformError> {
-    let decode_failed = |error: image::ImageError| TransformError::DecodeFailed(error.to_string());
+fn retained_metadata<D: ImageDecoder>(
+    mut decoder: D,
+    media_type: MediaType,
+) -> Result<RetainedMetadata, TransformError> {
+    let decode_failed = |error: image::ImageError| decode_failure(media_type, &error);
     Ok(RetainedMetadata {
         exif_metadata: decoder.exif_metadata().map_err(decode_failed)?,
         icc_profile: decoder.icc_profile().map_err(decode_failed)?,
@@ -3253,11 +3330,18 @@ fn retained_metadata<D: ImageDecoder>(mut decoder: D) -> Result<RetainedMetadata
 /// them.
 fn read_input_metadata(input: &Artifact) -> Result<RetainedMetadata, TransformError> {
     let bytes = Cursor::new(&input.bytes);
-    let open_failed = |error: image::ImageError| TransformError::DecodeFailed(error.to_string());
-    match input.media_type {
-        MediaType::Jpeg => retained_metadata(JpegDecoder::new(bytes).map_err(open_failed)?),
-        MediaType::Png => retained_metadata(PngDecoder::new(bytes).map_err(open_failed)?),
-        MediaType::Webp => retained_metadata(WebPDecoder::new(bytes).map_err(open_failed)?),
+    let media_type = input.media_type;
+    let open_failed = |error: image::ImageError| decode_failure(media_type, &error);
+    match media_type {
+        MediaType::Jpeg => {
+            retained_metadata(JpegDecoder::new(bytes).map_err(open_failed)?, media_type)
+        }
+        MediaType::Png => {
+            retained_metadata(PngDecoder::new(bytes).map_err(open_failed)?, media_type)
+        }
+        MediaType::Webp => {
+            retained_metadata(WebPDecoder::new(bytes).map_err(open_failed)?, media_type)
+        }
         MediaType::Avif | MediaType::Svg | MediaType::Bmp | MediaType::Tiff | MediaType::Gif => {
             Ok(RetainedMetadata::default())
         }
@@ -6867,6 +6951,182 @@ mod tests {
         assert_eq!(result.artifact.metadata.width, Some(32));
     }
 
+    /// A decode failure reads as a sentence truss wrote, not as the decoder's.
+    ///
+    /// The upstream `Display` names its own error classes and carries its byte counters:
+    /// `Format error decoding Jpeg: I/O errors Not enough bytes, expected 162 but found 19`
+    /// reached the CLI's stderr and the `detail` of the server's problem body. The assertion
+    /// is the property rather than the wording, so a change to either side keeps it honest.
+    #[test]
+    fn a_decode_failure_reads_as_a_sentence_truss_wrote() {
+        const DECODER_WORDS: [&str; 7] = [
+            "Format error",
+            "IoError",
+            "Decoding error",
+            "I/O errors",
+            "The Decoder",
+            "Unsupported",
+            "Limits are exceeded",
+        ];
+
+        let sources: &[(&str, Vec<u8>)] = &[
+            ("png", crate::test_support::flat_png(32, 32)),
+            ("jpeg", flat_jpeg_artifact(32, 32).bytes),
+        ];
+
+        for (name, bytes) in sources {
+            // Cut inside the image data, past the header the sniffer reads, so the failure
+            // comes from the decoder rather than from truss's own container walk.
+            let cut = bytes.len() * 9 / 10;
+            let artifact = sniff_artifact(RawArtifact::new(bytes[..cut].to_vec(), None))
+                .expect("the header still sniffs");
+            let error = transform_raster(TransformRequest::new(
+                artifact,
+                TransformOptions {
+                    format: Some(MediaType::Png),
+                    ..TransformOptions::default()
+                },
+            ))
+            .expect_err("a truncated image does not decode");
+
+            let message = error.to_string();
+            for word in DECODER_WORDS {
+                assert!(
+                    !message.contains(word),
+                    "a truncated {name} answered with the decoder's own words: {message}"
+                );
+            }
+            assert!(
+                message.contains(*name),
+                "the message should name the format, got: {message}"
+            );
+            assert!(
+                !message.chars().any(|c| c.is_ascii_digit()),
+                "the message should not carry the decoder's counters, got: {message}"
+            );
+        }
+    }
+
+    /// The refusal has to name the condition that fired, not the category it sits in.
+    ///
+    /// Converting a PNG or a WebP into JPEG asks for no transform at all, and was answered
+    /// `only supported when no pixel transforms are applied`, which sends a reader looking
+    /// for a flag they never passed. The real condition is that copying a JPEG's
+    /// coefficients needs a JPEG to copy them from.
+    #[test]
+    fn a_lossless_jpeg_refusal_names_the_condition_that_fired() {
+        let webp = {
+            let image = RgbaImage::from_pixel(16, 16, Rgba([10, 20, 30, 255]));
+            let mut bytes = Vec::new();
+            WebPEncoder::new_lossless(&mut bytes)
+                .encode(image.as_raw(), 16, 16, image::ExtendedColorType::Rgba8)
+                .expect("encode webp");
+            bytes
+        };
+        let sources: &[(&str, Vec<u8>)] = &[
+            ("png", crate::test_support::flat_png(16, 16)),
+            ("webp", webp),
+        ];
+
+        for (name, bytes) in sources {
+            let artifact = sniff_artifact(RawArtifact::new(bytes.clone(), None)).expect("sniff");
+            let error = transform_raster(TransformRequest::new(
+                artifact,
+                TransformOptions {
+                    format: Some(MediaType::Jpeg),
+                    optimize: OptimizeMode::Lossless,
+                    ..TransformOptions::default()
+                },
+            ))
+            .expect_err("a non-JPEG input cannot be optimized losslessly into a JPEG");
+
+            let message = error.to_string();
+            assert!(
+                message.contains("jpeg input") || message.contains("JPEG input"),
+                "a {name} input should be told a JPEG is needed, got: {message}"
+            );
+            assert!(
+                !message.contains("pixel transforms"),
+                "a request with no transform should not be told one was applied, got: {message}"
+            );
+        }
+    }
+
+    /// The never-grow guarantee has to survive a PNG that carries metadata, which is most
+    /// PNGs: ImageMagick, GIMP, Photoshop, and optipng all write a text chunk. Declining to
+    /// build a candidate when one is present left the re-encode standing however large it
+    /// was, so a 16-colour indexed PNG came back 42 percent bigger under the default policy.
+    #[test]
+    fn optimizing_a_png_that_carries_metadata_does_not_grow_it() {
+        for chunk in [b"tEXt", b"zTXt", b"iTXt", b"iCCP", b"eXIf"] {
+            let mut bytes = noisy_indexed_png_bytes();
+            let iend = bytes.len() - 12;
+            let mut with_metadata = bytes.split_off(iend);
+            push_png_chunk(
+                &mut bytes,
+                chunk,
+                b"truss\0some metadata worth several bytes",
+            );
+            bytes.append(&mut with_metadata);
+            let input_length = bytes.len();
+
+            let artifact = sniff_artifact(RawArtifact::new(bytes, None)).expect("sniff png");
+            for mode in [OptimizeMode::Auto, OptimizeMode::Lossless] {
+                let optimized = optimize_bytes(artifact.clone(), mode);
+                assert!(
+                    optimized.len() <= input_length,
+                    "{} {mode}: {input_length} became {}",
+                    String::from_utf8_lossy(chunk),
+                    optimized.len()
+                );
+                // Every optimize mode resolves to `PreserveIcc`, which keeps the profile on
+                // purpose so the re-encode does not shift the colours. The other four are
+                // metadata the policy removes, and they have to be gone.
+                if chunk != b"iCCP" {
+                    assert!(
+                        !optimized
+                            .windows(4)
+                            .any(|window| window == chunk.as_slice()),
+                        "{} {mode}: the chunk the policy strips is still there",
+                        String::from_utf8_lossy(chunk)
+                    );
+                }
+            }
+        }
+    }
+
+    /// An AVIF had no arm in the passthrough at all, so its re-encode was never compared
+    /// against the input and could come back larger.
+    #[cfg(feature = "avif")]
+    #[test]
+    fn optimizing_an_avif_does_not_grow_it() {
+        // Encoded at a low quality so the file is small, which is the shape that made the
+        // missing arm visible: a small AVIF re-encodes larger than it arrived.
+        let mut state = 0x2545_F491_4F6C_DD1D_u64;
+        let source = image::RgbaImage::from_fn(64, 48, |_, _| {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1);
+            let value = (state >> 33) as u8;
+            image::Rgba([value, value.wrapping_mul(3), value.wrapping_add(97), 255])
+        });
+        let mut bytes = Vec::new();
+        image::codecs::avif::AvifEncoder::new_with_speed_quality(&mut bytes, 10, 5)
+            .write_image(source.as_raw(), 64, 48, image::ExtendedColorType::Rgba8)
+            .expect("encode avif");
+        let input_length = bytes.len();
+        let artifact = sniff_artifact(RawArtifact::new(bytes, None)).expect("sniff avif");
+
+        for mode in [OptimizeMode::Auto, OptimizeMode::Lossy] {
+            let optimized = optimize_bytes(artifact.clone(), mode);
+            assert!(
+                optimized.len() <= input_length,
+                "{mode}: {input_length} became {}",
+                optimized.len()
+            );
+        }
+    }
+
     /// An indexed PNG has no encoder here, so it comes back as truecolour and grows.
     /// Handing back the input keeps both the size and the colour model.
     #[test]
@@ -6916,8 +7176,8 @@ mod tests {
         ] {
             assert_eq!(
                 png_bytes_satisfying_metadata_policy(&clean, policy),
-                Some(clean.as_slice()),
-                "a PNG with no metadata satisfies {policy:?}"
+                Some(clean.clone()),
+                "a PNG with no metadata is handed back unchanged under {policy:?}"
             );
         }
 
@@ -6925,7 +7185,7 @@ mod tests {
         insert_png_text_chunk(&mut with_text, b"a comment");
         assert_eq!(
             png_bytes_satisfying_metadata_policy(&with_text, MetadataPolicy::KeepAll),
-            Some(with_text.as_slice()),
+            Some(with_text.clone()),
             "keeping everything is satisfied by anything"
         );
         for policy in [
@@ -6933,10 +7193,11 @@ mod tests {
             MetadataPolicy::PreserveIcc,
             MetadataPolicy::PreserveExif,
         ] {
+            let kept = png_bytes_satisfying_metadata_policy(&with_text, policy)
+                .expect("the container is walkable");
             assert_eq!(
-                png_bytes_satisfying_metadata_policy(&with_text, policy),
-                None,
-                "{policy:?} removes the text chunk, so the file has to be re-encoded"
+                kept, clean,
+                "{policy:?} removes the text chunk and leaves the rest alone"
             );
         }
     }
@@ -6952,6 +7213,49 @@ mod tests {
             png_bytes_satisfying_metadata_policy(&truncated, MetadataPolicy::StripAll),
             None
         );
+    }
+
+    /// A 16-colour indexed PNG whose indices are noise, so the palette is doing real work.
+    ///
+    /// The flat fixture beside this one re-encodes smaller than it started, which makes the
+    /// never-grow guarantee hold for the wrong reason. A picture the palette compresses and
+    /// a truecolour re-encode does not is what puts the guarantee under load.
+    fn noisy_indexed_png_bytes() -> Vec<u8> {
+        let mut bytes = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+        let mut ihdr = Vec::new();
+        ihdr.extend_from_slice(&64u32.to_be_bytes());
+        ihdr.extend_from_slice(&48u32.to_be_bytes());
+        ihdr.extend_from_slice(&[8, 3, 0, 0, 0]);
+        push_png_chunk(&mut bytes, b"IHDR", &ihdr);
+
+        let mut palette = Vec::new();
+        for index in 0..16u8 {
+            palette.extend_from_slice(&[index * 17, 255 - index * 17, index * 9]);
+        }
+        push_png_chunk(&mut bytes, b"PLTE", &palette);
+
+        // A fixed-seed linear congruential sequence, so the fixture is the same on every run.
+        let mut state = 0x2545_F491_4F6C_DD1D_u64;
+        let mut raw = Vec::new();
+        for _ in 0..48u32 {
+            // The per-row filter byte, which is zero because the row is stored as it is.
+            raw.extend_from_slice(&[0]);
+            for _ in 0..64u32 {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1);
+                raw.push(((state >> 33) % 16) as u8);
+            }
+        }
+        let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::best());
+        std::io::Write::write_all(&mut encoder, &raw).expect("deflate");
+        push_png_chunk(
+            &mut bytes,
+            b"IDAT",
+            &encoder.finish().expect("finish deflate"),
+        );
+        push_png_chunk(&mut bytes, b"IEND", &[]);
+        bytes
     }
 
     /// A 4-colour indexed PNG, written by hand so the test carries its own fixture.
