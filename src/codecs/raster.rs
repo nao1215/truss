@@ -8,11 +8,13 @@ use crate::core::{
 use crate::{RawArtifact, Rgba8, sniff_artifact};
 #[cfg(feature = "avif")]
 use image::codecs::avif::AvifEncoder;
+use image::codecs::gif::GifDecoder;
 use image::codecs::jpeg::JpegDecoder;
 use image::codecs::jpeg::JpegEncoder;
 use image::codecs::png::{
     CompressionType as PngCompressionType, FilterType as PngFilterType, PngDecoder, PngEncoder,
 };
+use image::codecs::tiff::TiffDecoder;
 use image::codecs::webp::WebPDecoder;
 use image::codecs::webp::WebPEncoder;
 use image::imageops::{self, FilterType};
@@ -2475,7 +2477,7 @@ fn encode_baseline_output(
             used_lossy_webp: false,
         }),
         MediaType::Tiff => Ok(EncodedOutput {
-            bytes: encode_tiff(image)?,
+            bytes: encode_tiff(image, retained_metadata)?,
             used_lossy_webp: false,
         }),
         MediaType::Svg => Err(TransformError::EncodeFailed(
@@ -2855,11 +2857,27 @@ fn encode_bmp(image: &DynamicImage) -> Result<Vec<u8>, TransformError> {
     Ok(bytes)
 }
 
-fn encode_tiff(image: &DynamicImage) -> Result<Vec<u8>, TransformError> {
+/// Encodes a TIFF, with the ICC profile the policy kept.
+///
+/// TIFF defines an `ICCProfile` directory entry and the encoder writes one, which makes it the
+/// one kind of metadata a TIFF output carries. EXIF is a different question here than in the
+/// other containers: a TIFF's metadata is its own directory rather than a block that can be
+/// lifted out of one file and put into another, and the encoder offers no way to write one.
+fn encode_tiff(
+    image: &DynamicImage,
+    retained_metadata: Option<&RetainedMetadata>,
+) -> Result<Vec<u8>, TransformError> {
     let samples = EncodeSamples::from_image(image);
     let (width, height) = samples.dimensions();
     let mut cursor = Cursor::new(Vec::new());
-    image::codecs::tiff::TiffEncoder::new(&mut cursor)
+    let mut encoder = image::codecs::tiff::TiffEncoder::new(&mut cursor);
+    if let Some(icc_profile) = retained_metadata.and_then(|metadata| metadata.icc_profile.as_ref())
+    {
+        encoder
+            .set_icc_profile(icc_profile.clone())
+            .map_err(|error| TransformError::EncodeFailed(error.to_string()))?;
+    }
+    encoder
         .write_image(
             samples.as_bytes(),
             width,
@@ -3356,7 +3374,9 @@ impl RetainedMetadata {
     /// - WebP: EXIF, ICC, XMP in RIFF chunks. IPTC has no WebP container chunk.
     /// - AVIF: EXIF as an item of its own and ICC as a `colr` property, both written into the
     ///   container after the encode. XMP would be a `mime` item and is not written.
-    /// - Everything else, TIFF and BMP: no injection path for any of the four.
+    /// - TIFF: ICC as the directory entry the format defines for it. Its EXIF is its own
+    ///   directory rather than a block that travels, so nothing carries that.
+    /// - BMP: no path for any of the four.
     ///
     /// A kind that was there and cannot travel is returned rather than dropped in silence:
     /// the caller turns each into a `MetadataDropped` warning, which is what the caller of
@@ -3366,6 +3386,9 @@ impl RetainedMetadata {
             MediaType::Jpeg => (true, true, true, true),
             MediaType::Png | MediaType::Webp => (true, true, true, false),
             MediaType::Avif => (true, true, false, false),
+            // TIFF defines a directory entry for a profile and the encoder writes one; its
+            // metadata is otherwise its own directory rather than a block that travels.
+            MediaType::Tiff => (false, true, false, false),
             _ => (false, false, false, false),
         };
 
@@ -3478,9 +3501,20 @@ fn read_input_metadata(input: &Artifact) -> Result<RetainedMetadata, TransformEr
         }
         #[cfg(not(feature = "avif"))]
         MediaType::Avif => Ok(RetainedMetadata::default()),
-        MediaType::Svg | MediaType::Bmp | MediaType::Tiff | MediaType::Gif => {
-            Ok(RetainedMetadata::default())
+        // Neither decoder offers EXIF, XMP or IPTC, and the trait's defaults answer `None`
+        // for those, so what these two arms carry over is the ICC profile: the `IccProfile`
+        // tag of a TIFF's directory and the colour profile extension of a GIF. Reading
+        // nothing at all meant a profile that could not travel was not even reported as
+        // dropped, which is the one loss a caller cannot detect.
+        MediaType::Tiff => {
+            retained_metadata(TiffDecoder::new(bytes).map_err(open_failed)?, media_type)
         }
+        MediaType::Gif => {
+            retained_metadata(GifDecoder::new(bytes).map_err(open_failed)?, media_type)
+        }
+        // SVG is text and carries none of the four, and the `image` crate's BMP decoder
+        // exposes nothing, so there is nothing here to read rather than nothing read.
+        MediaType::Svg | MediaType::Bmp => Ok(RetainedMetadata::default()),
     }
 }
 
@@ -4497,13 +4531,17 @@ mod tests {
 
     /// Metadata a caller asked to keep, for an output that cannot carry it, is reported.
     ///
-    /// TIFF and BMP have no injection path for EXIF or an ICC profile, and dropping them
-    /// in silence is the one answer the pipeline does not give anywhere else: XMP and IPTC
-    /// raise this same warning, and AVIF refuses the request outright.
+    /// Dropping it in silence is the one answer the pipeline does not give anywhere else. TIFF
+    /// carries a profile in the directory entry the format defines and nothing else, since its
+    /// EXIF is its own directory rather than a block that travels; BMP carries neither.
     #[rstest]
-    #[case::tiff(MediaType::Tiff)]
-    #[case::bmp(MediaType::Bmp)]
-    fn metadata_an_output_cannot_carry_is_reported_rather_than_dropped(#[case] format: MediaType) {
+    #[case::tiff(MediaType::Tiff, true, false)]
+    #[case::bmp(MediaType::Bmp, true, true)]
+    fn metadata_an_output_cannot_carry_is_reported_rather_than_dropped(
+        #[case] format: MediaType,
+        #[case] exif_is_dropped: bool,
+        #[case] icc_is_dropped: bool,
+    ) {
         let artifact = jpeg_artifact_with_metadata(4, 2, Some(1), Some(b"demo-icc-profile"));
         let result = transform_raster(TransformRequest::new(
             artifact,
@@ -4517,13 +4555,15 @@ mod tests {
 
         let warnings: Vec<String> = result.warnings.iter().map(ToString::to_string).collect();
 
-        assert!(
+        assert_eq!(
             warnings.iter().any(|w| w.contains("EXIF")),
-            "{format:?} dropped the EXIF without saying so: {warnings:?}"
+            exif_is_dropped,
+            "{format:?} and its EXIF: {warnings:?}"
         );
-        assert!(
+        assert_eq!(
             warnings.iter().any(|w| w.contains("ICC")),
-            "{format:?} dropped the profile without saying so: {warnings:?}"
+            icc_is_dropped,
+            "{format:?} and its profile: {warnings:?}"
         );
     }
 
@@ -5094,6 +5134,120 @@ mod tests {
                 let _ = sniff_artifact(RawArtifact::new(damaged, None));
             }
         }
+    }
+
+    /// A TIFF input's ICC profile is read, so it can travel to a format that carries one.
+    #[test]
+    fn transform_raster_carries_a_tiff_inputs_icc_profile_to_a_jpeg() {
+        let source = png_artifact_with_icc(b"demo-icc-profile");
+        let tiff = transform_raster(TransformRequest::new(
+            source,
+            TransformOptions {
+                format: Some(MediaType::Tiff),
+                strip_metadata: false,
+                ..TransformOptions::default()
+            },
+        ))
+        .expect("encode a tiff carrying a profile")
+        .artifact;
+
+        let jpeg = transform_raster(TransformRequest::new(
+            Artifact::new(tiff.bytes, MediaType::Tiff, tiff.metadata),
+            TransformOptions {
+                format: Some(MediaType::Jpeg),
+                strip_metadata: false,
+                ..TransformOptions::default()
+            },
+        ))
+        .expect("tiff to jpeg with keep-metadata")
+        .artifact;
+
+        let mut decoder = JpegDecoder::new(Cursor::new(&jpeg.bytes)).expect("open the jpeg");
+        assert_eq!(
+            decoder.icc_profile().expect("read icc").as_deref(),
+            Some(b"demo-icc-profile".as_slice()),
+            "the profile the tiff carried reached the jpeg"
+        );
+    }
+
+    /// TIFF output carries the profile in the directory entry the format defines for it.
+    #[test]
+    fn transform_raster_writes_an_icc_profile_into_a_tiff() {
+        let artifact = png_artifact_with_icc(b"demo-icc-profile");
+        let result = transform_raster(TransformRequest::new(
+            artifact,
+            TransformOptions {
+                format: Some(MediaType::Tiff),
+                strip_metadata: false,
+                ..TransformOptions::default()
+            },
+        ))
+        .expect("keep-metadata tiff should succeed");
+
+        let mut decoder =
+            super::TiffDecoder::new(Cursor::new(&result.artifact.bytes)).expect("open the tiff");
+        assert_eq!(
+            decoder.icc_profile().expect("read icc").as_deref(),
+            Some(b"demo-icc-profile".as_slice())
+        );
+        assert!(
+            !result.warnings.iter().any(|warning| matches!(
+                warning,
+                TransformWarning::MetadataDropped(MetadataKind::Icc)
+            )),
+            "the profile was not dropped, got: {:?}",
+            result.warnings
+        );
+    }
+
+    /// Stripping still strips: the entry is written only when the policy kept the profile.
+    #[test]
+    fn transform_raster_writes_no_icc_profile_into_a_stripped_tiff() {
+        let artifact = png_artifact_with_icc(b"demo-icc-profile");
+        let result = transform_raster(TransformRequest::new(
+            artifact,
+            TransformOptions {
+                format: Some(MediaType::Tiff),
+                ..TransformOptions::default()
+            },
+        ))
+        .expect("strip-metadata tiff should succeed");
+
+        let mut decoder =
+            super::TiffDecoder::new(Cursor::new(&result.artifact.bytes)).expect("open the tiff");
+        assert_eq!(decoder.icc_profile().expect("read icc"), None);
+    }
+
+    /// A GIF input's ICC profile is read from the application extension that carries it.
+    ///
+    /// No encoder in this repository writes one, so the fixture is built here: the extension is
+    /// `ICCRGBG1012` followed by the profile in sub-blocks, which is what the GIF89a colour
+    /// management convention defines and what the `image` crate's decoder reads.
+    #[test]
+    fn transform_raster_reads_a_gif_inputs_icc_profile() {
+        const PROFILE: &[u8] = b"demo-icc-profile";
+        let mut gif = include_bytes!("../../integration/fixtures/sample.gif").to_vec();
+
+        // Past the six-byte signature and the seven-byte logical screen descriptor, then past
+        // the global colour table when the descriptor says there is one.
+        let packed = gif[10];
+        let mut at = 13;
+        if packed & 0x80 != 0 {
+            at += 3 * (1 << ((packed & 0x07) + 1));
+        }
+
+        let mut extension = vec![0x21, 0xFF, 0x0B];
+        extension.extend_from_slice(b"ICCRGBG1012");
+        for chunk in PROFILE.chunks(255) {
+            extension.push(u8::try_from(chunk.len()).expect("a chunk of at most 255 bytes"));
+            extension.extend_from_slice(chunk);
+        }
+        extension.push(0);
+        gif.splice(at..at, extension);
+
+        let artifact = sniff_artifact(RawArtifact::new(gif, None)).expect("sniff the gif");
+        let metadata = super::read_input_metadata(&artifact).expect("read the gif's metadata");
+        assert_eq!(metadata.icc_profile.as_deref(), Some(PROFILE));
     }
 
     /// The README's metadata table says what `retain_supported` does.

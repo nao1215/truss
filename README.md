@@ -371,7 +371,7 @@ An optimization — `truss optimize` in any mode, or `--optimize auto`, `lossles
 on `convert` — keeps the ICC profile even under `--strip-metadata`: dropping it would make the
 re-encoded image render with shifted colors. A plain `truss convert` with no optimization
 strips it as asked, and `--preserve-exif` drops it under every mode. Formats that cannot carry
-a profile (BMP, TIFF) strip it as asked.
+a profile (BMP) strip it as asked.
 
 Metadata support per output format:
 
@@ -382,7 +382,7 @@ Metadata support per output format:
 | WebP | yes | yes | yes | no |
 | AVIF | yes | yes | no | no |
 | BMP | no | no | no | no |
-| TIFF | no | no | no | no |
+| TIFF | yes | no | no | no |
 
 Asking to keep metadata an output format cannot carry is not silent: the request succeeds and
 each kind that did not survive is reported as a `warning:` line on stderr, as a `Truss-Warning`
