@@ -130,3 +130,62 @@ fn convert_local_jpeg_can_keep_icc_profile() {
     assert_eq!(decoder.dimensions(), (4, 2));
     assert_eq!(icc_profile, b"demo-icc-profile".to_vec());
 }
+
+/// A JPEG converted to AVIF and back keeps what the AVIF container has a place for.
+///
+/// The two hops are what makes this a test of the container rather than of one function: the
+/// first writes the EXIF and the profile into an AVIF, and the second reads them back out of
+/// one, so a writer that produces something only its own reader understands fails here.
+#[cfg(feature = "avif")]
+#[test]
+fn convert_carries_metadata_through_an_avif_round_trip() {
+    let input_path = temp_file_path("input-avif").with_extension("jpg");
+    let avif_path = temp_file_path("middle-avif").with_extension("avif");
+    let output_path = temp_file_path("output-avif").with_extension("jpg");
+    fs::write(
+        &input_path,
+        jpeg_with_metadata_bytes(Some(6), Some(b"demo-icc-profile")),
+    )
+    .expect("write jpeg input");
+
+    let to_avif = Command::new(env!("CARGO_BIN_EXE_truss"))
+        .arg(&input_path)
+        .arg("-o")
+        .arg(&avif_path)
+        .arg("--keep-metadata")
+        .arg("--no-auto-orient")
+        .output()
+        .expect("run truss convert to avif");
+    assert!(to_avif.status.success(), "{to_avif:?}");
+
+    let back_to_jpeg = Command::new(env!("CARGO_BIN_EXE_truss"))
+        .arg(&avif_path)
+        .arg("-o")
+        .arg(&output_path)
+        .arg("--keep-metadata")
+        .arg("--no-auto-orient")
+        .output()
+        .expect("run truss convert from avif");
+    assert!(back_to_jpeg.status.success(), "{back_to_jpeg:?}");
+
+    let output_bytes = fs::read(&output_path).expect("read jpeg output");
+    let mut decoder = JpegDecoder::new(Cursor::new(&output_bytes)).expect("decode jpeg output");
+    let icc_profile = decoder
+        .icc_profile()
+        .expect("read icc")
+        .expect("retained icc");
+    let exif = decoder
+        .exif_metadata()
+        .expect("read exif")
+        .expect("retained exif");
+
+    let _ = fs::remove_file(&input_path);
+    let _ = fs::remove_file(&avif_path);
+    let _ = fs::remove_file(&output_path);
+
+    assert_eq!(icc_profile, b"demo-icc-profile".to_vec());
+    assert_eq!(
+        Orientation::from_exif_chunk(&exif),
+        Some(Orientation::Rotate90)
+    );
+}
