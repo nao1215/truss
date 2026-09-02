@@ -98,6 +98,14 @@ This package exports the generated Wasm bindings directly:
 
 For the JSON payload shapes, limits, and runtime caveats, see the repository's [WASM Integration guide](https://github.com/nao1215/truss/blob/main/docs/wasm.md).
 
+## Compatibility
+
+The package version tracks the truss release it is built from, so what a version number means is what the [crate documentation](https://docs.rs/truss-image) states. While the version is `0.x`, a minor release may change any of it.
+
+From `1.0` on, the covered surface is the exported names listed above, the arguments each takes, and the field names of the JSON payloads they read and return, which [WASM Integration](https://github.com/nao1215/truss/blob/main/docs/wasm.md) specifies. Adding an export, an optional argument, or a payload field is a minor release; removing or renaming one is a major release, and so is changing what an existing field means. The `kind` values of a returned error are the class names of [Problem Types](https://github.com/nao1215/truss/blob/main/docs/problems.md), and are covered with them.
+
+Not covered: the feature set listed above, which is a property of this build rather than of the API and may change in a minor release; the human-readable `message` of an error and the text of a warning; and the exact bytes an encode produces, which move with the codec libraries as they are upgraded.
+
 ## Build From Source
 
 ```sh

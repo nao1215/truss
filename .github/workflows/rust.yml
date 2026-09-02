@@ -11,6 +11,7 @@ on:
       - "examples/**"
       - "packages/**"
       - "scripts/**"
+      - "docs/openapi.yaml"
       - "justfile"
       - "Cargo.toml"
       - "Cargo.lock"
@@ -25,6 +26,7 @@ on:
       - "examples/**"
       - "packages/**"
       - "scripts/**"
+      - "docs/openapi.yaml"
       - "justfile"
       - "Cargo.toml"
       - "Cargo.lock"
@@ -200,7 +202,7 @@ jobs:
       # branch for GNU tar, bsdtar and ZIP, and each release job exercises only
       # the branch its own runner has.
       - name: Test release manifest tooling
-        run: node --test scripts/lib/release-manifest.test.mjs scripts/release-artifacts.test.mjs
+        run: node --test scripts/lib/release-manifest.test.mjs scripts/lib/version-copies.test.mjs scripts/release-artifacts.test.mjs
 
       - name: Check the pinned release toolchain against rust-version
         if: runner.os == 'Linux'
@@ -250,6 +252,35 @@ jobs:
       - name: Run doc tests
         run: cargo test --doc
 
+  # ── Minimum supported Rust version ─────────────────────────
+  # Every other job installs `stable`, so nothing here noticed when the crate or
+  # one of its dependencies started needing a compiler newer than the
+  # `rust-version` the manifest declares and the crate root promises. The
+  # toolchain is read from the manifest so that raising the MSRV stays one edit.
+  msrv:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Read rust-version from Cargo.toml
+        id: msrv
+        run: |
+          version="$(grep -oP '^rust-version\s*=\s*"\K[^"]+' Cargo.toml)"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust ${{ steps.msrv.outputs.version }}
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check with the declared minimum toolchain
+        run: cargo check --locked --all-features --all-targets
+
   # ── OpenAPI spec validation ─────────────────────────────────────────
   openapi-validate:
     runs-on: ubuntu-latest
@@ -263,6 +294,14 @@ jobs:
 
       - name: Validate OpenAPI spec
         run: python -m openapi_spec_validator docs/openapi.yaml
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      - name: Check every copy of the version against the crate's
+        run: node ./scripts/check-version-consistency.mjs
 
   # ── security audit ──────────────────────────────────────────────────
   security-audit:

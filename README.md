@@ -610,6 +610,8 @@ Top-level shortcuts:
 - `truss --bind <ADDR> [OPTIONS]` is implicit `serve`
 - `truss --version` prints version information
 
+Which of these names a version number covers is stated under [Compatibility](docs/problems.md#compatibility), beside the exit code table it shares the promise with.
+
 ## Documentation
 
 | Page | Description |

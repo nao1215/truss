@@ -81,6 +81,14 @@ The package exports one function:
 The package omits transform fields that would resolve to truss defaults, matching the Rust implementation. For the public contract and compatibility policy, see the repository's [Signed URL Specification](https://github.com/nao1215/truss/blob/main/docs/signed-url-spec.md).
 It also rejects request-invariant invalid combinations before signing, including `fit` / `position` without bounded resize, `quality` with `optimize=lossless`, invalid `targetQuality` matrices, invalid crop strings, and watermark opacity outside `1..=100`. An empty `keyId`, `secret`, or source is rejected for the same reason: a server will not start with an empty key id or secret, so a URL carrying one can never verify. A key none of the objects above reads is rejected on the same grounds, since a misspelled optional key would otherwise be dropped in silence and sign a URL for a transform nobody asked for: `transform` for `transforms` signs one with no transform in it, and `watermarks` for `watermark` signs one that serves the image without its overlay. A key whose value is `undefined` counts as absent, so `{...options, preset: undefined}` still signs.
 
+## Compatibility
+
+The package version tracks the truss release it ships with, so what a version number means is what the [crate documentation](https://docs.rs/truss-image) states. While the version is `0.x`, a minor release may change any of it.
+
+From `1.0` on, the covered surface is the exported function names, the keys of the options object and of the `source`, `transforms`, and `watermark` objects it contains, and the values each key accepts. Adding a key is a minor release; removing or renaming one is a major release. Because an unknown key is refused rather than ignored, a key removed here stops signing rather than signing something else, which is the behaviour a caller can act on.
+
+Not covered: the text of the errors thrown for an invalid option, which name the key for a person to read. The URL this package produces is governed by the [Signed URL Specification](https://github.com/nao1215/truss/blob/main/docs/signed-url-spec.md#compatibility-policy), whose promise is stronger and applies even before `1.0`.
+
 ## Runtime Notes
 
 - This package targets Node.js because URL signing requires a secret and uses `node:crypto`.
