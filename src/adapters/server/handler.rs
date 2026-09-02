@@ -365,7 +365,7 @@ impl TransformOptionsPayload {
         // that answered 400 for `preserveExif=true` on its own — including when a
         // server-side preset was the thing that set it — while every other caller of
         // `resolve_metadata_flags` accepted it.
-        let (strip_metadata, preserve_exif) = crate::resolve_metadata_flags(
+        let (strip_metadata, preserve_exif) = crate::core::resolve_metadata_flags(
             self.strip_metadata,
             None,
             self.preserve_exif.or(Some(defaults.preserve_exif)),

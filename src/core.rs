@@ -41,7 +41,7 @@ pub const MAX_OUTPUT_PIXELS: u64 = 67_108_864;
 /// ```
 /// assert_eq!(truss::MAX_DECODED_PIXELS, 100_000_000);
 /// ```
-pub const MAX_DECODED_PIXELS: u64 = 100_000_000;
+pub(crate) const MAX_DECODED_PIXELS: u64 = 100_000_000;
 
 /// Maximum number of decoded pixels allowed for a watermark image.
 ///
@@ -51,7 +51,7 @@ pub const MAX_DECODED_PIXELS: u64 = 100_000_000;
 /// ```
 /// assert_eq!(truss::MAX_WATERMARK_PIXELS, 4_000_000);
 /// ```
-pub const MAX_WATERMARK_PIXELS: u64 = 4_000_000;
+pub(crate) const MAX_WATERMARK_PIXELS: u64 = 4_000_000;
 
 /// A (width, height) pair that prevents accidental transposition of dimensions.
 ///
@@ -1528,7 +1528,7 @@ pub(crate) enum MetadataPolicy {
 /// // keep + preserve_exif conflict
 /// assert!(resolve_metadata_flags(None, Some(true), Some(true)).is_err());
 /// ```
-pub fn resolve_metadata_flags(
+pub(crate) fn resolve_metadata_flags(
     strip: Option<bool>,
     keep: Option<bool>,
     preserve_exif: Option<bool>,

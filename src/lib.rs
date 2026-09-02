@@ -74,14 +74,13 @@ pub use adapters::server::s3::{S3Context, build_s3_context};
 #[cfg(feature = "server")]
 pub use adapters::server::{
     LogHandler, LogLevel, ServerConfig, SignedUrlSource, SignedWatermarkParams,
-    TransformOptionsPayload, TrustedProxy, bind_addr, serve, serve_once, serve_once_with_config,
-    serve_with_config, sign_public_url, sign_public_url_with_method,
+    TransformOptionsPayload, TrustedProxy, bind_addr, serve_once_with_config, serve_with_config,
+    sign_public_url, sign_public_url_with_method,
 };
 pub use codecs::transform;
 pub use core::{
-    Artifact, ArtifactMetadata, CropRegion, Dimensions, Fit, MAX_DECODED_PIXELS, MAX_OUTPUT_PIXELS,
-    MAX_WATERMARK_PIXELS, MediaType, MetadataKind, OptimizeMode, Position, QualityMetric,
-    RawArtifact, Rgba8, Rotation, TargetQuality, TransformError, TransformOptions,
-    TransformRequest, TransformResult, TransformWarning, WatermarkInput, resolve_metadata_flags,
-    sniff_artifact,
+    Artifact, ArtifactMetadata, CropRegion, Dimensions, Fit, MAX_OUTPUT_PIXELS, MediaType,
+    MetadataKind, OptimizeMode, Position, QualityMetric, RawArtifact, Rgba8, Rotation,
+    TargetQuality, TransformError, TransformOptions, TransformRequest, TransformResult,
+    TransformWarning, WatermarkInput, sniff_artifact,
 };

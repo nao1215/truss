@@ -42,37 +42,6 @@ fn worker_pool_size(max_concurrent_transforms: u64) -> usize {
         .saturating_add(WORKER_THREADS)
 }
 
-/// Serves requests until the listener stops producing connections.
-///
-/// This helper loads [`ServerConfig`] from the process environment and then delegates to
-/// [`serve_with_config`]. Health endpoints remain available even when the private API is not
-/// configured, but authenticated transform requests will return `503 Service Unavailable`
-/// unless `TRUSS_BEARER_TOKEN` is set.
-///
-/// # Errors
-///
-/// Returns an [`io::Error`] when the storage root cannot be resolved, when accepting the next
-/// connection fails, or when a response cannot be written to the socket.
-pub fn serve(listener: TcpListener) -> io::Result<()> {
-    let config = ServerConfig::from_env()?;
-
-    // Fail fast: verify the storage backend is reachable before accepting
-    // connections so that configuration errors are surfaced immediately.
-    for (ok, name) in super::handler::storage_health_check(&config) {
-        if !ok {
-            return Err(io::Error::new(
-                io::ErrorKind::ConnectionRefused,
-                format!(
-                    "storage connectivity check failed for `{name}` — verify the backend \
-                     endpoint, credentials, and container/bucket configuration"
-                ),
-            ));
-        }
-    }
-
-    serve_with_config(listener, config)
-}
-
 /// Serves requests with an explicit server configuration.
 ///
 /// This is the adapter entry point for tests and embedding scenarios that want deterministic
@@ -240,20 +209,6 @@ pub fn serve_with_config(listener: TcpListener, config: ServerConfig) -> io::Res
     config.log("shutdown: complete");
     close_shutdown_pipe(shutdown_read_fd, shutdown_write_fd);
     Ok(())
-}
-
-/// Serves exactly one request using configuration loaded from the environment.
-///
-/// This helper is primarily useful in tests that want to drive the server over a real TCP
-/// socket but do not need a long-running loop.
-///
-/// # Errors
-///
-/// Returns an [`io::Error`] when the storage root cannot be resolved, when accepting the next
-/// connection fails, or when a response cannot be written to the socket.
-pub fn serve_once(listener: TcpListener) -> io::Result<()> {
-    let config = ServerConfig::from_env()?;
-    serve_once_with_config(listener, config)
 }
 
 /// Serves exactly one request with an explicit server configuration.

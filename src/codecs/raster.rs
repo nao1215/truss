@@ -1148,10 +1148,10 @@ fn apply_watermark(
         watermark.image.metadata.height,
     ) {
         let pixels = u64::from(w) * u64::from(h);
-        if pixels > crate::MAX_WATERMARK_PIXELS {
+        if pixels > crate::core::MAX_WATERMARK_PIXELS {
             return Err(TransformError::LimitExceeded(format!(
                 "watermark image has {pixels} pixels, limit is {}",
-                crate::MAX_WATERMARK_PIXELS
+                crate::core::MAX_WATERMARK_PIXELS
             )));
         }
     }

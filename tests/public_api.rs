@@ -13,23 +13,21 @@ fn every_exported_symbol_is_reachable_from_the_crate_root() {
     // Types and values that describe an image.
     #[allow(unused_imports)]
     use truss::{
-        Artifact, ArtifactMetadata, CropRegion, Dimensions, MAX_DECODED_PIXELS, MAX_OUTPUT_PIXELS,
-        MAX_WATERMARK_PIXELS, MediaType, MetadataKind, RawArtifact, Rgba8, sniff_artifact,
+        Artifact, ArtifactMetadata, CropRegion, Dimensions, MAX_OUTPUT_PIXELS, MediaType,
+        MetadataKind, RawArtifact, Rgba8, sniff_artifact,
     };
     // The transform vocabulary.
     #[allow(unused_imports)]
     use truss::{
         Fit, OptimizeMode, Position, QualityMetric, Rotation, TargetQuality, TransformError,
         TransformOptions, TransformRequest, TransformResult, TransformWarning, WatermarkInput,
-        resolve_metadata_flags, transform,
+        transform,
     };
 
     // A value from each group, so the test exercises the paths rather than only naming them.
     assert_eq!(MediaType::Png.as_name(), "png");
     assert_eq!(Rotation::DEG_90.as_degrees(), 90);
     const { assert!(MAX_OUTPUT_PIXELS > 0) };
-    const { assert!(MAX_DECODED_PIXELS > 0) };
-    const { assert!(MAX_WATERMARK_PIXELS > 0) };
     assert_eq!(Dimensions::new(4, 3).width, 4);
     assert!(TransformOptions::default().strip_metadata);
 }
@@ -49,8 +47,8 @@ fn every_exported_server_symbol_is_reachable_from_the_crate_root() {
     #[allow(unused_imports)]
     use truss::{
         LogHandler, LogLevel, ServerConfig, SignedUrlSource, SignedWatermarkParams,
-        TransformOptionsPayload, TrustedProxy, bind_addr, serve, serve_once,
-        serve_once_with_config, serve_with_config, sign_public_url, sign_public_url_with_method,
+        TransformOptionsPayload, TrustedProxy, bind_addr, serve_once_with_config,
+        serve_with_config, sign_public_url, sign_public_url_with_method,
     };
 
     // `bind_addr` resolves `TRUSS_BIND_ADDR` against the default, which is the only reason

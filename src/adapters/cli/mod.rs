@@ -1434,7 +1434,7 @@ impl TransformFields {
         } else {
             defaults.auto_orient
         };
-        let (strip_metadata, preserve_exif) = crate::resolve_metadata_flags(
+        let (strip_metadata, preserve_exif) = crate::core::resolve_metadata_flags(
             if self.strip_metadata {
                 Some(true)
             } else {

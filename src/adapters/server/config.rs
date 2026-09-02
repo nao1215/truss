@@ -1294,7 +1294,7 @@ impl ServerConfig {
                 .unwrap_or(DEFAULT_TRANSFORM_DEADLINE_SECS);
 
         let max_input_pixels =
-            parse_env_u64_ranged("TRUSS_MAX_INPUT_PIXELS", 1, crate::MAX_DECODED_PIXELS)?
+            parse_env_u64_ranged("TRUSS_MAX_INPUT_PIXELS", 1, crate::core::MAX_DECODED_PIXELS)?
                 .unwrap_or(DEFAULT_MAX_INPUT_PIXELS);
 
         let max_upload_bytes =
