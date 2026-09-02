@@ -20,6 +20,14 @@ mod sign;
 
 const MAX_REMOTE_BYTES: u64 = 32 * 1024 * 1024;
 
+/// The size cap for a watermark fetched over HTTP.
+///
+/// The server keeps this apart from the source limit and publishes it as
+/// `TRUSS_MAX_WATERMARK_BYTES`: an overlay has no business being the size of a source image.
+/// The CLI shares the fetch with `--url`, and sharing brought the source's cap with it, so a
+/// watermark that worked locally was refused in production.
+pub(super) const MAX_REMOTE_WATERMARK_BYTES: u64 = 10 * 1024 * 1024;
+
 // ---------------------------------------------------------------------------
 // Exit codes — kept in sync with help text
 // ---------------------------------------------------------------------------
@@ -1534,7 +1542,7 @@ where
                 &format!("failed to read {}: {error}", path.display()),
             )
         }),
-        InputSource::Url(url) => read_url_bytes(&url),
+        InputSource::Url(url) => read_url_bytes(&url, MAX_REMOTE_BYTES),
     }
 }
 
@@ -1621,7 +1629,7 @@ fn refuse_disallowed_fetch_target(url: &str) -> Result<(), CliError> {
 ///
 /// Every failure here is the remote end's, which the server names `bad-gateway`; the CLI
 /// keeps its I/O exit code (2) and adds that class.
-fn read_url_bytes(url: &str) -> Result<Vec<u8>, CliError> {
+fn read_url_bytes(url: &str, max_bytes: u64) -> Result<Vec<u8>, CliError> {
     let fetch_failed =
         |message: String| classified_error(ErrorClass::BadGateway, EXIT_IO, &message);
     let config = ureq::config::Config::builder()
@@ -1685,10 +1693,10 @@ fn read_url_bytes(url: &str) -> Result<Vec<u8>, CliError> {
         .get("Content-Length")
         .and_then(|v: &ureq::http::HeaderValue| v.to_str().ok())
         .and_then(|value: &str| value.parse::<u64>().ok())
-        .is_some_and(|len| len > MAX_REMOTE_BYTES)
+        .is_some_and(|len| len > max_bytes)
     {
         return Err(fetch_failed(format!(
-            "failed to fetch {url}: response exceeds {MAX_REMOTE_BYTES} bytes"
+            "failed to fetch {url}: response exceeds {max_bytes} bytes"
         )));
     }
 
