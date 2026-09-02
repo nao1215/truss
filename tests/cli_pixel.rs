@@ -442,3 +442,54 @@ fn fit_contain_with_without_enlargement_pads_around_the_source() {
         "expected green content at center, got {center:?}"
     );
 }
+
+/// The compiled binary decodes an AVIF.
+///
+/// This ran through the library and never through the binary until it did, and the binary is
+/// where the thread the process starts on decides how much stack the decoder gets: one
+/// megabyte on Windows, which an AV1 decode does not fit in a build without optimizations.
+/// A conversion out of AVIF is the smallest thing that reaches that.
+#[cfg(feature = "avif")]
+#[test]
+fn convert_decodes_an_avif_through_the_binary() {
+    let source = temp_file_path("avif-source").with_extension("png");
+    let avif = temp_file_path("avif-middle").with_extension("avif");
+    let output = temp_file_path("avif-output").with_extension("png");
+    let mut image = RgbaImage::new(64, 64);
+    for (x, y, pixel) in image.enumerate_pixels_mut() {
+        *pixel = Rgba([(x * 4) as u8, (y * 4) as u8, ((x + y) * 2) as u8, 255]);
+    }
+    let mut png = Vec::new();
+    PngEncoder::new(&mut png)
+        .write_image(&image, 64, 64, ColorType::Rgba8.into())
+        .expect("encode png");
+    fs::write(&source, png).expect("write png source");
+
+    let to_avif = Command::new(env!("CARGO_BIN_EXE_truss"))
+        .arg(&source)
+        .arg("-o")
+        .arg(&avif)
+        .output()
+        .expect("run truss convert to avif");
+    assert!(to_avif.status.success(), "{to_avif:?}");
+
+    let from_avif = Command::new(env!("CARGO_BIN_EXE_truss"))
+        .arg(&avif)
+        .arg("-o")
+        .arg(&output)
+        .output()
+        .expect("run truss convert from avif");
+
+    let decoded = fs::read(&output).ok();
+    let _ = fs::remove_file(&source);
+    let _ = fs::remove_file(&avif);
+    let _ = fs::remove_file(&output);
+
+    assert!(from_avif.status.success(), "{from_avif:?}");
+    let decoded = ImageReader::new(std::io::Cursor::new(decoded.expect("the png was written")))
+        .with_guessed_format()
+        .expect("guess the output format")
+        .decode()
+        .expect("decode the output");
+    assert_eq!(decoded.dimensions(), (64, 64));
+}
