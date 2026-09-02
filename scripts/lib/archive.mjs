@@ -1,5 +1,5 @@
 /**
- * Minimal readers for the two archive formats truss publishes.
+ * Minimal readers for the two archive formats truss publishes, and the writer for one of them.
  *
  * These parse the container metadata directly instead of shelling out to `tar`
  * / `unzip` / `7z`, because the release verification has to make identical
@@ -9,7 +9,7 @@
  * such as the ustar uid/gid and the ZIP external attributes.
  */
 
-import { gunzipSync, inflateRawSync } from "node:zlib";
+import { crc32, deflateRawSync, gunzipSync, inflateRawSync } from "node:zlib";
 
 const TAR_BLOCK_SIZE = 512;
 
@@ -215,4 +215,88 @@ function readString(header, start, length) {
 function readOctal(header, start, length) {
   const text = readString(header, start, length).trim();
   return text === "" ? 0 : Number.parseInt(text, 8);
+}
+
+/**
+ * The DOS date and time a release archive's entries carry.
+ *
+ * 2000-01-01T00:00:00, because ZIP cannot represent a timestamp before 1980 and the tar path
+ * pins the same instant. The date field packs the year past 1980 into seven bits, the month
+ * into four and the day into five; the time field is zero, which is midnight.
+ */
+const DOS_DATE = ((2000 - 1980) << 9) | (1 << 5) | 1;
+const DOS_TIME = 0;
+
+/**
+ * Build a ZIP archive holding one file, byte for byte the same every time.
+ *
+ * Both packers this replaces write more than the entry's contents into the archive. 7-Zip adds
+ * an extended timestamp field carrying times `touch` cannot pin, which made two archives packed
+ * a second apart differ in a field nobody reads, and both take the entry's modification time
+ * through the local time zone, which made the packing machine's zone part of the output. What a
+ * release archive needs is the name, the mode, the bytes and a fixed timestamp, so writing those
+ * four directly is both shorter than normalizing a packer's output and the only way to be sure
+ * nothing else got in.
+ *
+ * Deflate comes from the Node the caller is running, so two archives built by one Node build are
+ * identical; a different Node may bundle a different zlib and compress to different bytes, which
+ * is why the release pins its Node version.
+ *
+ * @param {{name: string, data: Buffer, mode: number}} entry
+ * @returns {Buffer}
+ */
+export function buildZip(entry) {
+  const name = Buffer.from(entry.name, "utf8");
+  const crc = crc32(entry.data);
+  const deflated = deflateRawSync(entry.data, { level: 9 });
+  // A file that deflates larger than it started is stored instead, which is what every packer
+  // does and what keeps the size guarantee the archive is checked against.
+  const stored = deflated.length >= entry.data.length;
+  const body = stored ? entry.data : deflated;
+  const method = stored ? 0 : 8;
+
+  const local = Buffer.alloc(30);
+  local.writeUInt32LE(0x04034b50, 0);
+  local.writeUInt16LE(20, 4); // version needed to extract
+  local.writeUInt16LE(0, 6); // no flags: no data descriptor, no encryption
+  local.writeUInt16LE(method, 8);
+  local.writeUInt16LE(DOS_TIME, 10);
+  local.writeUInt16LE(DOS_DATE, 12);
+  local.writeUInt32LE(crc, 14);
+  local.writeUInt32LE(body.length, 18);
+  local.writeUInt32LE(entry.data.length, 22);
+  local.writeUInt16LE(name.length, 26);
+  local.writeUInt16LE(0, 28); // no extra field, which is the point
+
+  const central = Buffer.alloc(46);
+  central.writeUInt32LE(0x02014b50, 0);
+  // Made by Unix (3) with ZIP 2.0, so the mode in the external attributes is read as `st_mode`.
+  central.writeUInt16LE((3 << 8) | 20, 4);
+  central.writeUInt16LE(20, 6);
+  central.writeUInt16LE(0, 8);
+  central.writeUInt16LE(method, 10);
+  central.writeUInt16LE(DOS_TIME, 12);
+  central.writeUInt16LE(DOS_DATE, 14);
+  central.writeUInt32LE(crc, 16);
+  central.writeUInt32LE(body.length, 20);
+  central.writeUInt32LE(entry.data.length, 24);
+  central.writeUInt16LE(name.length, 28);
+  central.writeUInt16LE(0, 30); // extra
+  central.writeUInt16LE(0, 32); // comment
+  central.writeUInt16LE(0, 34); // disk number
+  central.writeUInt16LE(0, 36); // internal attributes
+  central.writeUInt32LE(((0o100000 | (entry.mode & 0o7777)) >>> 0) * 65536, 38);
+  central.writeUInt32LE(0, 42); // the single local header is at the start
+
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0);
+  end.writeUInt16LE(0, 4);
+  end.writeUInt16LE(0, 6);
+  end.writeUInt16LE(1, 8);
+  end.writeUInt16LE(1, 10);
+  end.writeUInt32LE(central.length + name.length, 12);
+  end.writeUInt32LE(local.length + name.length + body.length, 16);
+  end.writeUInt16LE(0, 20);
+
+  return Buffer.concat([local, name, body, central, name, end]);
 }

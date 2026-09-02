@@ -14,7 +14,9 @@
 #     GitHub Actions runner UID never leaks into the tarball and `tar x` as root
 #     does not fail trying to chown to a user that does not exist;
 #   * the entry mtime is a fixed 2000-01-01T00:00:00Z, and gzip is told not to
-#     store its own timestamp or the input file name.
+#     store its own timestamp or the input file name;
+#   * a ZIP carries no extra fields at all, so no packer's idea of a creation or
+#     access time and no local time zone rides along with it.
 #
 # The archives are therefore byte-for-byte reproducible for a given input
 # binary. The binary itself is not: `cargo build --release` embeds absolute
@@ -81,38 +83,27 @@ case "${format}" in
       | gzip -9 -n > "${archive_abs}"
     ;;
   zip)
-    # ZIP stores a local time with no zone, so the packing machine's own zone is
-    # part of the archive unless it is pinned: the same binary packed in Tokyo
-    # and in UTC differed by nine hours in the entry's timestamp and therefore
-    # in its bytes. The release runs on runners that are all UTC, which is why
-    # nothing noticed.
+    # ZIP is written here rather than by 7-Zip or Info-ZIP. Both put more into the
+    # archive than the entry: an extended timestamp field carrying times `touch`
+    # cannot pin, which made two archives packed a second apart differ, and a
+    # modification time read through the machine's own zone, which made the
+    # packing machine part of the output. The archive holds one file, so writing
+    # the container directly is shorter than normalizing what a packer produced,
+    # and it is the same code on all three runners rather than whichever tool
+    # each one happens to have.
     #
-    # 7-Zip on Windows is a native binary that cannot read the POSIX paths Git
-    # Bash hands it, so translate the destination when cygpath is present.
+    # Node on Windows is a native binary that cannot read the POSIX paths Git
+    # Bash hands it, so the three paths are translated where cygpath exists.
+    zip_script="$(dirname "$0")/pack-zip.mjs"
+    zip_source="${staging}/${binary_name}"
+    zip_target="${archive_abs}"
     if command -v cygpath > /dev/null; then
-      archive_arg="$(cygpath -w "${archive_abs}")"
-    else
-      archive_arg="${archive_abs}"
+      zip_script="$(cygpath -w "${zip_script}")"
+      zip_source="$(cygpath -w "${zip_source}")"
+      zip_target="$(cygpath -w "${zip_target}")"
     fi
 
-    if command -v 7z > /dev/null; then
-      # Which tool packed the archive is printed so that a reproducibility failure
-      # names its own branch: this arm has two, and the log said nothing about
-      # which one ran. `-mtc=off` and `-mta=off`, which would keep the creation
-      # and last-access times out of the entry, are rejected as E_INVALIDARG by
-      # the 7-Zip on the macOS and Windows runners, so the entry carries whatever
-      # those two are; only the modification time is pinned.
-      echo "pack-release-archive: zip via 7z" >&2
-      (cd "${staging}" && TZ=UTC0 7z a -tzip -mx=9 -bso0 -bsp0 "${archive_arg}" "${binary_name}" > /dev/null)
-    elif command -v zip > /dev/null; then
-      echo "pack-release-archive: zip via Info-ZIP" >&2
-      # -X drops the extra attribute fields (uid/gid and high-resolution
-      # timestamps) that would otherwise carry runner state into the archive.
-      (cd "${staging}" && TZ=UTC0 zip -q -9 -X "${archive_arg}" "${binary_name}")
-    else
-      echo "error: neither 7z nor zip is available" >&2
-      exit 1
-    fi
+    node "${zip_script}" "${zip_source}" "${zip_target}" "${binary_name}"
     ;;
 esac
 
