@@ -422,8 +422,23 @@ pub(super) fn bad_gateway_response(message: &str) -> HttpResponse {
     problem_response(ErrorClass::BadGateway, message)
 }
 
-pub(super) fn service_unavailable_response(message: &str) -> HttpResponse {
-    problem_response(ErrorClass::ServiceUnavailable, message)
+/// Builds a 503, naming the delay after which a retry has a chance of succeeding.
+///
+/// `retry_after_secs` is `Some` when the condition clears on its own, which RFC 9110 section
+/// 15.6.4 asks a 503 to say: without it a client retries immediately, and an immediate retry
+/// adds to the load the answer was sent to shed. It is `None` when the condition is a
+/// configuration the process cannot resolve by waiting, since naming a delay there would
+/// invite a caller to poll something that will not change until an operator changes it.
+pub(super) fn service_unavailable_response(
+    message: &str,
+    retry_after_secs: Option<u64>,
+) -> HttpResponse {
+    let mut resp = problem_response(ErrorClass::ServiceUnavailable, message);
+    if let Some(secs) = retry_after_secs {
+        resp.headers
+            .push(("Retry-After".to_string(), secs.to_string()));
+    }
+    resp
 }
 
 pub(super) fn too_many_requests_response(message: &str) -> HttpResponse {
@@ -502,6 +517,7 @@ pub(super) fn map_source_io_error(error: io::Error) -> HttpResponse {
 mod tests {
     use super::*;
     use crate::{MediaType, TransformError};
+    use rstest::rstest;
     use serde_json::Value;
 
     /// Parse the body of an HttpResponse as JSON.
@@ -681,7 +697,7 @@ mod tests {
 
     #[test]
     fn test_service_unavailable_response() {
-        let resp = service_unavailable_response("overloaded");
+        let resp = service_unavailable_response("overloaded", Some(1));
         assert_eq!(resp.status, "503 Service Unavailable");
 
         let v = parse_body(&resp);
@@ -704,6 +720,49 @@ mod tests {
 
         let retry_after = resp.headers.iter().find(|(name, _)| name == "Retry-After");
         assert_eq!(retry_after.map(|(_, v)| v.as_str()), Some("1"));
+    }
+
+    /// A status a client is expected to retry has to say when, or the retry is immediate and
+    /// adds to the load the response was sent to shed. RFC 9110 section 15.6.4 says so for
+    /// 503 and RFC 6585 section 4 says so for 429; the table is what keeps the next builder
+    /// of a retryable status from being added without one.
+    #[rstest]
+    #[case(too_many_requests_response("rate limit exceeded"), "429")]
+    #[case(
+        service_unavailable_response("too many concurrent transforms; retry later", Some(1)),
+        "503"
+    )]
+    fn a_retryable_status_says_when_to_come_back(
+        #[case] response: HttpResponse,
+        #[case] status: &str,
+    ) {
+        assert!(
+            response.status.starts_with(status),
+            "{} is not {status}",
+            response.status
+        );
+        let retry_after = response
+            .headers
+            .iter()
+            .find(|(name, _)| name == "Retry-After")
+            .map(|(_, value)| value.as_str());
+        let seconds = retry_after
+            .unwrap_or_else(|| panic!("{status} must carry Retry-After"))
+            .parse::<u64>()
+            .expect("Retry-After is a delay in seconds");
+        assert!(seconds >= 1, "{status} must name a delay, got {seconds}");
+    }
+
+    /// A 503 whose cause is a configuration says nothing about when to come back, because
+    /// waiting is not what resolves it.
+    #[test]
+    fn a_configuration_failure_names_no_delay() {
+        let resp = service_unavailable_response("private API bearer token is not configured", None);
+        assert_eq!(resp.status, "503 Service Unavailable");
+        assert!(
+            !resp.headers.iter().any(|(name, _)| name == "Retry-After"),
+            "a misconfiguration does not clear by waiting"
+        );
     }
 
     // ---------------------------------------------------------------
@@ -1035,7 +1094,7 @@ mod tests {
             ),
             (bad_gateway_response("x"), "bad-gateway", "Bad Gateway", 502),
             (
-                service_unavailable_response("x"),
+                service_unavailable_response("x", Some(1)),
                 "service-unavailable",
                 "Service Unavailable",
                 503,

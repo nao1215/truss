@@ -899,18 +899,21 @@ fn collect_resource_checks(config: &ServerConfig) -> (Vec<serde_json::Value>, bo
         }
     }
 
-    // Concurrency utilization
+    // Concurrency utilization, reported and deliberately outside `all_ok`. A server with
+    // every slot busy is doing what it was configured to do and is answering what it
+    // accepted, so withdrawing it from the load balancer would move its share to its peers
+    // and push them into the same state. Shedding the individual request with a 503 is the
+    // load signal; readiness answers whether this process should receive traffic at all.
+    //
+    // The status stays `ok` because `current` against `max` is the utilization, and a second
+    // field saying the same thing could only disagree with it.
     let in_flight = config.transforms_in_flight.load(Ordering::Relaxed);
-    let overloaded = in_flight >= config.max_concurrent_transforms;
     checks.push(json!({
         "name": "transformCapacity",
-        "status": if overloaded { "fail" } else { "ok" },
+        "status": "ok",
         "current": in_flight,
         "max": config.max_concurrent_transforms,
     }));
-    if overloaded {
-        all_ok = false;
-    }
 
     // Memory usage (Linux only) — skip entirely when RSS is unavailable
     if let Some(rss_bytes) = config.health_cache.rss() {
@@ -1414,28 +1417,11 @@ pub(super) fn transform_source_bytes(
             )
     });
 
-    if let Some(ref cache) = cache
-        && options.format.is_some()
-    {
-        let cache_key = compute_cache_key(source_hash, &options, watermark_identity);
-        if let Some(response) = cache.get(&cache_key).into_hit_response(
-            request,
-            response_policy,
-            false,
-            config.public_cache_control(),
-            &config.custom_response_headers,
-        ) {
-            CACHE_HITS_TOTAL.fetch_add(1, Ordering::Relaxed);
-            return response;
-        }
-    }
-
-    let Some(_slot) = TransformSlot::try_acquire(
-        &config.transforms_in_flight,
-        config.max_concurrent_transforms,
-    ) else {
-        return service_unavailable_response("too many concurrent transforms; retry later");
-    };
+    // The concurrency limit is taken inside, once the answer is known to need a transform.
+    // A variant already on disk costs no decode to serve, so it is answered whether or not
+    // the slots are full; the lookup that decides needs a concrete format, which a request
+    // that leaves the format to `Accept` only gets after the negotiation a few lines into
+    // the callee.
     transform_source_bytes_inner(
         source_bytes,
         options,
@@ -1543,6 +1529,18 @@ fn transform_source_bytes_inner(
     if cache.is_some() {
         CACHE_MISSES_TOTAL.fetch_add(1, Ordering::Relaxed);
     }
+
+    // Everything above answers from what is already on disk or in the request. What follows
+    // fetches and decodes, which is the work the limit exists to bound.
+    let Some(_slot) = TransformSlot::try_acquire(
+        &config.transforms_in_flight,
+        config.max_concurrent_transforms,
+    ) else {
+        return service_unavailable_response(
+            "too many concurrent transforms; retry later",
+            Some(1),
+        );
+    };
 
     let is_svg = artifact.media_type == MediaType::Svg;
 
