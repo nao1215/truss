@@ -899,10 +899,10 @@ components:
       description: |
         Requested output width in pixels.
         When `height` is omitted, the image is resized proportionally.
-        The resulting output is refused with `limit-exceeded` when it passes the output pixel
+        The resulting output is refused with `limit-exceeded` when it exceeds the output pixel
         budget, or when it is longer on an axis than the requested format holds: 65535 for
         `jpeg` and `avif`, 16383 for `webp`, and no limit below the pixel budget for `png`,
-        `bmp` and `tiff`.
+        `bmp`, `tiff` and `svg`.
       schema:
         type: integer
         minimum: 1
@@ -1312,9 +1312,8 @@ components:
           type: integer
           minimum: 1
           description: >-
-            Requested output width in pixels. The resulting output is refused with
-            `limit-exceeded` when it is longer on an axis than the requested format holds:
-            65535 for `jpeg` and `avif`, 16383 for `webp`.
+            Requested output width in pixels. The output limits described on the `width` query
+            parameter apply.
         height:
           type: integer
           minimum: 1
