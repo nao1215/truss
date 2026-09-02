@@ -456,18 +456,24 @@ scenarios:
             path: plain.jpg
             not_contains: "ICC_PROFILE"
 
-  # TIFF and BMP have no way to carry either kind, and saying nothing is the one answer the
-  # pipeline gives nowhere else: XMP and IPTC warn, and AVIF refuses.
-  - name: metadata a TIFF output cannot carry is named on stderr
+  # A TIFF carries a profile in the directory entry the format defines for it, and nothing
+  # else: its EXIF is its own directory rather than a block that travels. What cannot travel
+  # is named, which is the one answer the pipeline gives nowhere else by staying silent.
+  - name: a TIFF output carries the profile and says what it cannot carry
     steps:
       - run:
           command: truss convert "${fixtures}/icc-profile.jpg" -o meta.tiff --format tiff --keep-metadata
       - assert:
           exit_code: 0
           stderr:
-            contains:
-              - "warning:"
-              - "ICC profile"
+            not_contains: "ICC profile"
+      - run:
+          command: truss convert meta.tiff -o back.jpg --format jpeg --keep-metadata
+      - assert:
+          exit_code: 0
+          file:
+            path: back.jpg
+            contains: "ICC_PROFILE"
       - run:
           command: truss convert "${fixtures}/exif-rotated.jpg" -o meta2.tiff --format tiff --keep-metadata --no-auto-orient
       - assert:
