@@ -37,20 +37,12 @@ pub const MAX_OUTPUT_PIXELS: u64 = 67_108_864;
 ///
 /// This limit prevents decompression bombs from consuming unbounded memory.
 /// The value matches the API specification in `docs/openapi.yaml`.
-///
-/// ```
-/// assert_eq!(truss::MAX_DECODED_PIXELS, 100_000_000);
-/// ```
 pub(crate) const MAX_DECODED_PIXELS: u64 = 100_000_000;
 
 /// Maximum number of decoded pixels allowed for a watermark image.
 ///
 /// This prevents a single watermark overlay from dominating memory during
 /// compositing. The value (4 MP) is generous for typical watermarks.
-///
-/// ```
-/// assert_eq!(truss::MAX_WATERMARK_PIXELS, 4_000_000);
-/// ```
 pub(crate) const MAX_WATERMARK_PIXELS: u64 = 4_000_000;
 
 /// A (width, height) pair that prevents accidental transposition of dimensions.
@@ -1504,30 +1496,6 @@ pub(crate) enum MetadataPolicy {
 ///
 /// Returns [`TransformError::InvalidOptions`] when `keep` and `preserve_exif` are both
 /// explicitly `true`, since those policies are mutually exclusive.
-///
-/// # Examples
-///
-/// ```
-/// use truss::resolve_metadata_flags;
-///
-/// // Default: strip all metadata
-/// let (strip, exif) = resolve_metadata_flags(None, None, None).unwrap();
-/// assert!(strip);
-/// assert!(!exif);
-///
-/// // Explicit keep
-/// let (strip, exif) = resolve_metadata_flags(None, Some(true), None).unwrap();
-/// assert!(!strip);
-/// assert!(!exif);
-///
-/// // Preserve EXIF only
-/// let (strip, exif) = resolve_metadata_flags(None, None, Some(true)).unwrap();
-/// assert!(!strip);
-/// assert!(exif);
-///
-/// // keep + preserve_exif conflict
-/// assert!(resolve_metadata_flags(None, Some(true), Some(true)).is_err());
-/// ```
 pub(crate) fn resolve_metadata_flags(
     strip: Option<bool>,
     keep: Option<bool>,
@@ -3223,6 +3191,41 @@ fn read_u64_be(bytes: &[u8]) -> Result<u64, TransformError> {
 
 #[cfg(test)]
 mod tests {
+    /// The two input caps are the numbers `docs/openapi.yaml` publishes, so a change to
+    /// either is a change to the document. These were doctests on the constants before the
+    /// pair stopped being public; the assertions are the same.
+    #[test]
+    fn the_input_pixel_caps_are_the_documented_numbers() {
+        assert_eq!(super::MAX_DECODED_PIXELS, 100_000_000);
+        assert_eq!(super::MAX_WATERMARK_PIXELS, 4_000_000);
+    }
+
+    /// The three flag names resolve to one `(strip_metadata, preserve_exif)` pair, which is
+    /// what makes the four adapters agree. This was a doctest on `resolve_metadata_flags`
+    /// before that function stopped being public; the assertions are the same.
+    #[test]
+    fn metadata_flag_resolution() {
+        use super::resolve_metadata_flags;
+
+        // Default: strip all metadata.
+        let (strip, exif) = resolve_metadata_flags(None, None, None).unwrap();
+        assert!(strip);
+        assert!(!exif);
+
+        // Explicit keep.
+        let (strip, exif) = resolve_metadata_flags(None, Some(true), None).unwrap();
+        assert!(!strip);
+        assert!(!exif);
+
+        // Preserve EXIF only.
+        let (strip, exif) = resolve_metadata_flags(None, None, Some(true)).unwrap();
+        assert!(!strip);
+        assert!(exif);
+
+        // keep + preserve_exif conflict.
+        assert!(resolve_metadata_flags(None, Some(true), Some(true)).is_err());
+    }
+
     /// The three metadata names the adapters carry resolve to one policy, which is what the
     /// pipeline reads. This was a doctest on `MetadataPolicy` before that enum stopped being
     /// public; the assertions are the same.
