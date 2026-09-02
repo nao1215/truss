@@ -45,7 +45,7 @@ fn scale_crop_into_render_space(
     crop: crate::core::CropRegion,
     intrinsic: (u32, u32),
     region_render: (u32, u32),
-) -> ((u32, u32), Option<crate::core::CropRegion>) {
+) -> ((u32, u32), crate::core::CropRegion) {
     let scale_x = f64::from(region_render.0) / f64::from(crop.width.max(1));
     let scale_y = f64::from(region_render.1) / f64::from(crop.height.max(1));
     let scale = if scale_x.is_finite() && scale_y.is_finite() {
@@ -54,33 +54,38 @@ fn scale_crop_into_render_space(
         1.0
     };
 
-    let scaled = |value: u32| -> u32 {
-        let scaled = (f64::from(value) * scale).round();
-        if scaled < 1.0 {
-            1
-        } else if scaled > f64::from(u32::MAX) {
+    let clamp = |value: f64, floor: u32| -> u32 {
+        if value < f64::from(floor) {
+            floor
+        } else if value > f64::from(u32::MAX) {
             u32::MAX
         } else {
-            scaled as u32
+            value as u32
         }
     };
+    // An origin and a size have different floors. Zero is a perfectly good origin, and it is
+    // the commonest one; a size floored at zero would be an empty rectangle. Scaling both
+    // with the size's floor pushed every rectangle starting at the drawing's edge one pixel
+    // inwards, which the clamp below then paid for out of the width.
+    let origin = |value: u32| clamp((f64::from(value) * scale).round(), 0);
+    let extent = |value: u32| clamp((f64::from(value) * scale).round(), 1);
 
-    let full = (scaled(intrinsic.0), scaled(intrinsic.1));
+    let full = (extent(intrinsic.0), extent(intrinsic.1));
     // The rectangle is clamped to the buffer it will be taken from, so rounding cannot put
     // its far edge past the last pixel.
-    let x = scaled(crop.x).min(full.0.saturating_sub(1));
-    let y = scaled(crop.y).min(full.1.saturating_sub(1));
-    let width = scaled(crop.width).min(full.0 - x);
-    let height = scaled(crop.height).min(full.1 - y);
+    let x = origin(crop.x).min(full.0.saturating_sub(1));
+    let y = origin(crop.y).min(full.1.saturating_sub(1));
+    let width = extent(crop.width).min(full.0 - x);
+    let height = extent(crop.height).min(full.1 - y);
 
     (
         full,
-        Some(crate::core::CropRegion {
+        crate::core::CropRegion {
             x,
             y,
             width,
             height,
-        }),
+        },
     )
 }
 
@@ -228,20 +233,40 @@ pub fn transform_svg(request: TransformRequest) -> Result<TransformResult, Trans
         normalized.options.fit,
         normalized.options.without_enlargement,
     );
-    // With a crop the region the fit was asked about is a part of the drawing, so the whole
-    // drawing has to be rasterized at the scale that region needs, and the rectangle scaled
-    // with it. Rasterizing the drawing at its own size and enlarging afterwards would throw
-    // away the resolution a vector source is kept for.
+    // With a crop the region the fit was asked about is a part of the drawing, so the scale
+    // is the one that region needs: rasterizing the drawing at its own size and enlarging
+    // afterwards would throw away the resolution a vector source is kept for. What that
+    // scale is applied to depends on the rotation. With none, the rectangle is in the
+    // drawing's own coordinates and the region is rendered directly, so the buffer is the
+    // size of the output rather than of the drawing. With one, the rectangle is in the
+    // rotated drawing's coordinates, the turn has to happen before the cut, and the whole
+    // drawing is rendered at that scale.
     let (rotated_render_full, scaled_crop) = match normalized.options.crop {
-        Some(crop) => scale_crop_into_render_space(crop, rotated_intrinsic, rotated_render),
+        Some(crop) => {
+            let (full, scaled) =
+                scale_crop_into_render_space(crop, rotated_intrinsic, rotated_render);
+            (full, Some(scaled))
+        }
         None => (rotated_render, None),
     };
+    let render_region = normalized
+        .options
+        .rotate
+        .is_identity()
+        .then_some(scaled_crop)
+        .flatten();
     let render = pre_rotation_render_size(
         rotated_render_full,
         intrinsic,
         rotated_intrinsic,
         normalized.options.rotate.as_degrees(),
     );
+    // The buffer that is actually allocated: the region when it is rendered directly, and
+    // the whole drawing otherwise.
+    let rasterization = match render_region {
+        Some(region) => (region.width, region.height),
+        None => render,
+    };
     let canvas = crate::codecs::raster::resolved_output_dimensions(
         cropped_intrinsic,
         normalized.options.width,
@@ -253,7 +278,7 @@ pub fn transform_svg(request: TransformRequest) -> Result<TransformResult, Trans
     // Both are checked from dimensions alone, before anything is allocated: `cover` scales
     // the content past the box it returns, so the buffer it materializes is not the size of
     // the output. That is the shape of #316, on the other codec.
-    for (label, (width, height)) in [("rasterization", render), ("output", canvas)] {
+    for (label, (width, height)) in [("rasterization", rasterization), ("output", canvas)] {
         let pixel_count = u64::from(width) * u64::from(height);
         if pixel_count > MAX_OUTPUT_PIXELS {
             return Err(TransformError::LimitExceeded(format!(
@@ -262,7 +287,7 @@ pub fn transform_svg(request: TransformRequest) -> Result<TransformResult, Trans
         }
     }
 
-    let rgba_image = rasterize_svg(&tree, render.0, render.1)?;
+    let rgba_image = rasterize_svg(&tree, render.0, render.1, render_region)?;
 
     if let (Some(start), Some(limit)) = (start, deadline) {
         crate::codecs::raster::check_deadline(start.elapsed(), limit, "rasterize")?;
@@ -285,13 +310,14 @@ pub fn transform_svg(request: TransformRequest) -> Result<TransformResult, Trans
     };
 
     // The crop follows the rotation and precedes the resize, which is where the pipeline
-    // puts it. The rectangle was scaled into the render space above.
+    // puts it. A region rendered directly is already the cut, so only the rotated case has
+    // anything left to take.
     let rgba_image = match scaled_crop {
-        Some(crop) => {
+        Some(crop) if render_region.is_none() => {
             crate::codecs::raster::apply_crop(image::DynamicImage::ImageRgba8(rgba_image), crop)?
                 .into_rgba8()
         }
-        None => rgba_image,
+        _ => rgba_image,
     };
 
     // The buffer is already the content size, so every resize inside this call is a no-op and
@@ -1061,16 +1087,32 @@ fn rasterize_svg(
     tree: &resvg::usvg::Tree,
     width: u32,
     height: u32,
+    region: Option<crate::core::CropRegion>,
 ) -> Result<RgbaImage, TransformError> {
-    let mut pixmap = resvg::tiny_skia::Pixmap::new(width, height).ok_or_else(|| {
-        TransformError::DecodeFailed(format!(
-            "failed to create {width}x{height} pixel buffer for SVG rasterization"
-        ))
-    })?;
+    // `width` and `height` are the size the whole drawing would be rendered at, which is
+    // what fixes the scale. A region shifts the drawing under a buffer of the region's own
+    // size, so a crop allocates what its output needs rather than what its source is.
+    let (buffer_width, buffer_height) = match region {
+        Some(region) => (region.width, region.height),
+        None => (width, height),
+    };
+    let mut pixmap =
+        resvg::tiny_skia::Pixmap::new(buffer_width, buffer_height).ok_or_else(|| {
+            TransformError::DecodeFailed(format!(
+                "failed to create {buffer_width}x{buffer_height} pixel buffer for SVG rasterization"
+            ))
+        })?;
 
     let scale_x = width as f32 / tree.size().width();
     let scale_y = height as f32 / tree.size().height();
-    let transform = resvg::tiny_skia::Transform::from_scale(scale_x, scale_y);
+    let scale = resvg::tiny_skia::Transform::from_scale(scale_x, scale_y);
+    let transform = match region {
+        Some(region) => {
+            resvg::tiny_skia::Transform::from_translate(-(region.x as f32), -(region.y as f32))
+                .pre_concat(scale)
+        }
+        None => scale,
+    };
 
     resvg::render(tree, transform, &mut pixmap.as_mut());
 
@@ -1089,7 +1131,7 @@ fn rasterize_svg(
         }
     }
 
-    RgbaImage::from_raw(width, height, rgba_data)
+    RgbaImage::from_raw(buffer_width, buffer_height, rgba_data)
         .ok_or_else(|| TransformError::DecodeFailed("SVG rasterization buffer mismatch".into()))
 }
 
@@ -2396,6 +2438,126 @@ mod tests {
                 "{name} was accepted but changed nothing about the picture"
             );
         }
+    }
+
+    /// A crop of a rasterized SVG is the same crop of the same drawing rasterized first.
+    ///
+    /// `docs/pipeline.md` says a drawing with a raster output joins the raster pipeline, so
+    /// the raster path is the oracle: it decodes at the source's own size, crops, and
+    /// resizes. Scaling the rectangle into the space the drawing is rasterized in has to
+    /// land on the same pixels. It did not: the origin was scaled with the helper that
+    /// floors a dimension at one, so a rectangle starting at zero started one pixel late and
+    /// lost a row and a column when it reached the far edge.
+    #[test]
+    fn a_crop_of_a_rasterized_svg_matches_the_same_crop_of_the_raster() {
+        for (width, height) in [(10_u32, 10_u32), (40, 24), (24, 40), (33, 7)] {
+            let drawing = marked_svg(width, height);
+            let whole = transform_svg(TransformRequest::new(
+                sniff_artifact(RawArtifact::new(drawing.clone(), None)).unwrap(),
+                TransformOptions {
+                    format: Some(MediaType::Png),
+                    ..TransformOptions::default()
+                },
+            ))
+            .expect("rasterize the drawing")
+            .artifact
+            .bytes;
+
+            for (x, y, w, h) in [
+                (0, 0, width, height),
+                (0, 0, 1, 1),
+                (0, 0, width / 2, height / 2),
+                (width - 1, height - 1, 1, 1),
+                (1, 1, width - 1, height - 1),
+                (width / 3, height / 3, width / 3, height / 3),
+            ] {
+                if w == 0 || h == 0 {
+                    continue;
+                }
+                let crop = crate::core::CropRegion {
+                    x,
+                    y,
+                    width: w,
+                    height: h,
+                };
+                let options = TransformOptions {
+                    format: Some(MediaType::Png),
+                    crop: Some(crop),
+                    ..TransformOptions::default()
+                };
+                let from_drawing = transform_svg(TransformRequest::new(
+                    sniff_artifact(RawArtifact::new(drawing.clone(), None)).unwrap(),
+                    options.clone(),
+                ))
+                .expect("crop the drawing")
+                .artifact
+                .bytes;
+                let from_raster = crate::codecs::transform(TransformRequest::new(
+                    sniff_artifact(RawArtifact::new(whole.clone(), None)).unwrap(),
+                    options,
+                ))
+                .expect("crop the raster")
+                .artifact
+                .bytes;
+
+                let a = image::load_from_memory(&from_drawing).unwrap().to_rgba8();
+                let b = image::load_from_memory(&from_raster).unwrap().to_rgba8();
+                assert_eq!(
+                    a.dimensions(),
+                    b.dimensions(),
+                    "{width}x{height} crop {x},{y},{w},{h}: the two paths disagree on the size"
+                );
+                assert_eq!(
+                    a.into_raw(),
+                    b.into_raw(),
+                    "{width}x{height} crop {x},{y},{w},{h}: the two paths disagree on the pixels"
+                );
+            }
+        }
+    }
+
+    /// A small region of a large drawing is served, not refused for a buffer nobody asked
+    /// for. Rasterizing the whole drawing at the scale the region needs made the buffer as
+    /// many times larger than the output as the drawing was larger than the region, so a
+    /// thumbnail cut out of a poster hit the pixel limit.
+    #[test]
+    fn a_small_crop_of_a_large_drawing_is_served() {
+        let drawing = marked_svg(1000, 3);
+        let result = transform_svg(TransformRequest::new(
+            sniff_artifact(RawArtifact::new(drawing, None)).unwrap(),
+            TransformOptions {
+                format: Some(MediaType::Png),
+                crop: Some(crate::core::CropRegion {
+                    x: 0,
+                    y: 0,
+                    width: 250,
+                    height: 1,
+                }),
+                width: Some(200),
+                height: Some(200),
+                fit: Some(crate::core::Fit::Cover),
+                ..TransformOptions::default()
+            },
+        ))
+        .expect("a 200x200 output should not need 120 million pixels");
+
+        assert_eq!(result.artifact.metadata.width, Some(200));
+        assert_eq!(result.artifact.metadata.height, Some(200));
+    }
+
+    /// A drawing with a mark in every corner, so a rectangle that is off by a pixel shows it.
+    fn marked_svg(width: u32, height: u32) -> Vec<u8> {
+        format!(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{width}\" height=\"{height}\">\
+             <rect width=\"{width}\" height=\"{height}\" fill=\"white\"/>\
+             <rect x=\"0\" y=\"0\" width=\"1\" height=\"1\" fill=\"red\"/>\
+             <rect x=\"{last_x}\" y=\"0\" width=\"1\" height=\"1\" fill=\"lime\"/>\
+             <rect x=\"0\" y=\"{last_y}\" width=\"1\" height=\"1\" fill=\"blue\"/>\
+             <rect x=\"{last_x}\" y=\"{last_y}\" width=\"1\" height=\"1\" fill=\"black\"/></svg>",
+            last_x = width - 1,
+            last_y = height - 1,
+        )
+        .into_bytes()
     }
 
     /// A crop takes its bite before the resize, so the output is the box that was asked for
