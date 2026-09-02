@@ -4744,6 +4744,51 @@ mod tests {
         mp4_box(b"clap", &payload)
     }
 
+    /// A clean aperture whose denominator is large enough to overflow the arithmetic that
+    /// places it is answered rather than aborting the process that read the file.
+    ///
+    /// The product of the picture size and the denominator reaches about 1.8e19 with both read
+    /// from the file, which is past what an `i64` holds. Whether such a file is accepted or
+    /// refused is a property of the fraction: a maximum denominator against a maximum picture
+    /// centres a one-pixel aperture exactly, and one pixel less does not divide evenly. What
+    /// this pins is that both answers come back at all.
+    #[rstest]
+    #[case::a_fraction_that_does_not_divide(4_000_000_000, 4_000_000_000, None)]
+    #[case::a_fraction_that_does(u32::MAX, u32::MAX, Some((1, 1)))]
+    fn sniff_artifact_places_a_clean_aperture_without_overflowing(
+        #[case] picture: u32,
+        #[case] denominator: u32,
+        #[case] expected: Option<(u32, u32)>,
+    ) {
+        let mut clap = Vec::new();
+        // An aperture of one pixel: the numerator over the denominator, so the aperture is
+        // small and the picture it is cut from is enormous, which is what makes the product
+        // large.
+        for value in [denominator, denominator, denominator, denominator] {
+            clap.extend_from_slice(&value.to_be_bytes());
+        }
+        for _ in 0..2 {
+            clap.extend_from_slice(&0_i32.to_be_bytes());
+            clap.extend_from_slice(&denominator.to_be_bytes());
+        }
+        let bytes = avif_bytes_with_properties(
+            1,
+            &[avif_ispe(picture, picture), mp4_box(b"clap", &clap)],
+            avif_ipma(0, 0, &[(1, &[1, 2])]),
+        );
+
+        match (sniff_artifact(RawArtifact::new(bytes, None)), expected) {
+            (Ok(artifact), Some((width, height))) => {
+                assert_eq!(
+                    (artifact.metadata.width, artifact.metadata.height),
+                    (Some(width), Some(height))
+                );
+            }
+            (Err(TransformError::DecodeFailed(_)), None) => {}
+            (actual, expected) => panic!("expected {expected:?}, got {actual:?}"),
+        }
+    }
+
     /// The clean aperture is the picture, so the sniffer reports its size, and it is cut
     /// before the orientation turns it, so the oriented size follows from the cut.
     #[rstest]
