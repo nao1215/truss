@@ -357,25 +357,55 @@ fn decode_avif(bytes: &[u8]) -> Result<DynamicImage, TransformError> {
 /// Feeds AV1 OBU data to a `rav1d` decoder and returns the first decoded frame.
 #[cfg(feature = "avif")]
 fn decode_av1_frame(obu_data: &[u8]) -> Result<rav1d_safe::Frame, TransformError> {
-    let mut decoder = Decoder::new()
-        .map_err(|e| TransformError::DecodeFailed(format!("AV1 decoder init failed: {e}")))?;
+    contain_decoder_panic("AV1", || {
+        let mut decoder = Decoder::new()
+            .map_err(|e| TransformError::DecodeFailed(format!("AV1 decoder init failed: {e}")))?;
 
-    if let Some(frame) = decoder
-        .decode(obu_data)
-        .map_err(|e| TransformError::DecodeFailed(format!("AV1 decode failed: {e}")))?
-    {
-        return Ok(frame);
-    }
+        if let Some(frame) = decoder
+            .decode(obu_data)
+            .map_err(|e| TransformError::DecodeFailed(format!("AV1 decode failed: {e}")))?
+        {
+            return Ok(frame);
+        }
 
-    // Flush any buffered frames.
-    let frames = decoder
-        .flush()
-        .map_err(|e| TransformError::DecodeFailed(format!("AV1 flush failed: {e}")))?;
+        // Flush any buffered frames.
+        let frames = decoder
+            .flush()
+            .map_err(|e| TransformError::DecodeFailed(format!("AV1 flush failed: {e}")))?;
 
-    frames
-        .into_iter()
-        .next()
-        .ok_or_else(|| TransformError::DecodeFailed("AV1 decoder produced no frames".into()))
+        frames
+            .into_iter()
+            .next()
+            .ok_or_else(|| TransformError::DecodeFailed("AV1 decoder produced no frames".into()))
+    })
+}
+
+/// Runs a decoder and reports a panic inside it as a decode failure.
+///
+/// truss decodes bytes it did not produce, on a server, from a caller it does not know. A
+/// decoder that panics is therefore not a bug report but a way to take a connection worker
+/// down, and on a build with `panic = "abort"` it would be a way to take the process down. The
+/// panic is contained here, at the one call that leaves truss's own code, and becomes the
+/// error the format's other failures already produce.
+///
+/// This is not a claim that the decode was correct. The known case is an arithmetic overflow
+/// in `rav1d`'s ARM loop restoration, which panics where overflow checks are on and wraps
+/// where they are off, and containing the panic makes the first behave like the second rather
+/// than making either right. The panic message the default hook printed on the way is the
+/// record that something in the decoder went wrong.
+///
+/// The closure takes nothing by mutable reference and writes nothing outside itself, so there
+/// is no state a panic could leave half-written; that is what [`AssertUnwindSafe`] asserts.
+#[cfg(feature = "avif")]
+fn contain_decoder_panic<T>(
+    format: &str,
+    decode: impl FnOnce() -> Result<T, TransformError>,
+) -> Result<T, TransformError> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(decode)).unwrap_or_else(|_| {
+        Err(TransformError::DecodeFailed(format!(
+            "{format} decoder failed while decoding this image"
+        )))
+    })
 }
 
 /// How an AVIF's declared matrix coefficients are turned back into RGB.
@@ -5249,6 +5279,43 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A decoder that panics is a decode failure rather than a dead worker.
+    #[cfg(feature = "avif")]
+    #[test]
+    fn a_panicking_decoder_is_reported_as_a_decode_failure() {
+        // The default hook would print the panic message and its backtrace note, which is
+        // noise in the test output and nothing this asserts on.
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let contained = super::contain_decoder_panic::<()>("AV1", || {
+            panic!("attempt to multiply with overflow")
+        });
+        std::panic::set_hook(previous);
+
+        assert_eq!(
+            contained,
+            Err(TransformError::DecodeFailed(
+                "AV1 decoder failed while decoding this image".to_string()
+            ))
+        );
+    }
+
+    /// Containment does not change what a decode that works, or that fails for a reason the
+    /// decoder reports, comes back as.
+    #[cfg(feature = "avif")]
+    #[test]
+    fn containment_passes_a_result_through_unchanged() {
+        assert_eq!(super::contain_decoder_panic("AV1", || Ok(7)), Ok(7));
+        assert_eq!(
+            super::contain_decoder_panic::<u8>("AV1", || Err(TransformError::DecodeFailed(
+                "AV1 decode failed: truncated".to_string()
+            ))),
+            Err(TransformError::DecodeFailed(
+                "AV1 decode failed: truncated".to_string()
+            ))
+        );
     }
 
     /// Every matrix the AV1 sequence header can declare, and what truss does with it.
