@@ -1,6 +1,6 @@
 {
   "name": "@nao1215/truss-url-signer",
-  "version": "0.21.1",
+  "version": "0.22.0",
   "description": "Official Node.js/TypeScript signer for truss public image URLs.",
   "type": "module",
   "main": "./index.js",
