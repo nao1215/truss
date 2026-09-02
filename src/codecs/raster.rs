@@ -5009,6 +5009,93 @@ mod tests {
         assert_eq!(result.artifact.metadata.height, Some(3));
     }
 
+    /// Bit-flipped AVIF containers reach the metadata walk without panicking.
+    ///
+    /// The walk reads an item list, an item location table and a property list out of bytes
+    /// truss did not produce: on the server they arrive as a request body or from storage, and
+    /// on the CLI as a file. Every read is bounds-checked and every arithmetic step is
+    /// saturating or checked, and this is what says so rather than a comment claiming it. The
+    /// generator is a fixed-seed xorshift so a failure is reproducible from the seed alone, and
+    /// the corpus is the container truss itself writes, since that is the shape whose fields a
+    /// flip can make inconsistent rather than merely unparseable.
+    #[cfg(feature = "avif")]
+    #[test]
+    fn a_damaged_avif_container_is_read_without_panicking() {
+        let mut state: u64 = 0x2026_0902_A71F_0001;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+
+        let source = jpeg_artifact_with_metadata(8, 8, Some(6), Some(b"demo-icc-profile"));
+        let seed = transform_raster(TransformRequest::new(
+            source,
+            TransformOptions {
+                format: Some(MediaType::Avif),
+                strip_metadata: false,
+                auto_orient: false,
+                ..TransformOptions::default()
+            },
+        ))
+        .expect("encode an avif carrying metadata")
+        .artifact
+        .bytes;
+
+        for _ in 0..200_000 {
+            let mut damaged = seed.clone();
+            // One to four flips: one keeps the container walkable and reaches the deeper
+            // fields, and several take it apart.
+            for _ in 0..=(next() % 4) {
+                let at = (next() as usize) % damaged.len();
+                damaged[at] ^= 1u8 << (next() % 8);
+            }
+
+            // Neither of these may panic, and neither may be trusted to succeed: a damaged
+            // container is a decode error, and that is the answer this asserts is reachable.
+            let _ = crate::core::avif_metadata(&damaged);
+            let _ = sniff_artifact(RawArtifact::new(damaged, None));
+        }
+    }
+
+    /// The same, with the length fields damaged on purpose rather than by chance.
+    ///
+    /// A random flip almost never turns a box size into one that is enormous or zero, and those
+    /// are the two shapes a walk over sizes gets wrong: a size of zero that does not advance,
+    /// and a size that reaches past the end. Writing them in directly is what makes the loop's
+    /// termination the thing under test.
+    #[cfg(feature = "avif")]
+    #[test]
+    fn an_avif_with_impossible_box_sizes_is_read_without_hanging() {
+        let source = png_artifact(4, 3, Rgba([10, 20, 30, 255]));
+        let seed = transform_raster(TransformRequest::new(
+            source,
+            TransformOptions {
+                format: Some(MediaType::Avif),
+                ..TransformOptions::default()
+            },
+        ))
+        .expect("encode an avif")
+        .artifact
+        .bytes;
+
+        const SIZES: [u32; 6] = [0, 1, 7, 8, u32::MAX, 0x7FFF_FFFF];
+        // Every four-byte aligned position in the first part of the file, which is where the
+        // box headers are; the payload past that is coded pixels and has no sizes in it.
+        for at in (0..seed.len().min(256)).step_by(4) {
+            for size in SIZES {
+                let mut damaged = seed.clone();
+                if at + 4 > damaged.len() {
+                    break;
+                }
+                damaged[at..at + 4].copy_from_slice(&size.to_be_bytes());
+                let _ = crate::core::avif_metadata(&damaged);
+                let _ = sniff_artifact(RawArtifact::new(damaged, None));
+            }
+        }
+    }
+
     /// AVIF is the last of the four raster outputs to carry metadata, and it carries the two
     /// kinds the container has a place for.
     #[cfg(feature = "avif")]

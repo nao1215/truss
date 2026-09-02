@@ -246,15 +246,20 @@ fn avif_aperture_origin(
             "avif clean aperture is larger than the {picture}-pixel picture along the {axis} axis"
         )));
     }
-    let scaled = i64::from(picture - aperture) * i64::from(denominator) + 2 * i64::from(numerator);
-    let divisor = 2 * i64::from(denominator);
+    // In `i128`, because the product of two values read from the file reaches about 1.8e19 and
+    // an `i64` stops at 9.2e18: a denominator near `u32::MAX` against a picture of the same
+    // order overflowed, which aborts where overflow checks are on and, where they are off,
+    // leaves every test below made against a number that is not the offset.
+    let scaled =
+        i128::from(picture - aperture) * i128::from(denominator) + 2 * i128::from(numerator);
+    let divisor = 2 * i128::from(denominator);
     if scaled % divisor != 0 {
         return Err(TransformError::DecodeFailed(format!(
             "avif clean aperture {axis} offset {numerator}/{denominator} does not land on a whole pixel"
         )));
     }
     let origin = scaled / divisor;
-    if origin < 0 || origin + i64::from(aperture) > i64::from(picture) {
+    if origin < 0 || origin + i128::from(aperture) > i128::from(picture) {
         return Err(TransformError::DecodeFailed(format!(
             "avif clean aperture leaves the picture along the {axis} axis"
         )));

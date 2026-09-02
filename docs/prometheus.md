@@ -60,6 +60,7 @@ scrape_configs:
 | `truss_origin_cache_misses_total` | | Origin cache misses. |
 | `truss_watermark_transforms_total` | | Total transforms that included a watermark. |
 | `truss_transform_errors_total` | `error_type` | Transform errors by category. |
+| `truss_connection_panics_total` | | Panics caught while handling a connection. The correct value is zero: a request that is merely bad is answered with a status code, so anything here names a defect in the handler rather than a caller. Alert on any increase. |
 
 #### `error_type` values
 

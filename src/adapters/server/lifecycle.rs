@@ -91,9 +91,7 @@ pub fn serve_with_config(listener: TcpListener, config: ServerConfig) -> io::Res
                             Err(_) => break,
                         }
                     }; // MutexGuard dropped here — before handle_stream runs.
-                    if let Err(err) = handle_stream(stream, accepted_at, &cfg) {
-                        cfg.log_warn(&format!("failed to handle connection: {err}"));
-                    }
+                    handle_one_connection(stream, accepted_at, &cfg);
                 }
             })
             .expect("failed to start a connection worker");
@@ -228,6 +226,65 @@ pub fn serve_with_config(listener: TcpListener, config: ServerConfig) -> io::Res
     #[cfg(windows)]
     SHUTDOWN_COMPLETE.store(true, Ordering::SeqCst);
     Ok(())
+}
+
+/// Handles one connection, and survives a panic in the handler.
+///
+/// A worker is created once at startup and never replaced, so a panic that unwound out of it
+/// cost the pool a thread for the rest of the process's life: enough of them and the accept
+/// loop keeps taking connections and sending them into a channel nobody is reading. The server
+/// decodes bytes it did not produce, so a panic reachable from a request is not hypothetical,
+/// and containing it here makes the worker lose the connection rather than itself, which is the
+/// outcome a returned error already has.
+///
+/// The panic is counted rather than only logged, because the count is what an operator alerts
+/// on and its correct value is zero: a request that is merely bad is answered with a status
+/// code, so anything here is a defect in the handler.
+///
+/// [`AssertUnwindSafe`](std::panic::AssertUnwindSafe) is what the closure needs and what the
+/// shape of the handler justifies: it writes to a socket it then drops, and the shared state it
+/// reaches — the transform slot, the cache, the metrics — is behind types that cannot be left
+/// half-written by an unwind, the slot's release being an RAII guard for exactly that reason.
+fn handle_one_connection(stream: TcpStream, accepted_at: Instant, config: &Arc<ServerConfig>) {
+    contain_handler_panic(config, || handle_stream(stream, accepted_at, config));
+}
+
+/// Runs one connection's handler and reports what it did, whether it returned or unwound.
+///
+/// Split from [`handle_one_connection`] so that the containment can be tested with a handler
+/// that panics on purpose: nothing a request can send panics the real one, which is the
+/// condition this exists to survive rather than to demonstrate.
+fn contain_handler_panic(
+    config: &Arc<ServerConfig>,
+    handler: impl FnOnce() -> io::Result<()>,
+) -> bool {
+    let handled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(handler));
+    let survived = handled.is_ok();
+
+    match handled {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => config.log_warn(&format!("failed to handle connection: {err}")),
+        Err(payload) => {
+            super::metrics::CONNECTION_PANICS_TOTAL.fetch_add(1, Ordering::Relaxed);
+            config.log_warn(&format!(
+                "panic while handling a connection: {}",
+                panic_message(&payload)
+            ));
+        }
+    }
+
+    survived
+}
+
+/// The message a panic payload carries, for the two types `panic!` produces.
+fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> &str {
+    if let Some(message) = payload.downcast_ref::<&'static str>() {
+        message
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        message
+    } else {
+        "a payload of an unknown type"
+    }
 }
 
 /// Serves exactly one request with an explicit server configuration.
@@ -599,6 +656,40 @@ pub(super) fn preset_watcher(
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// A handler that panics costs the connection rather than the worker.
+    ///
+    /// A worker is created once at startup and never replaced, so before this a panic in the
+    /// handler shrank the pool for the rest of the process's life. The panic hook is silenced
+    /// around the call, since the panic is the input rather than a failure of the test.
+    #[test]
+    #[cfg_attr(unix, serial)]
+    fn a_panicking_handler_leaves_the_worker_able_to_take_the_next_connection() {
+        let config = Arc::new(ServerConfig::new(std::env::temp_dir(), None));
+        let before = super::super::metrics::CONNECTION_PANICS_TOTAL.load(Ordering::SeqCst);
+
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let survived_panic = contain_handler_panic(&config, || panic!("a handler came apart"));
+        std::panic::set_hook(previous);
+
+        assert!(!survived_panic, "the handler is reported as having unwound");
+        assert_eq!(
+            super::super::metrics::CONNECTION_PANICS_TOTAL.load(Ordering::SeqCst),
+            before + 1,
+            "the panic is counted, since its correct value is zero"
+        );
+
+        // The worker's loop calls this again, which is the whole point.
+        assert!(contain_handler_panic(&config, || Ok(())));
+        assert!(contain_handler_panic(&config, || Err(io::Error::other(
+            "a closed socket"
+        ))));
+        assert_eq!(
+            super::super::metrics::CONNECTION_PANICS_TOTAL.load(Ordering::SeqCst),
+            before + 1,
+            "an ordinary error is not a panic"
+        );
+    }
 
     #[cfg(unix)]
     use serial_test::serial;
