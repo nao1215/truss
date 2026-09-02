@@ -6,6 +6,7 @@ use common::{
 };
 use std::collections::BTreeMap;
 use std::fs;
+use std::sync::atomic::Ordering;
 use truss::{MediaType, RawArtifact, ServerConfig, sniff_artifact};
 
 #[test]
@@ -345,6 +346,119 @@ fn serve_once_shares_one_cache_entry_across_equivalent_accept_headers() {
     assert_eq!(
         entries, 1,
         "two equivalent Accept headers wrote {entries} cache entries"
+    );
+}
+
+/// A variant already on disk costs no CPU to produce, so it is what a saturated server can
+/// still answer. The pre-flight cache lookup that makes that true was reachable only for a
+/// request that named its own format, so the caller who relied on `Accept` negotiation --
+/// the arrangement `docs/api-reference.md` describes for a CDN -- was shed instead.
+///
+/// Saturation is expressed by setting the in-flight counter to the limit rather than by
+/// holding a real transform, so the test states the condition it means and does not race.
+#[test]
+fn serve_once_answers_a_warm_negotiated_variant_while_every_transform_slot_is_taken() {
+    let storage_root = temp_dir("saturated-negotiated");
+    fs::write(storage_root.join("image.png"), png_bytes()).expect("write source fixture");
+    let cache_root = temp_dir("saturated-negotiated-cache");
+    let config = ServerConfig::new(storage_root, Some("secret".to_string()))
+        .with_signed_url_credentials("public-dev", "secret-value")
+        .with_cache_root(cache_root);
+    let target = signed_target(
+        "/images/by-path",
+        BTreeMap::from([
+            ("path".to_string(), "/image.png".to_string()),
+            ("keyId".to_string(), "public-dev".to_string()),
+            ("expires".to_string(), "4102444800".to_string()),
+        ]),
+        "cdn.example.com",
+        "secret-value",
+    );
+
+    // Warm the entry. The URL names no format, so the output is negotiated from Accept.
+    let (addr, handle) = spawn_server(config.clone());
+    let warm = send_public_get_request_with_headers(
+        addr,
+        &target,
+        "cdn.example.com",
+        &[("Accept", "image/webp")],
+    );
+    handle
+        .join()
+        .expect("join server thread")
+        .expect("serve one request");
+    let (warm_header, warm_content_type, warm_body) = split_response(&warm);
+    assert!(
+        warm_header.contains("Cache-Status: \"truss\"; fwd=miss"),
+        "the first request writes the entry: {warm_header}"
+    );
+
+    // Every transform slot is taken.
+    config
+        .transforms_in_flight
+        .store(config.max_concurrent_transforms, Ordering::Relaxed);
+
+    let (addr, handle) = spawn_server(config.clone());
+    let response = send_public_get_request_with_headers(
+        addr,
+        &target,
+        "cdn.example.com",
+        &[("Accept", "image/webp")],
+    );
+    handle
+        .join()
+        .expect("join server thread")
+        .expect("serve one request");
+    let (header, content_type, body) = split_response(&response);
+
+    assert!(
+        header.starts_with("HTTP/1.1 200 OK"),
+        "a cached variant costs no transform slot to serve: {header}"
+    );
+    assert!(
+        header.contains("Cache-Status: \"truss\"; hit"),
+        "the warm entry should answer it: {header}"
+    );
+    assert_eq!(content_type, warm_content_type);
+    assert_eq!(body, warm_body);
+}
+
+/// The other half of the rule: the limit still sheds a request that has no cached answer,
+/// so the fix above cannot be "stop counting slots".
+#[test]
+fn serve_once_still_sheds_an_uncached_transform_while_every_slot_is_taken() {
+    let storage_root = temp_dir("saturated-miss");
+    fs::write(storage_root.join("image.png"), png_bytes()).expect("write source fixture");
+    let cache_root = temp_dir("saturated-miss-cache");
+    let config =
+        ServerConfig::new(storage_root, Some("secret".to_string())).with_cache_root(cache_root);
+    config
+        .transforms_in_flight
+        .store(config.max_concurrent_transforms, Ordering::Relaxed);
+
+    let (addr, handle) = spawn_server(config);
+    let response = send_transform_request(
+        addr,
+        r#"{"source":{"kind":"path","path":"/image.png"},"options":{"format":"jpeg"}}"#,
+        Some("secret"),
+    );
+    handle
+        .join()
+        .expect("join server thread")
+        .expect("serve one request");
+
+    let (header, _, body) = split_response(&response);
+    let body = String::from_utf8(body).expect("utf8 body");
+    assert!(
+        header.starts_with("HTTP/1.1 503"),
+        "an uncached transform still needs a slot: {header}"
+    );
+    assert!(body.contains("too many concurrent transforms"), "{body}");
+    // The answer says to retry later, so it has to say when: an immediate retry is more of
+    // the load this response was sent to shed.
+    assert!(
+        header.lines().any(|line| line == "Retry-After: 1"),
+        "a shed request carries the delay through the writer: {header}"
     );
 }
 

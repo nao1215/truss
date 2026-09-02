@@ -3804,6 +3804,100 @@ mod tests {
         assert_eq!(capacity["max"], default_max_concurrent_transforms());
     }
 
+    /// A server at its configured concurrency is doing exactly what it was configured to
+    /// do, and is answering every request it accepted. Reporting it not-ready removes it
+    /// from the load balancer at peak, which moves its share to its peers and pushes them
+    /// to the same state.
+    ///
+    /// The check itself stays in the body, with the numbers an operator reads.
+    #[test]
+    fn readiness_is_not_withdrawn_because_every_transform_slot_is_taken() {
+        let storage = temp_dir("ready-capacity");
+        let config = ServerConfig::new(storage, None);
+        config
+            .transforms_in_flight
+            .store(config.max_concurrent_transforms, Ordering::Relaxed);
+
+        let response = route_request(
+            HttpRequest {
+                method: "GET".to_string(),
+                target: "/health/ready".to_string(),
+                version: "HTTP/1.1".to_string(),
+                headers: Vec::new(),
+                body: Vec::new(),
+            },
+            &config,
+        );
+
+        assert_eq!(
+            response.status,
+            "200 OK",
+            "a busy server is not an unready one: {}",
+            String::from_utf8_lossy(&response.body)
+        );
+        let body: serde_json::Value =
+            serde_json::from_slice(&response.body).expect("parse readiness body");
+        let checks = body["checks"].as_array().expect("checks array");
+        let capacity = checks
+            .iter()
+            .find(|c| c["name"] == "transformCapacity")
+            .expect("transformCapacity check");
+        assert_eq!(
+            capacity["current"], config.max_concurrent_transforms,
+            "the saturation is still reported: {capacity}"
+        );
+    }
+
+    /// The states readiness does answer for. Draining is the process going away, and a
+    /// storage root that is gone is a misconfiguration; neither recovers by itself the way
+    /// a busy moment does.
+    #[test]
+    fn readiness_is_withdrawn_while_draining() {
+        let storage = temp_dir("ready-draining");
+        let config = ServerConfig::new(storage, None);
+        config.draining.store(true, Ordering::Relaxed);
+
+        let response = route_request(
+            HttpRequest {
+                method: "GET".to_string(),
+                target: "/health/ready".to_string(),
+                version: "HTTP/1.1".to_string(),
+                headers: Vec::new(),
+                body: Vec::new(),
+            },
+            &config,
+        );
+
+        assert_eq!(response.status, "503 Service Unavailable");
+        assert!(
+            response
+                .headers
+                .iter()
+                .any(|(name, value)| name == "Retry-After" && value == "5"),
+            "a draining answer tells the caller not to come straight back"
+        );
+    }
+
+    #[test]
+    fn readiness_is_withdrawn_when_the_storage_root_is_gone() {
+        let storage = temp_dir("ready-storage-gone");
+        let config = ServerConfig::new(storage.clone(), None);
+        std::fs::remove_dir_all(&storage).expect("remove storage root");
+
+        let response = route_request(
+            HttpRequest {
+                method: "GET".to_string(),
+                target: "/health/ready".to_string(),
+                version: "HTTP/1.1".to_string(),
+                headers: Vec::new(),
+                body: Vec::new(),
+            },
+            &config,
+        );
+
+        assert_eq!(response.status, "503 Service Unavailable");
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn process_rss_bytes_returns_some() {
