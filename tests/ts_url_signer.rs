@@ -187,33 +187,30 @@ fn typescript_signer_matches_rust_head_canonicalization_with_preset_and_watermar
         return;
     }
 
-    let options = TransformOptions {
-        width: Some(1200),
-        height: Some(628),
-        fit: Some(Fit::Cover),
-        position: Some(Position::Top),
-        format: Some(MediaType::Webp),
-        optimize: OptimizeMode::Lossy,
-        target_quality: Some(
-            "psnr:41"
-                .parse::<TargetQuality>()
-                .expect("parse target quality"),
-        ),
-        background: Some(Rgba8::from_hex("ffffff").expect("parse color")),
-        rotate: Rotation::DEG_180,
-        strip_metadata: false,
-        crop: Some("0,0,1200,628".parse().expect("parse crop")),
-        sharpen: Some(1.25),
-        grayscale: true,
-        without_enlargement: true,
-        ..TransformOptions::default()
-    };
-    let watermark = SignedWatermarkParams {
-        url: "https://cdn.example.com/logo.png".to_string(),
-        position: Some("bottom-right".to_string()),
-        opacity: Some(70),
-        margin: Some(24),
-    };
+    let mut options = TransformOptions::default();
+    options.width = Some(1200);
+    options.height = Some(628);
+    options.fit = Some(Fit::Cover);
+    options.position = Some(Position::Top);
+    options.format = Some(MediaType::Webp);
+    options.optimize = OptimizeMode::Lossy;
+    options.target_quality = Some(
+        "psnr:41"
+            .parse::<TargetQuality>()
+            .expect("parse target quality"),
+    );
+    options.background = Some(Rgba8::from_hex("ffffff").expect("parse color"));
+    options.rotate = Rotation::DEG_180;
+    options.strip_metadata = false;
+    options.crop = Some("0,0,1200,628".parse().expect("parse crop"));
+    options.sharpen = Some(1.25);
+    options.grayscale = true;
+    options.without_enlargement = true;
+
+    let mut watermark = SignedWatermarkParams::new("https://cdn.example.com/logo.png");
+    watermark.position = Some("bottom-right".to_string());
+    watermark.opacity = Some(70);
+    watermark.margin = Some(24);
 
     let rust_signed_url = sign_public_url_with_method(
         "HEAD",

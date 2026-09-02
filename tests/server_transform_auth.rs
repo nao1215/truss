@@ -384,15 +384,11 @@ fn a_signed_url_may_turn_counter_clockwise() {
     assert_eq!(status_code(&header), 200, "{header}");
 
     let artifact = sniff_artifact(RawArtifact::new(parity_source(), None)).expect("sniff source");
-    let expected = transform(TransformRequest::new(
-        artifact,
-        TransformOptions {
-            format: Some(MediaType::Png),
-            rotate: Rotation::from_degrees(-90),
-            ..TransformOptions::default()
-        },
-    ))
-    .expect("turn the picture counter-clockwise");
+    let mut options = TransformOptions::default();
+    options.format = Some(MediaType::Png);
+    options.rotate = Rotation::from_degrees(-90);
+    let expected = transform(TransformRequest::new(artifact, options))
+        .expect("turn the picture counter-clockwise");
 
     assert_eq!(expected.artifact.bytes, body);
 }
@@ -443,37 +439,39 @@ fn parity_source() -> Vec<u8> {
 }
 
 fn parity_base() -> TransformOptions {
-    TransformOptions {
-        width: Some(40),
-        height: Some(30),
-        fit: Some(Fit::Cover),
-        position: Some(Position::Top),
-        format: Some(MediaType::Jpeg),
-        quality: Some(70),
-        optimize: OptimizeMode::None,
-        target_quality: None,
-        background: Some(Rgba8 {
-            r: 1,
-            g: 2,
-            b: 3,
-            a: 255,
-        }),
-        rotate: Rotation::DEG_90,
-        auto_orient: true,
-        strip_metadata: true,
-        preserve_exif: false,
-        crop: Some(CropRegion {
-            x: 1,
-            y: 2,
-            width: 30,
-            height: 40,
-        }),
-        blur: Some(1.0),
-        sharpen: Some(2.0),
-        grayscale: false,
-        without_enlargement: false,
-        deadline: None,
-    }
+    // Every field is named on purpose, so a field truss adds later fails to be named here
+    // and the parity table is extended deliberately rather than by omission.
+    let mut options = TransformOptions::default();
+    options.width = Some(40);
+    options.height = Some(30);
+    options.fit = Some(Fit::Cover);
+    options.position = Some(Position::Top);
+    options.format = Some(MediaType::Jpeg);
+    options.quality = Some(70);
+    options.optimize = OptimizeMode::None;
+    options.target_quality = None;
+    options.background = Some(Rgba8 {
+        r: 1,
+        g: 2,
+        b: 3,
+        a: 255,
+    });
+    options.rotate = Rotation::DEG_90;
+    options.auto_orient = true;
+    options.strip_metadata = true;
+    options.preserve_exif = false;
+    options.crop = Some(CropRegion {
+        x: 1,
+        y: 2,
+        width: 30,
+        height: 40,
+    });
+    options.blur = Some(1.0);
+    options.sharpen = Some(2.0);
+    options.grayscale = false;
+    options.without_enlargement = false;
+    options.deadline = None;
+    options
 }
 
 fn parity_cases() -> Vec<(&'static str, TransformOptions)> {

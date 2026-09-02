@@ -62,12 +62,11 @@ use yuvutils_rs::{YuvGrayImage, YuvPlanarImage, YuvRange, YuvStandardMatrix};
 ///     .unwrap();
 ///
 /// let input = sniff_artifact(RawArtifact::new(bytes, Some(MediaType::Png))).unwrap();
+/// let mut options = TransformOptions::default();
+/// options.format = Some(MediaType::Jpeg);
 /// let output = transform_raster(TransformRequest::new(
 ///     input,
-///     TransformOptions {
-///         format: Some(MediaType::Jpeg),
-///         ..TransformOptions::default()
-///     },
+///     options,
 /// ))
 /// .unwrap();
 ///
@@ -88,13 +87,12 @@ use yuvutils_rs::{YuvGrayImage, YuvPlanarImage, YuvRange, YuvStandardMatrix};
 ///     .unwrap();
 ///
 /// let input = sniff_artifact(RawArtifact::new(bytes, Some(MediaType::Png))).unwrap();
+/// let mut options = TransformOptions::default();
+/// options.format = Some(MediaType::Avif);
+/// options.quality = Some(70);
 /// let output = transform_raster(TransformRequest::new(
 ///     input,
-///     TransformOptions {
-///         format: Some(MediaType::Avif),
-///         quality: Some(70),
-///         ..TransformOptions::default()
-///     },
+///     options,
 /// ))
 /// .unwrap();
 /// let sniffed = sniff_artifact(RawArtifact::new(output.artifact.bytes.clone(), None)).unwrap();
@@ -126,14 +124,13 @@ use yuvutils_rs::{YuvGrayImage, YuvPlanarImage, YuvRange, YuvStandardMatrix};
 ///     .unwrap();
 ///
 /// let input = sniff_artifact(RawArtifact::new(bytes, Some(MediaType::Jpeg))).unwrap();
+/// let mut options = TransformOptions::default();
+/// options.format = Some(MediaType::Jpeg);
+/// options.strip_metadata = false;
+/// options.preserve_exif = true;
 /// let output = transform_raster(TransformRequest::new(
 ///     input,
-///     TransformOptions {
-///         format: Some(MediaType::Jpeg),
-///         strip_metadata: false,
-///         preserve_exif: true,
-///         ..TransformOptions::default()
-///     },
+///     options,
 /// ))
 /// .unwrap();
 ///
@@ -161,13 +158,12 @@ use yuvutils_rs::{YuvGrayImage, YuvPlanarImage, YuvRange, YuvStandardMatrix};
 ///     .unwrap();
 ///
 /// let input = sniff_artifact(RawArtifact::new(bytes, Some(MediaType::Jpeg))).unwrap();
+/// let mut options = TransformOptions::default();
+/// options.format = Some(MediaType::Jpeg);
+/// options.strip_metadata = false;
 /// let output = transform_raster(TransformRequest::new(
 ///     input,
-///     TransformOptions {
-///         format: Some(MediaType::Jpeg),
-///         strip_metadata: false,
-///         ..TransformOptions::default()
-///     },
+///     options,
 /// ))
 /// .unwrap();
 ///

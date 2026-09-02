@@ -105,6 +105,7 @@ impl fmt::Display for Dimensions {
 /// assert!(unknown.declared_media_type.is_none());
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RawArtifact {
     /// The raw input bytes.
     pub bytes: Vec<u8>,
@@ -139,6 +140,7 @@ impl RawArtifact {
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[must_use]
+#[non_exhaustive]
 pub struct Artifact {
     /// The artifact bytes.
     pub bytes: Vec<u8>,
@@ -166,11 +168,11 @@ impl Artifact {
 /// ```
 /// use truss::{ArtifactMetadata, Dimensions};
 ///
-/// let meta = ArtifactMetadata {
-///     width: Some(1920),
-///     height: Some(1080),
-///     ..ArtifactMetadata::default()
-/// };
+/// // The struct is `#[non_exhaustive]`, so start from `default()` and assign; a field
+/// // truss adds later is then a minor change rather than a breaking one.
+/// let mut meta = ArtifactMetadata::default();
+/// meta.width = Some(1920);
+/// meta.height = Some(1080);
 /// assert_eq!(meta.dimensions(), Some(Dimensions::new(1920, 1080)));
 /// assert_eq!(meta.frame_count, 1);
 ///
@@ -178,17 +180,17 @@ impl Artifact {
 /// assert_eq!(meta.oriented_dimensions(), Some(Dimensions::new(1920, 1080)));
 ///
 /// // Orientation 6 is a quarter turn, so a transform swaps the axes.
-/// let rotated = ArtifactMetadata {
-///     orientation: Some(6),
-///     ..meta.clone()
-/// };
+/// let mut rotated = meta.clone();
+/// rotated.orientation = Some(6);
 /// assert_eq!(rotated.oriented_dimensions(), Some(Dimensions::new(1080, 1920)));
 ///
 /// // When either dimension is unknown, dimensions() returns None
-/// let partial = ArtifactMetadata { width: Some(100), ..ArtifactMetadata::default() };
+/// let mut partial = ArtifactMetadata::default();
+/// partial.width = Some(100);
 /// assert!(partial.dimensions().is_none());
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ArtifactMetadata {
     /// The rendered width in pixels, when known.
     pub width: Option<u32>,
@@ -438,6 +440,13 @@ impl FromStr for MediaType {
     }
 }
 
+/// Where a watermark sits when the caller does not say.
+pub(crate) const WATERMARK_DEFAULT_POSITION: Position = Position::BottomRight;
+/// How opaque a watermark is when the caller does not say.
+pub(crate) const WATERMARK_DEFAULT_OPACITY: u8 = 50;
+/// How far a watermark sits from its edge when the caller does not say.
+pub(crate) const WATERMARK_DEFAULT_MARGIN: u32 = 10;
+
 /// A watermark image to composite onto the output.
 ///
 /// The watermark is alpha-composited onto the main image after all other
@@ -446,15 +455,17 @@ impl FromStr for MediaType {
 /// ```
 /// use truss::{Artifact, ArtifactMetadata, MediaType, Position, WatermarkInput};
 ///
-/// let wm = WatermarkInput {
-///     image: Artifact::new(vec![0], MediaType::Png, ArtifactMetadata::default()),
-///     position: Position::BottomRight,
-///     opacity: 50,
-///     margin: 10,
-/// };
+/// let image = Artifact::new(vec![0], MediaType::Png, ArtifactMetadata::default());
+/// let mut wm = WatermarkInput::new(image);
+/// assert_eq!(wm.position, Position::BottomRight);
 /// assert_eq!(wm.opacity, 50);
+/// assert_eq!(wm.margin, 10);
+///
+/// wm.opacity = 80;
+/// assert_eq!(wm.opacity, 80);
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct WatermarkInput {
     /// The watermark image (already classified via [`sniff_artifact`]).
     pub image: Artifact,
@@ -464,6 +475,26 @@ pub struct WatermarkInput {
     pub opacity: u8,
     /// Margin in pixels from the nearest edge. Default: 10.
     pub margin: u32,
+}
+
+impl WatermarkInput {
+    /// Builds a watermark placed the way the vocabulary says it is placed when nothing else
+    /// is asked for.
+    ///
+    /// The three defaults are the ones the CLI, the HTTP server, and the Wasm package all
+    /// publish, and this is where they are written; each adapter used to spell them again at
+    /// its own call site. A caller who wants something else assigns the field afterwards,
+    /// which is also how a caller reaches the ones this constructor does not take: the
+    /// struct is `#[non_exhaustive]`, so a field truss adds later is a minor change.
+    #[must_use]
+    pub fn new(image: Artifact) -> Self {
+        Self {
+            image,
+            position: WATERMARK_DEFAULT_POSITION,
+            opacity: WATERMARK_DEFAULT_OPACITY,
+            margin: WATERMARK_DEFAULT_MARGIN,
+        }
+    }
 }
 
 /// A complete transform request for the Core layer.
@@ -478,6 +509,7 @@ pub struct WatermarkInput {
 /// assert!(request.watermark.is_none());
 /// ```
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct TransformRequest {
     /// The already-resolved input artifact.
     pub input: Artifact,
@@ -528,6 +560,7 @@ impl TransformRequest {
 
 /// A fully normalized transform request.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct NormalizedTransformRequest {
     /// The normalized input artifact.
     pub input: Artifact,
@@ -619,6 +652,7 @@ impl fmt::Display for CropRegion {
 
 /// Optimization policy applied near the final encoding stage.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum OptimizeMode {
     /// Keep the current encoding behavior with no extra optimization work.
     #[default]
@@ -666,6 +700,7 @@ impl FromStr for OptimizeMode {
 
 /// Perceptual metric used for lossy optimization quality targeting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum QualityMetric {
     /// Structural similarity index.
     Ssim,
@@ -761,22 +796,22 @@ pub(crate) fn default_lossy_target_quality(media_type: MediaType) -> Option<Targ
 
 /// Raw transform options before defaulting and validation has completed.
 ///
-/// Use `TransformOptions::default()` as a starting point and override the fields
-/// you need. Call [`TransformOptions::normalize`] to validate and resolve defaults.
+/// Start from `TransformOptions::default()` and assign the fields you need, then call
+/// [`TransformOptions::normalize`] to validate and resolve the rest. The struct is
+/// `#[non_exhaustive]`, so a field a later version of truss adds is a minor change rather
+/// than a breaking one, and a struct literal is not available from outside the crate.
 ///
 /// # Examples
 ///
 /// ```
 /// use truss::{TransformOptions, MediaType, Rotation};
 ///
-/// let opts = TransformOptions {
-///     width: Some(800),
-///     height: Some(600),
-///     format: Some(MediaType::Webp),
-///     quality: Some(80),
-///     rotate: Rotation::DEG_90,
-///     ..TransformOptions::default()
-/// };
+/// let mut opts = TransformOptions::default();
+/// opts.width = Some(800);
+/// opts.height = Some(600);
+/// opts.format = Some(MediaType::Webp);
+/// opts.quality = Some(80);
+/// opts.rotate = Rotation::DEG_90;
 /// assert_eq!(opts.width, Some(800));
 /// assert_eq!(opts.quality, Some(80));
 /// assert_eq!(opts.rotate, Rotation::DEG_90);
@@ -784,6 +819,7 @@ pub(crate) fn default_lossy_target_quality(media_type: MediaType) -> Option<Targ
 /// assert!(opts.strip_metadata);
 /// ```
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct TransformOptions {
     /// The desired output width in pixels.
     pub width: Option<u32>,
@@ -1081,6 +1117,7 @@ impl TransformOptions {
 
 /// Fully normalized transform options ready for a backend pipeline.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct NormalizedTransformOptions {
     /// The desired output width in pixels.
     pub width: Option<u32>,
@@ -1135,6 +1172,7 @@ pub struct NormalizedTransformOptions {
 /// assert!(Fit::from_str("unknown").is_err());
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Fit {
     /// Scale to fit inside the box, preserving aspect ratio, then pad to the exact box.
     ///
@@ -1198,6 +1236,7 @@ impl FromStr for Fit {
 /// assert!(Position::from_str("middle").is_err());
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Position {
     /// Center alignment.
     Center,
@@ -1439,11 +1478,13 @@ impl Rgba8 {
 /// assert_eq!(normalized.metadata_policy, truss::MetadataPolicy::StripAll);
 ///
 /// // Disabling strip_metadata normalizes to KeepAll
-/// let opts = TransformOptions { strip_metadata: false, ..TransformOptions::default() };
+/// let mut opts = TransformOptions::default();
+/// opts.strip_metadata = false;
 /// let normalized = opts.normalize(MediaType::Png).unwrap();
 /// assert_eq!(normalized.metadata_policy, truss::MetadataPolicy::KeepAll);
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum MetadataPolicy {
     /// Drop metadata from the output.
     StripAll,
@@ -1742,6 +1783,7 @@ impl fmt::Display for TransformWarning {
 /// metadata types that were silently dropped because the output encoder does not support them.
 #[derive(Debug)]
 #[must_use]
+#[non_exhaustive]
 pub struct TransformResult {
     /// The transformed output artifact.
     pub artifact: Artifact,

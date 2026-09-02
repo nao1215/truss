@@ -124,15 +124,11 @@ use std::io::Cursor;
 ///
 /// let svg_bytes = b"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"10\" height=\"10\"><rect width=\"10\" height=\"10\" fill=\"red\"/></svg>";
 /// let input = sniff_artifact(RawArtifact::new(svg_bytes.to_vec(), None)).unwrap();
-/// let result = transform_svg(TransformRequest::new(
-///     input,
-///     TransformOptions {
-///         format: Some(MediaType::Png),
-///         width: Some(10),
-///         height: Some(10),
-///         ..TransformOptions::default()
-///     },
-/// )).unwrap();
+/// let mut options = TransformOptions::default();
+/// options.format = Some(MediaType::Png);
+/// options.width = Some(10);
+/// options.height = Some(10);
+/// let result = transform_svg(TransformRequest::new(input, options)).unwrap();
 /// assert_eq!(result.artifact.media_type, MediaType::Png);
 /// ```
 #[must_use = "this function returns the transform result without side effects"]

@@ -13,6 +13,7 @@ pub(super) type HmacSha256 = Hmac<Sha256>;
 
 /// Source selector used when generating a signed public transform URL.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum SignedUrlSource {
     /// Generates a signed `GET /images/by-path` URL.
     Path {
@@ -48,8 +49,11 @@ pub enum SignedUrlSource {
 /// # Examples
 ///
 /// ```
-/// use truss::adapters::server::{sign_public_url, SignedUrlSource};
+/// use truss::{sign_public_url, SignedUrlSource};
 /// use truss::{MediaType, TransformOptions};
+///
+/// let mut options = TransformOptions::default();
+/// options.format = Some(MediaType::Jpeg);
 ///
 /// let url = sign_public_url(
 ///     "https://cdn.example.com",
@@ -57,10 +61,7 @@ pub enum SignedUrlSource {
 ///         path: "/image.png".to_string(),
 ///         version: None,
 ///     },
-///     &TransformOptions {
-///         format: Some(MediaType::Jpeg),
-///         ..TransformOptions::default()
-///     },
+///     &options,
 ///     "public-dev",
 ///     "secret-value",
 ///     4_102_444_800,
@@ -74,12 +75,35 @@ pub enum SignedUrlSource {
 /// assert!(url.contains("signature="));
 /// ```
 /// Optional watermark parameters for signed URL generation.
+///
+/// Each field other than the URL is `None` when the caller does not name it, and the server
+/// then applies the same default it applies to a watermark from any other adapter.
 #[derive(Debug, Default)]
+#[non_exhaustive]
 pub struct SignedWatermarkParams {
+    /// The URL the watermark image is fetched from.
     pub url: String,
+    /// Where to place the watermark, as the name the vocabulary uses.
     pub position: Option<String>,
+    /// Opacity of the watermark, 1 to 100.
     pub opacity: Option<u8>,
+    /// Margin in pixels from the nearest edge.
     pub margin: Option<u32>,
+}
+
+impl SignedWatermarkParams {
+    /// Names the watermark image and leaves every other parameter to the server's default.
+    ///
+    /// A caller assigns the rest afterwards. The struct is `#[non_exhaustive]`, so a
+    /// parameter the watermark vocabulary gains later is a minor change rather than a
+    /// breaking one.
+    #[must_use]
+    pub fn new(url: impl Into<String>) -> Self {
+        Self {
+            url: url.into(),
+            ..Self::default()
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
