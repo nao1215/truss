@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # generate-fixtures.sh — Create integration test fixture images.
 #
-# Requires: ImageMagick 7 (magick), Python 3 with Pillow (for the ICC fixture)
+# Requires: ImageMagick 7 (magick), Python 3 with Pillow (for the ICC fixture),
+#           ffmpeg with libaom-av1 (for the AVIF matrix fixtures)
 # Output:   integration/fixtures/
 #
 # These fixtures exercise edge cases that real-world image processing
@@ -185,6 +186,36 @@ magick -size 40x20 xc:red -fill blue -draw 'rectangle 0,0 9,19' \
 python3 "$(dirname "$0")/avif-add-clap.py" "$DIR/clap-base.avif" "$DIR/clap-cropped.avif" 30 20
 python3 "$(dirname "$0")/avif-add-clap.py" "$DIR/irot-rotated.avif" "$DIR/clap-rotated.avif" 30 20
 rm -f "$DIR/clap-base.avif"
+
+echo "[8c**/14] matrix-unspecified.avif / matrix-smpte240.avif — AVIF declaring a matrix libheif is not the only reader of"
+# The matrix coefficients decide how the three planes become RGB, and libheif and ImageMagick
+# cannot be told which to write: they always write BT.601. ffmpeg can, so these two carry the
+# two values truss read as BT.709 and every other decoder does not, `unspecified` and
+# `smpte240m`. Four flat 8x8 quadrants, red, green, blue and mid grey, so a wrong matrix moves
+# a channel a colour does not contribute to and the assertion needs no tolerance for content.
+python3 -c "
+from PIL import Image
+image = Image.new('RGB', (16, 16))
+for y in range(16):
+    for x in range(16):
+        if y < 8 and x < 8:
+            colour = (255, 0, 0)
+        elif y < 8:
+            colour = (0, 255, 0)
+        elif x < 8:
+            colour = (0, 0, 255)
+        else:
+            colour = (128, 128, 128)
+        image.putpixel((x, y), colour)
+image.save('$DIR/matrix-quadrants.png')
+"
+for matrix in unspecified smpte240m; do
+  name="matrix-${matrix%m}"
+  ffmpeg -y -loglevel error -i "$DIR/matrix-quadrants.png" -c:v libaom-av1 -still-picture 1 \
+    -crf 8 -cpu-used 4 -pix_fmt yuv444p -colorspace "$matrix" -color_primaries bt709 \
+    -color_trc iec61966-2-1 -color_range pc -frames:v 1 -f avif "$DIR/$name.avif"
+done
+rm -f "$DIR/matrix-quadrants.png"
 
 echo "[8d/14] deep-10bit.avif / deep-12bit.avif — high bit depth AVIF with saturated samples"
 # The image crate writes 8-bit AVIF only, so nothing in the test suite reached the 10/12-bit

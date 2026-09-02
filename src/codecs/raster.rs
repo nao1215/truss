@@ -322,7 +322,7 @@ fn decode_avif(bytes: &[u8]) -> Result<DynamicImage, TransformError> {
     let height = frame.height();
 
     let color = frame.color_info();
-    let matrix = map_yuv_matrix(color.matrix_coefficients);
+    let matrix = map_yuv_matrix(color.matrix_coefficients)?;
     let range = map_yuv_range(color.color_range);
 
     let mut rgba = yuv_frame_to_rgba(&frame, width, height, range, matrix)?;
@@ -378,17 +378,72 @@ fn decode_av1_frame(obu_data: &[u8]) -> Result<rav1d_safe::Frame, TransformError
         .ok_or_else(|| TransformError::DecodeFailed("AV1 decoder produced no frames".into()))
 }
 
-/// Maps rav1d `MatrixCoefficients` to the corresponding `yuvutils_rs` standard matrix.
+/// How an AVIF's declared matrix coefficients are turned back into RGB.
+///
+/// Almost every value is a pair of luma coefficients and a matrix multiply, which is what
+/// [`YuvStandardMatrix`] describes. `matrix_coefficients = 0` is not: it says the encoder did
+/// not convert to a luma and two chroma differences at all, so the three planes are already
+/// green, blue and red, and reading them through any matrix produces a different picture.
 #[cfg(feature = "avif")]
-fn map_yuv_matrix(mc: rav1d_safe::MatrixCoefficients) -> YuvStandardMatrix {
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum AvifMatrix {
+    /// The planes are G, B and R at full resolution. Nothing is converted; they are copied.
+    Identity,
+    /// A luma and chroma matrix, applied by `yuvutils_rs`.
+    Standard(YuvStandardMatrix),
+}
+
+/// Maps rav1d `MatrixCoefficients` to how truss converts the planes back to RGB.
+///
+/// Every variant is named. The catch-all this replaced answered BT.709 for seven values it
+/// does not describe, including the identity matrix, which is what `avifenc --lossless` and
+/// `cavif --color rgb` write: those files decoded with the red and green planes swapped
+/// through a matrix, off by half the range, and nothing said so. A value truss cannot convert
+/// is refused here rather than approximated, since a decode error is something a caller can
+/// act on and a wrong picture is not.
+///
+/// # Errors
+///
+/// Returns [`TransformError::DecodeFailed`] naming the coefficients truss cannot apply.
+#[cfg(feature = "avif")]
+fn map_yuv_matrix(mc: rav1d_safe::MatrixCoefficients) -> Result<AvifMatrix, TransformError> {
+    use rav1d_safe::MatrixCoefficients as Mc;
+
+    let unsupported = |name: &str| {
+        Err(TransformError::DecodeFailed(format!(
+            "AVIF declares {name} matrix coefficients, which truss cannot convert"
+        )))
+    };
+
     match mc {
-        rav1d_safe::MatrixCoefficients::BT601 => YuvStandardMatrix::Bt601,
-        rav1d_safe::MatrixCoefficients::BT470BG => YuvStandardMatrix::Bt601,
-        rav1d_safe::MatrixCoefficients::BT2020NCL => YuvStandardMatrix::Bt2020,
-        rav1d_safe::MatrixCoefficients::BT2020CL => YuvStandardMatrix::Bt2020,
-        rav1d_safe::MatrixCoefficients::SMPTE240 => YuvStandardMatrix::Smpte240,
-        // BT.709 is the most common for AVIF and a safe default for unspecified.
-        _ => YuvStandardMatrix::Bt709,
+        Mc::Identity => Ok(AvifMatrix::Identity),
+        Mc::BT709 => Ok(AvifMatrix::Standard(YuvStandardMatrix::Bt709)),
+        // "Unspecified" asks the reader to choose, and the readers have chosen: libavif
+        // substitutes BT.601 when it prepares its reformat state, which is what libheif and
+        // therefore ImageMagick answer, and FFmpeg's swscale defaults to the same. Reading
+        // it as BT.709 put truss 33 of 255 away from every other decoder of the same file.
+        Mc::Unspecified => Ok(AvifMatrix::Standard(YuvStandardMatrix::Bt601)),
+        // FCC is 0.30 red and 0.11 blue, which is neither BT.601 nor the `Bt470_6` member,
+        // whose coefficients are the ones BT.470 System M primaries derive.
+        Mc::FCC => Ok(AvifMatrix::Standard(YuvStandardMatrix::Custom(0.30, 0.11))),
+        Mc::BT470BG | Mc::BT601 => Ok(AvifMatrix::Standard(YuvStandardMatrix::Bt601)),
+        // SMPTE 240M is 0.212 red and 0.087 blue. `yuvutils_rs` 0.8.3 defines its own
+        // `Smpte240` member with the two exchanged, so the member that names the matrix
+        // applies a different one; the coefficients are given here instead. This arm goes
+        // back to `YuvStandardMatrix::Smpte240` when a release reports `kr` as 0.212.
+        Mc::SMPTE240 => Ok(AvifMatrix::Standard(YuvStandardMatrix::Custom(
+            0.212, 0.087,
+        ))),
+        Mc::BT2020NCL => Ok(AvifMatrix::Standard(YuvStandardMatrix::Bt2020)),
+        // Constant luminance is not the same transform as the non-constant one that shares
+        // its coefficients, and the rest are not luma and chroma at all.
+        Mc::BT2020CL => unsupported("BT.2020 constant luminance"),
+        Mc::YCgCo => unsupported("YCgCo"),
+        Mc::SMPTE2085 => unsupported("SMPTE 2085"),
+        Mc::ChromaDerivedNCL => unsupported("chromaticity-derived non-constant luminance"),
+        Mc::ChromaDerivedCL => unsupported("chromaticity-derived constant luminance"),
+        Mc::ICtCp => unsupported("ICtCp"),
+        Mc::Reserved => unsupported("reserved"),
     }
 }
 
@@ -411,7 +466,7 @@ fn yuv_frame_to_rgba(
     width: u32,
     height: u32,
     range: YuvRange,
-    matrix: YuvStandardMatrix,
+    matrix: AvifMatrix,
 ) -> Result<Vec<u8>, TransformError> {
     let rgba_stride = width.checked_mul(4).ok_or_else(|| {
         TransformError::DecodeFailed("AVIF frame dimensions overflow address space".into())
@@ -513,8 +568,27 @@ fn convert_8bit_yuv_to_rgba(
     rgba: &mut [u8],
     rgba_stride: u32,
     range: YuvRange,
-    matrix: YuvStandardMatrix,
+    matrix: AvifMatrix,
 ) -> Result<(), TransformError> {
+    if matrix == AvifMatrix::Identity {
+        return copy_identity_planes_to_rgba(
+            layout,
+            y_data,
+            y_stride,
+            u_data,
+            v_data,
+            width,
+            height,
+            rgba,
+            rgba_stride,
+            range,
+        );
+    }
+    let matrix = match matrix {
+        AvifMatrix::Standard(matrix) => matrix,
+        AvifMatrix::Identity => unreachable!("handled above"),
+    };
+
     match layout {
         rav1d_safe::PixelLayout::I400 => {
             let gray = YuvGrayImage {
@@ -554,6 +628,81 @@ fn convert_8bit_yuv_to_rgba(
         }
     }
     Ok(())
+}
+
+/// Copies the three planes of an identity-matrix AVIF straight into the RGBA buffer.
+///
+/// With `matrix_coefficients = 0` the AV1 frame does not hold a luma and two chroma
+/// differences: it holds green in the Y plane, blue in U and red in V, at full resolution and
+/// over the full range. There is nothing to convert, so the planes are copied, and the two
+/// things the format requires alongside are checked rather than assumed. A file that claims
+/// the identity matrix with subsampled chroma or a limited range is contradicting itself, and
+/// guessing which half of the contradiction to believe would put the wrong picture out under
+/// a successful decode, which is the failure this whole path exists to stop.
+#[cfg(feature = "avif")]
+#[allow(clippy::too_many_arguments)]
+fn copy_identity_planes_to_rgba(
+    layout: rav1d_safe::PixelLayout,
+    y_data: &[u8],
+    y_stride: usize,
+    u_data: Option<(&[u8], usize)>,
+    v_data: Option<(&[u8], usize)>,
+    width: u32,
+    height: u32,
+    rgba: &mut [u8],
+    rgba_stride: u32,
+    range: YuvRange,
+) -> Result<(), TransformError> {
+    if layout != rav1d_safe::PixelLayout::I444 {
+        return Err(TransformError::DecodeFailed(
+            "AVIF declares identity matrix coefficients, which require 4:4:4 chroma".into(),
+        ));
+    }
+    if range != YuvRange::Full {
+        return Err(TransformError::DecodeFailed(
+            "AVIF declares identity matrix coefficients, which require full range".into(),
+        ));
+    }
+
+    let (u_data, u_stride) = u_data.ok_or_else(|| {
+        TransformError::DecodeFailed("missing G/B/R planes for an identity-matrix AVIF".into())
+    })?;
+    let (v_data, v_stride) = v_data.ok_or_else(|| {
+        TransformError::DecodeFailed("missing G/B/R planes for an identity-matrix AVIF".into())
+    })?;
+
+    let width = width as usize;
+    let rgba_stride = rgba_stride as usize;
+    for row in 0..height as usize {
+        let green = plane_row(y_data, y_stride, row, width)?;
+        let blue = plane_row(u_data, u_stride, row, width)?;
+        let red = plane_row(v_data, v_stride, row, width)?;
+        let out = rgba
+            .get_mut(row * rgba_stride..row * rgba_stride + width * 4)
+            .ok_or_else(|| {
+                TransformError::DecodeFailed("AVIF decoded buffer size mismatch".into())
+            })?;
+        for column in 0..width {
+            out[column * 4] = red[column];
+            out[column * 4 + 1] = green[column];
+            out[column * 4 + 2] = blue[column];
+        }
+    }
+
+    Ok(())
+}
+
+/// One row of a plane, of exactly `width` samples.
+#[cfg(feature = "avif")]
+fn plane_row(
+    plane: &[u8],
+    stride: usize,
+    row: usize,
+    width: usize,
+) -> Result<&[u8], TransformError> {
+    plane
+        .get(row * stride..row * stride + width)
+        .ok_or_else(|| TransformError::DecodeFailed("AVIF plane is shorter than its size".into()))
 }
 
 /// Merges a separately decoded alpha plane into an existing RGBA buffer.
@@ -4905,6 +5054,176 @@ mod tests {
             result.warnings.is_empty(),
             "nothing was dropped, got: {:?}",
             result.warnings
+        );
+    }
+
+    /// The colour of the four quadrants of the matrix fixtures, at the centre of each.
+    ///
+    /// The fixtures are flat 8x8 blocks, so a correct decode reproduces them to within the
+    /// rounding of one YUV round trip whatever the matrix says; a wrong matrix moves the
+    /// channels a colour does not contribute to, which is what these assert against.
+    #[cfg(feature = "avif")]
+    const QUADRANTS: [((u32, u32), [u8; 3]); 4] = [
+        ((4, 4), [255, 0, 0]),
+        ((12, 4), [0, 255, 0]),
+        ((4, 12), [0, 0, 255]),
+        ((12, 12), [128, 128, 128]),
+    ];
+
+    #[cfg(feature = "avif")]
+    fn assert_quadrants_decode(bytes: &[u8], tolerance: u8, name: &str) {
+        let artifact = sniff_artifact(RawArtifact::new(bytes.to_vec(), None)).expect("sniff avif");
+        let result = transform_raster(TransformRequest::new(
+            artifact,
+            TransformOptions {
+                format: Some(MediaType::Png),
+                ..TransformOptions::default()
+            },
+        ))
+        .expect("decode avif");
+        let decoded = image::load_from_memory(&result.artifact.bytes)
+            .expect("load decoded png")
+            .to_rgb8();
+
+        for ((x, y), expected) in QUADRANTS {
+            let actual = decoded.get_pixel(x, y).0;
+            for channel in 0..3 {
+                let delta = actual[channel].abs_diff(expected[channel]);
+                assert!(
+                    delta <= tolerance,
+                    "{name}: pixel ({x}, {y}) is {actual:?}, expected {expected:?} within {tolerance}"
+                );
+            }
+        }
+    }
+
+    /// Every matrix the AV1 sequence header can declare, and what truss does with it.
+    ///
+    /// The table is exhaustive on purpose: `MatrixCoefficients` is a plain enum, so a
+    /// variant added by a later `rav1d-safe` fails to compile in `map_yuv_matrix` rather
+    /// than silently joining a catch-all. The coefficients are asserted rather than the
+    /// member names, because #508 was a member whose name said one matrix and whose
+    /// contents were another.
+    #[cfg(feature = "avif")]
+    #[rstest]
+    #[case::identity(rav1d_safe::MatrixCoefficients::Identity, Some(None))]
+    #[case::bt709(rav1d_safe::MatrixCoefficients::BT709, Some(Some((0.2126, 0.0722))))]
+    #[case::unspecified(rav1d_safe::MatrixCoefficients::Unspecified, Some(Some((0.299, 0.114))))]
+    #[case::fcc(rav1d_safe::MatrixCoefficients::FCC, Some(Some((0.30, 0.11))))]
+    #[case::bt470bg(rav1d_safe::MatrixCoefficients::BT470BG, Some(Some((0.299, 0.114))))]
+    #[case::bt601(rav1d_safe::MatrixCoefficients::BT601, Some(Some((0.299, 0.114))))]
+    #[case::smpte240(rav1d_safe::MatrixCoefficients::SMPTE240, Some(Some((0.212, 0.087))))]
+    #[case::bt2020ncl(rav1d_safe::MatrixCoefficients::BT2020NCL, Some(Some((0.2627, 0.0593))))]
+    #[case::reserved(rav1d_safe::MatrixCoefficients::Reserved, None)]
+    #[case::ycgco(rav1d_safe::MatrixCoefficients::YCgCo, None)]
+    #[case::bt2020cl(rav1d_safe::MatrixCoefficients::BT2020CL, None)]
+    #[case::smpte2085(rav1d_safe::MatrixCoefficients::SMPTE2085, None)]
+    #[case::chroma_ncl(rav1d_safe::MatrixCoefficients::ChromaDerivedNCL, None)]
+    #[case::chroma_cl(rav1d_safe::MatrixCoefficients::ChromaDerivedCL, None)]
+    #[case::ictcp(rav1d_safe::MatrixCoefficients::ICtCp, None)]
+    fn every_avif_matrix_is_converted_or_refused(
+        #[case] coefficients: rav1d_safe::MatrixCoefficients,
+        #[case] expected: Option<Option<(f32, f32)>>,
+    ) {
+        match (super::map_yuv_matrix(coefficients), expected) {
+            (Ok(super::AvifMatrix::Identity), Some(None)) => {}
+            (Ok(super::AvifMatrix::Standard(matrix)), Some(Some((kr, kb)))) => {
+                let bias = matrix.get_kr_kb();
+                assert!(
+                    (bias.kr - kr).abs() < 1e-4 && (bias.kb - kb).abs() < 1e-4,
+                    "{coefficients:?} converts with kr {} kb {}, expected {kr} and {kb}",
+                    bias.kr,
+                    bias.kb
+                );
+            }
+            (Err(TransformError::DecodeFailed(message)), None) => {
+                assert!(
+                    message.contains("truss cannot convert"),
+                    "{coefficients:?} is refused with {message}"
+                );
+            }
+            (actual, expected) => {
+                panic!("{coefficients:?} resolved to {actual:?}, expected {expected:?}")
+            }
+        }
+    }
+
+    /// An AVIF that does not say which matrix it used is read as BT.601, which is what
+    /// libavif substitutes and therefore what libheif and FFmpeg answer for the same file.
+    #[cfg(feature = "avif")]
+    #[test]
+    fn transform_raster_decodes_an_unspecified_matrix_as_bt601() {
+        assert_quadrants_decode(
+            include_bytes!("../../integration/fixtures/matrix-unspecified.avif"),
+            4,
+            "unspecified",
+        );
+    }
+
+    /// SMPTE 240M names its own luma coefficients, and they are not BT.709's.
+    #[cfg(feature = "avif")]
+    #[test]
+    fn transform_raster_decodes_a_smpte240_matrix_with_its_own_coefficients() {
+        assert_quadrants_decode(
+            include_bytes!("../../integration/fixtures/matrix-smpte240.avif"),
+            4,
+            "smpte240",
+        );
+    }
+
+    /// The identity matrix is not a matrix: the three planes are already G, B and R, which
+    /// is what an encoder writes when it is told not to convert to YCbCr, and what
+    /// `avifenc --lossless` has to write because a YCbCr round trip is not reversible.
+    #[cfg(feature = "avif")]
+    #[test]
+    fn transform_raster_decodes_an_identity_matrix_avif_as_the_planes_it_holds() {
+        use super::{AvifEncoder, EncodeSamples};
+        use image::ImageEncoder;
+        use image::codecs::avif::ColorSpace;
+
+        let mut source = image::RgbaImage::new(32, 32);
+        for (x, y, pixel) in source.enumerate_pixels_mut() {
+            *pixel = Rgba([(x * 8) as u8, (y * 8) as u8, ((x * y) % 256) as u8, 255]);
+        }
+        let source = DynamicImage::ImageRgba8(source);
+
+        let mut bytes = Vec::new();
+        let samples = EncodeSamples::from_image(&source);
+        let (width, height) = samples.dimensions();
+        AvifEncoder::new_with_speed_quality(&mut bytes, 1, 100)
+            .with_colorspace(ColorSpace::Srgb)
+            .write_image(
+                samples.as_bytes(),
+                width,
+                height,
+                samples.color_type().into(),
+            )
+            .expect("encode an identity-matrix avif");
+
+        let artifact = sniff_artifact(RawArtifact::new(bytes, None)).expect("sniff avif");
+        let result = transform_raster(TransformRequest::new(
+            artifact,
+            TransformOptions {
+                format: Some(MediaType::Png),
+                ..TransformOptions::default()
+            },
+        ))
+        .expect("decode an identity-matrix avif");
+        let decoded = image::load_from_memory(&result.artifact.bytes)
+            .expect("load decoded png")
+            .to_rgba8();
+        let expected = source.to_rgba8();
+
+        let worst = decoded
+            .as_raw()
+            .iter()
+            .zip(expected.as_raw())
+            .map(|(actual, expected)| actual.abs_diff(*expected))
+            .max()
+            .expect("a non-empty image");
+        assert!(
+            worst <= 4,
+            "identity matrix decode is off by {worst}, which is a colour conversion rather than a plane copy"
         );
     }
 
