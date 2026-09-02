@@ -197,6 +197,7 @@ pub(crate) fn apply_pixel_stages(
         options.height,
         options.fit,
         options.without_enlargement,
+        options.format,
     )?;
     image = apply_resize(
         image,
@@ -359,55 +360,80 @@ fn decode_avif(bytes: &[u8]) -> Result<DynamicImage, TransformError> {
 /// Feeds AV1 OBU data to a `rav1d` decoder and returns the first decoded frame.
 #[cfg(feature = "avif")]
 fn decode_av1_frame(obu_data: &[u8]) -> Result<rav1d_safe::Frame, TransformError> {
-    contain_decoder_panic("AV1", || {
-        let mut decoder = Decoder::new()
-            .map_err(|e| TransformError::DecodeFailed(format!("AV1 decoder init failed: {e}")))?;
+    contain_codec_panic(
+        || TransformError::DecodeFailed("AV1 decoder failed while decoding this image".into()),
+        || {
+            let mut decoder = Decoder::with_settings(avif_decoder_settings()).map_err(|e| {
+                TransformError::DecodeFailed(format!("AV1 decoder init failed: {e}"))
+            })?;
 
-        if let Some(frame) = decoder
-            .decode(obu_data)
-            .map_err(|e| TransformError::DecodeFailed(format!("AV1 decode failed: {e}")))?
-        {
-            return Ok(frame);
-        }
+            if let Some(frame) = decoder
+                .decode(obu_data)
+                .map_err(|e| TransformError::DecodeFailed(format!("AV1 decode failed: {e}")))?
+            {
+                return Ok(frame);
+            }
 
-        // Flush any buffered frames.
-        let frames = decoder
-            .flush()
-            .map_err(|e| TransformError::DecodeFailed(format!("AV1 flush failed: {e}")))?;
+            // Flush any buffered frames.
+            let frames = decoder
+                .flush()
+                .map_err(|e| TransformError::DecodeFailed(format!("AV1 flush failed: {e}")))?;
 
-        frames
-            .into_iter()
-            .next()
-            .ok_or_else(|| TransformError::DecodeFailed("AV1 decoder produced no frames".into()))
-    })
+            frames.into_iter().next().ok_or_else(|| {
+                TransformError::DecodeFailed("AV1 decoder produced no frames".into())
+            })
+        },
+    )
 }
 
-/// Runs a decoder and reports a panic inside it as a decode failure.
+/// The settings truss decodes AV1 with.
 ///
-/// truss decodes bytes it did not produce, on a server, from a caller it does not know. A
-/// decoder that panics is therefore not a bug report but a way to take a connection worker
-/// down, and on a build with `panic = "abort"` it would be a way to take the process down. The
-/// panic is contained here, at the one call that leaves truss's own code, and becomes the
-/// error the format's other failures already produce.
+/// `rav1d-safe`'s default `frame_size_limit` is 8192x4320, an 8K video frame, which is the
+/// right default for a video decoder and below what a still-image pipeline writes: truss's own
+/// output ceiling is [`MAX_OUTPUT_PIXELS`], nearly twice that, so an AVIF truss encoded at the
+/// top of its own budget came back `ERANGE` from the decoder in the next line of the same
+/// program. The limit is truss's input budget instead, which is the number
+/// [`check_input_pixel_limit`] already refuses an oversized input by, from the dimensions the
+/// sniffer read and before any frame reaches the decoder.
 ///
-/// This is not a claim that the decode was correct. The known case is an arithmetic overflow
-/// in `rav1d`'s ARM loop restoration, which panics where overflow checks are on and wraps
-/// where they are off, and containing the panic makes the first behave like the second rather
-/// than making either right. The panic message the default hook printed on the way is the
-/// record that something in the decoder went wrong.
+/// `max_frame_delay` is 1 because this is a still image: `rav1d-safe` documents that value as
+/// tile parallelism without the frame threading a single picture has no use for.
+#[cfg(feature = "avif")]
+fn avif_decoder_settings() -> rav1d_safe::Settings {
+    #[allow(clippy::cast_possible_truncation)]
+    let frame_size_limit = MAX_DECODED_PIXELS as u32;
+    // `Settings` is `#[non_exhaustive]`, so the fields are set on the default rather than
+    // written as a struct expression with `..Default::default()`.
+    let mut settings = rav1d_safe::Settings::default();
+    settings.frame_size_limit = frame_size_limit;
+    settings.max_frame_delay = 1;
+    settings
+}
+
+/// Runs a codec and reports a panic inside it as the error that codec's failures produce.
+///
+/// truss handles bytes and sizes it did not choose, on a server, from a caller it does not
+/// know. A codec that panics is therefore not a bug report but a way to take a connection
+/// worker down, and on a build with `panic = "abort"` it would be a way to take the process
+/// down. The panic is contained at each call that leaves truss's own code, and becomes the
+/// error that call's other failures already produce, which is what `on_panic` supplies.
+///
+/// This is not a claim that the operation was correct. Two cases are known. `rav1d`'s ARM loop
+/// restoration overflows an arithmetic width, which panics where overflow checks are on and
+/// wraps where they are off, and containing it makes the first behave like the second rather
+/// than making either right. The `webp` crate's `encode` returns no `Result`, so it unwraps
+/// libwebp's status; the dimensions that reach it are checked before the pipeline runs, and
+/// this covers whatever else that call unwraps on. The panic message the default hook printed
+/// on the way is the record that something inside went wrong.
 ///
 /// The closure takes nothing by mutable reference and writes nothing outside itself, so there
 /// is no state a panic could leave half-written; that is what [`AssertUnwindSafe`] asserts.
-#[cfg(feature = "avif")]
-fn contain_decoder_panic<T>(
-    format: &str,
-    decode: impl FnOnce() -> Result<T, TransformError>,
+#[cfg(any(feature = "avif", feature = "webp-lossy"))]
+fn contain_codec_panic<T>(
+    on_panic: impl FnOnce() -> TransformError,
+    run: impl FnOnce() -> Result<T, TransformError>,
 ) -> Result<T, TransformError> {
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(decode)).unwrap_or_else(|_| {
-        Err(TransformError::DecodeFailed(format!(
-            "{format} decoder failed while decoding this image"
-        )))
-    })
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(run)).unwrap_or_else(|_| Err(on_panic()))
 }
 
 /// How an AVIF's declared matrix coefficients are turned back into RGB.
@@ -959,18 +985,26 @@ pub(crate) fn resolved_output_dimensions(
     }
 }
 
-/// Checks the output dimensions against [`MAX_OUTPUT_PIXELS`] before resize allocation.
+/// Checks the output dimensions against [`MAX_OUTPUT_PIXELS`] and the output format's own
+/// ceiling, before resize allocation.
 ///
 /// Computes the effective output pixel count from the requested dimensions and the current
 /// image size, deriving the omitted axis from the aspect ratio the same way `apply_resize`
 /// does. The check runs before `apply_resize` so that oversized output buffers are never
 /// allocated.
+///
+/// The format's ceiling is checked here rather than at the encoder because the encoder is the
+/// last step: a size no encoder can write used to cost a full decode and resize before it was
+/// refused, and was then reported as an encoder failure, which is a 500 for a request the
+/// caller's own parameters made impossible. Both numbers come from the same dimensions, so
+/// asking about the second costs nothing beyond two comparisons.
 fn check_output_pixel_limit(
     image: &DynamicImage,
     width: Option<u32>,
     height: Option<u32>,
     fit: Option<Fit>,
     without_enlargement: bool,
+    format: MediaType,
 ) -> Result<(), TransformError> {
     let source = image.dimensions();
 
@@ -1005,7 +1039,29 @@ fn check_output_pixel_limit(
             "output image would have {pixels} pixels, limit is {MAX_OUTPUT_PIXELS}"
         )));
     }
-    Ok(())
+    check_output_format_dimensions(format, out_w, out_h)
+}
+
+/// Rejects an output the requested format cannot hold on one of its axes.
+///
+/// Split from the pixel check so the SVG codec can ask the same question about the canvas it
+/// resolves, before it rasterizes: both codecs reach [`apply_pixel_stages`] eventually, and a
+/// drawing that is refused there has already paid for the rendering.
+pub(crate) fn check_output_format_dimensions(
+    format: MediaType,
+    width: u32,
+    height: u32,
+) -> Result<(), TransformError> {
+    let Some(ceiling) = format.max_output_dimension() else {
+        return Ok(());
+    };
+    if width <= ceiling && height <= ceiling {
+        return Ok(());
+    }
+    Err(TransformError::LimitExceeded(format!(
+        "{} output cannot be {width}x{height}: the format holds at most {ceiling} pixels on an axis",
+        format.as_name()
+    )))
 }
 
 /// Applies the input's EXIF orientation, reading the tag the way `inspect` reports it.
@@ -2736,7 +2792,14 @@ fn encode_webp_lossy_bytes(image: &DynamicImage, quality: u8) -> Result<Vec<u8>,
                 webp::Encoder::from_rgba(buffer.as_raw(), width, height)
             }
         };
-        Ok(lossy_encoder.encode(f32::from(quality)).to_vec())
+        contain_codec_panic(
+            || {
+                TransformError::EncodeFailed(format!(
+                    "the WebP encoder refused a {width}x{height} image"
+                ))
+            },
+            || Ok(lossy_encoder.encode(f32::from(quality)).to_vec()),
+        )
     }
     #[cfg(not(feature = "webp-lossy"))]
     {
@@ -5741,9 +5804,10 @@ mod tests {
         // noise in the test output and nothing this asserts on.
         let previous = std::panic::take_hook();
         std::panic::set_hook(Box::new(|_| {}));
-        let contained = super::contain_decoder_panic::<()>("AV1", || {
-            panic!("attempt to multiply with overflow")
-        });
+        let contained = super::contain_codec_panic::<()>(
+            || TransformError::DecodeFailed("AV1 decoder failed while decoding this image".into()),
+            || panic!("attempt to multiply with overflow"),
+        );
         std::panic::set_hook(previous);
 
         assert_eq!(
@@ -5759,11 +5823,17 @@ mod tests {
     #[cfg(feature = "avif")]
     #[test]
     fn containment_passes_a_result_through_unchanged() {
-        assert_eq!(super::contain_decoder_panic("AV1", || Ok(7)), Ok(7));
         assert_eq!(
-            super::contain_decoder_panic::<u8>("AV1", || Err(TransformError::DecodeFailed(
-                "AV1 decode failed: truncated".to_string()
-            ))),
+            super::contain_codec_panic(|| TransformError::DecodeFailed("unused".into()), || Ok(7)),
+            Ok(7)
+        );
+        assert_eq!(
+            super::contain_codec_panic::<u8>(
+                || TransformError::DecodeFailed("unused".into()),
+                || Err(TransformError::DecodeFailed(
+                    "AV1 decode failed: truncated".to_string()
+                ))
+            ),
             Err(TransformError::DecodeFailed(
                 "AV1 decode failed: truncated".to_string()
             ))
@@ -6111,7 +6181,8 @@ mod tests {
             8192,
             Rgba([0, 0, 0, 255]),
         ));
-        check_output_pixel_limit(&image, Some(8192), Some(8192), None, false).unwrap();
+        check_output_pixel_limit(&image, Some(8192), Some(8192), None, false, MediaType::Png)
+            .unwrap();
     }
 
     #[test]
@@ -6121,8 +6192,152 @@ mod tests {
         let image =
             image::DynamicImage::ImageRgba8(RgbaImage::from_pixel(1, 1, Rgba([0, 0, 0, 255])));
         let err =
-            check_output_pixel_limit(&image, Some(8193), Some(8192), None, false).unwrap_err();
+            check_output_pixel_limit(&image, Some(8193), Some(8192), None, false, MediaType::Png)
+                .unwrap_err();
         assert!(matches!(err, TransformError::LimitExceeded(_)));
+    }
+
+    /// The output size a format cannot hold is refused from the dimensions, not by the encoder.
+    ///
+    /// JPEG and AVIF stop at 65535 on an axis and WebP at 16383, while `MAX_OUTPUT_PIXELS`
+    /// allows all three as long as the other axis is small enough, so the request is legal by
+    /// every limit truss states and impossible for the encoder that would run.
+    #[rstest]
+    #[case::jpeg_last_legal(MediaType::Jpeg, 65535, 1, true)]
+    #[case::jpeg_first_illegal(MediaType::Jpeg, 65536, 1, false)]
+    #[case::jpeg_first_illegal_on_height(MediaType::Jpeg, 1, 65536, false)]
+    #[case::webp_last_legal(MediaType::Webp, 16383, 1, true)]
+    #[case::webp_first_illegal(MediaType::Webp, 16384, 1, false)]
+    #[case::webp_first_illegal_on_height(MediaType::Webp, 1, 16384, false)]
+    #[case::avif_last_legal(MediaType::Avif, 65535, 1, true)]
+    #[case::avif_first_illegal(MediaType::Avif, 65536, 1, false)]
+    #[case::png_has_no_ceiling(MediaType::Png, 65536, 1, true)]
+    #[case::bmp_has_no_ceiling(MediaType::Bmp, 65536, 1, true)]
+    #[case::tiff_has_no_ceiling(MediaType::Tiff, 65536, 1, true)]
+    fn output_dimension_ceiling_refuses_what_the_format_cannot_hold(
+        #[case] format: MediaType,
+        #[case] width: u32,
+        #[case] height: u32,
+        #[case] accepted: bool,
+    ) {
+        use super::check_output_pixel_limit;
+        let image =
+            image::DynamicImage::ImageRgba8(RgbaImage::from_pixel(1, 1, Rgba([0, 0, 0, 255])));
+        let result = check_output_pixel_limit(
+            &image,
+            Some(width),
+            Some(height),
+            Some(Fit::Fill),
+            false,
+            format,
+        );
+
+        match (accepted, result) {
+            (true, Ok(())) => {}
+            (false, Err(TransformError::LimitExceeded(message))) => {
+                assert!(
+                    message.contains(format.as_name()),
+                    "the refusal should name the format: {message}"
+                );
+            }
+            (_, other) => panic!("unexpected result for {format:?} {width}x{height}: {other:?}"),
+        }
+    }
+
+    /// A WebP too wide for the lossy encoder is refused rather than unwinding through it.
+    ///
+    /// The `webp` crate's `encode` returns no `Result`, so it unwraps libwebp's
+    /// `VP8_ENC_ERROR_BAD_DIMENSION`. Reaching it needs the lossy path, which is what
+    /// `quality` selects.
+    #[test]
+    fn transform_refuses_a_lossy_webp_the_encoder_cannot_hold() {
+        let input = png_artifact(8, 8, Rgba([10, 20, 30, 255]));
+        let err = transform_raster(TransformRequest::new(
+            input,
+            TransformOptions {
+                width: Some(16384),
+                height: Some(1),
+                fit: Some(Fit::Fill),
+                format: Some(MediaType::Webp),
+                quality: Some(50),
+                ..TransformOptions::default()
+            },
+        ))
+        .expect_err("a webp wider than the format holds");
+
+        assert!(
+            matches!(err, TransformError::LimitExceeded(_)),
+            "expected LimitExceeded, got {err:?}"
+        );
+    }
+
+    /// The same size under every `optimize` mode, because the mode is what picks the encoder
+    /// and the two encoders disagree about 16384 by exactly one pixel.
+    #[rstest]
+    #[case::none(OptimizeMode::None)]
+    #[case::auto(OptimizeMode::Auto)]
+    #[case::lossy(OptimizeMode::Lossy)]
+    #[case::lossless(OptimizeMode::Lossless)]
+    fn a_webp_past_the_ceiling_is_refused_under_every_optimize_mode(
+        #[case] optimize: OptimizeMode,
+    ) {
+        let input = png_artifact(8, 8, Rgba([10, 20, 30, 255]));
+        let err = transform_raster(TransformRequest::new(
+            input,
+            TransformOptions {
+                width: Some(16384),
+                height: Some(1),
+                fit: Some(Fit::Fill),
+                format: Some(MediaType::Webp),
+                optimize,
+                ..TransformOptions::default()
+            },
+        ))
+        .expect_err("a webp wider than the format holds");
+
+        assert!(
+            matches!(err, TransformError::LimitExceeded(_)),
+            "expected LimitExceeded for {optimize:?}, got {err:?}"
+        );
+    }
+
+    /// A size the lossy encoder refuses is an error rather than a panic, even reached directly.
+    ///
+    /// The check above makes this unreachable through the pipeline. It stays because the
+    /// containment is what covers whatever else the crate unwraps on.
+    #[cfg(feature = "webp-lossy")]
+    #[test]
+    fn encode_webp_lossy_bytes_reports_an_oversized_image_rather_than_unwinding() {
+        let image = image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            16384,
+            1,
+            image::Rgb([1, 2, 3]),
+        ));
+        let err = super::encode_webp_lossy_bytes(&image, 50)
+            .expect_err("libwebp refuses an axis past 16383");
+
+        assert!(
+            matches!(err, TransformError::EncodeFailed(_)),
+            "expected EncodeFailed, got {err:?}"
+        );
+    }
+
+    /// The AVIF decoder accepts every frame truss will write.
+    ///
+    /// `rav1d-safe`'s default `frame_size_limit` is 8192x4320, an 8K video frame, which is
+    /// below `MAX_OUTPUT_PIXELS`: truss wrote AVIFs it then refused to read, with an ERANGE
+    /// that named the input.
+    #[cfg(feature = "avif")]
+    #[test]
+    fn the_avif_decoder_accepts_every_frame_truss_can_write() {
+        let limit = u64::from(super::avif_decoder_settings().frame_size_limit);
+
+        assert!(
+            limit >= crate::MAX_OUTPUT_PIXELS,
+            "the decoder stops at {limit} pixels, below the {} truss will encode",
+            crate::MAX_OUTPUT_PIXELS
+        );
+        assert_eq!(limit, crate::core::MAX_DECODED_PIXELS);
     }
 
     #[test]
@@ -6311,7 +6526,8 @@ mod tests {
         let image =
             image::DynamicImage::ImageRgba8(RgbaImage::from_pixel(16, 16, Rgba([0, 0, 0, 255])));
         // A square source scaled to width 10000 also becomes 10000 tall: 100 Mpx > 67_108_864.
-        let err = check_output_pixel_limit(&image, Some(10000), None, None, false).unwrap_err();
+        let err = check_output_pixel_limit(&image, Some(10000), None, None, false, MediaType::Png)
+            .unwrap_err();
         assert!(matches!(err, TransformError::LimitExceeded(_)));
         assert!(err.to_string().contains("100000000"));
     }
@@ -6322,7 +6538,8 @@ mod tests {
 
         let image =
             image::DynamicImage::ImageRgba8(RgbaImage::from_pixel(16, 16, Rgba([0, 0, 0, 255])));
-        let err = check_output_pixel_limit(&image, None, Some(10000), None, false).unwrap_err();
+        let err = check_output_pixel_limit(&image, None, Some(10000), None, false, MediaType::Png)
+            .unwrap_err();
         assert!(matches!(err, TransformError::LimitExceeded(_)));
         assert!(err.to_string().contains("100000000"));
     }
@@ -6334,7 +6551,7 @@ mod tests {
         // A 4:1 source scaled to width 8192 becomes 8192x2048 = 16_777_216 pixels.
         let image =
             image::DynamicImage::ImageRgba8(RgbaImage::from_pixel(16, 4, Rgba([0, 0, 0, 255])));
-        check_output_pixel_limit(&image, Some(8192), None, None, false).unwrap();
+        check_output_pixel_limit(&image, Some(8192), None, None, false, MediaType::Png).unwrap();
     }
 
     #[test]
@@ -8818,8 +9035,15 @@ mod tests {
     fn cover_rejects_an_oversized_intermediate_buffer() {
         let image = DynamicImage::ImageRgba8(RgbaImage::new(10000, 1));
 
-        let error = check_output_pixel_limit(&image, Some(3), Some(9999), Some(Fit::Cover), false)
-            .expect_err("cover into an opposite aspect ratio should exceed the limit");
+        let error = check_output_pixel_limit(
+            &image,
+            Some(3),
+            Some(9999),
+            Some(Fit::Cover),
+            false,
+            MediaType::Png,
+        )
+        .expect_err("cover into an opposite aspect ratio should exceed the limit");
 
         assert!(
             matches!(error, TransformError::LimitExceeded(ref message) if message.contains("fit=cover")),
@@ -8833,8 +9057,15 @@ mod tests {
         let image = DynamicImage::ImageRgba8(RgbaImage::new(10000, 1));
 
         for fit in [Fit::Contain, Fit::Inside, Fit::Fill] {
-            check_output_pixel_limit(&image, Some(3), Some(9999), Some(fit), false)
-                .unwrap_or_else(|error| panic!("{fit:?} should be within the limit: {error}"));
+            check_output_pixel_limit(
+                &image,
+                Some(3),
+                Some(9999),
+                Some(fit),
+                false,
+                MediaType::Png,
+            )
+            .unwrap_or_else(|error| panic!("{fit:?} should be within the limit: {error}"));
         }
     }
 
@@ -8844,9 +9075,15 @@ mod tests {
     fn cover_rejects_a_panorama_cropped_to_a_portrait_box() {
         let image = DynamicImage::ImageRgba8(RgbaImage::new(4000, 100));
 
-        let error =
-            check_output_pixel_limit(&image, Some(200), Some(2000), Some(Fit::Cover), false)
-                .expect_err("80000x2000 is over the output limit");
+        let error = check_output_pixel_limit(
+            &image,
+            Some(200),
+            Some(2000),
+            Some(Fit::Cover),
+            false,
+            MediaType::Png,
+        )
+        .expect_err("80000x2000 is over the output limit");
 
         assert!(
             matches!(error, TransformError::LimitExceeded(_)),
@@ -8859,8 +9096,15 @@ mod tests {
     fn cover_accepts_an_intermediate_buffer_within_the_limit() {
         let image = DynamicImage::ImageRgba8(RgbaImage::new(4000, 3000));
 
-        check_output_pixel_limit(&image, Some(200), Some(2000), Some(Fit::Cover), false)
-            .expect("2667x2000 is within the limit");
+        check_output_pixel_limit(
+            &image,
+            Some(200),
+            Some(2000),
+            Some(Fit::Cover),
+            false,
+            MediaType::Png,
+        )
+        .expect("2667x2000 is within the limit");
     }
 
     /// `withoutEnlargement` caps the scale at 1.0, so it cannot produce a large buffer.
@@ -8868,8 +9112,15 @@ mod tests {
     fn cover_without_enlargement_never_scales_past_the_source() {
         let image = DynamicImage::ImageRgba8(RgbaImage::new(10000, 1));
 
-        check_output_pixel_limit(&image, Some(3), Some(9999), Some(Fit::Cover), true)
-            .expect("the scale is clamped to 1.0, so the buffer stays at the source size");
+        check_output_pixel_limit(
+            &image,
+            Some(3),
+            Some(9999),
+            Some(Fit::Cover),
+            true,
+            MediaType::Png,
+        )
+        .expect("the scale is clamped to 1.0, so the buffer stays at the source size");
     }
 
     /// The whole pipeline reports the limit rather than aborting on the allocation.
