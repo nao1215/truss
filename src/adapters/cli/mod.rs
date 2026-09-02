@@ -18,14 +18,21 @@ mod inspect;
 mod serve;
 mod sign;
 
-const MAX_REMOTE_BYTES: u64 = 32 * 1024 * 1024;
+/// The size cap for a source fetched over HTTP.
+///
+/// The default of `TRUSS_MAX_SOURCE_BYTES`, so a URL the server will fetch is one this
+/// adapter can be pointed at. Trying a request locally before deploying it is what the
+/// command line is for, and a cap of its own turned a source the server serves into one it
+/// refuses to look at.
+const MAX_REMOTE_BYTES: u64 = crate::adapters::server::remote::MAX_SOURCE_BYTES;
 
 /// The size cap for a watermark fetched over HTTP.
 ///
 /// The server keeps this apart from the source limit and publishes it as
 /// `TRUSS_MAX_WATERMARK_BYTES`: an overlay has no business being the size of a source image,
 /// and a watermark the server would refuse is one there is no point in accepting here.
-pub(super) const MAX_REMOTE_WATERMARK_BYTES: u64 = 10 * 1024 * 1024;
+pub(super) const MAX_REMOTE_WATERMARK_BYTES: u64 =
+    crate::adapters::server::remote::MAX_WATERMARK_BYTES;
 
 // ---------------------------------------------------------------------------
 // Exit codes — kept in sync with help text
@@ -1649,7 +1656,7 @@ fn read_url_bytes(url: &str, max_bytes: u64) -> Result<Vec<u8>, CliError> {
             .call()
             .map_err(|error| fetch_failed(format!("failed to fetch {current}: {error}")))?;
         let status = hop.status().as_u16();
-        if matches!(status, 301 | 302 | 303 | 307 | 308) {
+        if crate::core::remote_policy::is_redirect_status(status) {
             let location = hop
                 .headers()
                 .get("Location")
@@ -1682,9 +1689,24 @@ fn read_url_bytes(url: &str, max_bytes: u64) -> Result<Vec<u8>, CliError> {
         )));
     };
 
-    if status >= 400 {
+    // Only a 2xx says the body that follows is the resource, which is the rule the HTTP
+    // server's own fetch applies. Reading an image out of anything else reports the origin
+    // declining as a problem with the caller's file, and reports it as a success whenever
+    // the body happens to sniff as an image.
+    if !crate::core::remote_policy::is_success_status(status) {
         return Err(fetch_failed(format!(
             "failed to fetch {current}: HTTP {status}"
+        )));
+    }
+
+    if let Some(encoding) = response
+        .headers()
+        .get("Content-Encoding")
+        .and_then(|value: &ureq::http::HeaderValue| value.to_str().ok())
+        .and_then(crate::core::remote_policy::unreadable_content_coding)
+    {
+        return Err(fetch_failed(format!(
+            "failed to fetch {current}: response uses unsupported content-encoding `{encoding}`"
         )));
     }
 
@@ -1842,14 +1864,16 @@ where
 mod tests {
     use super::serve::resolve_server_config;
     use super::{
-        Command, ConvertCommand, EXIT_INPUT, EXIT_TRANSFORM, EXIT_USAGE, HelpTopic, InputSource,
-        OutputTarget, ServeCommand, SignCommand, flush_stdout, parse_args, parse_optimize_mode,
-        parse_optimizing_mode, preprocess_args, run_with_io,
+        Command, ConvertCommand, EXIT_INPUT, EXIT_IO, EXIT_TRANSFORM, EXIT_USAGE, HelpTopic,
+        InputSource, MAX_REMOTE_BYTES, MAX_REMOTE_WATERMARK_BYTES, OutputTarget, ServeCommand,
+        SignCommand, flush_stdout, parse_args, parse_optimize_mode, parse_optimizing_mode,
+        preprocess_args, run_with_io,
     };
     use crate::{
         Fit, MediaType, OptimizeMode, RawArtifact, SignedUrlSource, TransformOptions,
         sniff_artifact,
     };
+    use rstest::rstest;
     use serial_test::serial;
     use std::env;
     use std::ffi::OsString;
@@ -1887,6 +1911,33 @@ mod tests {
             let _ = stream.read(&mut request);
             let header = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            stream.write_all(header.as_bytes()).expect("write headers");
+            stream.write_all(&body).expect("write body");
+            stream.flush().expect("flush response");
+        });
+
+        (url, handle)
+    }
+
+    /// Serves one response with a caller-chosen status line and an image body.
+    ///
+    /// The body is always an image so the status is the only thing that varies, which is
+    /// what makes the boundary between a response that is the resource and one that is not
+    /// visible in the outcome.
+    fn spawn_http_server_with_status(status: &'static str) -> (String, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind http test server");
+        let addr = listener.local_addr().expect("server addr");
+        let url = format!("http://{addr}/image");
+        let body = crate::test_support::flat_png(4, 3);
+
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept connection");
+            let mut request = [0_u8; 1024];
+            let _ = stream.read(&mut request);
+            let header = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: image/png\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                 body.len()
             );
             stream.write_all(header.as_bytes()).expect("write headers");
@@ -3389,6 +3440,111 @@ mod tests {
         assert!(stderr.is_empty());
         assert_eq!(artifact.media_type, MediaType::Png);
         assert_eq!(artifact.metadata.width, Some(8));
+    }
+
+    /// A response is the resource only when its status says so, which is what the HTTP
+    /// server's own fetch has always required and what this adapter did not.
+    ///
+    /// Reading a body out of a 3xx that truss does not follow reports the origin's refusal
+    /// as a problem with the caller's file, and reports it as a success whenever the body
+    /// happens to sniff as an image. Both are answered here by the class the server gives
+    /// the same response.
+    #[rstest]
+    #[case("300 Multiple Choices")]
+    #[case("305 Use Proxy")]
+    #[case("306 Switch Proxy")]
+    #[case("309 Unassigned")]
+    #[case("400 Bad Request")]
+    #[case("500 Internal Server Error")]
+    fn a_status_that_is_not_success_is_the_origin_failing(#[case] status: &'static str) {
+        let (url, handle) = spawn_http_server_with_status(status);
+        let output_path = temp_file_path("convert-url-status").with_extension("png");
+        let mut stdin = Cursor::new(Vec::<u8>::new());
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let exit_code = run_with_io(
+            vec![
+                "truss".to_string(),
+                "convert".to_string(),
+                "--url".to_string(),
+                url,
+                "-o".to_string(),
+                output_path.display().to_string(),
+            ],
+            &mut stdin,
+            &mut stdout,
+            &mut stderr,
+        );
+
+        handle.join().expect("join server thread");
+        let _ = fs::remove_file(&output_path);
+        let message = String::from_utf8(stderr).expect("utf8 stderr");
+
+        assert_eq!(exit_code, EXIT_IO, "{status} is the origin's failure");
+        assert!(
+            message.contains("bad-gateway"),
+            "{status} must be classified as the origin's failure, got: {message}"
+        );
+        let code = status.split(' ').next().expect("status code");
+        assert!(
+            message.contains(code),
+            "{status} must be named in the message, got: {message}"
+        );
+    }
+
+    /// The other side of the boundary: a success status is the resource, whatever number
+    /// inside the range it carries.
+    #[rstest]
+    #[case("200 OK")]
+    #[case("201 Created")]
+    #[case("299 Also Fine")]
+    fn a_success_status_is_the_resource(#[case] status: &'static str) {
+        let (url, handle) = spawn_http_server_with_status(status);
+        let output_path = temp_file_path("convert-url-success").with_extension("png");
+        let mut stdin = Cursor::new(Vec::<u8>::new());
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let exit_code = run_with_io(
+            vec![
+                "truss".to_string(),
+                "convert".to_string(),
+                "--url".to_string(),
+                url,
+                "-o".to_string(),
+                output_path.display().to_string(),
+            ],
+            &mut stdin,
+            &mut stdout,
+            &mut stderr,
+        );
+
+        handle.join().expect("join server thread");
+        let _ = fs::remove_file(&output_path);
+
+        assert_eq!(
+            exit_code,
+            0,
+            "{status} is a representation of the resource: {}",
+            String::from_utf8_lossy(&stderr)
+        );
+    }
+
+    /// A remote source the server would fetch has to be one this adapter can be pointed at,
+    /// which is the argument the watermark cap was already brought into line under.
+    #[test]
+    fn the_remote_caps_are_the_ones_the_server_publishes() {
+        assert_eq!(
+            MAX_REMOTE_BYTES,
+            crate::adapters::server::remote::MAX_SOURCE_BYTES,
+            "a source the server fetches must be one the command line can be pointed at"
+        );
+        assert_eq!(
+            MAX_REMOTE_WATERMARK_BYTES,
+            crate::adapters::server::remote::MAX_WATERMARK_BYTES,
+            "a watermark the server refuses is one there is no point in accepting here"
+        );
     }
 
     #[test]

@@ -152,3 +152,34 @@ scenarios:
           image:
             path: minimal.png
             format: png
+
+  # A cloud metadata endpoint is refused whatever the configuration, on every adapter that
+  # fetches. The command line allows loopback and private addresses that the server refuses,
+  # so these are the addresses that are not covered by that allowance. No connection is made:
+  # the refusal is the address, not what answers at it, so these run offline.
+  - name: refuses a URL that names a cloud metadata endpoint
+    steps:
+      - run:
+          command: truss convert --url http://169.254.169.254/latest/meta-data/ -o meta.png
+      - assert:
+          exit_code: 2
+          stderr:
+            contains:
+              - "cloud metadata service"
+              - "bad-gateway"
+      - assert:
+          file:
+            path: meta.png
+            exists: false
+      - run:
+          command: truss convert --url http://metadata.google.internal/computeMetadata/v1/ -o meta.png
+      - assert:
+          exit_code: 2
+          stderr:
+            contains: "cloud metadata service"
+      - run:
+          command: truss convert --url "http://[fd00:ec2::254]/latest/meta-data/" -o meta.png
+      - assert:
+          exit_code: 2
+          stderr:
+            contains: "cloud metadata service"
