@@ -987,7 +987,11 @@ components:
         Optimization mode for the final encoding stage.
         `none` preserves the existing behavior.
         `auto` picks a format-appropriate strategy.
-        `lossless` uses only pixel-preserving techniques.
+        `lossless` uses only pixel-preserving techniques, and is answered
+        `501 Not Implemented` for AVIF output: the AV1 encoder truss reaches
+        offers a quality setting and no bit-exact mode, and a near-lossless
+        encode is not what the name promises. Use `auto` for the smallest
+        AVIF, or a lossless format for bit-exact pixels.
         `lossy` may reduce quality to save more bytes.
       schema:
         type: string

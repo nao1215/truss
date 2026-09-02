@@ -24,6 +24,14 @@ pub(super) const HEADER_READ_DEADLINE: Duration = Duration::from_secs(15);
 /// Number of worker threads held back for requests that are not transforms.
 const WORKER_THREADS: usize = 8;
 
+/// How much stack a connection worker runs on.
+///
+/// A worker decodes, and decoding an AVIF wants close to a megabyte and a half in a build
+/// without optimizations, against the two megabytes a thread gets by default. That is not the
+/// margin to leave a decoder on, and the size is a reservation of address space rather than
+/// memory that is committed, so the pool costs no more for having it.
+const WORKER_STACK_SIZE: usize = 8 * 1024 * 1024;
+
 /// The size of the connection worker pool for a given transform limit.
 ///
 /// A worker is dedicated to a connection from accept to close, so the pool has to be larger
@@ -69,20 +77,25 @@ pub fn serve_with_config(listener: TcpListener, config: ServerConfig) -> io::Res
     for _ in 0..pool_size {
         let rx = Arc::clone(&receiver);
         let cfg = Arc::clone(&config);
-        workers.push(std::thread::spawn(move || {
-            loop {
-                let (stream, accepted_at) = {
-                    let guard = rx.lock().expect("worker lock poisoned");
-                    match guard.recv() {
-                        Ok(accepted) => accepted,
-                        Err(_) => break,
+        let worker = std::thread::Builder::new()
+            .name("truss-worker".into())
+            .stack_size(WORKER_STACK_SIZE)
+            .spawn(move || {
+                loop {
+                    let (stream, accepted_at) = {
+                        let guard = rx.lock().expect("worker lock poisoned");
+                        match guard.recv() {
+                            Ok(accepted) => accepted,
+                            Err(_) => break,
+                        }
+                    }; // MutexGuard dropped here — before handle_stream runs.
+                    if let Err(err) = handle_stream(stream, accepted_at, &cfg) {
+                        cfg.log_warn(&format!("failed to handle connection: {err}"));
                     }
-                }; // MutexGuard dropped here — before handle_stream runs.
-                if let Err(err) = handle_stream(stream, accepted_at, &cfg) {
-                    cfg.log_warn(&format!("failed to handle connection: {err}"));
                 }
-            }
-        }));
+            })
+            .expect("failed to start a connection worker");
+        workers.push(worker);
     }
 
     // Install signal handler for graceful shutdown.  The handler sets the

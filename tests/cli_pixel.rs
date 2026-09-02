@@ -442,3 +442,47 @@ fn fit_contain_with_without_enlargement_pads_around_the_source() {
         "expected green content at center, got {center:?}"
     );
 }
+
+/// The compiled binary decodes an AVIF.
+///
+/// This ran through the library and never through the binary until it did, and the binary is
+/// where the thread the process starts on decides how much stack the decoder gets: one
+/// megabyte on Windows, which an AV1 decode does not fit in a build without optimizations. The
+/// requirement does not depend on the size of the picture, since what wants the room is the
+/// decoder's own working set, so the smallest image reaches it.
+#[cfg(feature = "avif")]
+#[test]
+fn convert_decodes_an_avif_through_the_binary() {
+    let source = temp_file_path("avif-source").with_extension("png");
+    let avif = temp_file_path("avif-middle").with_extension("avif");
+    let output = temp_file_path("avif-output").with_extension("png");
+    fs::write(&source, create_red_blue_4x2_png()).expect("write png source");
+
+    let to_avif = Command::new(env!("CARGO_BIN_EXE_truss"))
+        .arg(&source)
+        .arg("-o")
+        .arg(&avif)
+        .output()
+        .expect("run truss convert to avif");
+    assert!(to_avif.status.success(), "{to_avif:?}");
+
+    let from_avif = Command::new(env!("CARGO_BIN_EXE_truss"))
+        .arg(&avif)
+        .arg("-o")
+        .arg(&output)
+        .output()
+        .expect("run truss convert from avif");
+
+    let decoded = fs::read(&output).ok();
+    let _ = fs::remove_file(&source);
+    let _ = fs::remove_file(&avif);
+    let _ = fs::remove_file(&output);
+
+    assert!(from_avif.status.success(), "{from_avif:?}");
+    let decoded = ImageReader::new(std::io::Cursor::new(decoded.expect("the png was written")))
+        .with_guessed_format()
+        .expect("guess the output format")
+        .decode()
+        .expect("decode the output");
+    assert_eq!(decoded.dimensions(), (4, 2));
+}

@@ -1573,7 +1573,7 @@ fn try_passthrough_lossless_optimization(
             }))
         }
         MediaType::Avif => Err(TransformError::CapabilityMissing(
-            "lossless optimization is not implemented for avif output".to_string(),
+            AVIF_LOSSLESS_REFUSAL.to_string(),
         )),
         _ => Ok(None),
     }
@@ -1711,12 +1711,13 @@ fn png_bytes_satisfying_metadata_policy(
 
 /// Returns the AVIF unchanged when it carries no metadata the policy would remove.
 ///
-/// AVIF is the one output format truss cannot write metadata into at all: the encoder
-/// refuses `--keep-metadata` with `metadata retention is not implemented for avif output`,
-/// so the only policies that reach here are the ones that strip. That leaves nothing to
-/// rewrite and only a question to answer, which is whether the input has anything to strip.
-/// Without this arm an AVIF re-encode was never compared against the bytes it came from,
-/// and a small AVIF came back larger than it arrived.
+/// This is the passthrough that keeps an optimize from returning more bytes than it was given,
+/// so what it answers is whether the input already satisfies the policy. A policy that keeps
+/// everything is satisfied by any file; one that strips is satisfied only by a file with
+/// nothing to strip. Unlike the PNG and WebP arms beside it, this does not produce a stripped
+/// candidate: removing an item means rewriting the item list, the item locations, and every
+/// offset that moves, and the re-encode the caller falls back to is the smaller change for
+/// what is a rare request.
 fn avif_bytes_satisfying_metadata_policy(
     bytes: &[u8],
     metadata_policy: MetadataPolicy,
@@ -2102,7 +2103,7 @@ fn encode_lossless_optimized_output(
                 .to_string(),
         )),
         MediaType::Avif => Err(TransformError::CapabilityMissing(
-            "lossless optimization is not implemented for avif output".to_string(),
+            AVIF_LOSSLESS_REFUSAL.to_string(),
         )),
         _ => Err(TransformError::InvalidOptions(format!(
             "optimization is not supported for {} output",
@@ -2749,6 +2750,16 @@ fn output_pixels(image: &DynamicImage) -> u64 {
 /// `optimize` asks for the smallest file the encoder can produce and accepts the time, so it
 /// runs two steps slower than the same size would otherwise. Below the first step that is
 /// speed 2, which is what the optimizing path already used.
+/// Why `optimize=lossless` is refused for AVIF output.
+///
+/// The AV1 encoder truss reaches through the `image` crate takes a quality setting and has no
+/// bit-exact mode: at the top setting a decode of its output still differs from the input by a
+/// channel or two, measured on a 32x32 gradient, so calling it lossless would be a claim about
+/// the pixels that is not true. The mode stays refused rather than approximated, which is the
+/// same choice `docs/api-reference.md` records for the caller.
+const AVIF_LOSSLESS_REFUSAL: &str =
+    "lossless optimization is not available for avif output: the AV1 encoder has no bit-exact mode";
+
 fn avif_speed(pixels: u64, optimized: bool) -> u8 {
     let speed = match pixels {
         0..=2_000_000 => 4,
@@ -2766,11 +2777,6 @@ fn encode_avif(
 ) -> Result<Vec<u8>, TransformError> {
     #[cfg(feature = "avif")]
     {
-        if retained_metadata.is_some_and(|metadata| !metadata.is_empty()) {
-            return Err(TransformError::CapabilityMissing(
-                "metadata retention is not implemented for avif output".to_string(),
-            ));
-        }
         let mut bytes = Vec::new();
         let samples = EncodeSamples::from_image(image);
         let (width, height) = samples.dimensions();
@@ -2783,7 +2789,17 @@ fn encode_avif(
                 samples.color_type().into(),
             )
             .map_err(|error| TransformError::EncodeFailed(error.to_string()))?;
-        Ok(bytes)
+
+        // The encoder writes pixels and colour information and nothing else, so the metadata
+        // goes into the container afterwards, the way the WebP path rewrites its own.
+        match retained_metadata {
+            Some(metadata) if !metadata.is_empty() => crate::core::avif_with_metadata(
+                &bytes,
+                metadata.exif_metadata.as_deref(),
+                metadata.icc_profile.as_deref(),
+            ),
+            _ => Ok(bytes),
+        }
     }
     #[cfg(not(feature = "avif"))]
     {
@@ -3308,8 +3324,8 @@ impl RetainedMetadata {
     /// - JPEG: EXIF, ICC, XMP (APP1 injection), IPTC (APP13 injection)
     /// - PNG: EXIF, ICC, XMP (iTXt injection). IPTC has no standard PNG embedding.
     /// - WebP: EXIF, ICC, XMP in RIFF chunks. IPTC has no WebP container chunk.
-    /// - AVIF: no injection at all, and EXIF and ICC are left in place here so that the
-    ///   caller refuses the request outright rather than reporting a loss.
+    /// - AVIF: EXIF as an item of its own and ICC as a `colr` property, both written into the
+    ///   container after the encode. XMP would be a `mime` item and is not written.
     /// - Everything else, TIFF and BMP: no injection path for any of the four.
     ///
     /// A kind that was there and cannot travel is returned rather than dropped in silence:
@@ -3373,12 +3389,6 @@ fn extract_retained_metadata(
     let (metadata, dropped) = metadata.retain_supported(output_format);
     warnings.extend(dropped.into_iter().map(TransformWarning::MetadataDropped));
 
-    if matches!(output_format, MediaType::Avif) && !metadata.is_empty() {
-        return Err(TransformError::CapabilityMissing(
-            "metadata retention is not implemented for avif output".to_string(),
-        ));
-    }
-
     if metadata.is_empty() {
         return Ok((None, warnings));
     }
@@ -3423,7 +3433,22 @@ fn read_input_metadata(input: &Artifact) -> Result<RetainedMetadata, TransformEr
         MediaType::Webp => {
             retained_metadata(WebPDecoder::new(bytes).map_err(open_failed)?, media_type)
         }
-        MediaType::Avif | MediaType::Svg | MediaType::Bmp | MediaType::Tiff | MediaType::Gif => {
+        // AVIF keeps EXIF as an item of its own and an ICC profile as a property, neither of
+        // which the decoder this file opens the others with reaches; the container walk reads
+        // both. The rest have no metadata truss carries: SVG is text, and the three raster
+        // formats left have no path into or out of them.
+        #[cfg(feature = "avif")]
+        MediaType::Avif => {
+            let metadata = crate::core::avif_metadata(&input.bytes);
+            Ok(RetainedMetadata {
+                exif_metadata: metadata.exif,
+                icc_profile: metadata.icc,
+                ..RetainedMetadata::default()
+            })
+        }
+        #[cfg(not(feature = "avif"))]
+        MediaType::Avif => Ok(RetainedMetadata::default()),
+        MediaType::Svg | MediaType::Bmp | MediaType::Tiff | MediaType::Gif => {
             Ok(RetainedMetadata::default())
         }
     }
@@ -4954,27 +4979,156 @@ mod tests {
         assert_eq!(result.artifact.metadata.height, Some(3));
     }
 
+    /// AVIF is the last of the four raster outputs to carry metadata, and it carries the two
+    /// kinds the container has a place for.
     #[cfg(feature = "avif")]
     #[test]
-    fn transform_raster_rejects_preserved_metadata_for_avif_output() {
+    fn transform_raster_avif_output_keeps_exif_and_icc_with_keep_metadata() {
+        let artifact = jpeg_artifact_with_metadata(8, 8, Some(6), Some(b"demo-icc-profile"));
+        let result = transform_raster(TransformRequest::new(
+            artifact,
+            TransformOptions {
+                format: Some(MediaType::Avif),
+                strip_metadata: false,
+                auto_orient: false,
+                ..TransformOptions::default()
+            },
+        ))
+        .expect("keep-metadata avif should succeed");
+
+        let written = crate::core::avif_metadata(&result.artifact.bytes);
+        assert_eq!(written.icc.as_deref(), Some(b"demo-icc-profile".as_slice()));
+        let exif = written.exif.expect("the exif item rides in the container");
+        assert_eq!(&exif[0..2], b"II", "the item holds the TIFF block itself");
+        assert!(
+            result.warnings.iter().all(|warning| !matches!(
+                warning,
+                TransformWarning::MetadataDropped(MetadataKind::Exif | MetadataKind::Icc)
+            )),
+            "nothing the container can hold was dropped, got: {:?}",
+            result.warnings
+        );
+    }
+
+    /// The rewritten container is still one a decoder reads, which is the half of the surgery
+    /// that a metadata assertion alone would not notice.
+    #[cfg(feature = "avif")]
+    #[test]
+    fn transform_raster_avif_output_is_decodable_after_metadata_is_written() {
+        let artifact = jpeg_artifact_with_metadata(16, 8, Some(6), Some(b"demo-icc-profile"));
+        let result = transform_raster(TransformRequest::new(
+            artifact,
+            TransformOptions {
+                format: Some(MediaType::Avif),
+                strip_metadata: false,
+                auto_orient: false,
+                ..TransformOptions::default()
+            },
+        ))
+        .expect("keep-metadata avif should succeed");
+
+        let sniffed =
+            sniff_artifact(RawArtifact::new(result.artifact.bytes.clone(), None)).expect("sniff");
+        assert_eq!(sniffed.media_type, MediaType::Avif);
+        assert_eq!(sniffed.metadata.width, Some(16));
+        assert_eq!(sniffed.metadata.height, Some(8));
+
+        let decoded = transform_raster(TransformRequest::new(
+            Artifact::new(result.artifact.bytes, MediaType::Avif, sniffed.metadata),
+            TransformOptions {
+                format: Some(MediaType::Png),
+                ..TransformOptions::default()
+            },
+        ))
+        .expect("the rewritten avif still decodes");
+        assert_eq!(decoded.artifact.metadata.width, Some(16));
+    }
+
+    /// An AVIF input is read for metadata like every other input, so what the container holds
+    /// travels to the next format instead of disappearing without a warning.
+    #[cfg(feature = "avif")]
+    #[test]
+    fn transform_raster_reads_the_metadata_an_avif_input_carries() {
+        let source = jpeg_artifact_with_metadata(8, 8, Some(6), Some(b"demo-icc-profile"));
+        let avif = transform_raster(TransformRequest::new(
+            source,
+            TransformOptions {
+                format: Some(MediaType::Avif),
+                strip_metadata: false,
+                auto_orient: false,
+                ..TransformOptions::default()
+            },
+        ))
+        .expect("encode an avif carrying metadata")
+        .artifact;
+
+        let sniffed =
+            sniff_artifact(RawArtifact::new(avif.bytes.clone(), None)).expect("sniff avif");
+        let jpeg = transform_raster(TransformRequest::new(
+            Artifact::new(avif.bytes, MediaType::Avif, sniffed.metadata),
+            TransformOptions {
+                format: Some(MediaType::Jpeg),
+                strip_metadata: false,
+                auto_orient: false,
+                ..TransformOptions::default()
+            },
+        ))
+        .expect("avif to jpeg with keep-metadata")
+        .artifact;
+
+        let decoder = JpegDecoder::new(Cursor::new(&jpeg.bytes)).expect("open the jpeg");
+        let metadata = super::retained_metadata(decoder, MediaType::Jpeg).expect("read the jpeg");
+        assert!(
+            metadata.exif_metadata.is_some(),
+            "the exif the avif carried reached the jpeg"
+        );
+        assert_eq!(
+            metadata.icc_profile.as_deref(),
+            Some(b"demo-icc-profile".as_slice())
+        );
+    }
+
+    /// An AVIF with no metadata items reads as no metadata rather than as an error, which is
+    /// what every AVIF truss wrote before this looked like.
+    #[cfg(feature = "avif")]
+    #[test]
+    fn avif_metadata_reads_nothing_from_a_container_that_carries_none() {
+        let artifact = png_artifact(4, 3, Rgba([10, 20, 30, 255]));
+        let result = transform_raster(TransformRequest::new(
+            artifact,
+            TransformOptions {
+                format: Some(MediaType::Avif),
+                ..TransformOptions::default()
+            },
+        ))
+        .expect("encode an avif");
+
+        let metadata = crate::core::avif_metadata(&result.artifact.bytes);
+        assert_eq!(metadata.exif, None);
+        assert_eq!(metadata.icc, None);
+    }
+
+    #[cfg(feature = "avif")]
+    #[test]
+    fn transform_raster_carries_only_exif_into_avif_with_preserve_exif() {
         let artifact = jpeg_artifact_with_metadata(4, 2, Some(6), Some(b"demo-icc-profile"));
-        let err = transform_raster(TransformRequest::new(
+        let result = transform_raster(TransformRequest::new(
             artifact,
             TransformOptions {
                 format: Some(MediaType::Avif),
                 strip_metadata: false,
                 preserve_exif: true,
+                auto_orient: false,
                 ..TransformOptions::default()
             },
         ))
-        .expect_err("avif output should reject preserved exif");
+        .expect("preserve-exif avif should succeed");
 
-        assert_eq!(
-            err,
-            TransformError::CapabilityMissing(
-                "metadata retention is not implemented for avif output".to_string()
-            )
-        );
+        // `preserve_exif` narrows the policy to one kind, so the profile the input carried is
+        // not written even though the container has a place for it.
+        let written = crate::core::avif_metadata(&result.artifact.bytes);
+        assert!(written.exif.is_some());
+        assert_eq!(written.icc, None);
     }
 
     #[cfg(feature = "webp-lossy")]

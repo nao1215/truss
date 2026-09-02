@@ -117,6 +117,8 @@ rather than echoing the input format back. A source with more than one frame is 
 that covers GIF, animated WebP, APNG, and animated AVIF, and the CLI `truss inspect` reports
 `isAnimated` for all of them.
 
+`optimize=lossless` asks for a re-encode that changes no pixel, and AVIF output is answered `501 Not Implemented` for it. The AV1 encoder truss reaches offers a quality setting and no bit-exact mode: at the top setting a decode still differs from the input by a channel or two, so advertising it as lossless would be a claim about the pixels that is not true. `optimize=auto` is what produces the smallest AVIF, and PNG or lossless WebP is what produces bit-exact pixels. Metadata retention is unaffected: `preserveExif` and the metadata policy work for AVIF output as they do for JPEG, PNG and WebP.
+
 ## Choosing the Output Format
 
 When a request names `format`, that is the output format. When it does not, the server reads `Accept` and picks the format it prefers among the ones the header names, falling back to the input's own format when the header names none.

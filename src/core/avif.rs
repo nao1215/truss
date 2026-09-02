@@ -653,3 +653,13 @@ fn avif_auxc_declares_alpha(bytes: &[u8]) -> Result<bool, TransformError> {
         .strip_suffix(&[0])
         .is_some_and(|urn| urn == AVIF_ALPHA_AUX_TYPE))
 }
+
+/// Reading and writing the metadata items an AVIF container carries.
+///
+/// Gated with the codec, unlike the walk above: describing an AVIF is something every build
+/// does, and carrying its EXIF and its ICC profile across a transform is something only a
+/// build that can decode and encode one ever asks for.
+#[cfg(feature = "avif")]
+mod metadata;
+#[cfg(feature = "avif")]
+pub(crate) use metadata::{avif_metadata, avif_with_metadata};
