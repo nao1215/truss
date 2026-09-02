@@ -238,8 +238,10 @@ pub fn sign_public_url_with_method(
 
 /// Returns the bind address for the HTTP server adapter.
 ///
-/// The adapter reads `TRUSS_BIND_ADDR` when it is present. Otherwise it falls back to
-/// [`DEFAULT_BIND_ADDR`].
+/// The adapter reads `TRUSS_BIND_ADDR` when it is present, and falls back to
+/// `127.0.0.1:8080`. This is the only way to learn the address truss would bind, since
+/// [`serve_with_config`](crate::serve_with_config) takes a listener the caller has already
+/// bound.
 pub fn bind_addr() -> String {
     std::env::var("TRUSS_BIND_ADDR").unwrap_or_else(|_| DEFAULT_BIND_ADDR.to_string())
 }

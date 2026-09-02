@@ -1,6 +1,6 @@
 # Transform Pipeline
 
-This document describes the image transformation pipeline that `transform_raster()` applies to raster inputs.
+This document describes the image transformation pipeline that `transform()` applies to a raster input.
 
 ## Pipeline stages
 
@@ -120,7 +120,7 @@ transparent color index exactly.
 
 ## SVG path
 
-SVG inputs are handled by `transform_svg()`, not by this pipeline.
+An SVG input takes the SVG path inside `transform()`, not this pipeline.
 
 With a raster output the drawing is rasterized and then joins the raster pipeline. The size it is rasterized at is the size `fit` scales the content to, not the requested box, so the vector scale is uniform on both axes; the padding `contain` adds and the crop `cover` takes are applied afterwards by the same helpers the raster path uses, with the same `position` anchor and `background`. `withoutEnlargement` clamps that scale the same way it does for a raster source. The document's own size — its `width` and `height`, or its `viewBox` extent — is what all of this scales from, and it is what `truss inspect` reports. Both the rasterization buffer and the final canvas are checked against `MAX_OUTPUT_PIXELS` from dimensions alone, before either is allocated, because `cover` scales the content past the box it returns.
 

@@ -115,24 +115,7 @@ use std::io::Cursor;
 /// Returns [`TransformError::InvalidOptions`] when the request fails validation,
 /// [`TransformError::DecodeFailed`] when the SVG cannot be parsed or rasterized,
 /// and [`TransformError::EncodeFailed`] when raster encoding fails.
-///
-/// # Examples
-///
-/// ```
-/// use truss::{sniff_artifact, RawArtifact, TransformRequest, TransformOptions, MediaType};
-/// use truss::transform_svg;
-///
-/// let svg_bytes = b"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"10\" height=\"10\"><rect width=\"10\" height=\"10\" fill=\"red\"/></svg>";
-/// let input = sniff_artifact(RawArtifact::new(svg_bytes.to_vec(), None)).unwrap();
-/// let mut options = TransformOptions::default();
-/// options.format = Some(MediaType::Png);
-/// options.width = Some(10);
-/// options.height = Some(10);
-/// let result = transform_svg(TransformRequest::new(input, options)).unwrap();
-/// assert_eq!(result.artifact.media_type, MediaType::Png);
-/// ```
-#[must_use = "this function returns the transform result without side effects"]
-pub fn transform_svg(request: TransformRequest) -> Result<TransformResult, TransformError> {
+pub(crate) fn transform_svg(request: TransformRequest) -> Result<TransformResult, TransformError> {
     let normalized = request.normalize()?;
     let budget = crate::codecs::raster::EncodeDeadline::starting(normalized.options.deadline);
 

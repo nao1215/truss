@@ -47,9 +47,7 @@ mod signing;
 
 #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
 pub use config::StorageBackend;
-pub use config::{
-    DEFAULT_BIND_ADDR, DEFAULT_STORAGE_ROOT, LogHandler, LogLevel, ServerConfig, TrustedProxy,
-};
+pub use config::{LogHandler, LogLevel, ServerConfig, TrustedProxy};
 pub use handler::TransformOptionsPayload;
 pub(crate) use handler::storage_health_check;
 pub use lifecycle::{serve, serve_once, serve_once_with_config, serve_with_config};
@@ -117,8 +115,8 @@ mod tests {
     use super::response::{HttpResponse, bad_request_response};
     // Items re-exported via `pub use` in mod.rs — accessible as `super::X`.
     use super::{
-        DEFAULT_BIND_ADDR, ServerConfig, SignedUrlSource, TransformOptionsPayload, bind_addr,
-        serve_once_with_config, sign_public_url,
+        ServerConfig, SignedUrlSource, TransformOptionsPayload, bind_addr, serve_once_with_config,
+        sign_public_url,
     };
     // Items from submodules — imported via direct submodule paths.
     use super::auth::{
@@ -449,7 +447,7 @@ mod tests {
     #[test]
     fn uses_default_bind_addr_when_env_is_missing() {
         unsafe { std::env::remove_var("TRUSS_BIND_ADDR") };
-        assert_eq!(bind_addr(), DEFAULT_BIND_ADDR);
+        assert_eq!(bind_addr(), super::config::DEFAULT_BIND_ADDR);
     }
 
     #[test]

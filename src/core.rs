@@ -543,7 +543,7 @@ impl TransformRequest {
     }
 
     /// Normalizes the request into a form that does not require adapter-specific defaults.
-    pub fn normalize(self) -> Result<NormalizedTransformRequest, TransformError> {
+    pub(crate) fn normalize(self) -> Result<NormalizedTransformRequest, TransformError> {
         let options = self.options.normalize(self.input.media_type)?;
 
         if let Some(ref wm) = self.watermark {
@@ -561,7 +561,7 @@ impl TransformRequest {
 /// A fully normalized transform request.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
-pub struct NormalizedTransformRequest {
+pub(crate) struct NormalizedTransformRequest {
     /// The normalized input artifact.
     pub input: Artifact,
     /// Fully normalized transform options.
@@ -796,10 +796,11 @@ pub(crate) fn default_lossy_target_quality(media_type: MediaType) -> Option<Targ
 
 /// Raw transform options before defaulting and validation has completed.
 ///
-/// Start from `TransformOptions::default()` and assign the fields you need, then call
-/// [`TransformOptions::normalize`] to validate and resolve the rest. The struct is
-/// `#[non_exhaustive]`, so a field a later version of truss adds is a minor change rather
-/// than a breaking one, and a struct literal is not available from outside the crate.
+/// Start from `TransformOptions::default()` and assign the fields you need. Validation and
+/// the resolution of the rest happen inside [`transform`](crate::transform), which reports
+/// what it refuses through [`TransformError`]. The struct is `#[non_exhaustive]`, so a field
+/// a later version of truss adds is a minor change rather than a breaking one, and a struct
+/// literal is not available from outside the crate.
 ///
 /// # Examples
 ///
@@ -1006,7 +1007,7 @@ impl TransformOptions {
     ///
     /// Returns [`TransformError::InvalidOptions`] when the options contradict each other
     /// or the output format they resolve to.
-    pub fn normalize(
+    pub(crate) fn normalize(
         self,
         input_media_type: MediaType,
     ) -> Result<NormalizedTransformOptions, TransformError> {
@@ -1118,7 +1119,7 @@ impl TransformOptions {
 /// Fully normalized transform options ready for a backend pipeline.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
-pub struct NormalizedTransformOptions {
+pub(crate) struct NormalizedTransformOptions {
     /// The desired output width in pixels.
     pub width: Option<u32>,
     /// The desired output height in pixels.
@@ -1467,25 +1468,14 @@ impl Rgba8 {
 
 /// Metadata handling after option normalization.
 ///
-/// # Examples
-///
-/// ```
-/// use truss::{TransformOptions, MediaType};
-///
-/// // Default options normalize to StripAll
-/// let opts = TransformOptions::default();
-/// let normalized = opts.normalize(MediaType::Png).unwrap();
-/// assert_eq!(normalized.metadata_policy, truss::MetadataPolicy::StripAll);
-///
-/// // Disabling strip_metadata normalizes to KeepAll
-/// let mut opts = TransformOptions::default();
-/// opts.strip_metadata = false;
-/// let normalized = opts.normalize(MediaType::Png).unwrap();
-/// assert_eq!(normalized.metadata_policy, truss::MetadataPolicy::KeepAll);
-/// ```
+/// Crate-internal: it is the resolved form of `stripMetadata`, `keepMetadata`, and
+/// `preserveExif`, which the adapters carry as those three names. What a caller sees is the
+/// output, and a [`TransformWarning::MetadataDropped`] when the format could not carry
+/// something. The resolution itself is covered by `metadata_policy_resolution` in this
+/// module's tests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum MetadataPolicy {
+pub(crate) enum MetadataPolicy {
     /// Drop metadata from the output.
     StripAll,
     /// Keep metadata unchanged when possible.
@@ -3233,6 +3223,42 @@ fn read_u64_be(bytes: &[u8]) -> Result<u64, TransformError> {
 
 #[cfg(test)]
 mod tests {
+    /// The three metadata names the adapters carry resolve to one policy, which is what the
+    /// pipeline reads. This was a doctest on `MetadataPolicy` before that enum stopped being
+    /// public; the assertions are the same.
+    ///
+    /// The struct literal is available here because `#[non_exhaustive]` binds other crates
+    /// and not the defining one, which is why the mutation form appears in the examples a
+    /// caller reads and not in the tests beside the definition.
+    #[test]
+    fn metadata_policy_resolution() {
+        let options = TransformOptions::default();
+        assert!(options.strip_metadata);
+        assert_eq!(
+            options.normalize(MediaType::Png).unwrap().metadata_policy,
+            MetadataPolicy::StripAll
+        );
+
+        let options = TransformOptions {
+            strip_metadata: false,
+            ..TransformOptions::default()
+        };
+        assert_eq!(
+            options.normalize(MediaType::Png).unwrap().metadata_policy,
+            MetadataPolicy::KeepAll
+        );
+
+        let options = TransformOptions {
+            strip_metadata: false,
+            preserve_exif: true,
+            ..TransformOptions::default()
+        };
+        assert_eq!(
+            options.normalize(MediaType::Jpeg).unwrap().metadata_policy,
+            MetadataPolicy::PreserveExif
+        );
+    }
+
     #[cfg(any(feature = "server", feature = "wasm"))]
     use super::single_line;
     use super::{

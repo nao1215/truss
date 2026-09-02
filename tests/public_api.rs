@@ -14,16 +14,14 @@ fn every_exported_symbol_is_reachable_from_the_crate_root() {
     #[allow(unused_imports)]
     use truss::{
         Artifact, ArtifactMetadata, CropRegion, Dimensions, MAX_DECODED_PIXELS, MAX_OUTPUT_PIXELS,
-        MAX_WATERMARK_PIXELS, MediaType, MetadataKind, MetadataPolicy, RawArtifact, Rgba8,
-        sniff_artifact,
+        MAX_WATERMARK_PIXELS, MediaType, MetadataKind, RawArtifact, Rgba8, sniff_artifact,
     };
     // The transform vocabulary.
     #[allow(unused_imports)]
     use truss::{
-        Fit, NormalizedTransformOptions, NormalizedTransformRequest, OptimizeMode, Position,
-        QualityMetric, Rotation, TargetQuality, TransformError, TransformOptions, TransformRequest,
-        TransformResult, TransformWarning, WatermarkInput, resolve_metadata_flags, transform,
-        transform_raster,
+        Fit, OptimizeMode, Position, QualityMetric, Rotation, TargetQuality, TransformError,
+        TransformOptions, TransformRequest, TransformResult, TransformWarning, WatermarkInput,
+        resolve_metadata_flags, transform,
     };
 
     // A value from each group, so the test exercises the paths rather than only naming them.
@@ -34,13 +32,6 @@ fn every_exported_symbol_is_reachable_from_the_crate_root() {
     const { assert!(MAX_WATERMARK_PIXELS > 0) };
     assert_eq!(Dimensions::new(4, 3).width, 4);
     assert!(TransformOptions::default().strip_metadata);
-}
-
-#[cfg(feature = "svg")]
-#[test]
-fn the_svg_codec_is_reachable_from_the_crate_root() {
-    #[allow(unused_imports)]
-    use truss::transform_svg;
 }
 
 #[cfg(feature = "cli")]
@@ -57,14 +48,13 @@ fn the_cli_entry_point_is_reachable_from_the_crate_root() {
 fn every_exported_server_symbol_is_reachable_from_the_crate_root() {
     #[allow(unused_imports)]
     use truss::{
-        DEFAULT_BIND_ADDR, DEFAULT_STORAGE_ROOT, LogHandler, LogLevel, ServerConfig,
-        SignedUrlSource, SignedWatermarkParams, TransformOptionsPayload, TrustedProxy, bind_addr,
-        serve, serve_once, serve_once_with_config, serve_with_config, sign_public_url,
-        sign_public_url_with_method,
+        LogHandler, LogLevel, ServerConfig, SignedUrlSource, SignedWatermarkParams,
+        TransformOptionsPayload, TrustedProxy, bind_addr, serve, serve_once,
+        serve_once_with_config, serve_with_config, sign_public_url, sign_public_url_with_method,
     };
 
-    assert!(!DEFAULT_BIND_ADDR.is_empty());
-    assert!(!DEFAULT_STORAGE_ROOT.is_empty());
+    // `bind_addr` resolves `TRUSS_BIND_ADDR` against the default, which is the only reason
+    // the default itself does not need to be exported.
     assert!(!bind_addr().is_empty());
     // `TrustedProxy` and `LogHandler` are named in public fields of `ServerConfig`, so they
     // have to be nameable too or the field is one a caller can read and not describe.

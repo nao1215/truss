@@ -287,10 +287,10 @@ impl StorageBackend {
 }
 
 /// The default bind address for the development HTTP server.
-pub const DEFAULT_BIND_ADDR: &str = "127.0.0.1:8080";
+pub(crate) const DEFAULT_BIND_ADDR: &str = "127.0.0.1:8080";
 
 /// The default storage root used by the server adapter.
-pub const DEFAULT_STORAGE_ROOT: &str = ".";
+pub(crate) const DEFAULT_STORAGE_ROOT: &str = ".";
 
 pub(super) const DEFAULT_PUBLIC_MAX_AGE_SECONDS: u32 = 3600;
 pub(super) const DEFAULT_PUBLIC_STALE_WHILE_REVALIDATE_SECONDS: u32 = 60;
