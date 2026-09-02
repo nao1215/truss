@@ -42,7 +42,9 @@ pub(super) fn authorize_request_headers(
     config: &ServerConfig,
 ) -> Result<(), HttpResponse> {
     let expected = config.bearer_token.as_deref().ok_or_else(|| {
-        service_unavailable_response("private API bearer token is not configured")
+        // A token the operator has not set is not a condition that clears by waiting, so
+        // the answer names no delay.
+        service_unavailable_response("private API bearer token is not configured", None)
     })?;
     let provided = headers
         .iter()
@@ -63,6 +65,7 @@ pub(super) fn authorize_signed_request(
     if config.signing_keys.is_empty() {
         return Err(service_unavailable_response(
             "public signed URL keys are not configured",
+            None,
         ));
     }
     let key_id = required_auth_query_param(query, "keyId")?;
