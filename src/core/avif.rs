@@ -40,11 +40,10 @@ pub(super) fn sniff_avif(bytes: &[u8]) -> Result<ArtifactMetadata, TransformErro
         width: dimensions.map(|(width, _)| width),
         height: dimensions.map(|(_, height)| height),
         // An animated AVIF is a moving-image sequence, and the container says so in its
-        // brands rather than in a property: `avis` is the sequence brand. The frames live in
-        // a `moov` track, which nothing here reads, so this records that there is more than
-        // one of them without claiming how many.
+        // brands rather than in a property: `avis` is the sequence brand. The frames
+        // themselves are samples of a `moov` track, which is where the count comes from.
         frame_count: if declares_image_sequence(&bytes[8..]) {
-            2
+            count_avif_samples(bytes).max(2)
         } else {
             1
         },
@@ -52,6 +51,51 @@ pub(super) fn sniff_avif(bytes: &[u8]) -> Result<ArtifactMetadata, TransformErro
         has_alpha: inspection.has_alpha(),
         orientation: inspection.orientation(),
     })
+}
+
+/// Counts the samples of the file's first media track, which for an image sequence is its
+/// frames.
+///
+/// The count is in the `stsz` box, at the end of the `moov` walk, as a plain sample count.
+/// A container the walk cannot follow reports zero, which the caller floors at two: the
+/// brand already said the file is a sequence, and reporting one frame would say it is not.
+fn count_avif_samples(bytes: &[u8]) -> u32 {
+    fn walk(bytes: &[u8], inside_moov: bool) -> u32 {
+        let mut offset = 0;
+        while offset + 8 <= bytes.len() {
+            let Ok((box_type, payload, next_offset)) = parse_mp4_box(bytes, offset) else {
+                return 0;
+            };
+            match box_type {
+                b"moov" => {
+                    let found = walk(payload, true);
+                    if found > 0 {
+                        return found;
+                    }
+                }
+                b"trak" | b"mdia" | b"minf" | b"stbl" if inside_moov => {
+                    let found = walk(payload, true);
+                    if found > 0 {
+                        return found;
+                    }
+                }
+                // A full box: version and flags, then the sample size, then the count.
+                b"stsz" if inside_moov && payload.len() >= 12 => {
+                    if let Ok(count) = read_u32_be(&payload[8..12]) {
+                        return count;
+                    }
+                }
+                _ => {}
+            }
+            if next_offset <= offset {
+                return 0;
+            }
+            offset = next_offset;
+        }
+        0
+    }
+
+    walk(bytes, false)
 }
 
 /// Reports whether the brand list names the AVIF image-sequence brand.

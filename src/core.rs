@@ -4204,6 +4204,41 @@ mod tests {
     }
 
     #[test]
+    fn sniff_artifact_counts_the_frames_of_an_animated_avif() {
+        // The frames are samples of a `moov` track, and the count is in `stsz`. The refusal
+        // prints the number, so a placeholder there would state a count nothing measured.
+        fn mp4_box(box_type: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+            let mut out = ((payload.len() + 8) as u32).to_be_bytes().to_vec();
+            out.extend_from_slice(box_type);
+            out.extend_from_slice(payload);
+            out
+        }
+
+        let mut stsz = vec![0_u8; 4];
+        stsz.extend_from_slice(&0_u32.to_be_bytes());
+        stsz.extend_from_slice(&7_u32.to_be_bytes());
+        let stbl = mp4_box(b"stbl", &mp4_box(b"stsz", &stsz));
+        let minf = mp4_box(b"minf", &stbl);
+        let mdia = mp4_box(b"mdia", &minf);
+        let trak = mp4_box(b"trak", &mdia);
+        let moov = mp4_box(b"moov", &trak);
+
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&24_u32.to_be_bytes());
+        bytes.extend_from_slice(b"ftyp");
+        bytes.extend_from_slice(b"avis");
+        bytes.extend_from_slice(&0_u32.to_be_bytes());
+        bytes.extend_from_slice(b"avis");
+        bytes.extend_from_slice(b"avif");
+        bytes.extend_from_slice(&moov);
+
+        let artifact =
+            sniff_artifact(RawArtifact::new(bytes, None)).expect("sniff an animated avif");
+
+        assert_eq!(artifact.metadata.frame_count, 7);
+    }
+
+    #[test]
     fn sniff_artifact_counts_the_frames_of_an_animated_png() {
         // An APNG announces its frame count in an `acTL` chunk before the image data. The
         // IHDR says nothing about it, so a sniffer that stops there calls the file static.
