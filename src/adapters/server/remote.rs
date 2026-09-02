@@ -28,6 +28,7 @@ use super::response::{
     payload_too_large_response, too_many_redirects_response,
 };
 use super::stderr_write;
+use crate::core::remote_policy::{is_redirect_status, is_success_status};
 use std::io::Read;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::atomic::Ordering;
@@ -35,8 +36,8 @@ use std::time::{Duration, Instant};
 use ureq::http;
 use url::Url;
 
-pub(super) const MAX_SOURCE_BYTES: u64 = 100 * 1024 * 1024;
-pub(super) const MAX_WATERMARK_BYTES: u64 = 10 * 1024 * 1024;
+pub(crate) const MAX_SOURCE_BYTES: u64 = 100 * 1024 * 1024;
+pub(crate) const MAX_WATERMARK_BYTES: u64 = 10 * 1024 * 1024;
 pub(super) const MAX_REMOTE_REDIRECTS: usize = 5;
 #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
 pub(super) const STORAGE_DOWNLOAD_TIMEOUT_SECS: u64 = 30;
@@ -206,7 +207,7 @@ fn fetch_remote_bytes(
                 if is_redirect_status(status) {
                     current_url =
                         next_redirect_url(&target.url, &response, redirect_index, max_redirects)?;
-                } else if (200..=299).contains(&status) {
+                } else if is_success_status(status) {
                     let bytes =
                         read_remote_response_body(target.url.as_str(), response, policy.max_bytes)?;
                     if let Some(cache) = origin_cache {
@@ -433,6 +434,35 @@ pub(super) fn validate_remote_url(
         )));
     }
 
+    validate_resolved_addrs(&addrs, config)?;
+
+    Ok(addrs)
+}
+
+/// Applies the address rules to what a host name resolved to.
+///
+/// Split out of [`validate_remote_url`] so the rules can be asked about an address without
+/// a name that resolves to it, which is the only way to test the case where the two
+/// disagree.
+fn validate_resolved_addrs(
+    addrs: &[SocketAddr],
+    config: &ServerConfig,
+) -> Result<(), HttpResponse> {
+    // The name check above only sees a URL that spells the endpoint. A host under someone
+    // else's control can point at one without naming it, and this is the rule the module
+    // doc and `docs/configuration.md` call unconditional, so it is asked of the addresses
+    // whatever `allow_insecure_url_sources` says. With the setting off, the deny-list below
+    // refuses the whole link-local range and this changes nothing.
+    if addrs
+        .iter()
+        .map(SocketAddr::ip)
+        .any(crate::core::remote_policy::is_cloud_metadata_ip)
+    {
+        return Err(forbidden_response(
+            "remote URL points to a cloud metadata service",
+        ));
+    }
+
     if !config.allow_insecure_url_sources
         && addrs
             .iter()
@@ -444,7 +474,7 @@ pub(super) fn validate_remote_url(
         ));
     }
 
-    Ok(addrs)
+    Ok(())
 }
 
 pub(super) fn read_remote_response_body(
@@ -492,31 +522,21 @@ pub(super) fn validate_remote_content_encoding(
         return Ok(());
     };
 
-    for encoding in content_encoding
-        .split(',')
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        if !matches!(encoding, "gzip" | "br" | "identity") {
-            return Err(bad_gateway_response(&format!(
-                "remote response uses unsupported content-encoding `{encoding}`"
-            )));
-        }
+    match crate::core::remote_policy::unreadable_content_coding(content_encoding) {
+        Some(encoding) => Err(bad_gateway_response(&format!(
+            "remote response uses unsupported content-encoding `{encoding}`"
+        ))),
+        None => Ok(()),
     }
-
-    Ok(())
-}
-
-pub(super) fn is_redirect_status(status: u16) -> bool {
-    matches!(status, 301 | 302 | 303 | 307 | 308)
 }
 
 /// Validates a storage-backend endpoint URL (e.g. `TRUSS_GCS_ENDPOINT`,
 /// `AWS_ENDPOINT_URL`) to prevent SSRF attacks.
 ///
-/// Cloud metadata hostnames are always blocked regardless of `allow_insecure`.
-/// When `allow_insecure` is false, the hostname is resolved via DNS and every
-/// resulting IP is checked against the private/loopback deny-list.
+/// A cloud metadata endpoint is always blocked regardless of `allow_insecure`, both when
+/// the URL names it and when the host resolves to one. When `allow_insecure` is false, every
+/// resolved address is additionally checked against the private/loopback deny-list, and a
+/// host that cannot be resolved is refused rather than assumed public.
 #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
 pub(super) fn validate_backend_endpoint_url(
     url: &str,
@@ -551,21 +571,40 @@ pub(super) fn validate_backend_endpoint_url(
         ));
     }
 
-    if let Some(host) = parsed.host_str()
-        && !allow_insecure
-    {
+    if let Some(host) = parsed.host_str() {
         let port = parsed.port_or_known_default().unwrap_or(80);
         let addr_str = format!("{host}:{port}");
-        let addrs: Vec<_> = addr_str
-            .to_socket_addrs()
-            .map_err(|e| {
-                io::Error::new(
+        let resolved = addr_str.to_socket_addrs();
+
+        // Insecure mode exists so an endpoint can be a container name or a loopback
+        // emulator, and one of those may not resolve at the moment the configuration is
+        // read, so a resolution failure is not fatal there. It is fatal in strict mode,
+        // where an endpoint that cannot be resolved cannot be checked either.
+        let addrs: Vec<_> = match resolved {
+            Ok(addrs) => addrs.collect(),
+            Err(_) if allow_insecure => Vec::new(),
+            Err(error) => {
+                return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    format!("{env_var_name} could not be resolved: {e}"),
-                )
-            })?
-            .collect();
-        if addrs.iter().any(|a| is_disallowed_remote_ip(a.ip())) {
+                    format!("{env_var_name} could not be resolved: {error}"),
+                ));
+            }
+        };
+
+        // The metadata rule holds in both modes, for the same reason it does on the fetch
+        // path: a name can reach the endpoint without spelling it.
+        if addrs
+            .iter()
+            .map(|a| a.ip())
+            .any(crate::core::remote_policy::is_cloud_metadata_ip)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{env_var_name} must not point to a cloud metadata service"),
+            ));
+        }
+
+        if !allow_insecure && addrs.iter().any(|a| is_disallowed_remote_ip(a.ip())) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!("{env_var_name} must not point to a private or loopback address"),
@@ -624,6 +663,7 @@ pub(super) fn is_disallowed_ipv6(ip: Ipv6Addr) -> bool {
 #[cfg(test)]
 mod redirect_tests {
     use super::*;
+    use rstest::rstest;
 
     #[test]
     fn is_redirect_status_recognizes_all_redirect_codes() {
@@ -733,6 +773,50 @@ mod redirect_tests {
         );
     }
 
+    /// The rule the module doc calls unconditional has to hold for an address a name
+    /// resolved to, not only for a name that spells the address.
+    ///
+    /// A host under someone else's control can point at a metadata endpoint without naming
+    /// it, and `TRUSS_ALLOW_INSECURE_URL_SOURCES` is the configuration where the deny-list
+    /// no longer refuses the link-local range on truss's behalf.
+    #[rstest]
+    #[case("169.254.169.254:80")]
+    #[case("[::ffff:169.254.169.254]:80")]
+    #[case("[::169.254.169.254]:80")]
+    #[case("[2002:a9fe:a9fe::]:80")]
+    #[case("[fd00:ec2::254]:80")]
+    fn resolved_metadata_address_is_refused_even_when_insecure(#[case] raw: &str) {
+        let mut config = ServerConfig::new(std::env::temp_dir(), None);
+        config.allow_insecure_url_sources = true;
+        let addr: SocketAddr = raw.parse().expect("parse socket address");
+
+        let err = validate_resolved_addrs(&[addr], &config)
+            .expect_err("a metadata address must be refused whatever the configuration");
+
+        assert!(
+            String::from_utf8_lossy(&err.body).contains("cloud metadata"),
+            "{raw} must be refused as a metadata endpoint"
+        );
+    }
+
+    /// The negative half, so the unconditional rule does not start refusing the private
+    /// addresses `TRUSS_ALLOW_INSECURE_URL_SOURCES` exists to allow.
+    #[rstest]
+    #[case("127.0.0.1:80")]
+    #[case("10.0.0.1:80")]
+    #[case("169.254.169.253:80")]
+    #[case("[::1]:80")]
+    fn resolved_private_address_stays_allowed_when_insecure(#[case] raw: &str) {
+        let mut config = ServerConfig::new(std::env::temp_dir(), None);
+        config.allow_insecure_url_sources = true;
+        let addr: SocketAddr = raw.parse().expect("parse socket address");
+
+        assert!(
+            validate_resolved_addrs(&[addr], &config).is_ok(),
+            "{raw} is what the insecure setting exists to allow"
+        );
+    }
+
     /// Helper to construct an `http::Response<ureq::Body>` for tests that only
     /// inspect headers. The body is an empty byte vector.
     fn build_response(builder: http::response::Builder) -> http::Response<ureq::Body> {
@@ -741,19 +825,42 @@ mod redirect_tests {
         http::Response::from_parts(parts, body)
     }
 
-    #[test]
-    fn validate_content_encoding_accepts_known_encodings() {
+    /// The list names what the HTTP client this crate is built with can decode, which is
+    /// `gzip` and nothing else, plus the identity that is not an encoding at all. A coding
+    /// token is case-insensitive, so the spellings an origin may send are all here.
+    #[rstest]
+    #[case("gzip")]
+    #[case("GZIP")]
+    #[case("identity")]
+    #[case("Identity")]
+    #[case("gzip, identity")]
+    fn validate_content_encoding_accepts_known_encodings(#[case] value: &str) {
         let response =
-            build_response(ureq::http::Response::builder().header("Content-Encoding", "gzip"));
-        assert!(validate_remote_content_encoding(&response).is_ok());
+            build_response(ureq::http::Response::builder().header("Content-Encoding", value));
+        assert!(
+            validate_remote_content_encoding(&response).is_ok(),
+            "{value} is decodable"
+        );
+    }
 
+    /// `br` is the case this list was getting wrong: `ureq`'s `brotli` feature is not
+    /// enabled, so a brotli body reached the sniffer still compressed and the request was
+    /// answered with an unsupported-media-type about the caller's own file.
+    #[rstest]
+    #[case("br")]
+    #[case("BR")]
+    #[case("gzip, br")]
+    #[case("deflate")]
+    #[case("zstd")]
+    fn validate_content_encoding_rejects_encodings_truss_cannot_decode(#[case] value: &str) {
         let response =
-            build_response(ureq::http::Response::builder().header("Content-Encoding", "br"));
-        assert!(validate_remote_content_encoding(&response).is_ok());
-
-        let response =
-            build_response(ureq::http::Response::builder().header("Content-Encoding", "identity"));
-        assert!(validate_remote_content_encoding(&response).is_ok());
+            build_response(ureq::http::Response::builder().header("Content-Encoding", value));
+        let err = validate_remote_content_encoding(&response)
+            .expect_err("an encoding truss cannot decode must be named");
+        assert!(
+            String::from_utf8_lossy(&err.body).contains("content-encoding"),
+            "{value} must be refused by name"
+        );
     }
 
     #[test]
@@ -1004,14 +1111,6 @@ mod redirect_tests {
     // ── Content-Encoding edge cases ──────────────────────────────────────
 
     #[test]
-    fn validate_content_encoding_accepts_multiple_known_encodings() {
-        let response = build_response(
-            ureq::http::Response::builder().header("Content-Encoding", "gzip, identity"),
-        );
-        assert!(validate_remote_content_encoding(&response).is_ok());
-    }
-
-    #[test]
     fn validate_content_encoding_rejects_mixed_with_unknown() {
         let response = build_response(
             ureq::http::Response::builder().header("Content-Encoding", "gzip, compress"),
@@ -1022,9 +1121,14 @@ mod redirect_tests {
     #[test]
     fn validate_content_encoding_handles_whitespace() {
         let response = build_response(
-            ureq::http::Response::builder().header("Content-Encoding", "  gzip , br  "),
+            ureq::http::Response::builder().header("Content-Encoding", "  gzip , identity  "),
         );
         assert!(validate_remote_content_encoding(&response).is_ok());
+
+        let response = build_response(
+            ureq::http::Response::builder().header("Content-Encoding", "  gzip , br  "),
+        );
+        assert!(validate_remote_content_encoding(&response).is_err());
     }
 
     // ── max_remote_redirects config enforcement ─────────────────────────

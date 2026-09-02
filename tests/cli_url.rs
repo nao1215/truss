@@ -43,6 +43,58 @@ fn spawn_http_server(
     (url, handle)
 }
 
+/// Serves one response with a caller-chosen status line and an image body, so the status is
+/// the only thing that varies between the runs below.
+fn spawn_http_server_with_status(status: &'static str) -> (String, thread::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+    let addr = listener.local_addr().expect("server addr");
+    let url = format!("http://{addr}/image");
+    let body = common::png_bytes();
+
+    let handle = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept connection");
+        let mut request = [0_u8; 1024];
+        let _ = stream.read(&mut request);
+        let header = format!(
+            "HTTP/1.1 {status}\r\nContent-Type: image/png\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        stream.write_all(header.as_bytes()).expect("write headers");
+        stream.write_all(&body).expect("write body");
+        stream.flush().expect("flush response");
+    });
+
+    (url, handle)
+}
+
+/// A 3xx truss does not follow is the origin declining, and used to be read as the image:
+/// with an image body the command exited 0 and wrote a picture out of a response that was
+/// not a representation of anything. The HTTP server answers the same response 502 with
+/// `upstream HTTP 300`, and this is the command line's column of that answer.
+#[test]
+fn convert_url_refuses_a_status_that_is_not_success() {
+    let (url, handle) = spawn_http_server_with_status("300 Multiple Choices");
+    let output_path = temp_file_path("url-status-300");
+    let output = Command::new(env!("CARGO_BIN_EXE_truss"))
+        .arg("convert")
+        .arg("--url")
+        .arg(url)
+        .arg("-o")
+        .arg(&output_path)
+        .output()
+        .expect("run truss convert");
+
+    handle.join().expect("join server thread");
+    let wrote_output = output_path.exists();
+    let _ = fs::remove_file(&output_path);
+    let stderr = String::from_utf8(output.stderr).expect("utf8 stderr");
+
+    assert_eq!(output.status.code(), Some(2), "{stderr}");
+    assert!(stderr.contains("HTTP 300"), "{stderr}");
+    assert!(stderr.contains("bad-gateway"), "{stderr}");
+    assert!(!wrote_output, "a refused fetch must not write an output");
+}
+
 #[test]
 fn inspect_url_reads_remote_png() {
     let (url, handle) = spawn_http_server(common::png_bytes(), "image/png");

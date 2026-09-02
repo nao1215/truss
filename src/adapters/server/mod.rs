@@ -36,7 +36,7 @@ mod metrics;
 mod multipart;
 mod negotiate;
 mod rate_limit;
-mod remote;
+pub(crate) mod remote;
 mod response;
 mod routing;
 #[cfg(feature = "s3")]

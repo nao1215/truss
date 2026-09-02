@@ -1,9 +1,11 @@
-//! Address rules for a URL truss is asked to fetch.
+//! The rules for a URL truss is asked to fetch and for the response it gets back.
 //!
-//! These are pure predicates over a URL and an address, with no I/O and no adapter
-//! vocabulary, so the two adapters that fetch read one copy of them. The HTTP server layers
-//! a deny-list, DNS pinning, and a redirect limit on top; the CLI, which is expected to
-//! fetch from a developer's own machine, applies only the rules that hold everywhere.
+//! These are pure predicates over a URL, an address, and a response's status and content
+//! coding, with no I/O and no adapter vocabulary, so the two adapters that fetch read one
+//! copy of them. The HTTP server layers a deny-list, DNS pinning, and a redirect limit on
+//! top; the CLI, which is expected to fetch from a developer's own machine, applies only
+//! the address rules that hold everywhere and all of the response rules, since a response
+//! means the same thing whoever asked for it.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use url::Url;
@@ -87,10 +89,106 @@ pub(crate) fn is_cloud_metadata_host(url: &Url) -> bool {
     }
 }
 
+/// Reports whether a status says the body that follows is the resource.
+///
+/// Only a 2xx does. A 1xx is not an answer, a 3xx names somewhere else to look, and a 4xx or
+/// 5xx is a refusal; reading an image out of any of them reports the origin's answer as the
+/// caller's picture.
+pub(crate) fn is_success_status(status: u16) -> bool {
+    (200..=299).contains(&status)
+}
+
+/// Reports whether a status names another URL to fetch instead of a body to read.
+///
+/// The five here are the ones that carry a `Location` a client is meant to follow. 300 and
+/// 305 are 3xx and are not on the list: neither names a single URL to retry against, so both
+/// are the origin declining to serve the resource.
+pub(crate) fn is_redirect_status(status: u16) -> bool {
+    matches!(status, 301 | 302 | 303 | 307 | 308)
+}
+
+/// Returns the first content coding in a `Content-Encoding` value that truss cannot decode.
+///
+/// The list of codings truss can read is `gzip`, plus `identity`, which is the absence of
+/// one. It is exactly the set the `ureq` features in `Cargo.toml` enable: `ureq`'s defaults
+/// are `rustls` and `gzip`, and `brotli` is a separate feature this crate does not turn on,
+/// so `br` belongs on neither side of the fetch — truss does not ask for it and cannot read
+/// it if an origin sends it anyway. A coding token is case-insensitive per RFC 9110 section
+/// 8.4.1, so the comparison is too.
+///
+/// Returning the offending token rather than a boolean is what lets the caller name it, so a
+/// body truss cannot read is reported as the origin's encoding rather than reaching the
+/// sniffer still compressed and being reported as an unrecognised file.
+pub(crate) fn unreadable_content_coding(header_value: &str) -> Option<&str> {
+    header_value
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .find(|value| {
+            !value.eq_ignore_ascii_case("gzip") && !value.eq_ignore_ascii_case("identity")
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use rstest::rstest;
+
+    #[rstest]
+    #[case(199, false)]
+    #[case(200, true)]
+    #[case(204, true)]
+    #[case(299, true)]
+    #[case(300, false)]
+    #[case(302, false)]
+    #[case(404, false)]
+    #[case(500, false)]
+    fn only_a_2xx_carries_the_resource(#[case] status: u16, #[case] expected: bool) {
+        assert_eq!(is_success_status(status), expected, "{status}");
+    }
+
+    /// The redirect set and the success set do not overlap, and a status in neither is the
+    /// origin declining, which is the case both adapters used to disagree about.
+    #[rstest]
+    #[case(301)]
+    #[case(302)]
+    #[case(303)]
+    #[case(307)]
+    #[case(308)]
+    fn a_followed_redirect_is_not_a_success(#[case] status: u16) {
+        assert!(is_redirect_status(status), "{status} carries a Location");
+        assert!(!is_success_status(status), "{status} is not the resource");
+    }
+
+    #[rstest]
+    #[case(300)]
+    #[case(305)]
+    #[case(306)]
+    #[case(309)]
+    fn a_3xx_that_is_not_followed_is_not_a_success_either(#[case] status: u16) {
+        assert!(!is_redirect_status(status), "{status} names no single URL");
+        assert!(!is_success_status(status), "{status} is not the resource");
+    }
+
+    #[rstest]
+    #[case("gzip")]
+    #[case("GZIP")]
+    #[case("identity")]
+    #[case(" gzip , identity ")]
+    #[case("")]
+    fn a_readable_coding_is_not_reported(#[case] value: &str) {
+        assert_eq!(unreadable_content_coding(value), None, "{value}");
+    }
+
+    #[rstest]
+    #[case("br", "br")]
+    #[case("BR", "BR")]
+    #[case("gzip, br", "br")]
+    #[case("deflate", "deflate")]
+    #[case("zstd, gzip", "zstd")]
+    fn an_unreadable_coding_is_named(#[case] value: &str, #[case] expected: &str) {
+        assert_eq!(unreadable_content_coding(value), Some(expected), "{value}");
+    }
 
     #[test]
     fn cloud_metadata_aws_with_various_paths_is_blocked() {
