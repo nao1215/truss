@@ -39,6 +39,15 @@ pub(super) static ORIGIN_CACHE_HITS_TOTAL: AtomicU64 = AtomicU64::new(0);
 pub(super) static ORIGIN_CACHE_MISSES_TOTAL: AtomicU64 = AtomicU64::new(0);
 pub(super) static WATERMARK_TRANSFORMS_TOTAL: AtomicU64 = AtomicU64::new(0);
 
+/// Panics caught while handling a connection.
+///
+/// A worker that unwinds is not replaced, so before the panic was caught each one cost the
+/// pool a thread for the rest of the process's life. Catching it turns that into a dropped
+/// connection, which is the same outcome the returned-error path already has, and leaves this
+/// as the only trace that something in the handler is broken. An operator alerts on it: the
+/// value should be zero, and any value at all names a defect rather than a bad request.
+pub(super) static CONNECTION_PANICS_TOTAL: AtomicU64 = AtomicU64::new(0);
+
 pub(super) static START_TIME: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
 
 pub(super) fn uptime_seconds() -> u64 {
@@ -316,6 +325,16 @@ pub(super) fn render_metrics_text(max_concurrent: u64, transforms_in_flight: &At
     );
     body.push_str("# TYPE truss_process_up gauge\n");
     body.push_str("truss_process_up 1\n");
+
+    body.push_str(
+        "# HELP truss_connection_panics_total Panics caught while handling a connection.\n",
+    );
+    body.push_str("# TYPE truss_connection_panics_total counter\n");
+    let _ = writeln!(
+        body,
+        "truss_connection_panics_total {}",
+        CONNECTION_PANICS_TOTAL.load(Ordering::Relaxed)
+    );
 
     body.push_str(
         "# HELP truss_transforms_in_flight Number of image transforms currently executing.\n",
