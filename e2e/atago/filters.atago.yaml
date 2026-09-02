@@ -350,3 +350,37 @@ scenarios:
             format: png
             width: 32
             height: 32
+
+  - name: the help does not deny a capability the binary has
+    steps:
+      # The help is what a caller reads first, and it called crop, blur, sharpen, and the
+      # watermark unsupported for SVG inputs after they had started working, so a caller was
+      # told not to try.
+      - fixture:
+          file: in.svg
+          from: ${fixtures}/svg-minimal.svg
+      - fixture:
+          file: mark.png
+          from: testdata/sample.png
+      - run:
+          command: truss help convert
+      - assert:
+          exit_code: 0
+          stdout:
+            not_contains: "not supported for SVG inputs"
+      - run:
+          command: truss convert in.svg -o blurred2.png --format png --width 40 --height 40 --blur 2
+      - assert:
+          exit_code: 0
+      - run:
+          command: truss convert in.svg -o sharpened2.png --format png --width 40 --height 40 --sharpen 2
+      - assert:
+          exit_code: 0
+      - run:
+          command: truss convert in.svg -o cropped2.png --format png --crop 0,0,1,1
+      - assert:
+          exit_code: 0
+      - run:
+          command: truss convert in.svg -o marked.png --format png --width 60 --height 60 --watermark mark.png
+      - assert:
+          exit_code: 0

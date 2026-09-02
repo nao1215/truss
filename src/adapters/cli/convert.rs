@@ -8,28 +8,50 @@ use crate::core::error_class::ErrorClass;
 
 use super::{
     ClapConvertArgs, ClapOptimizeArgs, CliError, Command, ConvertCommand, EXIT_IO, EXIT_RUNTIME,
-    EXIT_USAGE, HelpTopic, InputSource, OutputTarget, TransformFields, class_for_io_error,
-    classified_error, convert_error, convert_usage, is_dash, map_transform_error, optimize_error,
-    optimize_usage, read_input_bytes, read_url_bytes, runtime_error, validate_url,
+    EXIT_USAGE, HelpTopic, InputSource, MAX_REMOTE_WATERMARK_BYTES, OutputTarget, TransformFields,
+    class_for_io_error, classified_error, convert_error, convert_usage, is_dash,
+    map_transform_error, optimize_error, optimize_usage, read_input_bytes, read_url_bytes,
+    runtime_error, validate_url,
 };
 
 // ---------------------------------------------------------------------------
 // Clap -> Command conversion
 // ---------------------------------------------------------------------------
 
+/// Reports whether the value names a URL rather than a path.
+///
+/// A value is a URL when it names a scheme followed by `://`. A bare `scheme:` with no
+/// authority, as in `mailto:`, stays a path: nothing is fetched from one, and a file whose
+/// name holds a colon is likelier than a caller who meant a URI. Requiring the authority
+/// also keeps `C:\images\logo.png` the Windows path it is rather than a URL with the
+/// scheme `c`.
+fn watermark_is_a_url(watermark: &Path) -> bool {
+    // A value that is not valid UTF-8 cannot be a URL, so it is a path, which is also what a
+    // caller who named a file with an unusual encoding meant.
+    let Some(value) = watermark.to_str() else {
+        return false;
+    };
+    let Some((scheme, _)) = value.split_once("://") else {
+        return false;
+    };
+    !scheme.is_empty()
+        && scheme.starts_with(|c: char| c.is_ascii_alphabetic())
+        && scheme
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+}
+
 /// Reads the watermark image, from a URL when the value is one and from the filesystem
 /// otherwise.
 ///
-/// The fetch is the one `--url` uses, so the address rules, the redirect limit, and the size
-/// cap are the ones already written rather than a second copy of them. A value that is not
-/// valid UTF-8 cannot be a URL, so it is a path, which is also what a caller who named a file
-/// with an unusual encoding meant.
+/// The fetch is the one `--url` uses, so the address rules and the redirect limit are the
+/// ones already written rather than a second copy of them. The size cap is
+/// [`MAX_REMOTE_WATERMARK_BYTES`], not the input's.
 fn read_watermark_bytes(watermark: &Path) -> Result<Vec<u8>, CliError> {
-    if let Some(value) = watermark.to_str()
-        && (value.starts_with("http://") || value.starts_with("https://"))
-    {
+    if watermark_is_a_url(watermark) {
+        let value = watermark.to_str().expect("a URL is valid UTF-8");
         validate_url(value, "--watermark")?;
-        return read_url_bytes(value);
+        return read_url_bytes(value, MAX_REMOTE_WATERMARK_BYTES);
     }
 
     fs::read(watermark).map_err(|error| {
@@ -39,6 +61,50 @@ fn read_watermark_bytes(watermark: &Path) -> Result<Vec<u8>, CliError> {
             &format!("failed to read watermark {}: {error}", watermark.display()),
         )
     })
+}
+
+#[cfg(test)]
+mod watermark_tests {
+    use super::watermark_is_a_url;
+    use std::path::Path;
+
+    /// Which values `--watermark` sends to the fetcher.
+    #[test]
+    fn a_value_naming_a_scheme_is_a_url_and_everything_else_is_a_path() {
+        let urls = [
+            "http://example.com/logo.png",
+            "https://example.com/logo.png",
+            "HTTP://example.com/logo.png",
+            "ftp://example.com/logo.png",
+            "file:///etc/hosts",
+            "gopher://example.com/logo.png",
+        ];
+        for value in urls {
+            assert!(
+                watermark_is_a_url(Path::new(value)),
+                "{value} names a scheme, so it is a URL"
+            );
+        }
+
+        let paths = [
+            "logo.png",
+            "./logo.png",
+            "/var/lib/logo.png",
+            "../logo.png",
+            // A colon with no authority after it.
+            "logo:1.png",
+            "mailto:someone@example.com",
+            // A Windows path names a one-letter drive, which is not a scheme.
+            "C:\\images\\logo.png",
+            "c:/images/logo.png",
+        ];
+        for value in paths {
+            assert!(
+                !watermark_is_a_url(Path::new(value)),
+                "{value} is a path, not a URL"
+            );
+        }
+    }
 }
 
 pub(super) fn convert_from_clap(args: ClapConvertArgs) -> Result<Command, CliError> {
