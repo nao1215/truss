@@ -343,6 +343,29 @@ impl MediaType {
         matches!(self, Self::Jpeg | Self::Webp | Self::Avif)
     }
 
+    /// The longest an axis of this format's output can be, when the format sets a limit.
+    ///
+    /// `MAX_OUTPUT_PIXELS` bounds the area and says nothing about the shape, so an output can
+    /// be tens of thousands of pixels on one axis as long as the other is small. Three of the
+    /// encoders refuse that, for reasons outside truss: a JPEG frame header stores each
+    /// dimension in sixteen bits, WebP caps an image at 16383 on an axis, and rav1e refuses an
+    /// axis outside 16 to 65535, which is narrower than AV1's own frame size fields. The
+    /// number is the smaller of what the format can hold and what the encoder truss reaches
+    /// will write, so WebP is 16383 rather than the 16384 the `image` crate's lossless encoder
+    /// alone would accept: the mode that selects the encoder is a separate option, and one
+    /// ceiling per format is the one a caller can predict.
+    ///
+    /// PNG, BMP and TIFF store dimensions in thirty-two bits, so nothing in the format bites
+    /// before `MAX_OUTPUT_PIXELS` does. GIF is not an output format, and an SVG output is the
+    /// sanitized document rather than a raster of a chosen size.
+    pub(crate) const fn max_output_dimension(self) -> Option<u32> {
+        match self {
+            Self::Jpeg | Self::Avif => Some(65_535),
+            Self::Webp => Some(16_383),
+            Self::Png | Self::Bmp | Self::Tiff | Self::Gif | Self::Svg => None,
+        }
+    }
+
     /// Returns `true` if the encoded format can carry an embedded ICC profile.
     ///
     /// AVIF signals color through the container's `colr` box rather than a profile truss can

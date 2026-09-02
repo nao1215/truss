@@ -172,3 +172,75 @@ scenarios:
             format: png
             width: 512
             height: 512
+
+  # The output format's own ceiling, which the pixel budget does not cover: an output can be
+  # tens of thousands of pixels on one axis while staying well inside 67,108,864.
+  - name: rejects a webp output longer on an axis than the format holds
+    steps:
+      - fixture:
+          file: in.png
+          from: testdata/sample.png
+      - run:
+          command: truss convert in.png -o wide.webp --format webp --width 20000 --height 3000 --fit fill
+      - assert:
+          exit_code: 4
+          stderr:
+            contains:
+              - "error:"
+              - "webp output cannot be 20000x3000"
+              - "16383"
+          changes:
+            created: []
+            modified: []
+            deleted: []
+      - assert:
+          file:
+            path: wide.webp
+            exists: false
+
+  # The lossy encoder is what `--quality` selects, and it used to unwind out of libwebp with
+  # `VP8_ENC_ERROR_BAD_DIMENSION` rather than returning. Exit 5 with a panic dump was the
+  # symptom; the point of this case is that the refusal is a classified exit 4.
+  - name: rejects a lossy webp past the ceiling instead of panicking
+    steps:
+      - fixture:
+          file: in.png
+          from: testdata/sample.png
+      - run:
+          command: truss convert in.png -o wide.webp --format webp --quality 50 --width 16384 --height 1 --fit fill
+      - assert:
+          exit_code: 4
+          stderr:
+            contains: "webp output cannot be 16384x1"
+            not_contains: "panicked"
+      - assert:
+          file:
+            path: wide.webp
+            exists: false
+
+  - name: rejects a jpeg output longer on an axis than the format holds
+    steps:
+      - fixture:
+          file: in.png
+          from: testdata/sample.png
+      - run:
+          command: truss convert in.png -o wide.jpg --format jpeg --width 65536 --height 1 --fit fill
+      - assert:
+          exit_code: 4
+          stderr:
+            contains: "jpeg output cannot be 65536x1"
+
+  - name: allows a webp output at the last size the format holds
+    steps:
+      - fixture:
+          file: in.png
+          from: testdata/sample.png
+      - run:
+          command: truss convert in.png -o edge.webp --format webp --quality 50 --width 16383 --height 1 --fit fill
+      - assert:
+          exit_code: 0
+          image:
+            path: edge.webp
+            format: webp
+            width: 16383
+            height: 1

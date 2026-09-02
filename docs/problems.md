@@ -94,7 +94,7 @@ The request needs a codec or feature this build was compiled without, such as lo
 
 ### limit-exceeded
 
-The transform would exceed a pixel, size, or time limit of the pipeline: an output larger than the output pixel budget, a rotation whose canvas would be, a watermark that does not fit. The server's own limits on what it accepts are `payload-too-large` and `unprocessable-entity`.
+The transform would exceed a pixel, size, or time limit of the pipeline: an output larger than the output pixel budget, a rotation whose canvas would be, a watermark that does not fit, or an output longer on an axis than the requested format can hold. The last one is a limit of the format rather than of truss, and it is checked from the dimensions before the resize is allocated rather than by the encoder, so a size no encoder could write costs nothing; see [Output size limits](pipeline.md#output-size-limits) for the numbers. The server's own limits on what it accepts are `payload-too-large` and `unprocessable-entity`.
 
 ## Request classes
 

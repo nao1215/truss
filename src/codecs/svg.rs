@@ -261,6 +261,14 @@ pub(crate) fn transform_svg(request: TransformRequest) -> Result<TransformResult
         }
     }
 
+    // The output format's own ceiling, asked here for the same reason: a drawing refused by
+    // `apply_pixel_stages` has already been rendered, which is the expensive half.
+    crate::codecs::raster::check_output_format_dimensions(
+        normalized.options.format,
+        canvas.0,
+        canvas.1,
+    )?;
+
     let rgba_image = rasterize_svg(&tree, render.0, render.1, render_region)?;
     budget.check("rasterize")?;
 

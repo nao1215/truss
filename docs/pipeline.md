@@ -81,6 +81,32 @@ a small source scale up, or use `contain`, which pads to the box under either se
 the `MAX_OUTPUT_PIXELS` check read from it, so the limit is always applied to the size that
 actually gets allocated.
 
+## Output size limits
+
+Two limits apply to the size a transform produces, and both are checked from the dimensions
+alone, before the buffer is allocated.
+
+`MAX_OUTPUT_PIXELS` is 67,108,864 and bounds the area. It says nothing about the shape, so an
+output can be tens of thousands of pixels on one axis as long as the other is small.
+
+The output format's own ceiling bounds each axis. Three of the raster output formats set one,
+and it comes from the format, or from the encoder truss reaches, rather than from truss:
+
+| Output | Longest axis |
+|---|---|
+| `jpeg` | 65535 |
+| `webp` | 16383 |
+| `avif` | 65535 |
+| `png`, `bmp`, `tiff` | no limit below `MAX_OUTPUT_PIXELS` |
+
+An `svg` output is the sanitized document rather than a raster of a chosen size, so no ceiling
+applies to it.
+
+A request past either is `limit-exceeded`, exit 4 on the CLI and 413 over HTTP, refused before
+the resize rather than by the encoder. The WebP number is the one the format states; truss's own
+lossless path could write 16384 and no longer does. The AVIF number is rav1e's, which is
+narrower than AV1's own frame size fields.
+
 ## Rotation
 
 `rotate` is normalized into `0..360` before it reaches the pipeline, so a negative angle
