@@ -250,6 +250,35 @@ jobs:
       - name: Run doc tests
         run: cargo test --doc
 
+  # ── Minimum supported Rust version ─────────────────────────
+  # Every other job installs `stable`, so nothing here noticed when the crate or
+  # one of its dependencies started needing a compiler newer than the
+  # `rust-version` the manifest declares and the crate root promises. The
+  # toolchain is read from the manifest so that raising the MSRV stays one edit.
+  msrv:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Read rust-version from Cargo.toml
+        id: msrv
+        run: |
+          version="$(grep -oP '^rust-version\s*=\s*"\K[^"]+' Cargo.toml)"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust ${{ steps.msrv.outputs.version }}
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check with the declared minimum toolchain
+        run: cargo check --locked --all-features --all-targets
+
   # ── OpenAPI spec validation ─────────────────────────────────────────
   openapi-validate:
     runs-on: ubuntu-latest
