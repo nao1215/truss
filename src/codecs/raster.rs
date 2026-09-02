@@ -3469,9 +3469,12 @@ fn retained_metadata<D: ImageDecoder>(
 
 /// Reads the metadata truss can carry from one format to another.
 ///
-/// The formats not listed carry none through this path: AVIF and TIFF metadata is handled
-/// where those are decoded, SVG has no such containers, and BMP and GIF have nowhere to put
-/// them.
+/// Every format with something to read goes through a decoder, which answers for the four
+/// kinds and reports `None` for the ones it has no place for: JPEG, PNG and WebP carry all
+/// four between them, TIFF and GIF carry a profile and XMP, and AVIF's two items are read by
+/// truss's own container walk because the decoder is not one the `image` crate provides. SVG
+/// is text and BMP exposes nothing, which is why those two read nothing rather than being
+/// unfinished.
 fn read_input_metadata(input: &Artifact) -> Result<RetainedMetadata, TransformError> {
     let bytes = Cursor::new(&input.bytes);
     let media_type = input.media_type;
