@@ -76,3 +76,53 @@ fn every_exported_storage_symbol_is_reachable_from_the_crate_root() {
     #[allow(unused_imports)]
     use truss::{S3Context, build_s3_context};
 }
+
+/// The crate root says the other surfaces state their own half of the promise, and names
+/// where. A link to a heading that is not there reads as a policy that exists and cannot be
+/// found, which is what this file exists to prevent for the export list.
+#[test]
+fn every_surface_states_what_a_version_number_covers() {
+    const HEADING: &str = "\n## Compatibility\n";
+
+    for (name, document) in [
+        ("docs/problems.md", include_str!("../docs/problems.md")),
+        (
+            "docs/api-reference.md",
+            include_str!("../docs/api-reference.md"),
+        ),
+        (
+            "packages/truss-wasm/README.md",
+            include_str!("../packages/truss-wasm/README.md"),
+        ),
+        (
+            "packages/truss-url-signer/README.md",
+            include_str!("../packages/truss-url-signer/README.md"),
+        ),
+    ] {
+        assert!(
+            document.replace("\r\n", "\n").contains(HEADING),
+            "{name} has no Compatibility section, and src/lib.rs says its surface carries one"
+        );
+    }
+
+    // The signed URL format states its own, under the name it has had since before the
+    // others existed.
+    assert!(
+        include_str!("../docs/signed-url-spec.md")
+            .replace("\r\n", "\n")
+            .contains("\n## Compatibility Policy\n")
+    );
+
+    // The crate root links to those anchors, so the links and the headings move together.
+    let crate_root = include_str!("../src/lib.rs").replace("\r\n", "\n");
+    for anchor in [
+        "docs/problems.md#compatibility",
+        "docs/api-reference.md#compatibility",
+        "docs/signed-url-spec.md#compatibility-policy",
+    ] {
+        assert!(
+            crate_root.contains(anchor),
+            "src/lib.rs no longer links to {anchor}"
+        );
+    }
+}

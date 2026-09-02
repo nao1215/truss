@@ -54,6 +54,14 @@ A dash means the adapter cannot reach the class: the CLI has no `Accept` header 
 
 The CLI names the class on stderr as `error: <message> (<class>)`, always on one line, so the class is the last thing on the line whatever the message came from. The CLI's five exit codes are coarser than the classes, so a class determines an exit code but an exit code does not determine a class. `internal-error` is the one class on two of them: the CLI separates a fault while reading or writing (2) from one after that (5), and both are the same class to the server.
 
+## Compatibility
+
+What a version number means for truss is stated once, in the [crate documentation](https://docs.rs/truss-image); this section says which parts of the command line that promise covers. While the version is `0.x`, a minor release may change any of it.
+
+From `1.0` on, the covered surface is the names of the subcommands, the names of their flags and the short forms that already exist, the set of values each flag accepts, and the exit codes in the table above. Adding a subcommand, a flag, or an accepted value is a minor release; removing or renaming one is a major release, and so is moving a class to a different exit code or changing what a flag means while keeping its spelling. The class slugs on this page are covered too, since they are what the CLI prints in parentheses and what the server sends as `type`; a script that branches on the slug is reading a documented name rather than a message.
+
+Not covered: the wording of any message, before the class in parentheses or after `warning:`, which is what the class exists to spare a caller from parsing; the layout of `--help`; and the exact bytes an encode produces, which move with the codec libraries as they are upgraded. `truss inspect` writes JSON whose field names are covered and whose member order is not.
+
 ## Transform classes
 
 ### invalid-options

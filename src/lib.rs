@@ -9,9 +9,16 @@
 //! shape here is what semantic versioning covers: adding an export or a field to a
 //! `#[non_exhaustive]` type is a minor release, removing or renaming an export is a major
 //! one, and the minimum supported Rust version in `Cargo.toml` is raised only in a minor
-//! release. The CLI's flags, the HTTP server's routes and query vocabulary, and the two npm
-//! packages carry the same promise under their own documents; this page is the Rust crate's
-//! half of it.
+//! release. This page is the Rust crate's half of the promise. The other surfaces state
+//! their own half beside what they specify: the CLI's subcommands, flags, and exit codes in
+//! [`docs/problems.md`], the HTTP server's routes, query vocabulary, and headers in
+//! [`docs/api-reference.md`], and each npm package's exports and option keys in its own
+//! README. The signed URL format is older than all of them and carries a stronger promise,
+//! in [`docs/signed-url-spec.md`], which holds even before `1.0`.
+//!
+//! [`docs/problems.md`]: https://github.com/nao1215/truss/blob/main/docs/problems.md#compatibility
+//! [`docs/api-reference.md`]: https://github.com/nao1215/truss/blob/main/docs/api-reference.md#compatibility
+//! [`docs/signed-url-spec.md`]: https://github.com/nao1215/truss/blob/main/docs/signed-url-spec.md#compatibility-policy
 //!
 //! Everything the crate exports is re-exported here, at the root. The module tree is
 //! private, so a path through it is not part of the API and does not compile:

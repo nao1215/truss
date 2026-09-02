@@ -125,6 +125,16 @@ A header that only says `*/*` names none. RFC 9110 section 12.5.1 makes `Accept:
 
 `TRUSS_FORMAT_PREFERENCE` orders the formats a request asked for. It does not apply to a request that asked for none.
 
+## Compatibility
+
+What a version number means for truss is stated once, in the [crate documentation](https://docs.rs/truss-image); this section says which parts of the HTTP surface that promise covers. While the version is `0.x`, a minor release may change any of it.
+
+From `1.0` on, the covered surface is the route paths in the tables above, the names of the query parameters, JSON body fields, and multipart form parts, the values each of them accepts, the response headers truss sets, and the problem `type` slugs of [Problem Types](problems.md). Adding a route, a parameter, an accepted value, or a header is a minor release. Removing or renaming any of them is a major one, and so is changing what an existing name means: a parameter is not repurposed under the same spelling, because a caller has no way to notice. A request that omits a parameter added later keeps doing what it did.
+
+Not covered: the `detail` member of a problem body and the text of a `Truss-Warning` header, both of which this page documents as being for a person to read rather than to parse; the wording of any other message; the order of the members of a JSON body; and the exact bytes an encode produces, which move with the codec libraries as they are upgraded.
+
+The signed URL format carries a stronger promise than this one, because a signed URL outlives the request that minted it and may be handed to a CDN that keeps it. It is stated in [Signed URL Specification](signed-url-spec.md#compatibility-policy) and applies even before `1.0`.
+
 ## CDN / Reverse-Proxy Integration
 
 truss is an image transformation origin, not a CDN itself. In production, place a CDN such as CloudFront (or a reverse proxy like nginx / Envoy) in front of truss so that transformed images are cached at the edge.
