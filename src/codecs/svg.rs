@@ -1137,6 +1137,115 @@ fn encode_raster_output(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A drawing is rasterized from the sanitized document, not from the one that arrived.
+    ///
+    /// The two outputs share one sanitize call today, and the only thing keeping them together
+    /// is where that call sits: moving it inside the SVG-output branch would leave `format=png`
+    /// rendering a document truss refuses to serve as SVG, which for an external reference means
+    /// the renderer resolving a URL the sanitizer exists to remove. Rendering the same document
+    /// twice, once as it arrived and once already sanitized, is what says the second pass has
+    /// nothing left to remove and therefore that the first went through it.
+    #[test]
+    fn a_raster_output_renders_what_the_svg_output_would_have_served() {
+        let document = concat!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="16" height="16">"#,
+            r#"<script>alert(1)</script>"#,
+            r#"<image xlink:href="http://127.0.0.1:9/never.png" x="0" y="0" width="16" height="16"/>"#,
+            r#"<style>@import url(http://127.0.0.1:9/never.css);</style>"#,
+            r#"<rect x="2" y="2" width="12" height="12" fill="red"/>"#,
+            r#"</svg>"#,
+        );
+
+        let render = |source: &str| {
+            transform_svg(TransformRequest::new(
+                Artifact::new(
+                    source.as_bytes().to_vec(),
+                    MediaType::Svg,
+                    ArtifactMetadata::default(),
+                ),
+                TransformOptions {
+                    format: Some(MediaType::Png),
+                    ..TransformOptions::default()
+                },
+            ))
+            .expect("rasterize")
+            .artifact
+            .bytes
+        };
+
+        let sanitized = super::sanitize_svg(document.as_bytes()).expect("sanitize");
+        assert_eq!(
+            render(document),
+            render(&sanitized),
+            "the raster path renders something the sanitizer would have removed"
+        );
+    }
+
+    /// Sanitizing a document truss has already sanitized changes nothing further.
+    ///
+    /// The sanitizer is what stands between a caller and a document another caller uploaded,
+    /// and its output is what truss serves. If a second pass removes something, the first pass
+    /// left it in and the served document carried it; if a second pass adds something, the
+    /// output is not a fixed point and two servers in a chain disagree about what the document
+    /// is. Idempotence is the property that says the answer is the document rather than a step
+    /// towards one.
+    #[rstest]
+    #[case::script(include_str!("../../integration/fixtures/svg-script.svg"))]
+    #[case::external_ref(include_str!("../../integration/fixtures/svg-external-ref.svg"))]
+    #[case::external_css(include_str!("../../integration/fixtures/svg-external-css.svg"))]
+    #[case::animate_xss(include_str!("../../integration/fixtures/svg-animate-xss.svg"))]
+    #[case::illustrator(include_str!("../../integration/fixtures/svg-illustrator-prolog.svg"))]
+    #[case::minimal(include_str!("../../integration/fixtures/svg-minimal.svg"))]
+    fn sanitizing_a_sanitized_document_changes_nothing(#[case] source: &str) {
+        let once = super::sanitize_svg(source.as_bytes()).expect("sanitize once");
+        let twice = super::sanitize_svg(once.as_bytes()).expect("sanitize twice");
+        assert_eq!(
+            once, twice,
+            "the sanitizer is not a fixed point: a second pass changed the document"
+        );
+    }
+
+    /// The same, over documents assembled from the constructs the sanitizer decides about.
+    ///
+    /// The fixtures are the shapes that were found by hand; this crosses the same decisions
+    /// with each other, because a construct that survives on its own may not survive next to
+    /// another and the second pass is where that shows.
+    #[test]
+    fn sanitizing_is_a_fixed_point_over_the_constructs_it_decides_about() {
+        const PIECES: [&str; 12] = [
+            r#"<script>alert(1)</script>"#,
+            r#"<style>@import url(http://example.com/x.css); .a { fill: url(http://example.com/y) }</style>"#,
+            r#"<image href="http://example.com/a.png" width="10" height="10"/>"#,
+            r#"<image xlink:href="data:image/png;base64,iVBORw0KGgo=" width="10" height="10"/>"#,
+            r##"<use href="#a"/>"##,
+            r#"<a href="javascript:alert(1)"><rect width="4" height="4"/></a>"#,
+            r#"<rect width="4" height="4" onload="alert(1)" fill="red"/>"#,
+            r#"<animate attributeName="href" to="javascript:alert(1)"/>"#,
+            r#"<foreignObject width="4" height="4"><div xmlns="http://www.w3.org/1999/xhtml">x</div></foreignObject>"#,
+            r#"<text x="1" y="2">&lt;hello&gt;</text>"#,
+            r#"<!-- a comment --><circle cx="2" cy="2" r="1"/>"#,
+            r#"<g style="fill:url('http://example.com/z')"><path d="M0 0 L4 4"/></g>"#,
+        ];
+
+        for (index, piece) in PIECES.iter().enumerate() {
+            for (other_index, other) in PIECES.iter().enumerate() {
+                let document = format!(
+                    r#"<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8">{piece}{other}</svg>"#
+                );
+                let Ok(once) = super::sanitize_svg(document.as_bytes()) else {
+                    continue;
+                };
+                let twice = super::sanitize_svg(once.as_bytes()).unwrap_or_else(|error| {
+                    panic!("pieces {index} and {other_index} sanitize once and not twice: {error}")
+                });
+                assert_eq!(
+                    once, twice,
+                    "pieces {index} and {other_index} are not a fixed point"
+                );
+            }
+        }
+    }
     use crate::core::{Fit, Position, RawArtifact, Rotation, TransformOptions, sniff_artifact};
     use rstest::rstest;
 
