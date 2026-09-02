@@ -180,11 +180,7 @@ pub fn transform_raster(request: TransformRequest) -> Result<TransformResult, Tr
     if let Some(result) = try_passthrough_lossless_optimization(&normalized)? {
         return Ok(result);
     }
-    let deadline = normalized.options.deadline;
-    let budget = EncodeDeadline {
-        start: deadline.map(|_| Instant::now()),
-        deadline,
-    };
+    let budget = EncodeDeadline::starting(normalized.options.deadline);
 
     let (retained_metadata, mut warnings) = extract_retained_metadata(
         &normalized.input,
@@ -198,7 +194,7 @@ pub fn transform_raster(request: TransformRequest) -> Result<TransformResult, Tr
     let mut image = decode_input(&normalized.input)?;
     budget.check("decode")?;
 
-    image = apply_pixel_stages(image, &normalized, budget)?;
+    image = apply_pixel_stages(image, &normalized, budget, normalized.options.crop)?;
 
     // Formats without an alpha channel need the transparency resolved before the encoder
     // sees it, or it is truncated away rather than composited.
@@ -281,6 +277,11 @@ pub fn transform_raster(request: TransformRequest) -> Result<TransformResult, Tr
 /// Runs the stages that touch pixels, in the order `docs/pipeline.md` fixes: auto-orient,
 /// rotate, crop, resize, blur, sharpen, grayscale, watermark.
 ///
+/// This is the only place that order is written down, and both codecs come through it. A
+/// raster input arrives decoded; a drawing arrives rasterized, which is what the same
+/// document means by a drawing joining the raster pipeline. While there is one copy, a stage
+/// cannot be in one position for one kind of source and another position for the next.
+///
 /// The order is the contract, not the order the caller wrote the options in. Each stage
 /// works on the one before it, and each checks the deadline after it, so a pipeline that has
 /// spent its budget stops at the next boundary rather than carrying on. A stage already under
@@ -288,10 +289,17 @@ pub fn transform_raster(request: TransformRequest) -> Result<TransformResult, Tr
 /// stage takes. The output pixel limit is checked before the resize rather than after, from
 /// the dimensions alone, so an outsized request is refused without allocating the buffer it
 /// asked for.
-fn apply_pixel_stages(
+///
+/// The rectangle the crop stage cuts is an argument rather than `normalized.options.crop`
+/// because it is the one stage input that depends on how the buffer was produced. A raster
+/// input passes the request's own rectangle, since it decodes at the source's own size. A
+/// drawing passes the rectangle scaled into the space it was rasterized in, or none at all
+/// when the region was rendered directly and there is nothing left to cut.
+pub(crate) fn apply_pixel_stages(
     mut image: DynamicImage,
     normalized: &NormalizedTransformRequest,
     budget: EncodeDeadline,
+    crop: Option<CropRegion>,
 ) -> Result<DynamicImage, TransformError> {
     let options = &normalized.options;
 
@@ -302,7 +310,7 @@ fn apply_pixel_stages(
     image = apply_rotation(image, options.rotate, options.background, options.format)?;
     budget.check("rotate")?;
 
-    if let Some(crop) = options.crop {
+    if let Some(crop) = crop {
         image = apply_crop(image, crop)?;
         budget.check("crop")?;
     }
@@ -336,8 +344,11 @@ fn apply_pixel_stages(
         budget.check("sharpen")?;
     }
 
+    // Luminance uses the Rec. 601 weights, so an opaque input becomes `Luma8` and one with
+    // alpha becomes `LumaA8`. The encoder layer widens either back to `Rgb8`/`Rgba8`, so no
+    // stage after this one has to care which of the two came out.
     if options.grayscale {
-        image = apply_grayscale(image);
+        image = image.grayscale();
         budget.check("grayscale")?;
     }
 
@@ -720,11 +731,7 @@ fn merge_alpha_plane(alpha_frame: &rav1d_safe::Frame, rgba: &mut [u8], width: u3
 /// Called at pipeline stage boundaries when a deadline is configured. Accepts the elapsed
 /// time and limit as separate values so the function can be tested without depending on
 /// real wall-clock time.
-pub(crate) fn check_deadline(
-    elapsed: Duration,
-    limit: Duration,
-    stage: &str,
-) -> Result<(), TransformError> {
+fn check_deadline(elapsed: Duration, limit: Duration, stage: &str) -> Result<(), TransformError> {
     if elapsed > limit {
         return Err(TransformError::LimitExceeded(format!(
             "transform exceeded {:.0}s deadline after {stage} (elapsed: {:.1}s)",
@@ -976,15 +983,14 @@ fn apply_exif_orientation(image: DynamicImage, orientation: u16) -> DynamicImage
 /// A multiple of 90 keeps the exact path: those only permute pixels, so resampling them
 /// would lose sharpness for nothing. Any other angle goes through [`rotate_arbitrary`].
 ///
-/// The SVG codec calls this too, once it has rasterized: a rotated SVG needs the same
-/// quarter-turn shortcut, bounding box, background rule, and pixel limit as any other
-/// raster input, and one function is what keeps the two from drifting.
+/// Reached from [`apply_pixel_stages`], so a rasterized drawing gets the same quarter-turn
+/// shortcut, bounding box, background rule, and pixel limit as any other raster input.
 ///
 /// # Errors
 ///
 /// Returns [`TransformError::LimitExceeded`] when the rotated bounding box would exceed
 /// [`MAX_OUTPUT_PIXELS`].
-pub(crate) fn apply_rotation(
+fn apply_rotation(
     image: DynamicImage,
     rotation: Rotation,
     background: Option<Rgba8>,
@@ -1157,24 +1163,11 @@ fn sample_bilinear(source: &RgbaImage, x: f64, y: f64, outside: [f64; 4]) -> Rgb
     ])
 }
 
-/// Desaturates an image to grayscale while preserving its alpha channel.
-///
-/// Luminance uses the Rec. 601 weights applied by [`DynamicImage::grayscale`], so an
-/// opaque input becomes `Luma8` and an input with alpha becomes `LumaA8`. The encoder
-/// layer widens either back to `Rgb8`/`Rgba8`, so callers do not need to care which of
-/// the two comes out here.
-fn apply_grayscale(image: DynamicImage) -> DynamicImage {
-    image.grayscale()
-}
-
 /// Takes the region the crop names out of the image.
 ///
-/// Called from both codecs: an SVG rasterized to a raster format joins this pipeline, and
-/// the crop it gets is this one, so a rectangle means the same thing whichever the source.
-pub(crate) fn apply_crop(
-    image: DynamicImage,
-    crop: CropRegion,
-) -> Result<DynamicImage, TransformError> {
+/// Reached from [`apply_pixel_stages`], so a rectangle means the same thing whether the
+/// source was a raster file or a drawing.
+fn apply_crop(image: DynamicImage, crop: CropRegion) -> Result<DynamicImage, TransformError> {
     let (iw, ih) = image.dimensions();
     if crop.x.saturating_add(crop.width) > iw || crop.y.saturating_add(crop.height) > ih {
         return Err(TransformError::InvalidOptions(format!(
@@ -1191,7 +1184,7 @@ pub(crate) fn apply_crop(
 /// the parameters into a struct would only move the same fields somewhere else while adding
 /// a type that nothing outside this function would use.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn apply_resize(
+fn apply_resize(
     image: DynamicImage,
     width: Option<u32>,
     height: Option<u32>,
@@ -1259,13 +1252,11 @@ pub(crate) fn apply_resize(
     }
 }
 
-/// Composites a watermark image onto the main image at the given position,
-/// opacity, and margin.
-/// Composites the watermark onto the image.
+/// Composites the watermark onto the image at the given position, opacity, and margin.
 ///
-/// Called from both codecs, so an overlay lands in the same place at the same opacity
-/// whether the source was a raster file or a drawing.
-pub(crate) fn apply_watermark(
+/// Reached from [`apply_pixel_stages`], so an overlay lands in the same place at the same
+/// opacity whether the source was a raster file or a drawing.
+fn apply_watermark(
     image: DynamicImage,
     watermark: &WatermarkInput,
 ) -> Result<DynamicImage, TransformError> {
@@ -1965,14 +1956,24 @@ struct EncodedOutput {
     used_lossy_webp: bool,
 }
 
+/// The wall clock a request's deadline is measured against.
 #[derive(Clone, Copy)]
-struct EncodeDeadline {
+pub(crate) struct EncodeDeadline {
     start: Option<Instant>,
     deadline: Option<Duration>,
 }
 
 impl EncodeDeadline {
-    fn check(self, stage: &'static str) -> Result<(), TransformError> {
+    /// Starts the clock, or leaves it unstarted when no deadline was asked for.
+    pub(crate) fn starting(deadline: Option<Duration>) -> Self {
+        Self {
+            start: deadline.map(|_| Instant::now()),
+            deadline,
+        }
+    }
+
+    /// Fails when the elapsed time has passed the deadline by the end of `stage`.
+    pub(crate) fn check(self, stage: &'static str) -> Result<(), TransformError> {
         if let (Some(start), Some(limit)) = (self.start, self.deadline) {
             check_deadline(start.elapsed(), limit, stage)?;
         }
@@ -5451,6 +5452,30 @@ mod tests {
         assert!(matches!(err, TransformError::LimitExceeded(_)));
         assert!(err.to_string().contains("decode"));
         assert!(err.to_string().contains("30s"));
+    }
+
+    /// The order the pixel stages run in is written down once.
+    ///
+    /// Two copies of one order is the shape that produced #465 and #466: a stage was correct
+    /// in the raster copy and wrong in the SVG one, and the code read as correct in both
+    /// places. The stage functions are private to this module, so the compiler already keeps
+    /// the SVG codec from calling them; what it cannot keep out is a second spelling of a
+    /// stage that `image` offers as a method. This asks the source, because a duplicated
+    /// order is only visible there.
+    #[test]
+    fn the_pipeline_stage_order_lives_in_one_place() {
+        let svg = include_str!("svg.rs");
+
+        assert!(
+            svg.contains("raster::apply_pixel_stages("),
+            "the SVG codec no longer reaches the pixel stages through the shared entry point"
+        );
+        for stage in [".blur(", ".unsharpen(", ".grayscale("] {
+            assert!(
+                !svg.contains(stage),
+                "`{stage}` is applied in svg.rs; the stage order belongs to apply_pixel_stages alone"
+            );
+        }
     }
 
     #[test]
