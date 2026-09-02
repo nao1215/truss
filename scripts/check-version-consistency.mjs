@@ -21,6 +21,7 @@ import { fileURLToPath } from "node:url";
 import { parseArgs, reportAndExit } from "./lib/release-cli.mjs";
 import {
   OPENAPI_VERSION_PATHS,
+  collectChangelogProblems,
   collectVersionProblems,
   readCrateVersion,
   readYamlScalar,
@@ -54,7 +55,7 @@ const copies = [
   })),
 ];
 
-reportAndExit(
-  `version ${crateVersion} across ${copies.length + 1} copies`,
-  collectVersionProblems(crateVersion, copies),
-);
+reportAndExit(`version ${crateVersion} across ${copies.length + 1} copies`, [
+  ...collectVersionProblems(crateVersion, copies),
+  ...collectChangelogProblems(read("CHANGELOG.md"), crateVersion),
+]);

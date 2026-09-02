@@ -206,3 +206,38 @@ export function collectVersionProblems(crateVersion, copies) {
 
   return problems;
 }
+
+/**
+ * Check the changelog's headings against the crate version.
+ *
+ * Two things can go wrong here and neither fails anything else. A release renames
+ * `## [Unreleased]` to `## vX.Y.Z`, so a release that forgets leaves the notes for the version
+ * it published under a heading that says they are unreleased. And an edit that inserts a new
+ * `## [Unreleased]` above an existing one splits the notes in two, which is invisible in a diff
+ * of one hunk and obvious in the published file.
+ *
+ * @param {string} text the changelog
+ * @param {string} crateVersion
+ * @returns {string[]} problems, empty when the headings agree with the version
+ */
+export function collectChangelogProblems(text, crateVersion) {
+  const problems = [];
+  const lines = text.replace(/\r\n/g, "\n").split("\n");
+  const headings = lines.filter((line) => line.startsWith("## "));
+
+  const unreleased = headings.filter((line) => line.trim() === "## [Unreleased]");
+  if (unreleased.length > 1) {
+    problems.push(`the changelog has ${unreleased.length} [Unreleased] sections, which splits the notes`);
+  }
+
+  const firstRelease = headings.find((line) => /^## v\d/.test(line.trim()));
+  if (firstRelease === undefined) {
+    problems.push("the changelog names no released version");
+  } else if (firstRelease.trim() !== `## v${crateVersion}`) {
+    problems.push(
+      `the newest released section is "${firstRelease.trim()}", expected "## v${crateVersion}"; a release renames [Unreleased] to the version it publishes`,
+    );
+  }
+
+  return problems;
+}

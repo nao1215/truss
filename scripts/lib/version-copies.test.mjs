@@ -3,6 +3,7 @@ import { test } from "node:test";
 
 import {
   OPENAPI_VERSION_PATHS,
+  collectChangelogProblems,
   collectVersionProblems,
   readCrateVersion,
   readYamlScalar,
@@ -116,4 +117,56 @@ test("the crate version comes from the package table, not a dependency", () => {
 test("every addressed openapi path is distinct", () => {
   const addressed = OPENAPI_VERSION_PATHS.map((entry) => entry.join("."));
   assert.equal(new Set(addressed).size, addressed.length);
+});
+
+test("two Unreleased sections are a problem", () => {
+  const changelog = [
+    "# Changelog",
+    "",
+    "## [Unreleased]",
+    "",
+    "### Fixed",
+    "",
+    "- something",
+    "",
+    "## [Unreleased]",
+    "",
+    "### Fixed",
+    "",
+    "- something else",
+    "",
+    "## v1.2.3",
+    "",
+  ].join("\n");
+
+  assert.deepEqual(collectChangelogProblems(changelog, "1.2.3"), [
+    "the changelog has 2 [Unreleased] sections, which splits the notes",
+  ]);
+});
+
+test("a release that did not rename its section is a problem", () => {
+  const changelog = ["# Changelog", "", "## [Unreleased]", "", "## v1.2.2", ""].join("\n");
+
+  assert.deepEqual(collectChangelogProblems(changelog, "1.2.3"), [
+    'the newest released section is "## v1.2.2", expected "## v1.2.3"; a release renames [Unreleased] to the version it publishes',
+  ]);
+});
+
+test("one Unreleased above the crate's own version is what a working tree looks like", () => {
+  const changelog = [
+    "# Changelog",
+    "",
+    "## [Unreleased]",
+    "",
+    "### Fixed",
+    "",
+    "- something",
+    "",
+    "## v1.2.3",
+    "",
+    "## v1.2.2",
+    "",
+  ].join("\n");
+
+  assert.deepEqual(collectChangelogProblems(changelog, "1.2.3"), []);
 });
