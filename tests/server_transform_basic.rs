@@ -377,6 +377,112 @@ fn serve_once_rejects_oversized_output_with_413() {
     assert!(body.contains("limit"));
 }
 
+/// An output the format cannot hold is a 413 rather than a 500, and is refused before the work.
+///
+/// 20000x3000 is inside `MAX_OUTPUT_PIXELS` and past what WebP holds on an axis, so it used to
+/// reach the encoder: the server decoded, resized and filled a sixty-megapixel buffer, then
+/// answered 500 with the encoder crate's own sentence in the `detail`.
+#[test]
+fn serve_once_rejects_an_output_the_format_cannot_hold_with_413() {
+    let storage_root = temp_dir("format-ceiling");
+    fs::write(storage_root.join("image.png"), png_bytes()).expect("write source fixture");
+    let (addr, handle) = spawn_server(ServerConfig::new(storage_root, Some("secret".to_string())));
+    let response = send_transform_request(
+        addr,
+        r#"{"source":{"kind":"path","path":"/image.png"},"options":{"width":20000,"height":3000,"fit":"fill","format":"webp"}}"#,
+        Some("secret"),
+    );
+
+    handle
+        .join()
+        .expect("join server thread")
+        .expect("serve one request");
+
+    let (header, content_type, body) = split_response(&response);
+    let body = String::from_utf8(body).expect("utf8 response body");
+
+    assert!(
+        header.starts_with("HTTP/1.1 413 Payload Too Large"),
+        "expected 413, got {header}"
+    );
+    assert_eq!(content_type, "application/problem+json");
+    assert!(body.contains("webp output cannot be 20000x3000"), "{body}");
+    assert!(
+        !body.contains("Format error"),
+        "the detail should be a sentence truss wrote: {body}"
+    );
+}
+
+/// The size that used to unwind out of libwebp is answered, and no worker panic is counted.
+///
+/// The counter is the assertion that matters. `truss_connection_panics_total` is documented as
+/// a number whose correct value is zero, so a request that moves it names a defect in the
+/// handler rather than a bad caller.
+#[test]
+#[serial]
+fn serve_once_answers_a_lossy_webp_past_the_ceiling_without_panicking() {
+    let storage_root = temp_dir("webp-lossy-ceiling");
+    fs::write(storage_root.join("image.png"), png_bytes()).expect("write source fixture");
+
+    let (metrics_addr, metrics_handle) = spawn_server(ServerConfig::new(
+        temp_dir("panics-before"),
+        Some("secret".to_string()),
+    ));
+    let before = send_metrics_request(metrics_addr, Some("secret"));
+    metrics_handle
+        .join()
+        .expect("join server thread")
+        .expect("serve one request");
+    let before = panic_count(&before);
+
+    let (addr, handle) = spawn_server(ServerConfig::new(storage_root, Some("secret".to_string())));
+    let response = send_transform_request(
+        addr,
+        r#"{"source":{"kind":"path","path":"/image.png"},"options":{"width":16384,"height":1,"fit":"fill","format":"webp","quality":50}}"#,
+        Some("secret"),
+    );
+    handle
+        .join()
+        .expect("join server thread")
+        .expect("serve one request");
+
+    let (header, _, body) = split_response(&response);
+    let body = String::from_utf8(body).expect("utf8 response body");
+    assert!(
+        header.starts_with("HTTP/1.1 413 Payload Too Large"),
+        "expected 413, got {header}"
+    );
+    assert!(body.contains("webp output cannot be 16384x1"), "{body}");
+
+    let (after_addr, after_handle) = spawn_server(ServerConfig::new(
+        temp_dir("panics-after"),
+        Some("secret".to_string()),
+    ));
+    let after = send_metrics_request(after_addr, Some("secret"));
+    after_handle
+        .join()
+        .expect("join server thread")
+        .expect("serve one request");
+
+    assert_eq!(
+        panic_count(&after),
+        before,
+        "a request the caller composed must not count as a handler panic"
+    );
+}
+
+/// The value of `truss_connection_panics_total` in a `/metrics` response.
+fn panic_count(response: &[u8]) -> u64 {
+    let (_, _, body) = split_response(response);
+    let body = String::from_utf8(body).expect("utf8 metrics body");
+    body.lines()
+        .find_map(|line| line.strip_prefix("truss_connection_panics_total "))
+        .expect("the metrics body names the panic counter")
+        .trim()
+        .parse()
+        .expect("the counter is a number")
+}
+
 #[test]
 fn serve_once_exposes_metrics_with_bearer_auth() {
     let storage_root = temp_dir("metrics");
