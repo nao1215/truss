@@ -1,5 +1,13 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- A release archive no longer carries the time zone of the machine that packed it ([#516](https://github.com/nao1215/truss/issues/516)). ZIP stores a local time with no zone beside it, so the same binary packed in Tokyo and in UTC produced entries nine hours apart and therefore different bytes, which contradicts what `scripts/pack-release-archive.sh` normalizes the mode, the ownership and the modification time for. Every release runner is UTC, so the archives truss has published are consistent with each other and nothing downstream is affected; what was wrong is that the property held by accident. The zone is pinned for the packing tool now, as it already was for the `touch` that sets the timestamp, and a test packs each target twice in two zones and compares. The 7-Zip branch also stops writing the creation and last-access times into the entry, which `touch` does not pin and which no reader of a release archive wants.
+
+  The failure that led here was a different one, and it is still open: the reproducibility test failed once on the macOS runner and passed on a re-run, which a zone cannot explain. What this adds for it is a failure message that says where the two archives first differ and a line from the packing script naming which tool it used, so the next occurrence is enough to work from rather than a re-run away from nothing.
+
 ## v0.23.0
 
 ### Added
