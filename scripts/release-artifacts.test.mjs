@@ -47,7 +47,7 @@ function run(script, args, options = {}) {
   });
 }
 
-function pack(target, format, into, reportedVersion = version) {
+function pack(target, format, into, reportedVersion = version, timeZone = undefined) {
   // The staged file has to be named exactly as it will appear in the archive,
   // so give each target its own directory rather than a decorated file name.
   const stage = mkdtempSync(join(workspace, "stage-"));
@@ -60,6 +60,7 @@ function pack(target, format, into, reportedVersion = version) {
   const archivePath = join(into, archiveName(tag, target, format));
   const result = spawnSync("bash", [join(SCRIPTS, "pack-release-archive.sh"), source, archivePath], {
     encoding: "utf8",
+    env: timeZone === undefined ? process.env : { ...process.env, TZ: timeZone },
   });
 
   assert.equal(result.status, 0, `packing ${target} failed: ${result.stderr}`);
@@ -103,6 +104,38 @@ function cloneDistribution() {
   copyFileSync(join(distribution, "checksums.txt"), join(clone, "checksums.txt"));
 
   return clone;
+}
+
+/**
+ * Where two archives that should have been identical first differ.
+ *
+ * A message saying only that they differ leaves nothing behind: the failure has been seen
+ * once, on one platform, and passed on a re-run, so the next occurrence has to be enough to
+ * work from. The offset says which part of the container moved -- a local file header, the
+ * compressed data, the central directory -- and the bytes either side are what identifies the
+ * field, since a timestamp and a length look nothing alike.
+ *
+ * @param {Buffer} a
+ * @param {Buffer} b
+ * @returns {string}
+ */
+function describeDifference(a, b) {
+  if (a.length !== b.length) {
+    return `lengths differ, ${a.length} against ${b.length}`;
+  }
+
+  const at = a.findIndex((byte, index) => byte !== b[index]);
+  if (at < 0) {
+    return "no byte differs, which should not be possible here";
+  }
+
+  const from = Math.max(0, at - 8);
+  const to = Math.min(a.length, at + 16);
+  return [
+    `${a.length} bytes each, first difference at offset ${at}`,
+    `  a[${from}..${to}] ${a.subarray(from, to).toString("hex")}`,
+    `  b[${from}..${to}] ${b.subarray(from, to).toString("hex")}`,
+  ].join("\n");
 }
 
 function readManifest(from = distribution) {
@@ -154,7 +187,25 @@ describe("release distribution tooling", () => {
       const a = readFileSync(pack(entry.target, entry.archive, first));
       const b = readFileSync(pack(entry.target, entry.archive, second));
 
-      assert.ok(a.equals(b), `${entry.target} archive is not reproducible`);
+      assert.ok(a.equals(b), `${entry.target} archive is not reproducible: ${describeDifference(a, b)}`);
+    }
+  });
+
+  test("the packing machine's time zone is not part of the archive", () => {
+    // ZIP stores a local time with no zone, so an entry packed in Tokyo and one packed in UTC
+    // carried timestamps nine hours apart and therefore different bytes. Every release runner
+    // is UTC, which is why the reproducibility assertion above never caught it.
+    const tokyo = mkdtempSync(join(workspace, "tz-tokyo-"));
+    const utc = mkdtempSync(join(workspace, "tz-utc-"));
+
+    for (const entry of targets) {
+      const a = readFileSync(pack(entry.target, entry.archive, tokyo, version, "Asia/Tokyo"));
+      const b = readFileSync(pack(entry.target, entry.archive, utc, version, "UTC0"));
+
+      assert.ok(
+        a.equals(b),
+        `${entry.target} archive depends on the packing time zone: ${describeDifference(a, b)}`,
+      );
     }
   });
 

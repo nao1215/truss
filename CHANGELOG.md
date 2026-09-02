@@ -1,5 +1,17 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- A release ZIP is the same bytes every time it is packed ([#516](https://github.com/nao1215/truss/issues/516)). The reproducibility test failed once on the macOS runner and passed on a re-run of the same commit, which is a weak signal on its own and a strong one for this assertion in particular: what it checks is a property the release publishes, since `scripts/pack-release-archive.sh` normalizes the entry's mode, its ownership and its timestamp precisely so that packing the same binary twice gives the same archive, and `release-manifest.json` records a SHA-256 per archive on that basis.
+
+  Two things were writing into the archive that nothing pinned. The 7-Zip the ZIP branch used adds an extended timestamp field carrying times `touch` cannot set, so two archives packed either side of a second boundary differed by exactly one second in a field no reader of a release archive wants — an intermittent failure whose frequency is the chance that two packs straddle a second. And ZIP stores a local time with no zone beside it, so the entry's timestamp was the pinned instant read through whatever zone the machine was in: the same binary packed in Tokyo and in UTC differed by nine hours. Every release runner is UTC, so the published archives are consistent with each other; the property held by accident.
+
+  The ZIP is written directly now, by `scripts/pack-zip.mjs`, rather than by whichever of 7-Zip and Info-ZIP a runner happens to have. The archive holds one file, so the container is a local header, the deflated bytes, a central directory entry and an end record, with no extra fields at all and the timestamp written as the constant it is. That is shorter than normalizing a packer's output, and it is the same code on all three runners rather than two branches that are exercised one per platform. `unzip -t`, Python's `zipfile` and truss's own reader all accept the result, and the mode still reads back as 0755.
+
+  A test packs each target twice in two time zones and compares, and the reproducibility assertion now reports the offset of the first differing byte with a window of each side rather than only that the archives differ — which is what turned the intermittent failure from a re-run into a diagnosis in one run.
+
 ## v0.23.0
 
 ### Added
