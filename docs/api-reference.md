@@ -85,7 +85,7 @@ A source path is a `/`-separated path relative to `TRUSS_STORAGE_ROOT`. Leading 
 
 ## Requests and Connections
 
-A `HEAD` request answers with the headers its `GET` would have sent, including the `Content-Length` of the image that `GET` would have produced, so a caller can size a rendered variant without downloading it. No content follows the headers.
+A `HEAD` request answers with the headers its `GET` would have sent, including the `Content-Length` of the image that `GET` would have produced, so a caller can size a rendered variant without downloading it. No content follows the headers. On `/images/by-path` and `/images/by-url` the signature covers the HTTP method, so a `HEAD` needs a URL signed for `HEAD` and a `HEAD` sent to a `GET`-signed URL is answered `401`; `truss sign --method head` and the npm signer's `method` option mint one, and [Signed URL Specification](signed-url-spec.md) has the canonicalization.
 
 Connections are persistent for HTTP/1.1 and close after one answer for earlier versions unless the client sends `Connection: keep-alive`. A client may pipeline: requests written into the same packet are answered in the order they were sent. `TRUSS_KEEP_ALIVE_MAX_REQUESTS` caps how many requests one connection serves.
 
@@ -149,8 +149,8 @@ Only the public image endpoints should be exposed through CloudFront:
 
 | Endpoint | Visibility | CloudFront |
 |----------|-----------|------------|
-| `GET, HEAD /images/by-path` | Public (signed URL) | Origin for CDN |
-| `GET, HEAD /images/by-url` | Public (signed URL) | Origin for CDN |
+| `GET, HEAD /images/by-path` | Public (signed URL, per method) | Origin for CDN |
+| `GET, HEAD /images/by-url` | Public (signed URL, per method) | Origin for CDN |
 | `POST /images:transform` | Private (Bearer token) | Do not expose |
 | `POST /images` | Private (Bearer token) | Do not expose |
 

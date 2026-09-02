@@ -79,7 +79,7 @@ The package exports one function:
 - `method`: optional canonical HTTP method, default `GET`
 
 The package omits transform fields that would resolve to truss defaults, matching the Rust implementation. For the public contract and compatibility policy, see the repository's [Signed URL Specification](https://github.com/nao1215/truss/blob/main/docs/signed-url-spec.md).
-It also rejects request-invariant invalid combinations before signing, including `fit` / `position` without bounded resize, `quality` with `optimize=lossless`, invalid `targetQuality` matrices, invalid crop strings, and watermark opacity outside `1..=100`. An empty `keyId`, `secret`, or source is rejected for the same reason: a server will not start with an empty key id or secret, so a URL carrying one can never verify.
+It also rejects request-invariant invalid combinations before signing, including `fit` / `position` without bounded resize, `quality` with `optimize=lossless`, invalid `targetQuality` matrices, invalid crop strings, and watermark opacity outside `1..=100`. An empty `keyId`, `secret`, or source is rejected for the same reason: a server will not start with an empty key id or secret, so a URL carrying one can never verify. A key none of the objects above reads is rejected on the same grounds, since a misspelled optional key would otherwise be dropped in silence and sign a URL for a transform nobody asked for: `transform` for `transforms` signs one with no transform in it, and `watermarks` for `watermark` signs one that serves the image without its overlay. A key whose value is `undefined` counts as absent, so `{...options, preset: undefined}` still signs.
 
 ## Runtime Notes
 
