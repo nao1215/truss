@@ -17,7 +17,7 @@ This specification covers the public image endpoints authenticated by HMAC-signe
 - `GET /images/by-path`
 - `GET /images/by-url`
 
-The primary external contract is `GET`. truss also accepts `HEAD` on these routes, using the same canonicalization rules with `HEAD` as the HTTP method, but `truss sign` generates `GET` URLs.
+The primary external contract is `GET`. truss also accepts `HEAD` on these routes, using the same canonicalization rules with `HEAD` as the HTTP method, so a `HEAD` request needs a URL signed for `HEAD` and is answered `401` for one signed for `GET`. Every signer mints both: `truss sign --method head`, the `method` option of `@nao1215/truss-url-signer`, and `sign_public_url_with_method` in the Rust crate, each defaulting to `GET`.
 
 Private Bearer-token endpoints such as `POST /images` and `POST /images:transform` are out of scope for this document.
 
