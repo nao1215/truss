@@ -447,23 +447,16 @@ fn fit_contain_with_without_enlargement_pads_around_the_source() {
 ///
 /// This ran through the library and never through the binary until it did, and the binary is
 /// where the thread the process starts on decides how much stack the decoder gets: one
-/// megabyte on Windows, which an AV1 decode does not fit in a build without optimizations.
-/// A conversion out of AVIF is the smallest thing that reaches that.
+/// megabyte on Windows, which an AV1 decode does not fit in a build without optimizations. The
+/// requirement does not depend on the size of the picture, since what wants the room is the
+/// decoder's own working set, so the smallest image reaches it.
 #[cfg(feature = "avif")]
 #[test]
 fn convert_decodes_an_avif_through_the_binary() {
     let source = temp_file_path("avif-source").with_extension("png");
     let avif = temp_file_path("avif-middle").with_extension("avif");
     let output = temp_file_path("avif-output").with_extension("png");
-    let mut image = RgbaImage::new(64, 64);
-    for (x, y, pixel) in image.enumerate_pixels_mut() {
-        *pixel = Rgba([(x * 4) as u8, (y * 4) as u8, ((x + y) * 2) as u8, 255]);
-    }
-    let mut png = Vec::new();
-    PngEncoder::new(&mut png)
-        .write_image(&image, 64, 64, ColorType::Rgba8.into())
-        .expect("encode png");
-    fs::write(&source, png).expect("write png source");
+    fs::write(&source, create_red_blue_4x2_png()).expect("write png source");
 
     let to_avif = Command::new(env!("CARGO_BIN_EXE_truss"))
         .arg(&source)
@@ -491,5 +484,5 @@ fn convert_decodes_an_avif_through_the_binary() {
         .expect("guess the output format")
         .decode()
         .expect("decode the output");
-    assert_eq!(decoded.dimensions(), (64, 64));
+    assert_eq!(decoded.dimensions(), (4, 2));
 }
