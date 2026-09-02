@@ -281,6 +281,7 @@ pub(super) fn storage_backend_label(config: &ServerConfig) -> &'static str {
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 #[serde(default, rename_all = "camelCase", deny_unknown_fields)]
+#[non_exhaustive]
 pub struct TransformOptionsPayload {
     #[serde(default, deserialize_with = "crate::core::deserialize_width")]
     pub width: Option<u32>,
@@ -364,7 +365,7 @@ impl TransformOptionsPayload {
         // that answered 400 for `preserveExif=true` on its own — including when a
         // server-side preset was the thing that set it — while every other caller of
         // `resolve_metadata_flags` accepted it.
-        let (strip_metadata, preserve_exif) = crate::resolve_metadata_flags(
+        let (strip_metadata, preserve_exif) = crate::core::resolve_metadata_flags(
             self.strip_metadata,
             None,
             self.preserve_exif.or(Some(defaults.preserve_exif)),
@@ -433,9 +434,9 @@ impl TransformOptionsPayload {
 /// Overall request deadline for outbound fetches (source + watermark combined).
 const REQUEST_DEADLINE_SECS: u64 = 60;
 
-const WATERMARK_DEFAULT_POSITION: Position = Position::BottomRight;
-const WATERMARK_DEFAULT_OPACITY: u8 = 50;
-const WATERMARK_DEFAULT_MARGIN: u32 = 10;
+use crate::core::{
+    WATERMARK_DEFAULT_MARGIN, WATERMARK_DEFAULT_OPACITY, WATERMARK_DEFAULT_POSITION,
+};
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, rename_all = "camelCase", deny_unknown_fields)]
@@ -520,12 +521,11 @@ pub(super) fn fetch_watermark(
             "watermark image must be a raster format (not SVG)",
         ));
     }
-    Ok(WatermarkInput {
-        image: artifact,
-        position: validated.position,
-        opacity: validated.opacity,
-        margin: validated.margin,
-    })
+    let mut watermark = WatermarkInput::new(artifact);
+    watermark.position = validated.position;
+    watermark.opacity = validated.opacity;
+    watermark.margin = validated.margin;
+    Ok(watermark)
 }
 
 pub(super) fn resolve_multipart_watermark(

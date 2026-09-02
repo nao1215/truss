@@ -11,9 +11,11 @@ pub mod svg;
 
 /// Dispatches a transform request to the appropriate codec based on the input media type.
 ///
-/// This is the primary entry point for all image transformations. It routes SVG
-/// inputs to [`svg::transform_svg`] and raster inputs to [`raster::transform_raster`],
-/// and rejects unsupported conversions (e.g., raster-to-SVG output) with a clear error.
+/// This is the entry point for every image transformation, and the only one: it routes an
+/// SVG input to the SVG codec and everything else to the raster codec, and rejects an
+/// unsupported conversion such as raster-to-SVG output with a clear error. The two codecs
+/// are not exported, because choosing between them is what this function does and naming
+/// the wrong one for an input is only a way to get an error.
 ///
 /// GIF is an input-only format here. A single-frame GIF decodes and transforms like any
 /// other raster input; an animated one is refused rather than silently reduced to its
@@ -28,6 +30,142 @@ pub mod svg;
 /// SVG or GIF output, [`TransformError::UnsupportedInputMediaType`] for an animated GIF
 /// input, [`TransformError::CapabilityMissing`] if an SVG input is provided but the `svg`
 /// feature is not enabled, or any error propagated from the underlying codec.
+/// # Examples
+///
+/// ```
+/// use image::codecs::png::PngEncoder;
+/// use image::{ColorType, ImageEncoder, Rgba, RgbaImage};
+/// use truss::{sniff_artifact, transform, MediaType, RawArtifact, TransformOptions, TransformRequest};
+///
+/// let image = RgbaImage::from_pixel(2, 2, Rgba([10, 20, 30, 255]));
+/// let mut bytes = Vec::new();
+/// PngEncoder::new(&mut bytes)
+///     .write_image(&image, 2, 2, ColorType::Rgba8.into())
+///     .unwrap();
+///
+/// let input = sniff_artifact(RawArtifact::new(bytes, Some(MediaType::Png))).unwrap();
+/// let mut options = TransformOptions::default();
+/// options.format = Some(MediaType::Jpeg);
+/// let output = transform(TransformRequest::new(
+///     input,
+///     options,
+/// ))
+/// .unwrap();
+///
+/// assert_eq!(output.artifact.media_type, MediaType::Jpeg);
+/// assert_eq!(output.artifact.metadata.width, Some(2));
+/// assert_eq!(output.artifact.metadata.height, Some(2));
+/// ```
+///
+/// ```
+/// use image::codecs::png::PngEncoder;
+/// use image::{ColorType, ImageEncoder, Rgba, RgbaImage};
+/// use truss::{sniff_artifact, transform, MediaType, RawArtifact, TransformOptions, TransformRequest};
+///
+/// let image = RgbaImage::from_pixel(2, 2, Rgba([10, 20, 30, 255]));
+/// let mut bytes = Vec::new();
+/// PngEncoder::new(&mut bytes)
+///     .write_image(&image, 2, 2, ColorType::Rgba8.into())
+///     .unwrap();
+///
+/// let input = sniff_artifact(RawArtifact::new(bytes, Some(MediaType::Png))).unwrap();
+/// let mut options = TransformOptions::default();
+/// options.format = Some(MediaType::Avif);
+/// options.quality = Some(70);
+/// let output = transform(TransformRequest::new(
+///     input,
+///     options,
+/// ))
+/// .unwrap();
+/// let sniffed = sniff_artifact(RawArtifact::new(output.artifact.bytes.clone(), None)).unwrap();
+///
+/// assert_eq!(output.artifact.media_type, MediaType::Avif);
+/// assert_eq!(sniffed.media_type, MediaType::Avif);
+/// ```
+///
+/// ```
+/// use image::codecs::jpeg::JpegDecoder;
+/// use image::codecs::jpeg::JpegEncoder;
+/// use image::metadata::Orientation;
+/// use image::{ColorType, ImageDecoder, ImageEncoder, Rgb, RgbImage};
+/// use std::io::Cursor;
+/// use truss::{sniff_artifact, transform, MediaType, RawArtifact, TransformOptions, TransformRequest};
+///
+/// let image = RgbImage::from_pixel(2, 1, Rgb([10, 20, 30]));
+/// let exif = vec![
+///     0x49, 0x49, 0x2A, 0x00, 0x08, 0x00, 0x00, 0x00,
+///     0x01, 0x00, 0x12, 0x01, 0x03, 0x00, 0x01, 0x00,
+///     0x00, 0x00, 0x06, 0x00, 0x00, 0x00, 0x00, 0x00,
+///     0x00, 0x00,
+/// ];
+/// let mut bytes = Vec::new();
+/// let mut encoder = JpegEncoder::new_with_quality(&mut bytes, 80);
+/// encoder.set_exif_metadata(exif).unwrap();
+/// encoder
+///     .write_image(&image, 2, 1, ColorType::Rgb8.into())
+///     .unwrap();
+///
+/// let input = sniff_artifact(RawArtifact::new(bytes, Some(MediaType::Jpeg))).unwrap();
+/// let mut options = TransformOptions::default();
+/// options.format = Some(MediaType::Jpeg);
+/// options.strip_metadata = false;
+/// options.preserve_exif = true;
+/// let output = transform(TransformRequest::new(
+///     input,
+///     options,
+/// ))
+/// .unwrap();
+///
+/// let mut decoder = JpegDecoder::new(Cursor::new(&output.artifact.bytes)).unwrap();
+/// let exif = decoder.exif_metadata().unwrap().unwrap();
+///
+/// assert_eq!(output.artifact.metadata.width, Some(1));
+/// assert_eq!(output.artifact.metadata.height, Some(2));
+/// assert_eq!(Orientation::from_exif_chunk(&exif), Some(Orientation::NoTransforms));
+/// ```
+///
+/// ```
+/// use image::codecs::jpeg::JpegDecoder;
+/// use image::codecs::jpeg::JpegEncoder;
+/// use image::{ColorType, ImageDecoder, ImageEncoder, Rgb, RgbImage};
+/// use std::io::Cursor;
+/// use truss::{sniff_artifact, transform, MediaType, RawArtifact, TransformOptions, TransformRequest};
+///
+/// let image = RgbImage::from_pixel(2, 1, Rgb([10, 20, 30]));
+/// let mut bytes = Vec::new();
+/// let mut encoder = JpegEncoder::new_with_quality(&mut bytes, 80);
+/// encoder.set_icc_profile(b"demo-icc-profile".to_vec()).unwrap();
+/// encoder
+///     .write_image(&image, 2, 1, ColorType::Rgb8.into())
+///     .unwrap();
+///
+/// let input = sniff_artifact(RawArtifact::new(bytes, Some(MediaType::Jpeg))).unwrap();
+/// let mut options = TransformOptions::default();
+/// options.format = Some(MediaType::Jpeg);
+/// options.strip_metadata = false;
+/// let output = transform(TransformRequest::new(
+///     input,
+///     options,
+/// ))
+/// .unwrap();
+///
+/// let mut decoder = JpegDecoder::new(Cursor::new(&output.artifact.bytes)).unwrap();
+/// assert_eq!(decoder.icc_profile().unwrap(), Some(b"demo-icc-profile".to_vec()));
+/// ```
+///
+/// ```
+/// use truss::{sniff_artifact, RawArtifact, TransformRequest, TransformOptions, MediaType};
+/// use truss::transform;
+///
+/// let svg_bytes = b"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"10\" height=\"10\"><rect width=\"10\" height=\"10\" fill=\"red\"/></svg>";
+/// let input = sniff_artifact(RawArtifact::new(svg_bytes.to_vec(), None)).unwrap();
+/// let mut options = TransformOptions::default();
+/// options.format = Some(MediaType::Png);
+/// options.width = Some(10);
+/// options.height = Some(10);
+/// let result = transform(TransformRequest::new(input, options)).unwrap();
+/// assert_eq!(result.artifact.media_type, MediaType::Png);
+/// ```
 #[must_use = "this function returns the transform result without side effects"]
 pub fn transform(request: TransformRequest) -> Result<TransformResult, TransformError> {
     if request.input.media_type == MediaType::Svg {

@@ -1,3 +1,3 @@
 fn main() -> std::process::ExitCode {
-    truss::adapters::cli::run(std::env::args_os())
+    truss::run_cli(std::env::args_os())
 }

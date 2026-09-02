@@ -414,26 +414,18 @@ fn resolve_wasm_watermark(
             "watermark image must be a raster format, not SVG".to_string(),
         ));
     }
-    let position = watermark_options
-        .position
-        .map(|v| {
-            Position::from_str(&v).map_err(|reason| {
-                TransformError::InvalidOptions(format!("watermark position is invalid: {reason}"))
-            })
-        })
-        .transpose()?
-        .unwrap_or(Position::BottomRight);
-    let opacity = watermark_options.opacity.unwrap_or(50);
-    crate::core::validate_watermark_opacity(opacity)
+    let mut watermark = WatermarkInput::new(artifact);
+    if let Some(value) = watermark_options.position {
+        watermark.position = Position::from_str(&value).map_err(|reason| {
+            TransformError::InvalidOptions(format!("watermark position is invalid: {reason}"))
+        })?;
+    }
+    watermark.opacity = watermark_options.opacity.unwrap_or(watermark.opacity);
+    crate::core::validate_watermark_opacity(watermark.opacity)
         .map_err(|message| TransformError::InvalidOptions(message.to_string()))?;
-    let margin = watermark_options.margin.unwrap_or(10);
+    watermark.margin = watermark_options.margin.unwrap_or(watermark.margin);
 
-    Ok(WatermarkInput {
-        image: artifact,
-        position,
-        opacity,
-        margin,
-    })
+    Ok(watermark)
 }
 
 /// Transforms browser-provided bytes with an optional watermark overlay.

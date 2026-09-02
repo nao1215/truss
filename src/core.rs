@@ -37,21 +37,13 @@ pub const MAX_OUTPUT_PIXELS: u64 = 67_108_864;
 ///
 /// This limit prevents decompression bombs from consuming unbounded memory.
 /// The value matches the API specification in `docs/openapi.yaml`.
-///
-/// ```
-/// assert_eq!(truss::MAX_DECODED_PIXELS, 100_000_000);
-/// ```
-pub const MAX_DECODED_PIXELS: u64 = 100_000_000;
+pub(crate) const MAX_DECODED_PIXELS: u64 = 100_000_000;
 
 /// Maximum number of decoded pixels allowed for a watermark image.
 ///
 /// This prevents a single watermark overlay from dominating memory during
 /// compositing. The value (4 MP) is generous for typical watermarks.
-///
-/// ```
-/// assert_eq!(truss::MAX_WATERMARK_PIXELS, 4_000_000);
-/// ```
-pub const MAX_WATERMARK_PIXELS: u64 = 4_000_000;
+pub(crate) const MAX_WATERMARK_PIXELS: u64 = 4_000_000;
 
 /// A (width, height) pair that prevents accidental transposition of dimensions.
 ///
@@ -105,6 +97,7 @@ impl fmt::Display for Dimensions {
 /// assert!(unknown.declared_media_type.is_none());
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RawArtifact {
     /// The raw input bytes.
     pub bytes: Vec<u8>,
@@ -139,6 +132,7 @@ impl RawArtifact {
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[must_use]
+#[non_exhaustive]
 pub struct Artifact {
     /// The artifact bytes.
     pub bytes: Vec<u8>,
@@ -166,11 +160,11 @@ impl Artifact {
 /// ```
 /// use truss::{ArtifactMetadata, Dimensions};
 ///
-/// let meta = ArtifactMetadata {
-///     width: Some(1920),
-///     height: Some(1080),
-///     ..ArtifactMetadata::default()
-/// };
+/// // The struct is `#[non_exhaustive]`, so start from `default()` and assign; a field
+/// // truss adds later is then a minor change rather than a breaking one.
+/// let mut meta = ArtifactMetadata::default();
+/// meta.width = Some(1920);
+/// meta.height = Some(1080);
 /// assert_eq!(meta.dimensions(), Some(Dimensions::new(1920, 1080)));
 /// assert_eq!(meta.frame_count, 1);
 ///
@@ -178,17 +172,17 @@ impl Artifact {
 /// assert_eq!(meta.oriented_dimensions(), Some(Dimensions::new(1920, 1080)));
 ///
 /// // Orientation 6 is a quarter turn, so a transform swaps the axes.
-/// let rotated = ArtifactMetadata {
-///     orientation: Some(6),
-///     ..meta.clone()
-/// };
+/// let mut rotated = meta.clone();
+/// rotated.orientation = Some(6);
 /// assert_eq!(rotated.oriented_dimensions(), Some(Dimensions::new(1080, 1920)));
 ///
 /// // When either dimension is unknown, dimensions() returns None
-/// let partial = ArtifactMetadata { width: Some(100), ..ArtifactMetadata::default() };
+/// let mut partial = ArtifactMetadata::default();
+/// partial.width = Some(100);
 /// assert!(partial.dimensions().is_none());
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ArtifactMetadata {
     /// The rendered width in pixels, when known.
     pub width: Option<u32>,
@@ -438,6 +432,13 @@ impl FromStr for MediaType {
     }
 }
 
+/// Where a watermark sits when the caller does not say.
+pub(crate) const WATERMARK_DEFAULT_POSITION: Position = Position::BottomRight;
+/// How opaque a watermark is when the caller does not say.
+pub(crate) const WATERMARK_DEFAULT_OPACITY: u8 = 50;
+/// How far a watermark sits from its edge when the caller does not say.
+pub(crate) const WATERMARK_DEFAULT_MARGIN: u32 = 10;
+
 /// A watermark image to composite onto the output.
 ///
 /// The watermark is alpha-composited onto the main image after all other
@@ -446,15 +447,17 @@ impl FromStr for MediaType {
 /// ```
 /// use truss::{Artifact, ArtifactMetadata, MediaType, Position, WatermarkInput};
 ///
-/// let wm = WatermarkInput {
-///     image: Artifact::new(vec![0], MediaType::Png, ArtifactMetadata::default()),
-///     position: Position::BottomRight,
-///     opacity: 50,
-///     margin: 10,
-/// };
+/// let image = Artifact::new(vec![0], MediaType::Png, ArtifactMetadata::default());
+/// let mut wm = WatermarkInput::new(image);
+/// assert_eq!(wm.position, Position::BottomRight);
 /// assert_eq!(wm.opacity, 50);
+/// assert_eq!(wm.margin, 10);
+///
+/// wm.opacity = 80;
+/// assert_eq!(wm.opacity, 80);
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct WatermarkInput {
     /// The watermark image (already classified via [`sniff_artifact`]).
     pub image: Artifact,
@@ -464,6 +467,26 @@ pub struct WatermarkInput {
     pub opacity: u8,
     /// Margin in pixels from the nearest edge. Default: 10.
     pub margin: u32,
+}
+
+impl WatermarkInput {
+    /// Builds a watermark placed the way the vocabulary says it is placed when nothing else
+    /// is asked for.
+    ///
+    /// The three defaults are the ones the CLI, the HTTP server, and the Wasm package all
+    /// publish, and this is where they are written; each adapter used to spell them again at
+    /// its own call site. A caller who wants something else assigns the field afterwards,
+    /// which is also how a caller reaches the ones this constructor does not take: the
+    /// struct is `#[non_exhaustive]`, so a field truss adds later is a minor change.
+    #[must_use]
+    pub fn new(image: Artifact) -> Self {
+        Self {
+            image,
+            position: WATERMARK_DEFAULT_POSITION,
+            opacity: WATERMARK_DEFAULT_OPACITY,
+            margin: WATERMARK_DEFAULT_MARGIN,
+        }
+    }
 }
 
 /// A complete transform request for the Core layer.
@@ -478,6 +501,7 @@ pub struct WatermarkInput {
 /// assert!(request.watermark.is_none());
 /// ```
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct TransformRequest {
     /// The already-resolved input artifact.
     pub input: Artifact,
@@ -511,7 +535,7 @@ impl TransformRequest {
     }
 
     /// Normalizes the request into a form that does not require adapter-specific defaults.
-    pub fn normalize(self) -> Result<NormalizedTransformRequest, TransformError> {
+    pub(crate) fn normalize(self) -> Result<NormalizedTransformRequest, TransformError> {
         let options = self.options.normalize(self.input.media_type)?;
 
         if let Some(ref wm) = self.watermark {
@@ -528,7 +552,8 @@ impl TransformRequest {
 
 /// A fully normalized transform request.
 #[derive(Debug, Clone, PartialEq)]
-pub struct NormalizedTransformRequest {
+#[non_exhaustive]
+pub(crate) struct NormalizedTransformRequest {
     /// The normalized input artifact.
     pub input: Artifact,
     /// Fully normalized transform options.
@@ -619,6 +644,7 @@ impl fmt::Display for CropRegion {
 
 /// Optimization policy applied near the final encoding stage.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum OptimizeMode {
     /// Keep the current encoding behavior with no extra optimization work.
     #[default]
@@ -666,6 +692,7 @@ impl FromStr for OptimizeMode {
 
 /// Perceptual metric used for lossy optimization quality targeting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum QualityMetric {
     /// Structural similarity index.
     Ssim,
@@ -761,22 +788,23 @@ pub(crate) fn default_lossy_target_quality(media_type: MediaType) -> Option<Targ
 
 /// Raw transform options before defaulting and validation has completed.
 ///
-/// Use `TransformOptions::default()` as a starting point and override the fields
-/// you need. Call [`TransformOptions::normalize`] to validate and resolve defaults.
+/// Start from `TransformOptions::default()` and assign the fields you need. Validation and
+/// the resolution of the rest happen inside [`transform`](crate::transform), which reports
+/// what it refuses through [`TransformError`]. The struct is `#[non_exhaustive]`, so a field
+/// a later version of truss adds is a minor change rather than a breaking one, and a struct
+/// literal is not available from outside the crate.
 ///
 /// # Examples
 ///
 /// ```
 /// use truss::{TransformOptions, MediaType, Rotation};
 ///
-/// let opts = TransformOptions {
-///     width: Some(800),
-///     height: Some(600),
-///     format: Some(MediaType::Webp),
-///     quality: Some(80),
-///     rotate: Rotation::DEG_90,
-///     ..TransformOptions::default()
-/// };
+/// let mut opts = TransformOptions::default();
+/// opts.width = Some(800);
+/// opts.height = Some(600);
+/// opts.format = Some(MediaType::Webp);
+/// opts.quality = Some(80);
+/// opts.rotate = Rotation::DEG_90;
 /// assert_eq!(opts.width, Some(800));
 /// assert_eq!(opts.quality, Some(80));
 /// assert_eq!(opts.rotate, Rotation::DEG_90);
@@ -784,6 +812,7 @@ pub(crate) fn default_lossy_target_quality(media_type: MediaType) -> Option<Targ
 /// assert!(opts.strip_metadata);
 /// ```
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct TransformOptions {
     /// The desired output width in pixels.
     pub width: Option<u32>,
@@ -970,7 +999,7 @@ impl TransformOptions {
     ///
     /// Returns [`TransformError::InvalidOptions`] when the options contradict each other
     /// or the output format they resolve to.
-    pub fn normalize(
+    pub(crate) fn normalize(
         self,
         input_media_type: MediaType,
     ) -> Result<NormalizedTransformOptions, TransformError> {
@@ -1081,7 +1110,8 @@ impl TransformOptions {
 
 /// Fully normalized transform options ready for a backend pipeline.
 #[derive(Debug, Clone, PartialEq)]
-pub struct NormalizedTransformOptions {
+#[non_exhaustive]
+pub(crate) struct NormalizedTransformOptions {
     /// The desired output width in pixels.
     pub width: Option<u32>,
     /// The desired output height in pixels.
@@ -1135,6 +1165,7 @@ pub struct NormalizedTransformOptions {
 /// assert!(Fit::from_str("unknown").is_err());
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Fit {
     /// Scale to fit inside the box, preserving aspect ratio, then pad to the exact box.
     ///
@@ -1198,6 +1229,7 @@ impl FromStr for Fit {
 /// assert!(Position::from_str("middle").is_err());
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Position {
     /// Center alignment.
     Center,
@@ -1428,23 +1460,14 @@ impl Rgba8 {
 
 /// Metadata handling after option normalization.
 ///
-/// # Examples
-///
-/// ```
-/// use truss::{TransformOptions, MediaType};
-///
-/// // Default options normalize to StripAll
-/// let opts = TransformOptions::default();
-/// let normalized = opts.normalize(MediaType::Png).unwrap();
-/// assert_eq!(normalized.metadata_policy, truss::MetadataPolicy::StripAll);
-///
-/// // Disabling strip_metadata normalizes to KeepAll
-/// let opts = TransformOptions { strip_metadata: false, ..TransformOptions::default() };
-/// let normalized = opts.normalize(MediaType::Png).unwrap();
-/// assert_eq!(normalized.metadata_policy, truss::MetadataPolicy::KeepAll);
-/// ```
+/// Crate-internal: it is the resolved form of `stripMetadata`, `keepMetadata`, and
+/// `preserveExif`, which the adapters carry as those three names. What a caller sees is the
+/// output, and a [`TransformWarning::MetadataDropped`] when the format could not carry
+/// something. The resolution itself is covered by `metadata_policy_resolution` in this
+/// module's tests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MetadataPolicy {
+#[non_exhaustive]
+pub(crate) enum MetadataPolicy {
     /// Drop metadata from the output.
     StripAll,
     /// Keep metadata unchanged when possible.
@@ -1473,31 +1496,7 @@ pub enum MetadataPolicy {
 ///
 /// Returns [`TransformError::InvalidOptions`] when `keep` and `preserve_exif` are both
 /// explicitly `true`, since those policies are mutually exclusive.
-///
-/// # Examples
-///
-/// ```
-/// use truss::resolve_metadata_flags;
-///
-/// // Default: strip all metadata
-/// let (strip, exif) = resolve_metadata_flags(None, None, None).unwrap();
-/// assert!(strip);
-/// assert!(!exif);
-///
-/// // Explicit keep
-/// let (strip, exif) = resolve_metadata_flags(None, Some(true), None).unwrap();
-/// assert!(!strip);
-/// assert!(!exif);
-///
-/// // Preserve EXIF only
-/// let (strip, exif) = resolve_metadata_flags(None, None, Some(true)).unwrap();
-/// assert!(!strip);
-/// assert!(exif);
-///
-/// // keep + preserve_exif conflict
-/// assert!(resolve_metadata_flags(None, Some(true), Some(true)).is_err());
-/// ```
-pub fn resolve_metadata_flags(
+pub(crate) fn resolve_metadata_flags(
     strip: Option<bool>,
     keep: Option<bool>,
     preserve_exif: Option<bool>,
@@ -1742,6 +1741,7 @@ impl fmt::Display for TransformWarning {
 /// metadata types that were silently dropped because the output encoder does not support them.
 #[derive(Debug)]
 #[must_use]
+#[non_exhaustive]
 pub struct TransformResult {
     /// The transformed output artifact.
     pub artifact: Artifact,
@@ -3191,6 +3191,77 @@ fn read_u64_be(bytes: &[u8]) -> Result<u64, TransformError> {
 
 #[cfg(test)]
 mod tests {
+    /// The two input caps are the numbers `docs/openapi.yaml` publishes, so a change to
+    /// either is a change to the document. These were doctests on the constants before the
+    /// pair stopped being public; the assertions are the same.
+    #[test]
+    fn the_input_pixel_caps_are_the_documented_numbers() {
+        assert_eq!(super::MAX_DECODED_PIXELS, 100_000_000);
+        assert_eq!(super::MAX_WATERMARK_PIXELS, 4_000_000);
+    }
+
+    /// The three flag names resolve to one `(strip_metadata, preserve_exif)` pair, which is
+    /// what makes the four adapters agree. This was a doctest on `resolve_metadata_flags`
+    /// before that function stopped being public; the assertions are the same.
+    #[test]
+    fn metadata_flag_resolution() {
+        use super::resolve_metadata_flags;
+
+        // Default: strip all metadata.
+        let (strip, exif) = resolve_metadata_flags(None, None, None).unwrap();
+        assert!(strip);
+        assert!(!exif);
+
+        // Explicit keep.
+        let (strip, exif) = resolve_metadata_flags(None, Some(true), None).unwrap();
+        assert!(!strip);
+        assert!(!exif);
+
+        // Preserve EXIF only.
+        let (strip, exif) = resolve_metadata_flags(None, None, Some(true)).unwrap();
+        assert!(!strip);
+        assert!(exif);
+
+        // keep + preserve_exif conflict.
+        assert!(resolve_metadata_flags(None, Some(true), Some(true)).is_err());
+    }
+
+    /// The three metadata names the adapters carry resolve to one policy, which is what the
+    /// pipeline reads. This was a doctest on `MetadataPolicy` before that enum stopped being
+    /// public; the assertions are the same.
+    ///
+    /// The struct literal is available here because `#[non_exhaustive]` binds other crates
+    /// and not the defining one, which is why the mutation form appears in the examples a
+    /// caller reads and not in the tests beside the definition.
+    #[test]
+    fn metadata_policy_resolution() {
+        let options = TransformOptions::default();
+        assert!(options.strip_metadata);
+        assert_eq!(
+            options.normalize(MediaType::Png).unwrap().metadata_policy,
+            MetadataPolicy::StripAll
+        );
+
+        let options = TransformOptions {
+            strip_metadata: false,
+            ..TransformOptions::default()
+        };
+        assert_eq!(
+            options.normalize(MediaType::Png).unwrap().metadata_policy,
+            MetadataPolicy::KeepAll
+        );
+
+        let options = TransformOptions {
+            strip_metadata: false,
+            preserve_exif: true,
+            ..TransformOptions::default()
+        };
+        assert_eq!(
+            options.normalize(MediaType::Jpeg).unwrap().metadata_policy,
+            MetadataPolicy::PreserveExif
+        );
+    }
+
     #[cfg(any(feature = "server", feature = "wasm"))]
     use super::single_line;
     use super::{

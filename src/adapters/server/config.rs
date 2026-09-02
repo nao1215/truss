@@ -62,6 +62,7 @@ use url::Url;
 /// `info → debug → error → warn → info`.
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[non_exhaustive]
 pub enum LogLevel {
     /// Errors that indicate a failed operation.
     Error = 0,
@@ -225,6 +226,7 @@ pub(super) enum StorageBackendLabel {
 /// resolved.
 #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum StorageBackend {
     /// Source images live on the local filesystem under `storage_root`.
     Filesystem,
@@ -285,10 +287,10 @@ impl StorageBackend {
 }
 
 /// The default bind address for the development HTTP server.
-pub const DEFAULT_BIND_ADDR: &str = "127.0.0.1:8080";
+pub(crate) const DEFAULT_BIND_ADDR: &str = "127.0.0.1:8080";
 
 /// The default storage root used by the server adapter.
-pub const DEFAULT_STORAGE_ROOT: &str = ".";
+pub(crate) const DEFAULT_STORAGE_ROOT: &str = ".";
 
 pub(super) const DEFAULT_PUBLIC_MAX_AGE_SECONDS: u32 = 3600;
 pub(super) const DEFAULT_PUBLIC_STALE_WHILE_REVALIDATE_SECONDS: u32 = 60;
@@ -324,6 +326,7 @@ use super::http_parse::DEFAULT_MAX_UPLOAD_BODY_BYTES;
 /// messages to their preferred logging infrastructure instead of stderr.
 pub type LogHandler = Arc<dyn Fn(&str) + Send + Sync>;
 
+#[non_exhaustive]
 pub struct ServerConfig {
     /// The storage root used for `source.kind=path` lookups.
     pub storage_root: PathBuf,
@@ -840,7 +843,7 @@ impl ServerConfig {
     /// # Examples
     ///
     /// ```
-    /// use truss::adapters::server::ServerConfig;
+    /// use truss::ServerConfig;
     ///
     /// let config = ServerConfig::new(std::env::temp_dir(), Some("secret".to_string()));
     ///
@@ -973,7 +976,7 @@ impl ServerConfig {
     /// # Examples
     ///
     /// ```
-    /// use truss::adapters::server::ServerConfig;
+    /// use truss::ServerConfig;
     ///
     /// let config = ServerConfig::new(std::env::temp_dir(), None)
     ///     .with_signed_url_credentials("public-dev", "top-secret");
@@ -1013,7 +1016,7 @@ impl ServerConfig {
     /// # Examples
     ///
     /// ```
-    /// use truss::adapters::server::ServerConfig;
+    /// use truss::ServerConfig;
     ///
     /// let config = ServerConfig::new(std::env::temp_dir(), Some("secret".to_string()))
     ///     .with_insecure_url_sources(true);
@@ -1033,7 +1036,7 @@ impl ServerConfig {
     /// # Examples
     ///
     /// ```
-    /// use truss::adapters::server::ServerConfig;
+    /// use truss::ServerConfig;
     ///
     /// let config = ServerConfig::new(std::env::temp_dir(), None)
     ///     .with_cache_root(std::env::temp_dir().join("truss-cache"));
@@ -1054,7 +1057,7 @@ impl ServerConfig {
     /// # Examples
     ///
     /// ```
-    /// use truss::adapters::server::ServerConfig;
+    /// use truss::ServerConfig;
     ///
     /// let config = ServerConfig::new(std::env::temp_dir(), None)
     ///     .with_cache_max_bytes(500 * 1024 * 1024); // 500 MB
@@ -1187,7 +1190,7 @@ impl ServerConfig {
     ///     std::env::set_var("TRUSS_ALLOW_INSECURE_URL_SOURCES", "true");
     /// }
     ///
-    /// let config = truss::adapters::server::ServerConfig::from_env().unwrap();
+    /// let config = truss::ServerConfig::from_env().unwrap();
     ///
     /// assert!(config.storage_root.is_absolute());
     /// assert!(config.allow_insecure_url_sources);
@@ -1291,7 +1294,7 @@ impl ServerConfig {
                 .unwrap_or(DEFAULT_TRANSFORM_DEADLINE_SECS);
 
         let max_input_pixels =
-            parse_env_u64_ranged("TRUSS_MAX_INPUT_PIXELS", 1, crate::MAX_DECODED_PIXELS)?
+            parse_env_u64_ranged("TRUSS_MAX_INPUT_PIXELS", 1, crate::core::MAX_DECODED_PIXELS)?
                 .unwrap_or(DEFAULT_MAX_INPUT_PIXELS);
 
         let max_upload_bytes =

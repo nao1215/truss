@@ -323,14 +323,11 @@ where
             );
             failure
         })?;
-        Some(WatermarkInput {
-            image: wm_artifact,
-            position: command
-                .watermark_position
-                .unwrap_or(crate::Position::BottomRight),
-            opacity: command.watermark_opacity.unwrap_or(50),
-            margin: command.watermark_margin.unwrap_or(10),
-        })
+        let mut watermark = WatermarkInput::new(wm_artifact);
+        watermark.position = command.watermark_position.unwrap_or(watermark.position);
+        watermark.opacity = command.watermark_opacity.unwrap_or(watermark.opacity);
+        watermark.margin = command.watermark_margin.unwrap_or(watermark.margin);
+        Some(watermark)
     } else {
         None
     };

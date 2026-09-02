@@ -5,8 +5,8 @@ use image::codecs::jpeg::JpegEncoder;
 use image::codecs::png::PngEncoder;
 use image::{ColorType, ImageEncoder, Rgba, RgbaImage};
 use truss::{
-    Artifact, Fit, MediaType, Position, RawArtifact, TransformOptions, TransformRequest,
-    sniff_artifact, transform,
+    Artifact, Fit, MediaType, RawArtifact, TransformOptions, TransformRequest, sniff_artifact,
+    transform,
 };
 
 /// The size every case that touches pixels runs at, and the size its label names.
@@ -79,6 +79,18 @@ fn make_artifact(bytes: Vec<u8>, media_type: Option<MediaType>) -> Artifact {
     sniff_artifact(RawArtifact::new(bytes, media_type)).expect("sniff must succeed")
 }
 
+/// Builds transform options by assignment.
+///
+/// `TransformOptions` is `#[non_exhaustive]`, so a field truss adds later is a minor change
+/// rather than a breaking one, and a caller outside the crate starts from `default()` and
+/// assigns instead of writing a struct literal. This is that pattern with the repetition
+/// factored out; it is a benchmark's convenience and not part of the crate's API.
+fn options(set: impl FnOnce(&mut TransformOptions)) -> TransformOptions {
+    let mut options = TransformOptions::default();
+    set(&mut options);
+    options
+}
+
 // ---------------------------------------------------------------------------
 // Format conversion: JPEG -> various output formats
 // ---------------------------------------------------------------------------
@@ -102,11 +114,10 @@ fn bench_format_conversion(c: &mut Criterion) {
             |b, data| {
                 b.iter(|| {
                     let input = make_artifact(data.clone(), Some(MediaType::Jpeg));
-                    let opts = TransformOptions {
-                        format: Some(*target_format),
-                        quality: *quality,
-                        ..TransformOptions::default()
-                    };
+                    let opts = options(|o| {
+                        o.format = Some(*target_format);
+                        o.quality = *quality;
+                    });
                     let _ = transform(TransformRequest::new(input, opts)).unwrap();
                 });
             },
@@ -128,14 +139,13 @@ fn bench_resize(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("cover", &label), &jpeg_bytes, |b, data| {
             b.iter(|| {
                 let input = make_artifact(data.clone(), Some(MediaType::Jpeg));
-                let opts = TransformOptions {
-                    width: Some(w),
-                    height: Some(h),
-                    fit: Some(Fit::Cover),
-                    format: Some(MediaType::Jpeg),
-                    quality: Some(80),
-                    ..TransformOptions::default()
-                };
+                let opts = options(|o| {
+                    o.width = Some(w);
+                    o.height = Some(h);
+                    o.fit = Some(Fit::Cover);
+                    o.format = Some(MediaType::Jpeg);
+                    o.quality = Some(80);
+                });
                 let _ = transform(TransformRequest::new(input, opts)).unwrap();
             });
         });
@@ -163,14 +173,13 @@ fn bench_fit_modes(c: &mut Criterion) {
             |b, data| {
                 b.iter(|| {
                     let input = make_artifact(data.clone(), Some(MediaType::Jpeg));
-                    let opts = TransformOptions {
-                        width: Some(300),
-                        height: Some(300),
-                        fit: Some(*fit),
-                        format: Some(MediaType::Jpeg),
-                        quality: Some(80),
-                        ..TransformOptions::default()
-                    };
+                    let opts = options(|o| {
+                        o.width = Some(300);
+                        o.height = Some(300);
+                        o.fit = Some(*fit);
+                        o.format = Some(MediaType::Jpeg);
+                        o.quality = Some(80);
+                    });
                     let _ = transform(TransformRequest::new(input, opts)).unwrap();
                 });
             },
@@ -192,12 +201,11 @@ fn bench_filters(c: &mut Criterion) {
         |b, data| {
             b.iter(|| {
                 let input = make_artifact(data.clone(), Some(MediaType::Jpeg));
-                let opts = TransformOptions {
-                    blur: Some(5.0),
-                    format: Some(MediaType::Jpeg),
-                    quality: Some(80),
-                    ..TransformOptions::default()
-                };
+                let opts = options(|o| {
+                    o.blur = Some(5.0);
+                    o.format = Some(MediaType::Jpeg);
+                    o.quality = Some(80);
+                });
                 let _ = transform(TransformRequest::new(input, opts)).unwrap();
             });
         },
@@ -209,12 +217,11 @@ fn bench_filters(c: &mut Criterion) {
         |b, data| {
             b.iter(|| {
                 let input = make_artifact(data.clone(), Some(MediaType::Jpeg));
-                let opts = TransformOptions {
-                    sharpen: Some(3.0),
-                    format: Some(MediaType::Jpeg),
-                    quality: Some(80),
-                    ..TransformOptions::default()
-                };
+                let opts = options(|o| {
+                    o.sharpen = Some(3.0);
+                    o.format = Some(MediaType::Jpeg);
+                    o.quality = Some(80);
+                });
                 let _ = transform(TransformRequest::new(input, opts)).unwrap();
             });
         },
@@ -236,20 +243,14 @@ fn bench_watermark(c: &mut Criterion) {
         b.iter(|| {
             let input = make_artifact(jpeg_bytes.clone(), Some(MediaType::Jpeg));
             let wm_artifact = make_artifact(watermark_bytes.clone(), Some(MediaType::Png));
-            let wm = truss::WatermarkInput {
-                image: wm_artifact,
-                position: Position::BottomRight,
-                opacity: 50,
-                margin: 10,
-            };
-            let opts = TransformOptions {
-                width: Some(800),
-                height: Some(600),
-                fit: Some(Fit::Cover),
-                format: Some(MediaType::Jpeg),
-                quality: Some(80),
-                ..TransformOptions::default()
-            };
+            let wm = truss::WatermarkInput::new(wm_artifact);
+            let opts = options(|o| {
+                o.width = Some(800);
+                o.height = Some(600);
+                o.fit = Some(Fit::Cover);
+                o.format = Some(MediaType::Jpeg);
+                o.quality = Some(80);
+            });
             let _ = transform(TransformRequest::with_watermark(input, opts, wm)).unwrap();
         });
     });
@@ -290,12 +291,11 @@ fn bench_png_variants(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(name), &data, |b, data| {
             b.iter(|| {
                 let input = make_artifact(data.clone(), Some(MediaType::Png));
-                let opts = TransformOptions {
-                    width: Some(400),
-                    format: Some(MediaType::Jpeg),
-                    quality: Some(80),
-                    ..TransformOptions::default()
-                };
+                let opts = options(|o| {
+                    o.width = Some(400);
+                    o.format = Some(MediaType::Jpeg);
+                    o.quality = Some(80);
+                });
                 let _ = transform(TransformRequest::new(input, opts)).unwrap();
             });
         });
@@ -314,10 +314,9 @@ fn bench_svg(c: &mut Criterion) {
     group.bench_function("sanitize_passthrough", |b| {
         b.iter(|| {
             let input = make_artifact(svg_bytes.clone(), Some(MediaType::Svg));
-            let opts = TransformOptions {
-                format: Some(MediaType::Svg),
-                ..TransformOptions::default()
-            };
+            let opts = options(|o| {
+                o.format = Some(MediaType::Svg);
+            });
             let _ = transform(TransformRequest::new(input, opts)).unwrap();
         });
     });
@@ -325,11 +324,10 @@ fn bench_svg(c: &mut Criterion) {
     group.bench_function("rasterize_to_png_1024w", |b| {
         b.iter(|| {
             let input = make_artifact(svg_bytes.clone(), Some(MediaType::Svg));
-            let opts = TransformOptions {
-                width: Some(1024),
-                format: Some(MediaType::Png),
-                ..TransformOptions::default()
-            };
+            let opts = options(|o| {
+                o.width = Some(1024);
+                o.format = Some(MediaType::Png);
+            });
             let _ = transform(TransformRequest::new(input, opts)).unwrap();
         });
     });

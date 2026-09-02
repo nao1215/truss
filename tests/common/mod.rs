@@ -416,75 +416,79 @@ fn parse_source(route: &str, query: &BTreeMap<String, String>) -> SignedUrlSourc
 }
 
 fn parse_transform_options(query: &BTreeMap<String, String>) -> TransformOptions {
-    TransformOptions {
-        width: query
-            .get("width")
-            .map(|value| value.parse().expect("parse signed width")),
-        height: query
-            .get("height")
-            .map(|value| value.parse().expect("parse signed height")),
-        fit: query
-            .get("fit")
-            .map(|value| Fit::from_str(value).expect("parse signed fit")),
-        position: query
-            .get("position")
-            .map(|value| Position::from_str(value).expect("parse signed position")),
-        format: query
-            .get("format")
-            .map(|value| MediaType::from_str(value).expect("parse signed format")),
-        quality: query
-            .get("quality")
-            .map(|value| value.parse().expect("parse signed quality")),
-        optimize: query.get("optimize").map_or(OptimizeMode::None, |value| {
-            OptimizeMode::from_str(value).expect("parse signed optimize")
-        }),
-        target_quality: query
-            .get("targetQuality")
-            .map(|value| TargetQuality::from_str(value).expect("parse signed target quality")),
-        background: query
-            .get("background")
-            .map(|value| Rgba8::from_hex(value).expect("parse signed background")),
-        rotate: query.get("rotate").map_or(Rotation::DEG_0, |value| {
-            Rotation::from_str(value).expect("parse signed rotation")
-        }),
-        auto_orient: query
-            .get("autoOrient")
-            .is_none_or(|value| parse_bool_query(value, "autoOrient")),
-        strip_metadata: query
-            .get("stripMetadata")
-            .is_none_or(|value| parse_bool_query(value, "stripMetadata")),
-        preserve_exif: query
-            .get("preserveExif")
-            .is_some_and(|value| parse_bool_query(value, "preserveExif")),
-        blur: query
-            .get("blur")
-            .map(|value| value.parse().expect("parse signed blur")),
-        sharpen: query
-            .get("sharpen")
-            .map(|value| value.parse().expect("parse signed sharpen")),
-        grayscale: query
-            .get("grayscale")
-            .is_some_and(|value| parse_bool_query(value, "grayscale")),
-        without_enlargement: query
-            .get("withoutEnlargement")
-            .is_some_and(|value| parse_bool_query(value, "withoutEnlargement")),
-        crop: query
-            .get("crop")
-            .map(|value| CropRegion::from_str(value).expect("parse signed crop")),
-        deadline: None,
-    }
+    // `TransformOptions` is `#[non_exhaustive]`, so a caller outside the crate starts from
+    // `default()` and assigns. A field truss adds later shows up here as a field this
+    // reader does not know about, which is the point.
+    let mut options = TransformOptions::default();
+    options.width = query
+        .get("width")
+        .map(|value| value.parse().expect("parse signed width"));
+    options.height = query
+        .get("height")
+        .map(|value| value.parse().expect("parse signed height"));
+    options.fit = query
+        .get("fit")
+        .map(|value| Fit::from_str(value).expect("parse signed fit"));
+    options.position = query
+        .get("position")
+        .map(|value| Position::from_str(value).expect("parse signed position"));
+    options.format = query
+        .get("format")
+        .map(|value| MediaType::from_str(value).expect("parse signed format"));
+    options.quality = query
+        .get("quality")
+        .map(|value| value.parse().expect("parse signed quality"));
+    options.optimize = query.get("optimize").map_or(OptimizeMode::None, |value| {
+        OptimizeMode::from_str(value).expect("parse signed optimize")
+    });
+    options.target_quality = query
+        .get("targetQuality")
+        .map(|value| TargetQuality::from_str(value).expect("parse signed target quality"));
+    options.background = query
+        .get("background")
+        .map(|value| Rgba8::from_hex(value).expect("parse signed background"));
+    options.rotate = query.get("rotate").map_or(Rotation::DEG_0, |value| {
+        Rotation::from_str(value).expect("parse signed rotation")
+    });
+    options.auto_orient = query
+        .get("autoOrient")
+        .is_none_or(|value| parse_bool_query(value, "autoOrient"));
+    options.strip_metadata = query
+        .get("stripMetadata")
+        .is_none_or(|value| parse_bool_query(value, "stripMetadata"));
+    options.preserve_exif = query
+        .get("preserveExif")
+        .is_some_and(|value| parse_bool_query(value, "preserveExif"));
+    options.blur = query
+        .get("blur")
+        .map(|value| value.parse().expect("parse signed blur"));
+    options.sharpen = query
+        .get("sharpen")
+        .map(|value| value.parse().expect("parse signed sharpen"));
+    options.grayscale = query
+        .get("grayscale")
+        .is_some_and(|value| parse_bool_query(value, "grayscale"));
+    options.without_enlargement = query
+        .get("withoutEnlargement")
+        .is_some_and(|value| parse_bool_query(value, "withoutEnlargement"));
+    options.crop = query
+        .get("crop")
+        .map(|value| CropRegion::from_str(value).expect("parse signed crop"));
+    options.deadline = None;
+    options
 }
 
 fn parse_watermark(query: &BTreeMap<String, String>) -> Option<SignedWatermarkParams> {
-    query.get("watermarkUrl").map(|url| SignedWatermarkParams {
-        url: url.clone(),
-        position: query.get("watermarkPosition").cloned(),
-        opacity: query
+    query.get("watermarkUrl").map(|url| {
+        let mut watermark = SignedWatermarkParams::new(url.clone());
+        watermark.position = query.get("watermarkPosition").cloned();
+        watermark.opacity = query
             .get("watermarkOpacity")
-            .map(|value| value.parse().expect("parse signed watermark opacity")),
-        margin: query
+            .map(|value| value.parse().expect("parse signed watermark opacity"));
+        watermark.margin = query
             .get("watermarkMargin")
-            .map(|value| value.parse().expect("parse signed watermark margin")),
+            .map(|value| value.parse().expect("parse signed watermark margin"));
+        watermark
     })
 }
 
