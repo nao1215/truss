@@ -10,7 +10,9 @@
 
 mod common;
 
-use common::{large_png_bytes, split_response, status_code, temp_dir};
+#[cfg(unix)]
+use common::large_png_bytes;
+use common::{split_response, status_code, temp_dir};
 use serial_test::serial;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -744,6 +746,13 @@ mod windows_console_ctrl {
         fn GenerateConsoleCtrlEvent(event: u32, process_group_id: u32) -> i32;
     }
 
+    /// The status line of a readiness probe, as a number.
+    fn ready_status(addr: SocketAddr) -> u16 {
+        let response = super::send_health_ready(addr);
+        let (header, _, _) = super::split_response(&response);
+        super::status_code(&header)
+    }
+
     #[test]
     #[serial_test::serial]
     fn a_console_control_event_drains_the_server() {
@@ -774,8 +783,9 @@ mod windows_console_ctrl {
 
         // Ready before the event, so a 503 afterwards is the drain rather than a server that
         // never came up.
-        assert!(
-            super::status_code(&super::send_health_ready(addr)) == 200,
+        assert_eq!(
+            ready_status(addr),
+            200,
             "the server is ready before the control event"
         );
 
@@ -792,7 +802,7 @@ mod windows_console_ctrl {
         let deadline = Instant::now() + Duration::from_secs(5);
         let mut draining = false;
         while Instant::now() < deadline && !draining {
-            draining = super::status_code(&super::send_health_ready(addr)) == 503;
+            draining = ready_status(addr) == 503;
             if !draining {
                 std::thread::sleep(Duration::from_millis(50));
             }

@@ -77,6 +77,9 @@ pub enum LogLevel {
 impl LogLevel {
     /// Returns the next level in the SIGUSR1 cycle:
     /// `Info → Debug → Error → Warn → Info`.
+    ///
+    /// `SIGUSR1` is a Unix signal, so nothing on Windows reaches this.
+    #[cfg(any(unix, test))]
     pub(super) fn cycle(self) -> Self {
         match self {
             Self::Info => Self::Debug,

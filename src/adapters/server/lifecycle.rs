@@ -5,7 +5,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, Ordering};
 use std::time::{Duration, Instant};
 
-use super::config::{LogLevel, ServerConfig};
+#[cfg(unix)]
+use super::config::LogLevel;
+use super::config::ServerConfig;
 use super::handler::TransformOptionsPayload;
 use super::routing::handle_stream;
 use super::stderr_write;
@@ -346,11 +348,13 @@ fn close_shutdown_pipe(read_fd: i32, write_fd: i32) {
 fn close_shutdown_pipe(_read_fd: i32, _write_fd: i32) {}
 
 /// Global write-end of the shutdown pipe, written to from the signal handler.
+#[cfg(unix)]
 static SHUTDOWN_PIPE_WR: AtomicI32 = AtomicI32::new(-1);
 /// Global draining flag set by the signal handler.
 static GLOBAL_DRAINING: std::sync::atomic::AtomicPtr<AtomicBool> =
     std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
 /// Global log level, cycled by SIGUSR1 (Unix only).
+#[cfg(unix)]
 static GLOBAL_LOG_LEVEL: std::sync::atomic::AtomicPtr<AtomicU8> =
     std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
 
