@@ -18,6 +18,14 @@
 
   A test packs each target twice in two time zones and compares, and the reproducibility assertion now reports the offset of the first differing byte with a window of each side rather than only that the archives differ — which is what turned the intermittent failure from a re-run into a diagnosis in one run.
 
+## [Unreleased]
+
+### Fixed
+
+- The README, the WASM guide and the demo page say that AVIF carries metadata ([#521](https://github.com/nao1215/truss/issues/521)). v0.23.0 gave AVIF output metadata retention and gave AVIF input metadata reading, and four statements about what AVIF can carry went on saying it can carry nothing: the README's per-format table, the sentence under it calling AVIF the exception that refuses the request, the sentence above it listing AVIF among the formats that cannot carry a profile, and a caveat in `docs/wasm.md` that was never browser-specific. The fifth was not a statement but an enforcement — `web/app.js` disabled the "keep" and "exif" options whenever the output format was AVIF and switched the selection back to "strip", so a visitor to the demo could not ask for retention that works. The change that added retention updated the documents the HTTP surface's own statements live in and did not sweep the ones that describe the same capability from another surface.
+
+  A test now reads what each output format retains out of `retain_supported` and asserts the README's table has that row, in the shape `docs/configuration.md` is already checked in, so the table and the rule cannot drift apart again. `docs/pipeline.md` also gains a qualifier where it says an Exif item inside an AVIF is ignored: its Orientation field is, which is what that row is about, while the item itself is now read when metadata is retained.
+
 ## v0.23.0
 
 ### Added

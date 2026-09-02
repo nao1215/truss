@@ -5096,6 +5096,64 @@ mod tests {
         }
     }
 
+    /// The README's metadata table says what `retain_supported` does.
+    ///
+    /// The two have drifted once already: AVIF gained EXIF and a profile and the table went on
+    /// saying it carried neither, in the document a reader looks at first. The rule is one
+    /// `match` and the table is one row per format, so the check is a comparison rather than a
+    /// parse, and a format that gains or loses a kind fails here until the row follows.
+    #[test]
+    fn the_readme_metadata_table_says_what_each_format_retains() {
+        const README: &str = include_str!("../../README.md");
+
+        let expected: Vec<String> = [
+            MediaType::Jpeg,
+            MediaType::Png,
+            MediaType::Webp,
+            MediaType::Avif,
+            MediaType::Bmp,
+            MediaType::Tiff,
+        ]
+        .into_iter()
+        .map(|format| {
+            // Everything present, so what survives is what the format can carry rather than
+            // what this input happened to have.
+            let all = super::RetainedMetadata {
+                exif_metadata: Some(vec![0]),
+                icc_profile: Some(vec![0]),
+                xmp_metadata: Some(vec![0]),
+                iptc_metadata: Some(vec![0]),
+            };
+            let (kept, _) = all.retain_supported(format);
+            let yes_no = |carried: bool| if carried { "yes" } else { "no" };
+            format!(
+                "| {} | {} | {} | {} | {} |",
+                match format {
+                    MediaType::Jpeg => "JPEG",
+                    MediaType::Png => "PNG",
+                    MediaType::Webp => "WebP",
+                    MediaType::Avif => "AVIF",
+                    MediaType::Bmp => "BMP",
+                    MediaType::Tiff => "TIFF",
+                    other => panic!("{other:?} has no row in the table"),
+                },
+                yes_no(kept.icc_profile.is_some()),
+                yes_no(kept.exif_metadata.is_some()),
+                yes_no(kept.xmp_metadata.is_some()),
+                yes_no(kept.iptc_metadata.is_some()),
+            )
+        })
+        .collect();
+
+        let readme = README.replace("\r\n", "\n");
+        for row in &expected {
+            assert!(
+                readme.contains(row.as_str()),
+                "README.md has no row `{row}`; the table and `retain_supported` have drifted"
+            );
+        }
+    }
+
     /// AVIF is the last of the four raster outputs to carry metadata, and it carries the two
     /// kinds the container has a place for.
     #[cfg(feature = "avif")]
