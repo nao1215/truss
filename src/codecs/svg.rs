@@ -102,7 +102,6 @@ fn svg_parse_failure() -> String {
 use quick_xml::reader::Reader;
 use quick_xml::writer::Writer;
 use std::io::Cursor;
-use std::time::Instant;
 
 /// Transforms an SVG artifact by sanitizing and optionally rasterizing it.
 ///
@@ -139,14 +138,10 @@ use std::time::Instant;
 #[must_use = "this function returns the transform result without side effects"]
 pub fn transform_svg(request: TransformRequest) -> Result<TransformResult, TransformError> {
     let normalized = request.normalize()?;
-    let deadline = normalized.options.deadline;
-    let start = deadline.map(|_| Instant::now());
+    let budget = crate::codecs::raster::EncodeDeadline::starting(normalized.options.deadline);
 
     let sanitized = sanitize_svg(&normalized.input.bytes)?;
-
-    if let (Some(start), Some(limit)) = (start, deadline) {
-        crate::codecs::raster::check_deadline(start.elapsed(), limit, "sanitize")?;
-    }
+    budget.check("sanitize")?;
 
     if normalized.options.format == MediaType::Svg {
         // With SVG output there is no pipeline: the document is handed back as its author
@@ -288,100 +283,32 @@ pub fn transform_svg(request: TransformRequest) -> Result<TransformResult, Trans
     }
 
     let rgba_image = rasterize_svg(&tree, render.0, render.1, render_region)?;
+    budget.check("rasterize")?;
 
-    if let (Some(start), Some(limit)) = (start, deadline) {
-        crate::codecs::raster::check_deadline(start.elapsed(), limit, "rasterize")?;
-    }
-
-    // Rotation comes before the resize, which is the order the raster pipeline runs in and
-    // the order `docs/pipeline.md` states. The raster codec owns the arbitrary-angle path,
-    // so a rasterized SVG rotates through exactly the same code, the same background rule,
-    // and the same pixel-limit check on the canvas the turn needs.
-    let rgba_image = if normalized.options.rotate.is_identity() {
-        rgba_image
-    } else {
-        crate::codecs::raster::apply_rotation(
-            image::DynamicImage::ImageRgba8(rgba_image),
-            normalized.options.rotate,
-            normalized.options.background,
-            normalized.options.format,
-        )?
-        .into_rgba8()
+    // From here the drawing is pixels, so it goes through the stages the raster codec runs,
+    // in the one place their order is written down. That is what `docs/pipeline.md` means by
+    // a drawing joining the raster pipeline: the rotation, the crop, the resize, the filters,
+    // the desaturation, and the watermark are the same code with the same background rules
+    // and the same limits, reached from a different source.
+    //
+    // Only the crop rectangle differs from the request's own. A region rendered directly is
+    // already the cut, so there is nothing left to take; a rotated drawing was rendered whole
+    // and carries the rectangle scaled into the space it was rendered in.
+    let crop = match scaled_crop {
+        Some(crop) if render_region.is_none() => Some(crop),
+        _ => None,
     };
-
-    // The crop follows the rotation and precedes the resize, which is where the pipeline
-    // puts it. A region rendered directly is already the cut, so only the rotated case has
-    // anything left to take.
-    let rgba_image = match scaled_crop {
-        Some(crop) if render_region.is_none() => {
-            crate::codecs::raster::apply_crop(image::DynamicImage::ImageRgba8(rgba_image), crop)?
-                .into_rgba8()
-        }
-        _ => rgba_image,
-    };
-
-    // The buffer is already the content size, so every resize inside this call is a no-op and
-    // what it contributes is the padding for `contain` and the crop for `cover`, with the
-    // requested anchor and background.
-    let rgba_image = crate::codecs::raster::apply_resize(
+    let image = crate::codecs::raster::apply_pixel_stages(
         image::DynamicImage::ImageRgba8(rgba_image),
-        normalized.options.width,
-        normalized.options.height,
-        normalized.options.fit,
-        normalized.options.position,
-        normalized.options.background,
-        normalized.options.format,
-        normalized.options.without_enlargement,
-    )
-    .into_rgba8();
-
-    // Blur and sharpen follow the resize, which is where the pipeline puts them, and they
-    // are the same calls the raster codec makes on the same buffer type.
-    let rgba_image = match normalized.options.blur {
-        Some(sigma) => image::DynamicImage::ImageRgba8(rgba_image)
-            .blur(sigma)
-            .into_rgba8(),
-        None => rgba_image,
-    };
-    let rgba_image = match normalized.options.sharpen {
-        Some(sigma) => image::DynamicImage::ImageRgba8(rgba_image)
-            .unsharpen(sigma, 1)
-            .into_rgba8(),
-        None => rgba_image,
-    };
-
-    if let (Some(start), Some(limit)) = (start, deadline) {
-        crate::codecs::raster::check_deadline(start.elapsed(), limit, "filter")?;
-    }
-
-    // Desaturate after rotation so the operation order matches the raster pipeline.
-    let rgba_image = if normalized.options.grayscale {
-        image::DynamicImage::ImageRgba8(rgba_image)
-            .grayscale()
-            .into_rgba8()
-    } else {
-        rgba_image
-    };
-
-    // The watermark is the last stage before the encode, after the grayscale, so an overlay
-    // keeps its own colours. The raster codec owns the compositing and the fit check.
-    let rgba_image = match normalized.watermark {
-        Some(ref watermark) => crate::codecs::raster::apply_watermark(
-            image::DynamicImage::ImageRgba8(rgba_image),
-            watermark,
-        )?
-        .into_rgba8(),
-        None => rgba_image,
-    };
-
-    if let (Some(start), Some(limit)) = (start, deadline) {
-        crate::codecs::raster::check_deadline(start.elapsed(), limit, "watermark")?;
-    }
+        &normalized,
+        budget,
+        crop,
+    )?;
 
     // Formats without an alpha channel need the transparency resolved before the encoder
     // sees it. The raster codec owns that rule too, so both paths flatten the same way.
     let rgba_image = crate::codecs::raster::flatten_for_opaque_output(
-        image::DynamicImage::ImageRgba8(rgba_image),
+        image,
         normalized.options.background,
         normalized.options.format,
     )
@@ -394,10 +321,7 @@ pub fn transform_svg(request: TransformRequest) -> Result<TransformResult, Trans
         normalized.options.format,
         normalized.options.quality,
     )?;
-
-    if let (Some(start), Some(limit)) = (start, deadline) {
-        crate::codecs::raster::check_deadline(start.elapsed(), limit, "encode")?;
-    }
+    budget.check("encode")?;
 
     let format = normalized.options.format;
 
