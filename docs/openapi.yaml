@@ -614,8 +614,14 @@ paths:
         the cache root (if configured) is accessible, the object-storage backend
         (if configured) is network-reachable, cache disk free space is above the
         configured threshold (`TRUSS_HEALTH_CACHE_MIN_FREE_BYTES`), process memory
-        usage is below the configured limit (`TRUSS_HEALTH_MAX_MEMORY_BYTES`),
-        and transform capacity is not exhausted.
+        usage is below the configured limit (`TRUSS_HEALTH_MAX_MEMORY_BYTES`).
+
+        Transform capacity is reported in the `transformCapacity` check as
+        `current` against `max`, and does not affect readiness. A server with
+        every slot in use is doing what it was configured to do and is answering
+        what it accepted; withdrawing it from the load balancer would move its
+        share to its peers. A request that finds no free slot and no cached
+        answer is shed individually with 503 and a `Retry-After`.
 
         During graceful shutdown (after SIGTERM/SIGINT), this endpoint
         immediately returns 503 with a `draining` check set to `fail`, even
@@ -627,7 +633,7 @@ paths:
         Linux only. On other platforms `TRUSS_HEALTH_MAX_MEMORY_BYTES` and
         `TRUSS_HEALTH_CACHE_MIN_FREE_BYTES` are effectively no-ops — those
         checks are omitted from the response and the remaining checks
-        (object-storage reachability, transform capacity, etc.) still apply.
+        (object-storage reachability, storage root, etc.) still apply.
 
         The object-storage reachability check (S3, GCS, or Azure) confirms
         that the configured bucket/container exists and the service responds to
@@ -1818,7 +1824,16 @@ components:
           schema:
             $ref: '#/components/schemas/ProblemDetail'
     ServiceUnavailable:
-      description: Server overloaded or required configuration missing
+      description: |
+        Server overloaded or required configuration missing. `Retry-After` is
+        present when waiting is what resolves the condition, which is the case
+        for a request shed because every transform slot is in use, and absent
+        when the cause is a configuration the process cannot resolve by waiting.
+      headers:
+        Retry-After:
+          description: Seconds to wait before retrying the request
+          schema:
+            type: integer
       content:
         application/problem+json:
           schema:

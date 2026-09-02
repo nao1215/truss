@@ -146,7 +146,7 @@ A remote source or storage backend answered with an error, timed out, or could n
 
 ### service-unavailable
 
-The server is draining for shutdown, has no free transform slot, or failed its readiness check.
+The server is draining for shutdown, has no free transform slot, or is missing a configuration a route requires. `Retry-After` says when to try again where waiting is what resolves the condition, which covers a request shed for want of a transform slot and a probe answered while the process is draining; it is absent when the cause is a configuration, since waiting does not change one. A request whose answer is already in the cache is served whether or not the slots are free, because it needs none.
 
 ### loop-detected
 
