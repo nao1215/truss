@@ -72,6 +72,8 @@ A transform that succeeds but is not quite what was asked for answers 200 with o
 
 Both private endpoints take their transform options from the request body: the `options` object in the JSON body, and the `options` form part in the multipart body. Neither reads the query string, and a request that carries one is answered with `400 Bad Request` naming the parameters, rather than dropping them and returning an image nobody asked for.
 
+A source path is a `/`-separated path relative to `TRUSS_STORAGE_ROOT`. Leading separators are trimmed and a repeated one reads as one; a segment that is `.` or `..`, or that contains a backslash, is answered `400 Bad Request`. The backslash is refused because it is an ordinary character in a name on one operating system and a separator on another, so it could not name the same file on every server. The resolved path is checked against the storage root after the symbolic links in it are followed, so a path that leaves the root is refused whatever the segments looked like.
+
 ### Infrastructure Endpoints
 
 | Endpoint | Description |

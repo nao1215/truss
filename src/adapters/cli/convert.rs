@@ -1,8 +1,8 @@
 use crate::{MediaType, RawArtifact, TransformRequest, WatermarkInput, sniff_artifact, transform};
-use std::ffi::OsString;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::core::error_class::ErrorClass;
 
@@ -487,16 +487,23 @@ fn is_replaceable_destination(path: &Path) -> bool {
     }
 }
 
+/// Counts the temporary files this process has named, so two writes never share one.
+static TEMPORARY_COUNTER: AtomicU64 = AtomicU64::new(0);
+
 /// Builds the path of the temporary file a replacement is written to.
 ///
-/// It sits beside the destination, because a rename across file systems fails, and it
-/// carries the process id so two `truss` runs writing the same output do not collide.
+/// It sits beside the destination, because a rename across file systems fails. Its name is
+/// its own rather than derived from the destination's: a derived name is always longer than
+/// a name the file system has already accepted, so a destination near the limit produced a
+/// temporary over it, and the replacement fell back to a truncating write with nothing said.
+/// The length here is fixed, so a destination that can exist can be replaced.
+///
+/// The process id separates two `truss` runs and the counter separates two writes in one,
+/// which is what `server::cache::unique_tmp_suffix` pairs them for.
 fn temporary_sibling(path: &Path) -> Option<PathBuf> {
-    let name = path.file_name()?;
-    let mut candidate = OsString::from(".");
-    candidate.push(name);
-    candidate.push(format!(".tmp.{}", std::process::id()));
-    Some(path.with_file_name(candidate))
+    let sequence = TEMPORARY_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let name = format!(".truss.{}.{sequence}.tmp", std::process::id());
+    Some(path.with_file_name(name))
 }
 
 /// Gives the replacement the permissions the destination already had.
@@ -512,7 +519,7 @@ fn copy_permissions(path: &Path, temporary: &Path) {
 
 #[cfg(test)]
 mod tests {
-    use super::{OutputTarget, write_output_bytes};
+    use super::{OutputTarget, temporary_sibling, write_output_bytes};
     use std::fs;
     use std::path::PathBuf;
 
@@ -553,6 +560,71 @@ mod tests {
             before, after,
             "the destination was written in place, so a failure partway would truncate it"
         );
+    }
+
+    /// The temporary's name is the same length whatever the destination is called, so a
+    /// destination the file system accepts is one the replacement can be written for.
+    ///
+    /// A name derived from the destination is always longer than it, and a destination near
+    /// `NAME_MAX` pushed it over: the temporary could not be created, the write fell back to
+    /// truncating the destination, and nothing said so. 250 bytes is under the limit on
+    /// every file system truss is tested on and over what the derived name could take.
+    #[cfg(unix)]
+    #[test]
+    fn a_long_destination_name_is_still_replaced_rather_than_truncated() {
+        use std::os::unix::fs::MetadataExt;
+
+        let dir = temp_dir("write-swap-long-name");
+        let destination = dir.join(format!("{}.png", "a".repeat(246)));
+        fs::write(&destination, b"the bytes that were already there").expect("write it");
+        let before = fs::metadata(&destination).expect("stat it").ino();
+
+        let mut stdout = Vec::new();
+        write_output_bytes(OutputTarget::Path(destination.clone()), b"new", &mut stdout)
+            .expect("the write succeeds");
+
+        let after = fs::metadata(&destination).expect("stat it again").ino();
+        let content = fs::read(&destination).expect("read it back");
+        let _ = fs::remove_dir_all(&dir);
+
+        assert_eq!(content, b"new");
+        assert_ne!(
+            before, after,
+            "a 250-byte destination name lost the atomic replace, so a failure partway would truncate it"
+        );
+    }
+
+    /// Two destinations in one directory, and two writes to one destination, each get their
+    /// own temporary. The counter is what separates the second pair; a process id alone
+    /// does not.
+    #[test]
+    fn two_replacements_do_not_share_a_temporary() {
+        let dir = temp_dir("write-temp-uniqueness");
+        let first = dir.join("first.png");
+        let second = dir.join("second.png");
+
+        let names: Vec<_> = [&first, &second, &first, &second]
+            .iter()
+            .map(|path| temporary_sibling(path).expect("a destination has a file name"))
+            .collect();
+
+        let mut unique: Vec<_> = names.iter().collect();
+        unique.sort();
+        unique.dedup();
+        let _ = fs::remove_dir_all(&dir);
+
+        assert_eq!(
+            unique.len(),
+            names.len(),
+            "two writes must not race for one temporary: {names:?}"
+        );
+        for name in &names {
+            assert_eq!(
+                name.parent(),
+                Some(dir.as_path()),
+                "the temporary sits beside its destination so the rename cannot cross a file system"
+            );
+        }
     }
 
     /// A replacement that cannot be completed leaves the destination alone and takes its

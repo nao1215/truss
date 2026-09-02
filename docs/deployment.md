@@ -125,6 +125,8 @@ truss supports graceful shutdown for zero-downtime deployments. The `TRUSS_SHUTD
 
 On Kubernetes, set `terminationGracePeriodSeconds` >= drain + 20 (e.g. `35` for the default 10 s drain).
 
+The drain is started by `SIGTERM` or `SIGINT` on Unix, and by Ctrl+C on Windows. Windows does not deliver `SIGTERM`, so a service manager or a container runtime that stops the process there terminates it without a drain and in-flight requests are dropped. The published container image is Linux.
+
 ## Rate Limiting
 
 Per-client rate limiting is off by default. Set `TRUSS_RATE_LIMIT_RPS` to a positive value to enable it; each client IP then gets a token bucket refilling at that rate, with a capacity of `TRUSS_RATE_LIMIT_BURST` (defaulting to the same value), and requests that find an empty bucket receive 429.
