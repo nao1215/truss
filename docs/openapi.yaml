@@ -623,10 +623,12 @@ paths:
         share to its peers. A request that finds no free slot and no cached
         answer is shed individually with 503 and a `Retry-After`.
 
-        During graceful shutdown (after SIGTERM/SIGINT on Unix, or Ctrl+C on
-        Windows, which does not deliver SIGTERM), this endpoint immediately
-        returns 503 with a `draining` check set to `fail`, even before the
-        drain period (`TRUSS_SHUTDOWN_DRAIN_SECS`, default 10s) expires. This
+        During graceful shutdown (after SIGTERM/SIGINT on Unix, or any console
+        control event on Windows: Ctrl+C, Ctrl+Break, console close, log off,
+        or system shutdown — Windows never raises SIGTERM), this endpoint
+        immediately returns 503 with a `draining` check set to `fail`, even
+        before the drain period (`TRUSS_SHUTDOWN_DRAIN_SECS`, default 10s)
+        expires. This
         allows load balancers and CDN edges to remove the instance from
         rotation before the server stops accepting connections.
 
