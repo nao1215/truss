@@ -974,9 +974,9 @@ fn sign_usage() -> &'static str {
 /// # Examples
 ///
 /// ```no_run
-/// use truss::adapters::cli;
+/// use truss::run_cli;
 ///
-/// let _ = cli::run(vec![
+/// let _ = run_cli(vec![
 ///     "truss".to_string(),
 ///     "input.png".to_string(),
 ///     "-o".to_string(),
@@ -985,9 +985,9 @@ fn sign_usage() -> &'static str {
 /// ```
 ///
 /// ```no_run
-/// use truss::adapters::cli;
+/// use truss::run_cli;
 ///
-/// let _ = cli::run(vec![
+/// let _ = run_cli(vec![
 ///     "truss".to_string(),
 ///     "--bind".to_string(),
 ///     "127.0.0.1:8080".to_string(),

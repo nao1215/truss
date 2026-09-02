@@ -47,7 +47,9 @@ mod signing;
 
 #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
 pub use config::StorageBackend;
-pub use config::{DEFAULT_BIND_ADDR, DEFAULT_STORAGE_ROOT, LogHandler, LogLevel, ServerConfig};
+pub use config::{
+    DEFAULT_BIND_ADDR, DEFAULT_STORAGE_ROOT, LogHandler, LogLevel, ServerConfig, TrustedProxy,
+};
 pub use handler::TransformOptionsPayload;
 pub(crate) use handler::storage_health_check;
 pub use lifecycle::{serve, serve_once, serve_once_with_config, serve_with_config};
