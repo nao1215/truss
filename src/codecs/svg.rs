@@ -2445,9 +2445,7 @@ mod tests {
     /// `docs/pipeline.md` says a drawing with a raster output joins the raster pipeline, so
     /// the raster path is the oracle: it decodes at the source's own size, crops, and
     /// resizes. Scaling the rectangle into the space the drawing is rasterized in has to
-    /// land on the same pixels. It did not: the origin was scaled with the helper that
-    /// floors a dimension at one, so a rectangle starting at zero started one pixel late and
-    /// lost a row and a column when it reached the far edge.
+    /// land on the same pixels.
     #[test]
     fn a_crop_of_a_rasterized_svg_matches_the_same_crop_of_the_raster() {
         for (width, height) in [(10_u32, 10_u32), (40, 24), (24, 40), (33, 7)] {
@@ -2517,9 +2515,7 @@ mod tests {
     }
 
     /// A small region of a large drawing is served, not refused for a buffer nobody asked
-    /// for. Rasterizing the whole drawing at the scale the region needs made the buffer as
-    /// many times larger than the output as the drawing was larger than the region, so a
-    /// thumbnail cut out of a poster hit the pixel limit.
+    /// for.
     #[test]
     fn a_small_crop_of_a_large_drawing_is_served() {
         let drawing = marked_svg(1000, 3);

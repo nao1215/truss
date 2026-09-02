@@ -330,7 +330,8 @@ truss photo.jpg -o watermarked.jpg \
 
 Watermark positions are the same as cover positions: `center`, `top`, `right`, `bottom`, `left`, `top-left`, `top-right`, `bottom-left`, `bottom-right`.
 
-> **Note:** `--blur`, `--sharpen`, and `--watermark` are raster-only and not supported for SVG inputs.
+> **Note:** the watermark overlay itself must be a raster image. The picture it goes
+> onto may be an SVG, which is rasterized first; see [the pipeline](docs/pipeline.md#svg-path).
 
 #### Grayscale
 
@@ -351,7 +352,8 @@ after resize, blur, and sharpen, and before the watermark, so a watermark keeps 
 Anything `--background` filled in by then is part of the image and is desaturated with it, so
 `--fit contain --background ff0000 --grayscale` produces gray padding, not red.
 Unlike `--blur` and `--sharpen`, `--grayscale` also works for SVG input when the output is a
-raster format; SVG-to-SVG output ignores it along with the other raster-only options.
+raster format; with `svg` output it is rejected, along with the other options that ask
+for a different picture.
 
 #### Metadata control
 

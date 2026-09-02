@@ -361,7 +361,6 @@ fn a_remote_watermark_is_held_to_the_watermark_size_cap() {
     fs::write(&source, common::png_bytes()).expect("write source");
     let output_path = temp_file_path("watermark-cap-out");
 
-    // The cap is read from the declared length, so the body itself need not be sent.
     let (url, handle) = spawn_oversized_server(11 * 1024 * 1024);
 
     let output = Command::new(env!("CARGO_BIN_EXE_truss"))
@@ -389,6 +388,80 @@ fn a_remote_watermark_is_held_to_the_watermark_size_cap() {
 
     let _ = fs::remove_file(&source);
     let _ = fs::remove_file(&output_path);
+}
+
+/// A body past the cap that declares no length at all is bounded by what arrives rather than
+/// by what was claimed, so the check cannot be walked past by omitting the header.
+#[test]
+fn a_remote_watermark_that_declares_no_length_is_still_capped() {
+    let source = temp_file_path("watermark-chunked-source");
+    fs::write(&source, common::png_bytes()).expect("write source");
+    let output_path = temp_file_path("watermark-chunked-out");
+
+    let (url, handle) = spawn_undeclared_server(11 * 1024 * 1024);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_truss"))
+        .arg("convert")
+        .arg(&source)
+        .arg("-o")
+        .arg(&output_path)
+        .arg("--format")
+        .arg("png")
+        .arg("--watermark")
+        .arg(&url)
+        .output()
+        .expect("run truss convert");
+    let _ = handle.join();
+
+    assert!(
+        !output.status.success(),
+        "a body past the cap is refused whether or not it declared its length"
+    );
+
+    let _ = fs::remove_file(&source);
+    let _ = fs::remove_file(&output_path);
+}
+
+/// Answers with a body of `length` bytes and no `Content-Length`, closing to end it.
+fn spawn_undeclared_server(length: usize) -> (String, thread::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+    listener
+        .set_nonblocking(true)
+        .expect("configure the listener");
+    let addr = listener.local_addr().expect("server addr");
+    let url = format!("http://{addr}/undeclared.png");
+
+    let handle = thread::spawn(move || {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while std::time::Instant::now() < deadline {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    stream.set_nonblocking(false).expect("blocking stream");
+                    let mut request = [0_u8; 1024];
+                    let _ = stream.read(&mut request);
+                    let _ = stream.write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nConnection: close\r\n\r\n",
+                    );
+                    let chunk = vec![0_u8; 64 * 1024];
+                    let mut sent = 0;
+                    while sent < length {
+                        if stream.write_all(&chunk).is_err() {
+                            break;
+                        }
+                        sent += chunk.len();
+                    }
+                    let _ = stream.flush();
+                    return;
+                }
+                Err(ref error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(std::time::Duration::from_millis(20));
+                }
+                Err(error) => panic!("accept failed: {error}"),
+            }
+        }
+    });
+
+    (url, handle)
 }
 
 /// Answers with a declared length and nothing else, so a size check can be exercised without

@@ -20,16 +20,11 @@ use super::{
 
 /// Reports whether the value names a URL rather than a path.
 ///
-/// Matching only the two schemes the fetcher supports left every other URL falling through
-/// to a file read, so `ftp://example.com/logo.png` was reported as a missing file. A value
-/// that names a scheme is a URL whether or not truss can fetch it, and the one it cannot
-/// gets the sentence `--url` gives it.
-///
-/// The test is a scheme followed by `://`, which is what every fetchable URL has and what a
-/// filename does not. A bare `scheme:` with no authority, as in `mailto:`, is left a path:
-/// nothing is fetched from one, and a file whose name holds a colon is likelier than a
-/// caller who meant one. Requiring the authority also keeps `C:\images\logo.png` the
-/// Windows path it is rather than a URL with the scheme `c`.
+/// A value is a URL when it names a scheme followed by `://`. A bare `scheme:` with no
+/// authority, as in `mailto:`, stays a path: nothing is fetched from one, and a file whose
+/// name holds a colon is likelier than a caller who meant a URI. Requiring the authority
+/// also keeps `C:\images\logo.png` the Windows path it is rather than a URL with the
+/// scheme `c`.
 fn watermark_is_a_url(watermark: &Path) -> bool {
     // A value that is not valid UTF-8 cannot be a URL, so it is a path, which is also what a
     // caller who named a file with an unusual encoding meant.
@@ -50,10 +45,8 @@ fn watermark_is_a_url(watermark: &Path) -> bool {
 /// otherwise.
 ///
 /// The fetch is the one `--url` uses, so the address rules and the redirect limit are the
-/// ones already written rather than a second copy of them. The size cap is the watermark's
-/// own: an overlay has no business being the size of a source image, which is why the server
-/// keeps `TRUSS_MAX_WATERMARK_BYTES` apart from the source limit, and a watermark the server
-/// would refuse is one there is no point in accepting here.
+/// ones already written rather than a second copy of them. The size cap is
+/// [`MAX_REMOTE_WATERMARK_BYTES`], not the input's.
 fn read_watermark_bytes(watermark: &Path) -> Result<Vec<u8>, CliError> {
     if watermark_is_a_url(watermark) {
         let value = watermark.to_str().expect("a URL is valid UTF-8");
@@ -76,11 +69,6 @@ mod watermark_tests {
     use std::path::Path;
 
     /// Which values `--watermark` sends to the fetcher.
-    ///
-    /// Matching the two schemes the fetcher supports left every other URL falling through to
-    /// a file read, so `ftp://example.com/logo.png` was reported as a missing file — the
-    /// message the flag's URL support was added to remove. A value that names a scheme is a
-    /// URL whether or not truss can fetch it, and the refusal for one it cannot is `--url`'s.
     #[test]
     fn a_value_naming_a_scheme_is_a_url_and_everything_else_is_a_path() {
         let urls = [
@@ -103,8 +91,7 @@ mod watermark_tests {
             "./logo.png",
             "/var/lib/logo.png",
             "../logo.png",
-            // A colon with no authority after it: nothing is fetched from one of these, and
-            // a file whose name holds a colon is likelier than a caller who meant a URI.
+            // A colon with no authority after it.
             "logo:1.png",
             "mailto:someone@example.com",
             // A Windows path names a one-letter drive, which is not a scheme.

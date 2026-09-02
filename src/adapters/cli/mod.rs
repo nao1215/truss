@@ -23,9 +23,8 @@ const MAX_REMOTE_BYTES: u64 = 32 * 1024 * 1024;
 /// The size cap for a watermark fetched over HTTP.
 ///
 /// The server keeps this apart from the source limit and publishes it as
-/// `TRUSS_MAX_WATERMARK_BYTES`: an overlay has no business being the size of a source image.
-/// The CLI shares the fetch with `--url`, and sharing brought the source's cap with it, so a
-/// watermark that worked locally was refused in production.
+/// `TRUSS_MAX_WATERMARK_BYTES`: an overlay has no business being the size of a source image,
+/// and a watermark the server would refuse is one there is no point in accepting here.
 pub(super) const MAX_REMOTE_WATERMARK_BYTES: u64 = 10 * 1024 * 1024;
 
 // ---------------------------------------------------------------------------
@@ -151,9 +150,9 @@ OPTIONS:
                            ICC profile so colors are not shifted by the re-encode)
       --keep-metadata      Preserve EXIF, ICC, and other supported metadata
       --preserve-exif      Preserve EXIF only (strip ICC and others)
-      --crop <x,y,w,h>     Explicit crop region as x,y,width,height (applied before resize; raster-only)
-      --blur <SIGMA>       Gaussian blur sigma (0.1-100.0; raster-only, not supported for SVG inputs)
-      --sharpen <SIGMA>    Sharpen sigma (0.1-100.0; raster-only, not supported for SVG inputs)
+      --crop <x,y,w,h>     Explicit crop region as x,y,width,height (applied before resize)
+      --blur <SIGMA>       Gaussian blur sigma (0.1-100.0)
+      --sharpen <SIGMA>    Sharpen sigma (0.1-100.0)
       --grayscale          Desaturate the image to grayscale (applied after resize, blur,
                            and sharpen, and before the watermark)
       --without-enlargement
@@ -163,12 +162,13 @@ OPTIONS:
                            with the source rather than the whole box
       --watermark <FILE|URL>
                            Watermark image to composite onto the output, from a file or an
-                           HTTP(S) URL (raster-only, not supported for SVG inputs)
-      --watermark-position <POS>  Watermark placement (default: bottom-right; raster-only)
+                           HTTP(S) URL of at most 10 MB. The overlay itself must be a raster
+                           image; the picture it goes onto may be an SVG
+      --watermark-position <POS>  Watermark placement (default: bottom-right)
                            center, top, right, bottom, left,
                            top-left, top-right, bottom-left, bottom-right
-      --watermark-opacity <1-100> Watermark opacity percentage (default: 50; raster-only)
-      --watermark-margin <PX>     Margin from edge in pixels (default: 10; raster-only)
+      --watermark-opacity <1-100> Watermark opacity percentage (default: 50)
+      --watermark-margin <PX>     Margin from edge in pixels (default: 10)
 
 EXAMPLES:
   truss photo.png -o photo.jpg --width 800
@@ -1700,18 +1700,17 @@ fn read_url_bytes(url: &str, max_bytes: u64) -> Result<Vec<u8>, CliError> {
         )));
     }
 
-    let mut reader = response
-        .into_body()
-        .into_reader()
-        .take(MAX_REMOTE_BYTES + 1);
+    // The declared length is a claim; this is the measurement, so a response that declares
+    // nothing, or declares a small number and sends more, is bounded by the same cap.
+    let mut reader = response.into_body().into_reader().take(max_bytes + 1);
     let mut bytes = Vec::new();
     reader
         .read_to_end(&mut bytes)
         .map_err(|error| fetch_failed(format!("failed to fetch {url}: {error}")))?;
 
-    if bytes.len() as u64 > MAX_REMOTE_BYTES {
+    if bytes.len() as u64 > max_bytes {
         return Err(fetch_failed(format!(
-            "failed to fetch {url}: response exceeds {MAX_REMOTE_BYTES} bytes"
+            "failed to fetch {url}: response exceeds {max_bytes} bytes"
         )));
     }
 
