@@ -378,6 +378,9 @@ REQUIRED:
 
 OPTIONAL:
       --version <VALUE>    Cache-busting version tag
+      --method <METHOD>    HTTP method the URL is signed for: get or head (default: get).
+                           The signature covers the method, so a URL signed for one is
+                           refused for the other
       --width, --height, --fit, --position, --format, --quality,
       --optimize, --target-quality, --background, --rotate, --auto-orient, --no-auto-orient,
       --strip-metadata, --keep-metadata, --preserve-exif, --crop, --blur, --sharpen,
@@ -676,6 +679,9 @@ struct ClapSignArgs {
     /// Cache-busting version tag
     #[arg(long)]
     version: Option<String>,
+    /// HTTP method the signed URL is valid for (get or head)
+    #[arg(long, value_parser = parse_signed_method)]
+    method: Option<SignedMethod>,
     /// Signing key identifier
     #[arg(long)]
     key_id: Option<String>,
@@ -774,6 +780,47 @@ struct ClapSignArgs {
 
 fn parse_fit(s: &str) -> Result<Fit, String> {
     Fit::from_str(s)
+}
+
+/// The HTTP method a signed URL is minted for.
+///
+/// The signature covers the method, so a URL signed for `GET` is answered 401 for a `HEAD`
+/// and the two are separate URLs over the same transform. These are the only two methods
+/// `/images/by-path` and `/images/by-url` serve, so a third can only produce a URL that
+/// never verifies, which is why the parser refuses it rather than passing it through.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum SignedMethod {
+    #[default]
+    Get,
+    Head,
+}
+
+impl SignedMethod {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Get => "GET",
+            Self::Head => "HEAD",
+        }
+    }
+}
+
+impl FromStr for SignedMethod {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        // `@nao1215/truss-url-signer` uppercases before signing and so does
+        // `sign_public_url_with_method`, so a lowercase spelling has to reach the same URL
+        // here or the two signers disagree over the same input.
+        match s.to_ascii_uppercase().as_str() {
+            "GET" => Ok(Self::Get),
+            "HEAD" => Ok(Self::Head),
+            _ => Err(format!("unsupported signed URL method `{s}`")),
+        }
+    }
+}
+
+fn parse_signed_method(s: &str) -> Result<SignedMethod, String> {
+    SignedMethod::from_str(s)
 }
 
 fn parse_position(s: &str) -> Result<Position, String> {
@@ -1089,6 +1136,7 @@ struct ConvertCommand {
 #[derive(Debug, Clone, PartialEq)]
 struct SignCommand {
     base_url: String,
+    method: SignedMethod,
     source: SignedUrlSource,
     key_id: String,
     secret: String,
@@ -3055,6 +3103,7 @@ mod tests {
             command,
             Command::Sign(SignCommand {
                 base_url: "https://cdn.example.com".to_string(),
+                method: super::SignedMethod::Get,
                 source: SignedUrlSource::Path {
                     path: "/image.png".to_string(),
                     version: None
@@ -3101,6 +3150,7 @@ mod tests {
             command,
             Command::Sign(SignCommand {
                 base_url: "https://cdn.example.com".to_string(),
+                method: super::SignedMethod::Get,
                 source: SignedUrlSource::Url {
                     url: "https://origin.example.com/image.png".to_string(),
                     version: Some("v2".to_string())

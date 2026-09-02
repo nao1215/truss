@@ -241,3 +241,33 @@ scenarios:
           exit_code: 0
           stdout:
             contains: "https://cdn.example.com/images/by-path?"
+
+  # The signature covers the HTTP method, so a URL signed for GET is answered 401 for a
+  # HEAD. Both are URLs the server serves, and until --method existed the command line
+  # could only mint the first of them.
+  - name: signs the method it was asked for
+    steps:
+      - run:
+          command: truss sign --base-url "https://cdn.example.com" --path "/hero.jpg" --key-id "k1" --secret "s3cret" --expires 1700000000 --method head
+      - assert:
+          exit_code: 0
+          stdout:
+            contains: "signature=f33c4743ba295333638090a151e3424308ab38fa037b925701804d0922569f32"
+      - run:
+          command: truss sign --base-url "https://cdn.example.com" --path "/hero.jpg" --key-id "k1" --secret "s3cret" --expires 1700000000
+      - assert:
+          exit_code: 0
+          stdout:
+            not_contains: "signature=f33c4743ba295333638090a151e3424308ab38fa037b925701804d0922569f32"
+
+  - name: refuses a method the signed routes do not serve
+    steps:
+      - run:
+          command: truss sign --base-url "https://cdn.example.com" --path "/hero.jpg" --key-id "k1" --secret "s3cret" --expires 1700000000 --method POST
+      - assert:
+          exit_code: 1
+          stdout:
+            equals: ""
+          stderr:
+            contains:
+              - "unsupported signed URL method `POST`"

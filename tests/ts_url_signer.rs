@@ -500,3 +500,118 @@ fn both_signers_keep_a_path_in_the_base_url() {
         "the canonical string carries the endpoint path, not the base URL's"
     );
 }
+
+/// The command line signs the same HEAD URL the npm signer does.
+///
+/// The signature covers the HTTP method, so a URL signed for GET is answered 401 for a HEAD
+/// and the two are separate URLs over one transform. The npm signer has taken a `method`
+/// since it shipped and `truss sign` had no way to ask, which is the drift this pins: the
+/// two signers have to agree on the HEAD URL the way the rest of this file pins the GET one.
+#[test]
+fn both_signers_produce_the_same_head_url() {
+    if !node_is_available() {
+        eprintln!("skipping: node is not available");
+        return;
+    }
+
+    let mut cli = Command::new(env!("CARGO_BIN_EXE_truss"));
+    cli.arg("sign")
+        .arg("--base-url")
+        .arg("https://images.example.com")
+        .arg("--path")
+        .arg("image.png")
+        .arg("--key-id")
+        .arg("public-demo")
+        .arg("--secret")
+        .arg("secret-value")
+        .arg("--expires")
+        .arg("1900000000")
+        .arg("--width")
+        .arg("800")
+        .arg("--format")
+        .arg("webp")
+        .arg("--method")
+        .arg("HEAD");
+    let output = cli.output().expect("run truss sign --method HEAD");
+    assert!(
+        output.status.success(),
+        "truss sign --method HEAD must succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let cli_url = String::from_utf8(output.stdout)
+        .expect("utf-8")
+        .trim()
+        .to_string();
+
+    let js_url = sign_with_typescript_package(json!({
+        "baseUrl": "https://images.example.com",
+        "source": { "kind": "path", "path": "image.png" },
+        "transforms": { "width": 800, "format": "webp" },
+        "keyId": "public-demo",
+        "secret": "secret-value",
+        "expires": 1_900_000_000u64,
+        "method": "HEAD",
+    }));
+
+    assert_eq!(cli_url, js_url);
+
+    // The GET URL over the same transform is a different URL, which is the whole reason the
+    // flag has to exist rather than the method being assumed.
+    let mut get_cli = Command::new(env!("CARGO_BIN_EXE_truss"));
+    get_cli
+        .arg("sign")
+        .arg("--base-url")
+        .arg("https://images.example.com")
+        .arg("--path")
+        .arg("image.png")
+        .arg("--key-id")
+        .arg("public-demo")
+        .arg("--secret")
+        .arg("secret-value")
+        .arg("--expires")
+        .arg("1900000000")
+        .arg("--width")
+        .arg("800")
+        .arg("--format")
+        .arg("webp");
+    let get_url = String::from_utf8(get_cli.output().expect("run truss sign").stdout)
+        .expect("utf-8")
+        .trim()
+        .to_string();
+    assert_ne!(cli_url, get_url);
+}
+
+/// A method the signed routes do not serve is refused where the URL is minted.
+///
+/// `truss sign --method POST` could only produce a URL that never verifies, and the process
+/// that could report the mistake is gone by the time it is fetched, which is the reason
+/// `signing_input_error` refuses an empty key id here rather than at request time.
+#[test]
+fn the_cli_refuses_a_method_the_signed_routes_do_not_serve() {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_truss"));
+    command
+        .arg("sign")
+        .arg("--base-url")
+        .arg("https://images.example.com")
+        .arg("--path")
+        .arg("image.png")
+        .arg("--key-id")
+        .arg("public-demo")
+        .arg("--secret")
+        .arg("secret-value")
+        .arg("--expires")
+        .arg("1900000000")
+        .arg("--method")
+        .arg("POST");
+    let output = command.output().expect("run truss sign --method POST");
+    assert!(
+        !output.status.success(),
+        "truss sign must refuse an unsupported method: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("unsupported signed URL method `POST`"),
+        "the message names the method: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

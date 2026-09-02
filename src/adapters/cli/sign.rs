@@ -1,4 +1,4 @@
-use crate::adapters::server::{self, SignedUrlSource, sign_public_url};
+use crate::adapters::server::{self, SignedUrlSource, sign_public_url_with_method};
 use std::io::Write;
 
 use super::{
@@ -82,6 +82,7 @@ pub(super) fn sign_from_clap(args: ClapSignArgs) -> Result<Command, CliError> {
 
     Ok(Command::Sign(SignCommand {
         base_url,
+        method: args.method.unwrap_or_default(),
         source,
         key_id,
         secret,
@@ -132,7 +133,8 @@ where
                 opacity: command.watermark_opacity,
                 margin: command.watermark_margin,
             });
-    let url = sign_public_url(
+    let url = sign_public_url_with_method(
+        command.method.as_str(),
         &command.base_url,
         command.source,
         &command.options,
@@ -156,6 +158,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adapters::cli::SignedMethod;
     use crate::{Position, TransformOptions};
     use std::io;
 
@@ -174,6 +177,7 @@ mod tests {
     fn base_command() -> SignCommand {
         SignCommand {
             base_url: "https://cdn.example.com".to_string(),
+            method: SignedMethod::Get,
             source: SignedUrlSource::Path {
                 path: "/image.png".to_string(),
                 version: None,
@@ -233,6 +237,55 @@ mod tests {
             );
             assert!(stdout.is_empty(), "nothing is written for a refusal");
         }
+    }
+
+    /// The signature covers the HTTP method, so a URL signed for `GET` is answered 401 for
+    /// a `HEAD`. The server accepts both and the npm signer emits both; this is the flag
+    /// that lets the command line do the same.
+    #[test]
+    fn execute_sign_signs_the_method_it_was_given() {
+        let mut get_out = Vec::new();
+        execute_sign(base_command(), &mut get_out).expect("GET signs");
+        let get_url = String::from_utf8(get_out).expect("utf-8");
+
+        let mut head_out = Vec::new();
+        execute_sign(
+            SignCommand {
+                method: SignedMethod::Head,
+                ..base_command()
+            },
+            &mut head_out,
+        )
+        .expect("HEAD signs");
+        let head_url = String::from_utf8(head_out).expect("utf-8");
+
+        // Everything but the signature is the same, because the method is not on the wire.
+        let strip = |url: &str| {
+            url.split('&')
+                .filter(|part| !part.starts_with("signature="))
+                .collect::<Vec<_>>()
+                .join("&")
+        };
+        assert_eq!(strip(&get_url), strip(&head_url));
+        assert_ne!(
+            get_url, head_url,
+            "a HEAD URL must not carry the signature of its GET"
+        );
+    }
+
+    /// `GET` and `HEAD` are the two methods the signed routes serve, so a third one can only
+    /// produce a URL that never verifies. The signer refuses it for the reason it refuses an
+    /// empty key id: the process that could report the mistake is gone by fetch time.
+    #[test]
+    fn a_method_the_signed_routes_do_not_serve_is_refused() {
+        assert_eq!("GET".parse::<SignedMethod>(), Ok(SignedMethod::Get));
+        assert_eq!("HEAD".parse::<SignedMethod>(), Ok(SignedMethod::Head));
+        // The npm signer uppercases before signing, so the two agree on a lowercase spelling.
+        assert_eq!("head".parse::<SignedMethod>(), Ok(SignedMethod::Head));
+        assert_eq!(
+            "POST".parse::<SignedMethod>(),
+            Err("unsupported signed URL method `POST`".to_string())
+        );
     }
 
     #[test]
