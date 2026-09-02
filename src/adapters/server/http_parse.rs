@@ -3,7 +3,7 @@ use super::response::{
     payload_too_large_response, request_timeout_response,
 };
 use std::io::Read;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 pub(super) const MAX_HEADER_BYTES: usize = 16 * 1024;
@@ -430,19 +430,30 @@ pub(super) fn resolve_storage_path(
         return Err(bad_request_response("source path must not be empty"));
     }
 
+    // Split on the separator the route has rather than the one the host operating system
+    // has. `Path::components` reads both `/` and `\` on Windows and only `/` elsewhere, so
+    // it made `a\b.png` one file name on a Linux server and two segments on a Windows one:
+    // the same request resolving to different things depending on where the server runs. It
+    // also normalizes an interior `.` away, so `a/./b.png` was accepted while `./a/b.png`
+    // was refused, although the message names the segment either way.
     let mut relative_path = PathBuf::new();
-    for component in Path::new(trimmed).components() {
-        match component {
-            Component::Normal(segment) => relative_path.push(segment),
-            Component::CurDir
-            | Component::ParentDir
-            | Component::RootDir
-            | Component::Prefix(_) => {
-                return Err(bad_request_response(
-                    "source path must not contain root, current-directory, or parent-directory segments",
-                ));
-            }
+    for segment in trimmed.split('/') {
+        if segment.is_empty() {
+            // `a//b.png` is the caller writing one separator twice, which a URL path reads
+            // as one; the leading run is already trimmed above.
+            continue;
         }
+        if segment == "." || segment == ".." {
+            return Err(bad_request_response(
+                "source path must not contain root, current-directory, or parent-directory segments",
+            ));
+        }
+        if segment.contains('\\') {
+            return Err(bad_request_response(
+                "source path must not contain a backslash; the separator is `/`",
+            ));
+        }
+        relative_path.push(segment);
     }
 
     if relative_path.as_os_str().is_empty() {
@@ -560,6 +571,7 @@ pub(super) fn find_header_terminator(buffer: &[u8]) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
 
     // ── parse_request_line ─────────────────────────────────────────
 
@@ -1010,20 +1022,6 @@ mod tests {
     // and imgproxy source validation patterns.
 
     #[test]
-    #[cfg(unix)]
-    fn test_resolve_storage_path_backslash_is_literal_on_unix() {
-        // On Unix, backslash is a valid filename character, not a directory
-        // separator.  Create a file whose name literally contains a backslash
-        // and verify resolve_storage_path accepts it.
-        let dir = tempfile::tempdir().unwrap();
-        let file_path = dir.path().join(r"a\b");
-        std::fs::File::create(&file_path).unwrap();
-
-        let resolved = resolve_storage_path(dir.path(), r"a\b").unwrap();
-        assert_eq!(resolved, file_path.canonicalize().unwrap());
-    }
-
-    #[test]
     fn test_resolve_storage_path_unicode_normalization() {
         // Filenames with non-ASCII characters should pass through as Normal
         // components and not trigger traversal rejection.
@@ -1080,6 +1078,54 @@ mod tests {
         std::fs::File::create(&file_path).unwrap();
         let result = resolve_storage_path(dir.path(), "///image.png");
         assert!(result.is_ok(), "multiple leading slashes should be trimmed");
+    }
+
+    /// A backslash cannot mean the same thing on two platforms, so it means nothing.
+    ///
+    /// It is an ordinary character in a name on Unix and a separator on Windows, so
+    /// `a\\b.png` named one file on a Linux server and two segments on a Windows one: the
+    /// same request, the same root, and the same signed URL resolving to different things
+    /// depending on where the server runs. The route's separator is the `/` a URL path has.
+    #[rstest]
+    #[case("a\\b.png")]
+    #[case("\\a\\b.png")]
+    #[case("a\\..\\..\\etc")]
+    #[case("C:\\a\\b.png")]
+    #[case("images/a\\b.png")]
+    fn resolve_storage_path_refuses_a_backslash_on_every_platform(#[case] value: &str) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("a")).unwrap();
+        std::fs::File::create(dir.path().join("a/b.png")).unwrap();
+
+        let err = resolve_storage_path(dir.path(), value)
+            .err()
+            .unwrap_or_else(|| panic!("{value} must be refused, not resolved"));
+
+        assert_eq!(err.status, "400 Bad Request", "{value}");
+        assert!(
+            String::from_utf8_lossy(&err.body).contains("backslash"),
+            "the refusal names what is wrong with it: {}",
+            String::from_utf8_lossy(&err.body)
+        );
+    }
+
+    /// The separator the route does have still works, and the segments that were refused
+    /// before are still refused now that the split is truss's own.
+    #[rstest]
+    #[case("a/b.png", true)]
+    #[case("/a/b.png", true)]
+    #[case("///a/b.png", true)]
+    #[case("a/../a/b.png", false)]
+    #[case("./a/b.png", false)]
+    #[case("a/./b.png", false)]
+    #[case("..", false)]
+    fn resolve_storage_path_reads_a_url_path(#[case] value: &str, #[case] resolves: bool) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("a")).unwrap();
+        std::fs::File::create(dir.path().join("a/b.png")).unwrap();
+
+        let outcome = resolve_storage_path(dir.path(), value);
+        assert_eq!(outcome.is_ok(), resolves, "{value}: {outcome:?}");
     }
 
     // ── content_type_matches ───────────────────────────────────────
