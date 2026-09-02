@@ -512,3 +512,64 @@ test("refuses a secret no server can be configured with", () => {
   });
   assert.doesNotThrow(() => signPublicUrl({ ...options, secret: "s" }));
 });
+
+const unknownKeyBase = {
+  baseUrl: "https://images.example.com",
+  source: { kind: "path", path: "image.png" },
+  keyId: "public-demo",
+  secret: "secret-value",
+  expires: 1900000000,
+};
+
+test("refuses an unknown option rather than signing a URL without it", () => {
+  // `transform` for `transforms` drops every transform, so the origin serves the full-size
+  // original under a valid signature. `watermarks` for `watermark` publishes the image
+  // without its overlay. Neither is visible anywhere downstream: the URL verifies.
+  for (const [key, value] of [
+    ["transform", { width: 80 }],
+    ["watermarks", { url: "https://images.example.com/mark.png" }],
+    ["presets", "thumbnail"],
+    ["nonsense", 1],
+  ]) {
+    assert.throws(
+      () => signPublicUrl({ ...unknownKeyBase, [key]: value }),
+      new RegExp(`unknown option \`${key}\``),
+      `${key} must be refused`,
+    );
+  }
+});
+
+test("refuses an unknown key inside transforms and watermark", () => {
+  assert.throws(
+    () =>
+      signPublicUrl({
+        ...unknownKeyBase,
+        transforms: { width: 80, widht: 100 },
+      }),
+    /unknown transform option `widht`/,
+  );
+  assert.throws(
+    () =>
+      signPublicUrl({
+        ...unknownKeyBase,
+        watermark: { url: "https://images.example.com/mark.png", possition: "top" },
+      }),
+    /unknown watermark option `possition`/,
+  );
+});
+
+test("an optional key that is explicitly undefined is still accepted", () => {
+  // `{...opts, preset: undefined}` is how an optional value is threaded through a builder,
+  // so the key check must read the value rather than only the presence of the name.
+  const withUndefined = signPublicUrl({
+    ...unknownKeyBase,
+    transforms: { width: 800, format: "webp", height: undefined },
+    preset: undefined,
+    watermark: undefined,
+    method: undefined,
+  });
+  assert.equal(
+    withUndefined,
+    "https://images.example.com/images/by-path?expires=1900000000&format=webp&keyId=public-demo&path=image.png&signature=8c3234125e0e20efeaae1e2afaa88a81d387c82cef0080780fddd31c5689199e&width=800",
+  );
+});

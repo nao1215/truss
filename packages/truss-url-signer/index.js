@@ -24,6 +24,8 @@ export function signPublicUrl(options) {
     throw new TypeError("signPublicUrl options must be an object");
   }
 
+  rejectUnknownKeys(options, OPTION_KEYS, "option");
+
   const source = normalizeSource(options.source);
   const transforms = normalizeTransforms(options.transforms);
   const watermark = normalizeWatermark(options.watermark);
@@ -223,6 +225,8 @@ function normalizeSource(source) {
     throw new TypeError("source must be an object");
   }
 
+  rejectUnknownKeys(source, SOURCE_KEYS, "source option");
+
   switch (source.kind) {
     case "path":
       return {
@@ -249,6 +253,8 @@ function normalizeTransforms(transforms) {
   if (!isObject(transforms)) {
     throw new TypeError("transforms must be an object when provided");
   }
+
+  rejectUnknownKeys(transforms, TRANSFORM_KEYS, "transform option");
 
   const width = normalizeOptionalPositiveInteger("width", transforms.width);
   const height = normalizeOptionalPositiveInteger("height", transforms.height);
@@ -353,6 +359,8 @@ function normalizeWatermark(watermark) {
   if (!isObject(watermark)) {
     throw new TypeError("watermark must be an object when provided");
   }
+
+  rejectUnknownKeys(watermark, WATERMARK_KEYS, "watermark option");
 
   return {
     url: normalizeRemoteUrl("watermarkUrl", watermark.url),
@@ -718,4 +726,142 @@ function normalizeRemoteUrl(name, value) {
 
 function isObject(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+const OPTION_KEYS = Object.freeze([
+  "baseUrl",
+  "source",
+  "transforms",
+  "keyId",
+  "secret",
+  "expires",
+  "watermark",
+  "preset",
+  "method",
+]);
+
+const TRANSFORM_KEYS = Object.freeze([
+  "width",
+  "height",
+  "fit",
+  "position",
+  "format",
+  "quality",
+  "optimize",
+  "targetQuality",
+  "background",
+  "rotate",
+  "autoOrient",
+  "stripMetadata",
+  "preserveExif",
+  "crop",
+  "blur",
+  "sharpen",
+  "grayscale",
+  "withoutEnlargement",
+]);
+
+const WATERMARK_KEYS = Object.freeze(["url", "position", "opacity", "margin"]);
+
+const SOURCE_KEYS = Object.freeze(["kind", "path", "url", "version"]);
+
+/**
+ * Refuses a key this signer does not read.
+ *
+ * Every value is validated, so a misspelled key was the one caller mistake that produced a
+ * URL instead of an error: `transform` for `transforms` signs a URL with no transform in
+ * it, and `watermarks` for `watermark` signs one that serves the image without its overlay.
+ * Both verify at the server, because nothing about them is malformed, and a signed URL is
+ * read somewhere other than where it was written, so this is the last place the mistake is
+ * visible.
+ *
+ * A key whose value is `undefined` is not a mistake: `{...options, preset: undefined}` is
+ * how an optional value is threaded through a builder, and it is what the caller would have
+ * written by omitting the key.
+ */
+function rejectUnknownKeys(value, allowed, label) {
+  for (const key of Object.keys(value)) {
+    if (value[key] === undefined || allowed.includes(key)) {
+      continue;
+    }
+    const suggestion = nearestKey(key, allowed);
+    throw new TypeError(
+      suggestion === null
+        ? `unknown ${label} \`${key}\``
+        : `unknown ${label} \`${key}\`; did you mean \`${suggestion}\`?`,
+    );
+  }
+}
+
+/**
+ * Names the allowed key a misspelling was probably meant to be, or `null` when none is
+ * close enough. One edit away catches the plural slips this exists for (`transform`,
+ * `watermarks`, `presets`) without guessing at a key the caller never intended.
+ */
+function nearestKey(key, allowed) {
+  const lowered = key.toLowerCase();
+  for (const candidate of allowed) {
+    const target = candidate.toLowerCase();
+    if (editDistanceWithin(lowered, target, 1) || isAdjacentTransposition(lowered, target)) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
+/**
+ * Reports whether two same-length names differ only by one swapped pair of neighbours.
+ *
+ * `widht` for `width` is two substitutions and so out of reach of a one-edit rule, while
+ * being the shape a typed key most often takes.
+ */
+function isAdjacentTransposition(a, b) {
+  if (a.length !== b.length) {
+    return false;
+  }
+  const differing = [];
+  for (let i = 0; i < a.length; i += 1) {
+    if (a[i] !== b[i]) {
+      differing.push(i);
+      if (differing.length > 2) {
+        return false;
+      }
+    }
+  }
+  const [first, second] = differing;
+  return (
+    differing.length === 2 &&
+    second === first + 1 &&
+    a[first] === b[second] &&
+    a[second] === b[first]
+  );
+}
+
+function editDistanceWithin(a, b, limit) {
+  if (Math.abs(a.length - b.length) > limit) {
+    return false;
+  }
+  let edits = 0;
+  let i = 0;
+  let j = 0;
+  while (i < a.length && j < b.length) {
+    if (a[i] === b[j]) {
+      i += 1;
+      j += 1;
+      continue;
+    }
+    edits += 1;
+    if (edits > limit) {
+      return false;
+    }
+    if (a.length > b.length) {
+      i += 1;
+    } else if (a.length < b.length) {
+      j += 1;
+    } else {
+      i += 1;
+      j += 1;
+    }
+  }
+  return edits + (a.length - i) + (b.length - j) <= limit;
 }

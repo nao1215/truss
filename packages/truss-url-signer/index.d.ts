@@ -173,6 +173,11 @@ export interface SignPublicUrlOptions {
  * @param options - Signing parameters.
  * @returns A fully-qualified signed URL string.
  * @throws {TypeError} If any parameter fails validation (e.g. missing
- *   required fields, incompatible transform combinations).
+ *   required fields, incompatible transform combinations), or if any object
+ *   carries a key this signer does not read. A misspelled optional key would
+ *   otherwise be dropped in silence and sign a URL for a transform the caller
+ *   did not ask for, which nothing downstream can report: the signature is
+ *   valid and the server serves it. A key whose value is `undefined` is
+ *   treated as absent, so threading an optional value through is not an error.
  */
 export declare function signPublicUrl(options: SignPublicUrlOptions): string;
