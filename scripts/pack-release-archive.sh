@@ -81,6 +81,12 @@ case "${format}" in
       | gzip -9 -n > "${archive_abs}"
     ;;
   zip)
+    # ZIP stores a local time with no zone, so the packing machine's own zone is
+    # part of the archive unless it is pinned: the same binary packed in Tokyo
+    # and in UTC differed by nine hours in the entry's timestamp and therefore
+    # in its bytes. The release runs on runners that are all UTC, which is why
+    # nothing noticed.
+    #
     # 7-Zip on Windows is a native binary that cannot read the POSIX paths Git
     # Bash hands it, so translate the destination when cygpath is present.
     if command -v cygpath > /dev/null; then
@@ -90,11 +96,18 @@ case "${format}" in
     fi
 
     if command -v 7z > /dev/null; then
-      (cd "${staging}" && 7z a -tzip -mx=9 -bso0 -bsp0 "${archive_arg}" "${binary_name}" > /dev/null)
+      # -mtc=off and -mta=off keep the creation and last-access times out of the
+      # entry: `touch` above pins the modification time, and 7-Zip writes the
+      # other two from the staged file, where they are whatever the copy made
+      # them. Which tool packed the archive is printed so that a reproducibility
+      # failure names its own branch.
+      echo "pack-release-archive: zip via 7z" >&2
+      (cd "${staging}" && TZ=UTC0 7z a -tzip -mx=9 -mtc=off -mta=off -bso0 -bsp0 "${archive_arg}" "${binary_name}" > /dev/null)
     elif command -v zip > /dev/null; then
+      echo "pack-release-archive: zip via Info-ZIP" >&2
       # -X drops the extra attribute fields (uid/gid and high-resolution
       # timestamps) that would otherwise carry runner state into the archive.
-      (cd "${staging}" && zip -q -9 -X "${archive_arg}" "${binary_name}")
+      (cd "${staging}" && TZ=UTC0 zip -q -9 -X "${archive_arg}" "${binary_name}")
     else
       echo "error: neither 7z nor zip is available" >&2
       exit 1
