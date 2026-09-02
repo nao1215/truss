@@ -266,6 +266,77 @@ fn unsupported_zstd_encoding_returns_502() {
     assert!(body.contains("unsupported content-encoding"));
 }
 
+/// `br` used to be on the accepted list while `ureq`'s `brotli` feature was not enabled, so
+/// a brotli body reached the sniffer still compressed and the request was answered 415 about
+/// the caller's own file. It belongs with `deflate` and `zstd` above: an encoding truss
+/// cannot read is the origin's, and is named.
+#[test]
+fn unsupported_br_encoding_returns_502() {
+    let storage_root = temp_dir("br-encoding");
+    let (url, fixture) = spawn_fixture_server(vec![(
+        "200 OK".to_string(),
+        vec![
+            ("Content-Type".to_string(), "image/png".to_string()),
+            ("Content-Encoding".to_string(), "br".to_string()),
+        ],
+        png_bytes(),
+    )]);
+    let (addr, handle) = spawn_server(
+        ServerConfig::new(storage_root, Some("secret".to_string())).with_insecure_url_sources(true),
+    );
+    let body =
+        format!(r#"{{"source":{{"kind":"url","url":"{url}"}},"options":{{"format":"jpeg"}}}}"#);
+    let response = send_transform_request(addr, &body, Some("secret"));
+
+    handle
+        .join()
+        .expect("join server thread")
+        .expect("serve one request");
+    fixture.join().expect("join fixture server");
+
+    let (header, _, body) = split_response(&response);
+    let body = String::from_utf8(body).expect("utf8");
+    assert!(
+        header.starts_with("HTTP/1.1 502"),
+        "br encoding should be rejected, got: {header}"
+    );
+    assert!(body.contains("unsupported content-encoding `br`"), "{body}");
+}
+
+/// The encoding is still read case-insensitively on the side that is accepted, so an origin
+/// that spells a coding in upper case is not refused for a coding truss can read. A coding
+/// token is case-insensitive per RFC 9110 section 8.4.1.
+#[test]
+fn an_upper_case_gzip_encoding_is_accepted() {
+    let storage_root = temp_dir("gzip-case");
+    let (url, fixture) = spawn_fixture_server(vec![(
+        "200 OK".to_string(),
+        vec![
+            ("Content-Type".to_string(), "image/png".to_string()),
+            ("Content-Encoding".to_string(), "IDENTITY".to_string()),
+        ],
+        png_bytes(),
+    )]);
+    let (addr, handle) = spawn_server(
+        ServerConfig::new(storage_root, Some("secret".to_string())).with_insecure_url_sources(true),
+    );
+    let body =
+        format!(r#"{{"source":{{"kind":"url","url":"{url}"}},"options":{{"format":"jpeg"}}}}"#);
+    let response = send_transform_request(addr, &body, Some("secret"));
+
+    handle
+        .join()
+        .expect("join server thread")
+        .expect("serve one request");
+    fixture.join().expect("join fixture server");
+
+    let (header, _, _) = split_response(&response);
+    assert!(
+        header.starts_with("HTTP/1.1 200"),
+        "a coding token is case-insensitive, got: {header}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // ETag differs when processing options change
 // (from imgproxy TestETagProcessingOptionsNotMatch)
