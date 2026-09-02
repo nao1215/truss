@@ -90,7 +90,7 @@ The transform ran but the output could not be encoded.
 
 ### capability-missing
 
-The request needs a codec or feature this build was compiled without, such as lossy WebP or AVIF.
+The request needs a codec or feature this build was compiled without, such as lossy WebP or AVIF, or one the format itself does not have. The second is `optimize=lossless` with AVIF output: the AV1 encoder truss reaches has a quality setting and no bit-exact mode, so the mode is refused rather than approximated. See [Choosing the Output Format](api-reference.md#choosing-the-output-format).
 
 ### limit-exceeded
 
