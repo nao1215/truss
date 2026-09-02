@@ -5253,6 +5253,156 @@ mod tests {
         assert_eq!(metadata.icc_profile.as_deref(), Some(PROFILE));
     }
 
+    /// A gradient, so every stage has something to change: a flat fill survives a blur.
+    fn gradient_artifact(width: u32, height: u32) -> Artifact {
+        let mut image = RgbaImage::new(width, height);
+        for (x, y, pixel) in image.enumerate_pixels_mut() {
+            *pixel = Rgba([
+                (x * 9 % 256) as u8,
+                (y * 9 % 256) as u8,
+                ((x * y) % 256) as u8,
+                255,
+            ]);
+        }
+        let mut bytes = Vec::new();
+        PngEncoder::new(&mut bytes)
+            .write_image(&image, width, height, ColorType::Rgba8.into())
+            .expect("encode png");
+
+        Artifact::new(
+            bytes,
+            MediaType::Png,
+            ArtifactMetadata {
+                width: Some(width),
+                height: Some(height),
+                frame_count: 1,
+                duration: None,
+                has_alpha: Some(false),
+                orientation: None,
+            },
+        )
+    }
+
+    /// Every pipeline stage changes the picture, for every output format.
+    ///
+    /// The stages and the formats are chosen independently by a caller, so the pipeline is a
+    /// grid rather than a list and a hole in it is a stage that does nothing for one format
+    /// while working for the rest. That is not hypothetical: metadata retention was refused for
+    /// AVIF while the other three carried it, and a TIFF's profile was dropped while every
+    /// other format's travelled. Those two cells are on the metadata axis, which the retention
+    /// tests cover; this covers the geometry and the effects, where a silent no-op would show
+    /// as output that matches the untouched one byte for byte.
+    #[rstest]
+    #[case::jpeg(MediaType::Jpeg)]
+    #[case::png(MediaType::Png)]
+    #[case::webp(MediaType::Webp)]
+    #[cfg_attr(feature = "avif", case::avif(MediaType::Avif))]
+    #[case::bmp(MediaType::Bmp)]
+    #[case::tiff(MediaType::Tiff)]
+    fn every_stage_changes_the_picture_for_every_output_format(#[case] format: MediaType) {
+        let source = gradient_artifact(24, 24);
+        let watermark = gradient_artifact(6, 6);
+
+        let encode = |options: TransformOptions, watermark: Option<WatermarkInput>| {
+            let request = match watermark {
+                Some(watermark) => {
+                    TransformRequest::with_watermark(source.clone(), options, watermark)
+                }
+                None => TransformRequest::new(source.clone(), options),
+            };
+            transform_raster(request)
+                .unwrap_or_else(|error| panic!("{format:?} refused a stage: {error}"))
+                .artifact
+                .bytes
+        };
+
+        let base = encode(
+            TransformOptions {
+                format: Some(format),
+                ..TransformOptions::default()
+            },
+            None,
+        );
+
+        let stages: [(&str, TransformOptions, Option<WatermarkInput>); 7] = [
+            (
+                "rotate",
+                TransformOptions {
+                    rotate: Rotation::DEG_90,
+                    ..TransformOptions::default()
+                },
+                None,
+            ),
+            (
+                "crop",
+                TransformOptions {
+                    crop: Some(CropRegion {
+                        x: 2,
+                        y: 2,
+                        width: 12,
+                        height: 12,
+                    }),
+                    ..TransformOptions::default()
+                },
+                None,
+            ),
+            (
+                "resize",
+                TransformOptions {
+                    width: Some(12),
+                    height: Some(12),
+                    ..TransformOptions::default()
+                },
+                None,
+            ),
+            (
+                "blur",
+                TransformOptions {
+                    blur: Some(3.0),
+                    ..TransformOptions::default()
+                },
+                None,
+            ),
+            (
+                "sharpen",
+                TransformOptions {
+                    sharpen: Some(3.0),
+                    ..TransformOptions::default()
+                },
+                None,
+            ),
+            (
+                "grayscale",
+                TransformOptions {
+                    grayscale: true,
+                    ..TransformOptions::default()
+                },
+                None,
+            ),
+            (
+                "watermark",
+                TransformOptions {
+                    ..TransformOptions::default()
+                },
+                Some(WatermarkInput::new(watermark.clone())),
+            ),
+        ];
+
+        for (name, options, watermark) in stages {
+            let with_stage = encode(
+                TransformOptions {
+                    format: Some(format),
+                    ..options
+                },
+                watermark,
+            );
+            assert_ne!(
+                with_stage, base,
+                "{name} left a {format:?} output identical to the untouched one, so the stage did nothing"
+            );
+        }
+    }
+
     /// The README's metadata table says what `retain_supported` does.
     ///
     /// The two have drifted once already: AVIF gained EXIF and a profile and the table went on
