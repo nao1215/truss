@@ -11,6 +11,7 @@ on:
       - "examples/**"
       - "packages/**"
       - "scripts/**"
+      - "docs/openapi.yaml"
       - "justfile"
       - "Cargo.toml"
       - "Cargo.lock"
@@ -25,6 +26,7 @@ on:
       - "examples/**"
       - "packages/**"
       - "scripts/**"
+      - "docs/openapi.yaml"
       - "justfile"
       - "Cargo.toml"
       - "Cargo.lock"
@@ -200,7 +202,7 @@ jobs:
       # branch for GNU tar, bsdtar and ZIP, and each release job exercises only
       # the branch its own runner has.
       - name: Test release manifest tooling
-        run: node --test scripts/lib/release-manifest.test.mjs scripts/release-artifacts.test.mjs
+        run: node --test scripts/lib/release-manifest.test.mjs scripts/lib/version-copies.test.mjs scripts/release-artifacts.test.mjs
 
       - name: Check the pinned release toolchain against rust-version
         if: runner.os == 'Linux'
@@ -292,6 +294,14 @@ jobs:
 
       - name: Validate OpenAPI spec
         run: python -m openapi_spec_validator docs/openapi.yaml
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      - name: Check every copy of the version against the crate's
+        run: node ./scripts/check-version-consistency.mjs
 
   # ── security audit ──────────────────────────────────────────────────
   security-audit:
