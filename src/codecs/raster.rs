@@ -2146,6 +2146,71 @@ fn default_lossy_quality(media_type: MediaType) -> u8 {
     }
 }
 
+/// What a quality search came to.
+enum QualitySearch<T> {
+    /// A probed quality reaches the target. Carries that quality's encode.
+    Met { quality: u8, output: T },
+    /// No probed quality reaches it. Carries the top of the range, which is the closest the
+    /// search saw, and the score that encode reached.
+    Shortfall { quality: u8, output: T, score: f32 },
+}
+
+/// Binary-searches `1..=max_quality` for the lowest quality whose score reaches `target`.
+///
+/// The search assumes the score rises with the quality setting. Encoders do not promise
+/// that: rate control changes quantization as the setting moves, and a perceptual score
+/// against the original can fall a little on the way up. Where it does, a quality that
+/// reaches the target can sit between two probes and be missed, so what this returns is a
+/// quality that reaches the target rather than the least one that would, and a
+/// [`QualitySearch::Shortfall`] means no probed quality reached it rather than that none
+/// exists.
+///
+/// Making the minimum a guarantee needs a scan, which costs an encode, a decode, and a
+/// metric per step against this search's logarithmic handful, so the assumption is kept and
+/// written down rather than paid off.
+///
+/// `probe` encodes at a quality and scores the result. The range is never empty: a
+/// `max_quality` of zero is read as one, so a shortfall always carries an encode. When
+/// nothing meets the target the search's last probe is the top of the range, which is why
+/// the shortfall never needs an encode of its own.
+fn search_quality_for_target<T, E>(
+    target: TargetQuality,
+    max_quality: u8,
+    mut probe: impl FnMut(u8) -> Result<(T, f32), E>,
+) -> Result<QualitySearch<T>, E> {
+    let mut low = 1u8;
+    let mut high = max_quality.max(1);
+    let mut met: Option<(u8, T)> = None;
+    let mut shortfall: Option<(u8, T, f32)> = None;
+
+    while low <= high {
+        let mid = low + (high - low) / 2;
+        let (candidate, score) = probe(mid)?;
+
+        if score >= target.value {
+            met = Some((mid, candidate));
+            if mid == 1 {
+                break;
+            }
+            high = mid - 1;
+        } else {
+            shortfall = Some((mid, candidate, score));
+            low = mid.saturating_add(1);
+        }
+    }
+
+    if let Some((quality, output)) = met {
+        return Ok(QualitySearch::Met { quality, output });
+    }
+    let (quality, output, score) =
+        shortfall.expect("a search that met nothing probed at least once and every probe failed");
+    Ok(QualitySearch::Shortfall {
+        quality,
+        output,
+        score,
+    })
+}
+
 fn encode_lossy_with_target(
     image: &DynamicImage,
     media_type: MediaType,
@@ -2155,54 +2220,46 @@ fn encode_lossy_with_target(
     deadline: EncodeDeadline,
     warnings: &mut Vec<TransformWarning>,
 ) -> Result<EncodedOutput, TransformError> {
-    let mut low = 1u8;
-    let mut high = max_quality.max(1);
-    let mut best: Option<EncodedOutput> = None;
-
-    while low <= high {
-        let mid = low + (high - low) / 2;
-        let candidate =
-            encode_lossy_with_quality(image, media_type, mid, retained_metadata, true, deadline)?;
+    let search = search_quality_for_target(target, max_quality, |quality| {
+        let candidate = encode_lossy_with_quality(
+            image,
+            media_type,
+            quality,
+            retained_metadata,
+            true,
+            deadline,
+        )?;
         deadline.check("encode lossy optimization candidate")?;
         let score =
             measure_quality_metric(image, &candidate.bytes, media_type, target.metric, deadline)?;
         deadline.check("measure lossy optimization quality")?;
+        Ok::<_, TransformError>((candidate, score))
+    })?;
 
-        if score >= target.value {
-            best = Some(candidate);
-            if mid == 1 {
-                break;
-            }
-            high = mid - 1;
-        } else {
-            low = mid.saturating_add(1);
+    match search {
+        QualitySearch::Met { quality, output } => {
+            debug_assert!(
+                (1..=max_quality.max(1)).contains(&quality),
+                "the search answered with quality {quality}, outside 1..={}",
+                max_quality.max(1)
+            );
+            Ok(output)
+        }
+        // Returning the closest encode silently would pass a shortfall off as an answer, so
+        // the score that encode reached is reported alongside it.
+        QualitySearch::Shortfall {
+            quality,
+            output,
+            score,
+        } => {
+            warnings.push(TransformWarning::TargetQualityNotReached {
+                target,
+                achieved: score,
+                quality,
+            });
+            Ok(output)
         }
     }
-
-    if let Some(best) = best {
-        return Ok(best);
-    }
-
-    // No quality the search was allowed reaches the target. The highest one is the closest
-    // there is, and returning it silently would pass a shortfall off as an answer, so the
-    // score it did reach is reported alongside it.
-    let quality = max_quality.max(1);
-    let fallback = encode_lossy_with_quality(
-        image,
-        media_type,
-        quality,
-        retained_metadata,
-        true,
-        deadline,
-    )?;
-    let achieved =
-        measure_quality_metric(image, &fallback.bytes, media_type, target.metric, deadline)?;
-    warnings.push(TransformWarning::TargetQualityNotReached {
-        target,
-        achieved,
-        quality,
-    });
-    Ok(fallback)
 }
 
 fn measure_quality_metric(
@@ -3405,6 +3462,170 @@ pub(crate) fn flatten_for_opaque_output(
         }
     }
     DynamicImage::ImageRgba8(buffer)
+}
+
+#[cfg(test)]
+mod target_quality_search_tests {
+    //! The quality search, driven over a score table instead of an encoder.
+    //!
+    //! An encoder's rate control decides the curve, so an assertion against a real image is
+    //! an assertion about a libwebp version rather than about truss. These drive
+    //! [`super::search_quality_for_target`] with the shapes a curve takes, which is what the
+    //! search's behaviour actually depends on.
+    use super::{QualitySearch, search_quality_for_target};
+    use crate::core::{QualityMetric, TargetQuality};
+    use std::cell::RefCell;
+
+    fn target(value: f32) -> TargetQuality {
+        TargetQuality {
+            metric: QualityMetric::Ssim,
+            value,
+        }
+    }
+
+    /// Runs the search over a fixed score table, returning the outcome and the probe path.
+    fn run(value: f32, max_quality: u8, scores: &[f32]) -> (QualitySearch<u8>, Vec<u8>) {
+        let probed = RefCell::new(Vec::new());
+        let outcome = search_quality_for_target(target(value), max_quality, |quality| {
+            probed.borrow_mut().push(quality);
+            Ok::<_, std::convert::Infallible>((quality, scores[usize::from(quality) - 1]))
+        })
+        .expect("scoring cannot fail");
+        (outcome, probed.into_inner())
+    }
+
+    fn rising() -> Vec<f32> {
+        (1..=100u8).map(|q| f32::from(q) / 100.0).collect()
+    }
+
+    /// The guarantee that survives: on a curve that rises with the setting, the search
+    /// returns the lowest quality that reaches the target.
+    #[test]
+    fn a_rising_curve_gives_the_lowest_quality_that_reaches_the_target() {
+        let scores = rising();
+        for wanted in [1u8, 2, 37, 99, 100] {
+            let (outcome, _) = run(f32::from(wanted) / 100.0, 100, &scores);
+            match outcome {
+                QualitySearch::Met { quality, output } => {
+                    assert_eq!(quality, wanted, "a rising curve hides no lower quality");
+                    assert_eq!(output, wanted, "the encode returned is the one probed");
+                }
+                QualitySearch::Shortfall { .. } => {
+                    panic!("quality {wanted} reaches the target on a rising curve")
+                }
+            }
+        }
+    }
+
+    /// The measured shape of a WebP SSIM curve near its top: the maximum sits at 98 and the
+    /// two settings above it fall back below it. The search probes 50, 75, 88, 94, 97, 99,
+    /// and 100, so it never asks about 98 and comes back with a shortfall.
+    ///
+    /// This asserts what the search does rather than what a caller might wish it did:
+    /// finding the minimum on a curve like this needs a scan, at an encode, a decode, and a
+    /// metric per step. What the shortfall must not do is claim the target is out of reach,
+    /// which is why the rustdoc on the search says what it says.
+    #[test]
+    fn a_curve_that_dips_at_the_top_can_hide_the_only_quality_that_reaches_the_target() {
+        let peak = 0.994_257_f32;
+        let scores: Vec<f32> = (1..=100u8)
+            .map(|q| match q {
+                98 => peak,
+                99 | 100 => 0.994_241,
+                q => 0.9 + f32::from(q) * 0.000_9,
+            })
+            .collect();
+
+        let (outcome, probed) = run(peak, 100, &scores);
+
+        assert_eq!(
+            probed,
+            vec![50, 75, 88, 94, 97, 99, 100],
+            "the probe path is what decides which qualities the search can see"
+        );
+        match outcome {
+            QualitySearch::Shortfall {
+                quality,
+                output,
+                score,
+            } => {
+                assert_eq!(quality, 100, "the shortfall carries the top of the range");
+                assert_eq!(output, 100, "and that quality's own encode");
+                assert!(
+                    (score - 0.994_241).abs() < 1e-6,
+                    "the score reported is the one the returned encode reached, got {score}"
+                );
+            }
+            QualitySearch::Met { quality, .. } => {
+                panic!("98 is not on the probe path, so nothing can be met, got {quality}")
+            }
+        }
+    }
+
+    /// The shortfall reports the encode it returns, not the best score the search saw. A
+    /// caller reads it to learn how close the bytes in their hands are.
+    #[test]
+    fn the_shortfall_reports_the_score_of_the_encode_it_returns() {
+        let scores: Vec<f32> = (1..=100u8)
+            .map(|q| match q {
+                75 => 0.98,
+                100 => 0.90,
+                _ => 0.50,
+            })
+            .collect();
+
+        let (outcome, probed) = run(0.999, 100, &scores);
+
+        assert!(probed.contains(&75), "the search probes 75 on its way up");
+        match outcome {
+            QualitySearch::Shortfall {
+                quality,
+                output,
+                score,
+            } => {
+                assert_eq!(quality, 100);
+                assert_eq!(output, 100);
+                assert!(
+                    (score - 0.90).abs() < f32::EPSILON,
+                    "0.90 is what quality 100 reached; 0.98 at quality 75 is not the file returned, got {score}"
+                );
+            }
+            QualitySearch::Met { .. } => panic!("nothing reaches 0.999 on this curve"),
+        }
+    }
+
+    /// A cap narrows the range the search may use, and neither the probes nor the answer
+    /// leave it.
+    #[test]
+    fn a_quality_cap_bounds_the_search() {
+        let scores = rising();
+        let (outcome, probed) = run(0.60, 40, &scores);
+
+        assert!(
+            probed.iter().all(|q| *q <= 40),
+            "no probe may exceed the cap: {probed:?}"
+        );
+        match outcome {
+            QualitySearch::Shortfall { quality, .. } => {
+                assert_eq!(quality, 40, "0.60 needs quality 60, over the cap");
+            }
+            QualitySearch::Met { quality, .. } => panic!("quality {quality} cannot reach 0.60"),
+        }
+    }
+
+    /// A cap of zero is read as one rather than leaving the range empty, so a shortfall
+    /// always carries an encode to return.
+    #[test]
+    fn a_zero_cap_still_probes_quality_one() {
+        let scores = rising();
+        let (outcome, probed) = run(0.99, 0, &scores);
+
+        assert_eq!(probed, vec![1]);
+        match outcome {
+            QualitySearch::Shortfall { quality, .. } => assert_eq!(quality, 1),
+            QualitySearch::Met { .. } => panic!("quality 1 scores 0.01 here"),
+        }
+    }
 }
 
 #[cfg(test)]
