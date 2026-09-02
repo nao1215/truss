@@ -795,12 +795,11 @@ fn parse_optimize_mode(s: &str) -> Result<OptimizeMode, String> {
 
 /// The modes `truss optimize` takes, which is every mode that optimizes.
 ///
-/// `none` re-encodes without optimizing, which on a subcommand whose purpose is to shrink
-/// a file is a way to make it bigger: a deflate-compressed TIFF came back 13 times its
-/// size, and a lossless WebP twice. It also skipped the format check the other three
-/// apply, so a TIFF output passed when the format was inferred and failed when it was
-/// named. `truss convert` is the command for a plain re-encode, and `OptimizeMode::None`
-/// stays the default there and on the other three adapters, where it means what it says.
+/// `none` re-encodes without optimizing, which on a subcommand whose purpose is to shrink a
+/// file is a way to make it bigger, and it skipped the format check the other three apply, so
+/// a TIFF output passed when the format was inferred and failed when it was named.
+/// `truss convert` is the command for a plain re-encode, and `OptimizeMode::None` stays the
+/// default there and on the other three adapters, where it means what it says.
 fn parse_optimizing_mode(s: &str) -> Result<OptimizeMode, String> {
     match OptimizeMode::from_str(s)? {
         OptimizeMode::None => Err(

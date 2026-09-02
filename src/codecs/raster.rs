@@ -382,19 +382,11 @@ fn decode_input(input: &Artifact) -> Result<DynamicImage, TransformError> {
 
 /// The sentence truss gives a decode failure, in place of the decoder's own.
 ///
-/// The decoder's `Display` names its internal error classes, carries its byte counters, and
-/// is written in its own grammar: `Format error decoding Jpeg: I/O errors Not enough bytes,
-/// expected 162 but found 19` reached the CLI's stderr and the `detail` of the server's
-/// problem body. `docs/problems.md` describes `decode-failed` as truss's own class, and
-/// every other class in that document is reached with a sentence truss wrote. The counters
-/// are also a small disclosure about bytes a caller of `/images/by-url` named but may not be
-/// able to reach, which is the shape #431 closed for the sniff message.
-///
-/// The classification is by the error's own variant rather than by reading its text, so
-/// nothing here depends on wording upstream may change. Truncation and corruption share a
-/// sentence because the variant does not separate them; the sniffers, which run first and
-/// have their own sentences for a file that ends early, catch most of that case before the
-/// decoder is reached at all.
+/// `docs/problems.md` describes `decode-failed` as truss's own class, and every other class
+/// in that document is reached with a sentence truss wrote. The classification reads the
+/// error's variant rather than its text, so nothing here depends on wording upstream may
+/// change; truncation and corruption share a sentence because the variant does not separate
+/// them, and the sniffers run first and have their own for a file that ends early.
 fn decode_failure(media_type: MediaType, error: &image::ImageError) -> TransformError {
     let format = media_type.as_name();
     TransformError::DecodeFailed(match error {
@@ -1656,16 +1648,12 @@ fn smaller_passthrough(normalized: &NormalizedTransformRequest, encoded: &[u8]) 
 /// Returns the PNG with the metadata chunks the policy removes taken out, or `None` when
 /// the container cannot be walked.
 ///
-/// This used to decline whenever the file carried anything the policy would strip, on the
-/// grounds that filtering chunks would mean deciding what every ancillary chunk means. That
-/// is a larger contract than this needs and it left the size guarantee holding only for a
-/// PNG with no metadata at all, which almost nothing writes: ImageMagick, GIMP, Photoshop,
-/// and optipng all add a text chunk, and a 16-colour indexed PNG carrying one came back 42
-/// percent larger than it arrived. No such decision is required, because the chunks truss
-/// treats as metadata are a closed set named right here: one of those is dropped and
-/// everything else is copied, which is what "the policy says nothing about it" means. It is
-/// also what [`webp_bytes_satisfying_metadata_policy`] already does for the other container
-/// with an ancillary chunk space.
+/// The chunks truss treats as metadata are the closed set named right here: one of those is
+/// dropped and every other chunk is copied through, which is what "the policy says nothing
+/// about it" means, and it is what [`webp_bytes_satisfying_metadata_policy`] already does for
+/// the other container with an ancillary chunk space. Declining to produce a candidate at all
+/// when the file carried something to strip left the size guarantee holding only for a PNG
+/// with no metadata, which almost nothing writes.
 fn png_bytes_satisfying_metadata_policy(
     bytes: &[u8],
     metadata_policy: MetadataPolicy,

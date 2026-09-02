@@ -20,14 +20,10 @@ use super::{
 /// Reads the watermark image, from a URL when the value is one and from the filesystem
 /// otherwise.
 ///
-/// The server composites a watermark it fetches, and the CLI read one only from disk, so
-/// `--watermark https://cdn.example.com/logo.png` was reported as a missing file. Fetching
-/// remotely is already in the CLI's vocabulary through `--url`, and this goes through the
-/// same function, so the address rules, the redirect limit, and the size cap are the ones
-/// already written rather than a second copy of them.
-///
-/// A value that is not valid UTF-8 cannot be a URL, so it is a path, which is also what a
-/// caller who named a file with an unusual encoding meant.
+/// The fetch is the one `--url` uses, so the address rules, the redirect limit, and the size
+/// cap are the ones already written rather than a second copy of them. A value that is not
+/// valid UTF-8 cannot be a URL, so it is a path, which is also what a caller who named a file
+/// with an unusual encoding meant.
 fn read_watermark_bytes(watermark: &Path) -> Result<Vec<u8>, CliError> {
     if let Some(value) = watermark.to_str()
         && (value.starts_with("http://") || value.starts_with("https://"))
