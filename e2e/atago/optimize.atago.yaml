@@ -501,7 +501,7 @@ scenarios:
           stderr:
             contains:
               - "warning:"
-              - "could not reach psnr:60"
+              - "did not reach psnr:60"
               - "quality cap of 5"
           image:
             path: capped.jpg
