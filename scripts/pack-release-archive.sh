@@ -96,13 +96,14 @@ case "${format}" in
     fi
 
     if command -v 7z > /dev/null; then
-      # -mtc=off and -mta=off keep the creation and last-access times out of the
-      # entry: `touch` above pins the modification time, and 7-Zip writes the
-      # other two from the staged file, where they are whatever the copy made
-      # them. Which tool packed the archive is printed so that a reproducibility
-      # failure names its own branch.
+      # Which tool packed the archive is printed so that a reproducibility failure
+      # names its own branch: this arm has two, and the log said nothing about
+      # which one ran. `-mtc=off` and `-mta=off`, which would keep the creation
+      # and last-access times out of the entry, are rejected as E_INVALIDARG by
+      # the 7-Zip on the macOS and Windows runners, so the entry carries whatever
+      # those two are; only the modification time is pinned.
       echo "pack-release-archive: zip via 7z" >&2
-      (cd "${staging}" && TZ=UTC0 7z a -tzip -mx=9 -mtc=off -mta=off -bso0 -bsp0 "${archive_arg}" "${binary_name}" > /dev/null)
+      (cd "${staging}" && TZ=UTC0 7z a -tzip -mx=9 -bso0 -bsp0 "${archive_arg}" "${binary_name}" > /dev/null)
     elif command -v zip > /dev/null; then
       echo "pack-release-archive: zip via Info-ZIP" >&2
       # -X drops the extra attribute fields (uid/gid and high-resolution
