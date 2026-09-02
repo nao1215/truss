@@ -81,6 +81,31 @@ a small source scale up, or use `contain`, which pads to the box under either se
 the `MAX_OUTPUT_PIXELS` check read from it, so the limit is always applied to the size that
 actually gets allocated.
 
+## Output size limits
+
+Two limits apply to the size a transform produces, and both are checked from the dimensions
+alone, before the buffer is allocated.
+
+`MAX_OUTPUT_PIXELS` is 67,108,864 and bounds the area. It says nothing about the shape, so an
+output can be tens of thousands of pixels on one axis as long as the other is small.
+
+The output format's own ceiling bounds each axis. Three of the six output formats set one, and
+it comes from the format rather than from truss:
+
+| Output | Longest axis |
+|---|---|
+| `jpeg` | 65535 |
+| `webp` | 16383 |
+| `avif` | 65535 |
+| `png`, `bmp`, `tiff` | no limit below `MAX_OUTPUT_PIXELS` |
+
+A request past either is `limit-exceeded`, exit 4 on the CLI and 413 over HTTP, refused before
+the resize rather than by the encoder. The WebP number is the one the format states and the one
+libwebp enforces in both its lossy and its lossless encoder; truss's own lossless path could
+write 16384 and no longer does, because a file one pixel past the format's limit is not a WebP
+a reader is obliged to accept, and because a ceiling that moved with the `optimize` mode was
+not one a caller could predict.
+
 ## Rotation
 
 `rotate` is normalized into `0..360` before it reaches the pipeline, so a negative angle

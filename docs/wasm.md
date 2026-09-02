@@ -431,6 +431,13 @@ These limits come from the shared core and apply to browser builds too:
 | Max decoded input pixels | `100000000` |
 | Max output pixels | `67108864` |
 | Max watermark pixels | `4000000` |
+| Longest output axis, `jpeg` and `avif` | `65535` |
+| Longest output axis, `webp` | `16383` |
+
+The last two are limits of the format rather than of truss, so `png`, `bmp` and `tiff` have
+none below the output pixel budget. They are checked from the dimensions before the resize is
+allocated, so a request past them costs nothing; see
+[Output size limits](pipeline.md#output-size-limits).
 
 The demo UI adds one more browser-side check:
 
