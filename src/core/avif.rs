@@ -343,6 +343,11 @@ impl AvifInspection {
 /// EXIF would satisfy the size guarantee by breaking the metadata one. Metadata lives in
 /// `meta` as items whose `infe` entry names an item type, `Exif` for an EXIF block and
 /// `mime` for XMP, so the walk stops at the item list rather than reading the items.
+/// The `infe` item types that name metadata: `Exif` for an EXIF block, `mime` for XMP.
+fn names_a_metadata_item(window: &[u8]) -> bool {
+    window == b"Exif" || window == b"mime"
+}
+
 pub(crate) fn avif_carries_metadata(bytes: &[u8]) -> bool {
     fn walk(bytes: &[u8]) -> bool {
         let mut offset = 0;
@@ -357,13 +362,7 @@ pub(crate) fn avif_carries_metadata(bytes: &[u8]) -> bool {
                         return true;
                     }
                 }
-                b"iinf" => {
-                    if payload.windows(4).any(|window| window == b"Exif")
-                        || payload.windows(4).any(|window| window == b"mime")
-                    {
-                        return true;
-                    }
-                }
+                b"iinf" if payload.windows(4).any(names_a_metadata_item) => return true,
                 _ => {}
             }
             if next_offset <= offset {
