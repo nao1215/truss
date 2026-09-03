@@ -120,6 +120,8 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
         '406':
           $ref: '#/components/responses/NotAcceptable'
         '413':
@@ -190,6 +192,8 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
         '406':
           $ref: '#/components/responses/NotAcceptable'
         '413':
@@ -279,6 +283,8 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
         '406':
           $ref: '#/components/responses/NotAcceptable'
         '413':
@@ -349,6 +355,8 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
         '406':
           $ref: '#/components/responses/NotAcceptable'
         '413':
@@ -422,6 +430,8 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
         '406':
           $ref: '#/components/responses/NotAcceptable'
         '413':
@@ -478,6 +488,8 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
         '406':
           $ref: '#/components/responses/NotAcceptable'
         '413':
@@ -541,6 +553,8 @@ paths:
                 maxInputPixels: 40000000
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
         '429':
           $ref: '#/components/responses/TooManyRequests'
     head:
@@ -561,6 +575,8 @@ paths:
                 $ref: '#/components/schemas/HealthDiagnosticResponse'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
         '429':
           $ref: '#/components/responses/TooManyRequests'
 
@@ -585,6 +601,8 @@ paths:
                 status: ok
                 service: truss
                 version: 0.24.0
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
         '429':
           $ref: '#/components/responses/TooManyRequests'
     head:
@@ -600,6 +618,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/LivenessResponse'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
         '429':
           $ref: '#/components/responses/TooManyRequests'
 
@@ -691,6 +711,8 @@ paths:
                         status: ok
                       - name: storageBackend
                         status: ok
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
         '503':
           description: Server is not ready to accept traffic
           content:
@@ -727,6 +749,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ReadinessResponse'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
         '503':
           description: Server is not ready to accept traffic
           content:
@@ -775,6 +799,8 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
         '429':
@@ -799,6 +825,8 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
         '429':
@@ -1778,6 +1806,19 @@ components:
             $ref: '#/components/schemas/ProblemDetail'
     NotFound:
       description: Source file or route not found
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetail'
+    MethodNotAllowed:
+      description: |
+        The route exists and does not serve this method. `Allow` names the methods it does
+        serve; `OPTIONS` is answered on every route with `204 No Content` and the same header.
+      headers:
+        Allow:
+          description: The methods this route serves, comma separated
+          schema:
+            type: string
       content:
         application/problem+json:
           schema:

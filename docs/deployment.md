@@ -133,6 +133,8 @@ Per-client rate limiting is off by default. Set `TRUSS_RATE_LIMIT_RPS` to a posi
 
 Behind a CDN or reverse proxy every connection arrives from the proxy, so without further configuration all traffic shares one bucket and the limit applies to the whole site at once rather than per client. Set `TRUSS_TRUSTED_PROXIES` to the proxy addresses or CIDR ranges to fix this: when a connection comes from one of them, the client IP is taken from `X-Forwarded-For` (rightmost entry that is not itself a trusted proxy) or `X-Real-IP`. Only list addresses you control, because trusting an address means trusting whatever it puts in those headers.
 
+The limit applies to the image routes -- `/images/by-path`, `/images/by-url`, `/images:transform` and `/images` -- and to a path truss does not serve. `/health`, `/health/live`, `/health/ready` and `/metrics` are outside it: a liveness probe answered 429 is a failed probe, and an orchestrator that fails enough of them restarts the process, which is the opposite of what shedding load is for. Use `TRUSS_METRICS_TOKEN` and `TRUSS_HEALTH_TOKEN` to control access to those endpoints.
+
 ## Health Checks
 
 | Endpoint | Purpose |
