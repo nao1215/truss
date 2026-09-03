@@ -54,6 +54,8 @@ pub(crate) enum ErrorClass {
     Forbidden,
     /// The source the request named does not exist.
     NotFound,
+    /// The route exists and does not serve the method the request used.
+    MethodNotAllowed,
     /// The `Accept` header allows none of the output formats truss can produce.
     NotAcceptable,
     /// The client stopped sending before the request was complete.
@@ -95,6 +97,7 @@ impl ErrorClass {
             Self::Unauthorized => "unauthorized",
             Self::Forbidden => "forbidden",
             Self::NotFound => "not-found",
+            Self::MethodNotAllowed => "method-not-allowed",
             Self::NotAcceptable => "not-acceptable",
             Self::RequestTimeout => "request-timeout",
             Self::PayloadTooLarge => "payload-too-large",
@@ -131,6 +134,7 @@ impl ErrorClass {
             Self::Unauthorized => "unauthorized",
             Self::Forbidden => "forbidden",
             Self::NotFound => "notFound",
+            Self::MethodNotAllowed => "methodNotAllowed",
             Self::NotAcceptable => "notAcceptable",
             Self::RequestTimeout => "requestTimeout",
             Self::PayloadTooLarge => "payloadTooLarge",
@@ -149,7 +153,7 @@ impl ErrorClass {
     /// Only the tests walk this, and they are the reason it exists: a class that gains a
     /// spelling, an exit code, or a status has to gain it for all of them at once.
     #[cfg(test)]
-    pub(crate) const ALL: [Self; 23] = [
+    pub(crate) const ALL: [Self; 24] = [
         Self::InvalidOptions,
         Self::InvalidInput,
         Self::DecodeFailed,
@@ -163,6 +167,7 @@ impl ErrorClass {
         Self::Unauthorized,
         Self::Forbidden,
         Self::NotFound,
+        Self::MethodNotAllowed,
         Self::NotAcceptable,
         Self::RequestTimeout,
         Self::PayloadTooLarge,

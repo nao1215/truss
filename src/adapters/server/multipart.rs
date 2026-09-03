@@ -16,6 +16,7 @@ pub(super) struct MultipartPart {
 pub(super) fn parse_upload_request(
     body: &[u8],
     boundary: &str,
+    config: &super::config::ServerConfig,
 ) -> Result<(Vec<u8>, TransformOptions, Option<WatermarkInput>), HttpResponse> {
     let parts = parse_multipart_form_data(body, boundary)?;
     let mut file_range = None;
@@ -66,7 +67,7 @@ pub(super) fn parse_upload_request(
                         },
                     )?
                 };
-                options = Some(payload.into_options()?);
+                options = Some(payload.resolve_preset(config)?.into_options()?);
             }
             "watermark" => {
                 if watermark_range.is_some() {
@@ -642,12 +643,18 @@ mod tests {
     // parse_upload_request
     // ---------------------------------------------------------------------------
 
+    /// The multipart parser reaches presets through the configuration, and no test here is
+    /// about presets, so they all pass one with none.
+    fn no_presets() -> super::super::config::ServerConfig {
+        super::super::config::ServerConfig::new(std::path::PathBuf::from("."), None)
+    }
+
     #[test]
     fn test_upload_request_file_only() {
         let boundary = "b";
         let file_bytes = b"FAKE_IMAGE_DATA";
         let body = build_multipart_body(boundary, &[("file", Some("image/png"), file_bytes)]);
-        let (data, opts, watermark) = parse_upload_request(&body, boundary).unwrap();
+        let (data, opts, watermark) = parse_upload_request(&body, boundary, &no_presets()).unwrap();
         assert_eq!(data, file_bytes);
         assert_eq!(opts, TransformOptions::default());
         assert!(watermark.is_none());
@@ -664,7 +671,7 @@ mod tests {
                 ("options", Some("application/json"), options_json),
             ],
         );
-        let (data, opts, _) = parse_upload_request(&body, boundary).unwrap();
+        let (data, opts, _) = parse_upload_request(&body, boundary, &no_presets()).unwrap();
         assert_eq!(data, b"IMG");
         assert_eq!(opts.width, Some(200));
         assert_eq!(opts.height, Some(100));
@@ -680,7 +687,7 @@ mod tests {
                 ("options", Some("application/json"), b""),
             ],
         );
-        let (_, opts, _) = parse_upload_request(&body, boundary).unwrap();
+        let (_, opts, _) = parse_upload_request(&body, boundary, &no_presets()).unwrap();
         assert_eq!(opts, TransformOptions::default());
     }
 
@@ -688,7 +695,7 @@ mod tests {
     fn test_upload_request_missing_file() {
         let boundary = "b";
         let body = build_multipart_body(boundary, &[("options", Some("application/json"), b"{}")]);
-        let err = parse_upload_request(&body, boundary).unwrap_err();
+        let err = parse_upload_request(&body, boundary, &no_presets()).unwrap_err();
         assert_eq!(err.status, "400 Bad Request");
         assert!(String::from_utf8_lossy(&err.body).contains("file"));
     }
@@ -697,7 +704,7 @@ mod tests {
     fn test_upload_request_empty_file() {
         let boundary = "b";
         let body = build_multipart_body(boundary, &[("file", Some("image/png"), b"")]);
-        let err = parse_upload_request(&body, boundary).unwrap_err();
+        let err = parse_upload_request(&body, boundary, &no_presets()).unwrap_err();
         assert_eq!(err.status, "400 Bad Request");
         assert!(String::from_utf8_lossy(&err.body).contains("empty"));
     }
@@ -712,7 +719,7 @@ mod tests {
                 ("file", Some("image/png"), b"IMG2"),
             ],
         );
-        let err = parse_upload_request(&body, boundary).unwrap_err();
+        let err = parse_upload_request(&body, boundary, &no_presets()).unwrap_err();
         assert_eq!(err.status, "400 Bad Request");
         assert!(String::from_utf8_lossy(&err.body).contains("multiple"));
     }
@@ -728,7 +735,7 @@ mod tests {
                 ("options", Some("application/json"), b"{}"),
             ],
         );
-        let err = parse_upload_request(&body, boundary).unwrap_err();
+        let err = parse_upload_request(&body, boundary, &no_presets()).unwrap_err();
         assert_eq!(err.status, "400 Bad Request");
         assert!(String::from_utf8_lossy(&err.body).contains("multiple"));
     }
@@ -743,7 +750,7 @@ mod tests {
                 ("options", Some("text/plain"), b"{}"),
             ],
         );
-        let err = parse_upload_request(&body, boundary).unwrap_err();
+        let err = parse_upload_request(&body, boundary, &no_presets()).unwrap_err();
         assert_eq!(err.status, "400 Bad Request");
         assert!(String::from_utf8_lossy(&err.body).contains("application/json"));
     }
@@ -758,7 +765,7 @@ mod tests {
                 ("options", Some("application/json"), b"NOT JSON"),
             ],
         );
-        let err = parse_upload_request(&body, boundary).unwrap_err();
+        let err = parse_upload_request(&body, boundary, &no_presets()).unwrap_err();
         assert_eq!(err.status, "400 Bad Request");
         assert!(String::from_utf8_lossy(&err.body).contains("JSON"));
     }
@@ -773,7 +780,7 @@ mod tests {
                 ("unknown_field", None, b"value"),
             ],
         );
-        let err = parse_upload_request(&body, boundary).unwrap_err();
+        let err = parse_upload_request(&body, boundary, &no_presets()).unwrap_err();
         assert_eq!(err.status, "400 Bad Request");
         assert!(String::from_utf8_lossy(&err.body).contains("unknown_field"));
     }
@@ -788,7 +795,7 @@ mod tests {
                 ("watermark_position", None, b"center"),
             ],
         );
-        let err = parse_upload_request(&body, boundary).unwrap_err();
+        let err = parse_upload_request(&body, boundary, &no_presets()).unwrap_err();
         assert_eq!(err.status, "400 Bad Request");
         assert!(String::from_utf8_lossy(&err.body).contains("watermark"));
     }
@@ -803,7 +810,7 @@ mod tests {
                 ("watermark_opacity", None, b"50"),
             ],
         );
-        let err = parse_upload_request(&body, boundary).unwrap_err();
+        let err = parse_upload_request(&body, boundary, &no_presets()).unwrap_err();
         assert_eq!(err.status, "400 Bad Request");
     }
 
@@ -817,7 +824,7 @@ mod tests {
                 ("watermark_margin", None, b"10"),
             ],
         );
-        let err = parse_upload_request(&body, boundary).unwrap_err();
+        let err = parse_upload_request(&body, boundary, &no_presets()).unwrap_err();
         assert_eq!(err.status, "400 Bad Request");
     }
 
@@ -832,7 +839,7 @@ mod tests {
                 ("watermark_position", None, b"top-left"),
             ],
         );
-        let err = parse_upload_request(&body, boundary).unwrap_err();
+        let err = parse_upload_request(&body, boundary, &no_presets()).unwrap_err();
         assert_eq!(err.status, "400 Bad Request");
         assert!(String::from_utf8_lossy(&err.body).contains("multiple"));
     }
@@ -848,7 +855,7 @@ mod tests {
                 ("watermark_opacity", None, b"75"),
             ],
         );
-        let err = parse_upload_request(&body, boundary).unwrap_err();
+        let err = parse_upload_request(&body, boundary, &no_presets()).unwrap_err();
         assert_eq!(err.status, "400 Bad Request");
     }
 
@@ -863,7 +870,7 @@ mod tests {
                 ("watermark_margin", None, b"20"),
             ],
         );
-        let err = parse_upload_request(&body, boundary).unwrap_err();
+        let err = parse_upload_request(&body, boundary, &no_presets()).unwrap_err();
         assert_eq!(err.status, "400 Bad Request");
     }
 
@@ -877,7 +884,7 @@ mod tests {
                 ("watermark_opacity", None, b"abc"),
             ],
         );
-        let err = parse_upload_request(&body, boundary).unwrap_err();
+        let err = parse_upload_request(&body, boundary, &no_presets()).unwrap_err();
         assert_eq!(err.status, "400 Bad Request");
         assert!(String::from_utf8_lossy(&err.body).contains("integer"));
     }
@@ -892,7 +899,7 @@ mod tests {
                 ("watermark_margin", None, b"xyz"),
             ],
         );
-        let err = parse_upload_request(&body, boundary).unwrap_err();
+        let err = parse_upload_request(&body, boundary, &no_presets()).unwrap_err();
         assert_eq!(err.status, "400 Bad Request");
         assert!(String::from_utf8_lossy(&err.body).contains("integer"));
     }
@@ -907,7 +914,7 @@ mod tests {
                 ("watermark", Some("image/png"), b""),
             ],
         );
-        let err = parse_upload_request(&body, boundary).unwrap_err();
+        let err = parse_upload_request(&body, boundary, &no_presets()).unwrap_err();
         assert_eq!(err.status, "400 Bad Request");
         assert!(String::from_utf8_lossy(&err.body).contains("empty"));
     }
@@ -923,7 +930,7 @@ mod tests {
                 ("watermark", Some("image/png"), b"WM2"),
             ],
         );
-        let err = parse_upload_request(&body, boundary).unwrap_err();
+        let err = parse_upload_request(&body, boundary, &no_presets()).unwrap_err();
         assert_eq!(err.status, "400 Bad Request");
         assert!(String::from_utf8_lossy(&err.body).contains("multiple"));
     }
@@ -939,7 +946,7 @@ mod tests {
                 ("options", None, b"{\"width\":50}"),
             ],
         );
-        let (_, opts, _) = parse_upload_request(&body, boundary).unwrap();
+        let (_, opts, _) = parse_upload_request(&body, boundary, &no_presets()).unwrap();
         assert_eq!(opts.width, Some(50));
     }
 }

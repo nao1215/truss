@@ -1096,3 +1096,106 @@ fn a_malformed_body_is_still_called_invalid_json() {
         "a body that is not JSON is exactly what that sentence is for: {detail}"
     );
 }
+
+/// A preset named in the JSON body resolves to the same bytes as naming its values.
+///
+/// `preset` is declared on `ImageTransformOptions` in `docs/openapi.yaml`, which is the
+/// schema `TransformImageRequest.options` points at, and the private JSON route used to
+/// answer `unknown field \`preset\`` for it. That is the route a backend composes a
+/// transform from, and presets exist so the vocabulary lives on the server rather than in
+/// every caller.
+#[test]
+fn a_preset_named_in_the_json_body_resolves_to_the_values_it_stands_for() {
+    let storage_root = temp_dir("preset-json-body");
+    fs::write(storage_root.join("image.png"), png_bytes()).expect("write source fixture");
+
+    let mut presets = std::collections::HashMap::new();
+    presets.insert(
+        "thumb".to_string(),
+        serde_json::from_str::<truss::TransformOptionsPayload>(
+            r#"{"width":2,"height":2,"fit":"cover","format":"webp"}"#,
+        )
+        .expect("a preset is written as the options object it stands for"),
+    );
+    let config = ServerConfig::new(storage_root, Some("secret".to_string())).with_presets(presets);
+
+    let by_preset = {
+        let (addr, handle) = spawn_server(config.clone());
+        let response = send_transform_request(
+            addr,
+            r#"{"source":{"kind":"path","path":"/image.png"},"options":{"preset":"thumb"}}"#,
+            Some("secret"),
+        );
+        handle.join().expect("join").expect("serve one request");
+        response
+    };
+    let by_value = {
+        let (addr, handle) = spawn_server(config.clone());
+        let response = send_transform_request(
+            addr,
+            r#"{"source":{"kind":"path","path":"/image.png"},"options":{"width":2,"height":2,"fit":"cover","format":"webp"}}"#,
+            Some("secret"),
+        );
+        handle.join().expect("join").expect("serve one request");
+        response
+    };
+
+    let (preset_header, preset_type, preset_body) = split_response(&by_preset);
+    let (_, value_type, value_body) = split_response(&by_value);
+    assert!(
+        preset_header.starts_with("HTTP/1.1 200 OK"),
+        "{preset_header}"
+    );
+    assert_eq!(preset_type, "image/webp");
+    assert_eq!(preset_type, value_type);
+    assert_eq!(preset_body, value_body);
+}
+
+/// A field named beside the preset wins, which is the precedence the document states.
+#[test]
+fn a_field_in_the_body_overrides_the_preset_it_names() {
+    let storage_root = temp_dir("preset-json-override");
+    fs::write(storage_root.join("image.png"), png_bytes()).expect("write source fixture");
+
+    let mut presets = std::collections::HashMap::new();
+    presets.insert(
+        "thumb".to_string(),
+        serde_json::from_str::<truss::TransformOptionsPayload>(
+            r#"{"width":2,"height":2,"fit":"cover","format":"webp"}"#,
+        )
+        .expect("a preset is written as the options object it stands for"),
+    );
+    let (addr, handle) = spawn_server(
+        ServerConfig::new(storage_root, Some("secret".to_string())).with_presets(presets),
+    );
+    let response = send_transform_request(
+        addr,
+        r#"{"source":{"kind":"path","path":"/image.png"},"options":{"preset":"thumb","format":"png"}}"#,
+        Some("secret"),
+    );
+    handle.join().expect("join").expect("serve one request");
+
+    let (header, content_type, _) = split_response(&response);
+    assert!(header.starts_with("HTTP/1.1 200 OK"), "{header}");
+    assert_eq!(content_type, "image/png");
+}
+
+/// An unknown preset is the same 400 with the same sentence the signed GET route gives,
+/// rather than a serde shape error naming a field the document declares.
+#[test]
+fn an_unknown_preset_in_the_json_body_names_the_preset() {
+    let storage_root = temp_dir("preset-json-unknown");
+    fs::write(storage_root.join("image.png"), png_bytes()).expect("write source fixture");
+    let (addr, handle) = spawn_server(ServerConfig::new(storage_root, Some("secret".to_string())));
+    let response = send_transform_request(
+        addr,
+        r#"{"source":{"kind":"path","path":"/image.png"},"options":{"preset":"nosuch"}}"#,
+        Some("secret"),
+    );
+    handle.join().expect("join").expect("serve one request");
+
+    let (header, _, body) = split_response(&response);
+    assert!(header.starts_with("HTTP/1.1 400"), "{header}");
+    let text = String::from_utf8_lossy(&body);
+    assert!(text.contains("unknown preset `nosuch`"), "{text}");
+}

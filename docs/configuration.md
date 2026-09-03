@@ -2,12 +2,14 @@
 
 truss is configured through environment variables and CLI flags. This page documents every available setting.
 
+A setting described as a boolean takes `1`, `true`, `yes`, or `on` for true and `0`, `false`, `no`, or `off` for false, in any mix of case. Any other value, surrounding whitespace included, is refused when the server starts and by `truss validate`, so a typo is reported rather than read as false.
+
 ## Core Settings
 
 | Variable | Description |
 |------|------|
 | `TRUSS_BIND_ADDR` | Bind address (default: `127.0.0.1:8080`) |
-| `TRUSS_STORAGE_ROOT` | Root directory for local image sources |
+| `TRUSS_STORAGE_ROOT` | Root directory for local image sources (default: the process's current working directory) |
 | `TRUSS_BEARER_TOKEN` | Bearer token for private endpoints |
 | `TRUSS_STORAGE_BACKEND` | `filesystem` (default), `s3`, `gcs`, or `azure` |
 | `TRUSS_MAX_CONCURRENT_TRANSFORMS` | Max concurrent transforms; excess requests receive 503 (default: one per core, range: 1-1024) |
@@ -21,7 +23,7 @@ truss is configured through environment variables and CLI flags. This page docum
 | `TRUSS_HEALTH_HYSTERESIS_MARGIN` | Recovery margin for readiness probe hysteresis (default: `0.05`, range: 0.01-0.50). After a threshold is breached, the value must recover past threshold ± margin before the check returns to ok |
 | `TRUSS_SHUTDOWN_DRAIN_SECS` | Drain period in seconds during graceful shutdown; `/health/ready` returns 503 immediately (default: `10`, range: 0-300). Total shutdown time is drain + 15 s worker drain. On Kubernetes, set `terminationGracePeriodSeconds` >= drain + 20 (e.g. `35` for the default 10 s drain) |
 | `TRUSS_RESPONSE_HEADERS` | JSON object of custom headers added to all image responses including private transforms (e.g. `{"CDN-Cache-Control":"max-age=86400"}`). Framing / hop-by-hop headers (`Content-Length`, `Transfer-Encoding`, `Content-Encoding`, `Content-Type`, `Connection`, etc.) are rejected at startup. Header names must be valid RFC 7230 tokens; values must contain only visible ASCII, SP, or HTAB (CRLF is rejected) |
-| `TRUSS_DISABLE_COMPRESSION` | Disable gzip compression for non-image responses (`true`/`1`/`yes`/`on`, case-insensitive). When compression is enabled (default), `Vary: Accept-Encoding` is added to compressible responses |
+| `TRUSS_DISABLE_COMPRESSION` | Disable gzip compression for non-image responses (boolean). When compression is enabled (default), `Vary: Accept-Encoding` is added to compressible responses |
 | `TRUSS_COMPRESSION_LEVEL` | Gzip compression level (default: `1`, range: 0-9). `1` is fastest, `6` is a good trade-off, `9` is best compression |
 | `TRUSS_MAX_SOURCE_BYTES` | Max source image size in bytes from filesystem or remote URL (default: `104857600` = 100 MB, range: 1-10737418240) |
 | `TRUSS_MAX_WATERMARK_BYTES` | Max watermark image size in bytes from remote URL (default: `10485760` = 10 MB, range: 1-1073741824) |
@@ -47,12 +49,12 @@ truss is configured through environment variables and CLI flags. This page docum
 | `TRUSS_FORMAT_PREFERENCE` | Comma-separated output formats ordered by server preference, used to break ties during Accept negotiation (default: `avif,webp,jpeg,png`, with `png` ahead of `jpeg` for sources with alpha). Formats not listed keep their default relative order. Only `avif`, `webp`, `jpeg`, and `png` can be reordered; other encodable names are accepted at startup but have no effect. A source whose own format is outside that set (SVG, BMP) is offered as a candidate as well |
 | `TRUSS_PUBLIC_MAX_AGE` | `Cache-Control: max-age` for public GET responses in seconds (default: `3600`) |
 | `TRUSS_PUBLIC_STALE_WHILE_REVALIDATE` | `Cache-Control: stale-while-revalidate` for public GET responses in seconds (default: `60`) |
-| `TRUSS_DISABLE_ACCEPT_NEGOTIATION` | Disable Accept-based content negotiation (`true`/`1`; recommended behind CDNs that don't forward Accept) |
-| `TRUSS_ALLOW_INSECURE_URL_SOURCES` | Allow private-network/loopback URL sources (`true`/`1`; dev/test only). Cloud metadata endpoints (169.254.169.254, metadata.google.internal, fd00:ec2::254) are **always** blocked regardless of this setting |
+| `TRUSS_DISABLE_ACCEPT_NEGOTIATION` | Disable Accept-based content negotiation (boolean; recommended behind CDNs that don't forward Accept) |
+| `TRUSS_ALLOW_INSECURE_URL_SOURCES` | Allow private-network/loopback URL sources (boolean; dev/test only). Cloud metadata endpoints (169.254.169.254, metadata.google.internal, fd00:ec2::254) are always blocked regardless of this setting |
 | `TRUSS_PRESETS_FILE` | Path to a JSON file defining named transform presets. The file is watched for changes every 5 seconds; valid updates are applied without restart, invalid files are ignored (previous presets are kept) |
 | `TRUSS_PRESETS` | Inline JSON defining named transform presets (ignored when `TRUSS_PRESETS_FILE` is set) |
 
-Preset objects accept the same fields as the HTTP `ImageTransformOptions` schema, including `optimize` and `targetQuality`.
+Preset objects accept the same fields as the HTTP `ImageTransformOptions` schema, including `optimize` and `targetQuality`. The one field they may not set is `preset` itself, so a preset cannot name another one; a definition that sets it is refused at startup. A preset is named by every route that takes transform options: the `preset` query parameter on the public signed routes, and the `preset` field of the options object on `POST /images:transform` and the `options` part of `POST /images`. Fields given beside the name override the preset's.
 
 For the canonical signature payload, query serialization rules, and compatibility policy for public signed URLs, see [signed-url-spec.md](signed-url-spec.md).
 
@@ -61,7 +63,7 @@ For the canonical signature payload, query serialization rules, and compatibilit
 | Variable | Description |
 |------|------|
 | `TRUSS_S3_BUCKET` | Default S3 bucket name (required when backend is `s3`) |
-| `TRUSS_S3_FORCE_PATH_STYLE` | Use path-style S3 addressing (`true`/`1`; required for MinIO, LocalStack, etc.) |
+| `TRUSS_S3_FORCE_PATH_STYLE` | Use path-style S3 addressing (boolean; required for MinIO, LocalStack, etc.) |
 | `AWS_REGION` | AWS region for the S3 client (e.g. `us-east-1`) |
 | `AWS_ACCESS_KEY_ID` | AWS access key for S3 authentication |
 | `AWS_SECRET_ACCESS_KEY` | AWS secret key for S3 authentication |
@@ -93,7 +95,7 @@ The server exposes a `/metrics` endpoint in Prometheus text exposition format. B
 | Variable | Description |
 |------|------|
 | `TRUSS_METRICS_TOKEN` | Bearer token for `/metrics`; when set, requests must include `Authorization: Bearer <token>` |
-| `TRUSS_DISABLE_METRICS` | Disable the `/metrics` endpoint entirely (`true`/`1`; returns 404) |
+| `TRUSS_DISABLE_METRICS` | Disable the `/metrics` endpoint entirely (boolean; returns 404) |
 | `TRUSS_HEALTH_TOKEN` | Bearer token for `/health`; when set, requests must include `Authorization: Bearer <token>`. `/health/live` and `/health/ready` remain unauthenticated |
 
 For the full metrics reference, bucket boundaries, and example PromQL queries, see [prometheus.md](prometheus.md).

@@ -16,8 +16,10 @@ use super::http_parse;
 use super::lifecycle::{HEADER_READ_DEADLINE, SOCKET_READ_TIMEOUT, SOCKET_WRITE_TIMEOUT};
 use super::metrics::{RouteMetric, record_http_metrics, record_http_request_duration, status_code};
 use super::response::{
-    HttpResponse, NOT_FOUND_BODY, ResponseWriteOptions, too_many_requests_response, write_response,
+    HttpResponse, NOT_FOUND_BODY, ResponseWriteOptions, problem_response,
+    too_many_requests_response, write_response,
 };
+use crate::core::error_class::ErrorClass;
 
 use subtle::ConstantTimeEq;
 
@@ -237,12 +239,21 @@ pub(super) fn handle_stream(
                 resolve_client_ip(ip, &partial.headers, &config.trusted_proxies)
             }
         });
+        // The path is already parsed here, which is what lets the limit apply to the routes
+        // whose cost justifies it and leave the health probes and the metrics scrape out.
+        // `/health/live` answered 429 is a failed liveness probe, so shedding it turned a
+        // burst of client traffic into a restart, and a scrape shed at the moment the
+        // limiter starts working is the moment the evidence of it working stops arriving.
         if let (Some(limiter), Some(ip)) = (&config.rate_limiter, client_ip)
+            && is_rate_limited(partial.path())
             && !limiter.check(ip)
         {
             let mut response = too_many_requests_response("rate limit exceeded — try again later");
             response.attach_request_id(&request_id);
-            record_http_metrics(RouteMetric::Unknown, response.status);
+            // The route the request named, so an operator can see which route the 429s
+            // belong to rather than finding them all under the unknown one.
+            let route = classify_route_from_path(partial.path());
+            record_http_metrics(route, response.status);
             let sc = status_code(response.status).unwrap_or("unknown");
             let method_log = partial.method.clone();
             let path_log = partial.path().to_string();
@@ -251,14 +262,14 @@ pub(super) fn handle_stream(
                 response,
                 ResponseWriteOptions::closing(is_head),
             );
-            record_http_request_duration(RouteMetric::Unknown, start);
+            record_http_request_duration(route, start);
             emit_access_log(
                 config,
                 &AccessLogEntry {
                     request_id: &request_id,
                     method: &method_log,
                     path: &path_log,
-                    route: &path_log,
+                    route: route.as_label(),
                     status: sc,
                     start,
                     cache_status: None,
@@ -529,43 +540,233 @@ fn client_wants_close(version: &str, headers: &[(String, String)]) -> bool {
     !connection.is_some_and(|value| http_parse::header_list_contains(value, "keep-alive"))
 }
 
+/// One row of the routing table.
+///
+/// The path, the methods it serves, the label it is counted under, and whether the rate
+/// limiter is asked about it all sit together, because every one of them used to be decided
+/// somewhere else and the three answers disagreed: a wrong method on a real route was a 404
+/// counted as an unknown route, and the limiter, which runs before any of this, shed the
+/// health probes along with the transforms.
+struct Route {
+    path: &'static str,
+    /// The methods this route serves, in the order `Allow` lists them.
+    methods: &'static [&'static str],
+    metric: RouteMetric,
+    /// Whether the rate limiter is consulted for this route.
+    ///
+    /// The transform routes are what a limit is for: each one can cost a decode, a resize
+    /// and an encode. The health endpoints answer from memory or from a cached measurement
+    /// and are what decides whether the process keeps running, so shedding them turns a
+    /// burst of client traffic into a restart. `/metrics` is how the limiter is observed,
+    /// and it has `TRUSS_METRICS_TOKEN` for access control, which is the right tool for a
+    /// scrape.
+    rate_limited: bool,
+    handler: fn(http_parse::HttpRequest, &ServerConfig) -> HttpResponse,
+}
+
+const GET_HEAD: &[&str] = &["GET", "HEAD"];
+const POST: &[&str] = &["POST"];
+
+const ROUTES: &[Route] = &[
+    Route {
+        path: "/health",
+        methods: GET_HEAD,
+        metric: RouteMetric::Health,
+        rate_limited: false,
+        handler: |_request, config| handle_health(config),
+    },
+    Route {
+        path: "/health/live",
+        methods: GET_HEAD,
+        metric: RouteMetric::HealthLive,
+        rate_limited: false,
+        handler: |_request, _config| handle_health_live(),
+    },
+    Route {
+        path: "/health/ready",
+        methods: GET_HEAD,
+        metric: RouteMetric::HealthReady,
+        rate_limited: false,
+        handler: |_request, config| handle_health_ready(config),
+    },
+    Route {
+        path: "/metrics",
+        methods: GET_HEAD,
+        metric: RouteMetric::Metrics,
+        rate_limited: false,
+        handler: handle_metrics_request,
+    },
+    Route {
+        path: "/images/by-path",
+        methods: GET_HEAD,
+        metric: RouteMetric::PublicByPath,
+        rate_limited: true,
+        handler: handle_public_path_request,
+    },
+    Route {
+        path: "/images/by-url",
+        methods: GET_HEAD,
+        metric: RouteMetric::PublicByUrl,
+        rate_limited: true,
+        handler: handle_public_url_request,
+    },
+    Route {
+        path: "/images:transform",
+        methods: POST,
+        metric: RouteMetric::Transform,
+        rate_limited: true,
+        handler: handle_transform_request,
+    },
+    Route {
+        path: "/images",
+        methods: POST,
+        metric: RouteMetric::Upload,
+        rate_limited: true,
+        handler: handle_upload_request,
+    },
+];
+
+impl Route {
+    fn lookup(path: &str) -> Option<&'static Route> {
+        ROUTES.iter().find(|route| route.path == path)
+    }
+
+    fn serves(&self, method: &str) -> bool {
+        self.methods.contains(&method)
+    }
+
+    /// The `Allow` header RFC 9110 section 15.5.6 requires on a 405, naming the methods this
+    /// route serves. `OPTIONS` is on every route, because every route answers it.
+    fn allow_header(&self) -> String {
+        let mut allow = self.methods.join(", ");
+        allow.push_str(", OPTIONS");
+        allow
+    }
+}
+
+/// Whether the rate limiter is asked about this request.
+///
+/// A path truss does not serve is inside the limit: that is what a scanner produces and it
+/// costs nothing to shed. A wrong method on a real route follows that route's answer, since
+/// the cost of refusing it is the route's own.
+fn is_rate_limited(path: &str) -> bool {
+    Route::lookup(path).is_none_or(|route| route.rate_limited)
+}
+
 pub(super) fn route_request(
     request: http_parse::HttpRequest,
     config: &ServerConfig,
 ) -> HttpResponse {
-    let method = request.method.clone();
-    let path = request.path().to_string();
-
-    match (method.as_str(), path.as_str()) {
-        ("GET" | "HEAD", "/health") => handle_health(config),
-        ("GET" | "HEAD", "/health/live") => handle_health_live(),
-        ("GET" | "HEAD", "/health/ready") => handle_health_ready(config),
-        ("GET" | "HEAD", "/images/by-path") => handle_public_path_request(request, config),
-        ("GET" | "HEAD", "/images/by-url") => handle_public_url_request(request, config),
-        ("POST", "/images:transform") => handle_transform_request(request, config),
-        ("POST", "/images") => handle_upload_request(request, config),
-        ("GET" | "HEAD", "/metrics") => handle_metrics_request(request, config),
-        _ => HttpResponse::problem("404 Not Found", NOT_FOUND_BODY.as_bytes().to_vec()),
+    let Some(route) = Route::lookup(request.path()) else {
+        return HttpResponse::problem("404 Not Found", NOT_FOUND_BODY.as_bytes().to_vec());
+    };
+    // An `OPTIONS` probe is what a browser, a CDN and an uptime monitor send before they
+    // fetch. truss serves no CORS headers, so `Allow` and nothing else is the whole of what
+    // it has to report, which is what RFC 9110 section 9.3.7 describes for such a server.
+    if request.method == "OPTIONS" {
+        return HttpResponse::empty(
+            "204 No Content",
+            vec![("Allow".to_string(), route.allow_header())],
+        );
     }
+    if !route.serves(&request.method) {
+        let mut response = problem_response(
+            ErrorClass::MethodNotAllowed,
+            &format!("{} does not serve {}", route.path, request.method),
+        );
+        response
+            .headers
+            .push(("Allow".to_string(), route.allow_header()));
+        return response;
+    }
+    (route.handler)(request, config)
 }
 
+/// The label a request is counted under, which is the route it named whether or not the
+/// method was one the route serves.
 pub(super) fn classify_route(request: &http_parse::HttpRequest) -> RouteMetric {
-    match (request.method.as_str(), request.path()) {
-        ("GET" | "HEAD", "/health") => RouteMetric::Health,
-        ("GET" | "HEAD", "/health/live") => RouteMetric::HealthLive,
-        ("GET" | "HEAD", "/health/ready") => RouteMetric::HealthReady,
-        ("GET" | "HEAD", "/images/by-path") => RouteMetric::PublicByPath,
-        ("GET" | "HEAD", "/images/by-url") => RouteMetric::PublicByUrl,
-        ("POST", "/images:transform") => RouteMetric::Transform,
-        ("POST", "/images") => RouteMetric::Upload,
-        ("GET" | "HEAD", "/metrics") => RouteMetric::Metrics,
-        _ => RouteMetric::Unknown,
-    }
+    classify_route_from_path(request.path())
+}
+
+fn classify_route_from_path(path: &str) -> RouteMetric {
+    Route::lookup(path).map_or(RouteMetric::Unknown, |route| route.metric)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Which routes the rate limiter is asked about, written out so a route added later has
+    /// to choose a side.
+    ///
+    /// The transform routes are what a limit is for. The health endpoints and the metrics
+    /// scrape are outside it: a liveness probe answered 429 is a failed probe, and an
+    /// orchestrator that fails enough of them restarts the process, which turns a burst of
+    /// client traffic into a restart. An unknown path stays inside, since that is what a
+    /// scanner produces.
+    #[test]
+    fn the_rate_limiter_is_asked_about_the_transform_routes_and_not_the_probes() {
+        let cases: &[(&str, bool)] = &[
+            ("/images/by-path", true),
+            ("/images/by-url", true),
+            ("/images:transform", true),
+            ("/images", true),
+            ("/health", false),
+            ("/health/live", false),
+            ("/health/ready", false),
+            ("/metrics", false),
+            ("/nonexistent", true),
+            ("/", true),
+        ];
+        for &(path, expected) in cases {
+            assert_eq!(is_rate_limited(path), expected, "{path}");
+        }
+
+        for route in ROUTES {
+            assert_eq!(
+                is_rate_limited(route.path),
+                route.rate_limited,
+                "{} is not asked the table's own answer",
+                route.path
+            );
+        }
+    }
+
+    /// Every route names the methods it serves, and `Allow` reports them plus `OPTIONS`,
+    /// which every route answers.
+    #[test]
+    fn every_route_serves_its_methods_and_allows_options() {
+        for route in ROUTES {
+            assert!(!route.methods.is_empty(), "{} serves nothing", route.path);
+            for method in route.methods {
+                assert!(route.serves(method), "{} {}", method, route.path);
+            }
+            assert!(
+                !route.serves("BREW"),
+                "{} serves a method it does not name",
+                route.path
+            );
+            let allow = route.allow_header();
+            assert!(allow.ends_with(", OPTIONS"), "{allow}");
+            for method in route.methods {
+                assert!(allow.contains(method), "{allow} omits {method}");
+            }
+        }
+    }
+
+    /// A path appears once, so a lookup cannot depend on the order of the table.
+    #[test]
+    fn the_routing_table_names_each_path_once() {
+        let mut seen: Vec<&str> = Vec::new();
+        for route in ROUTES {
+            assert!(
+                !seen.contains(&route.path),
+                "{} is listed twice",
+                route.path
+            );
+            seen.push(route.path);
+        }
+    }
 
     /// A connection is kept open only when the client's protocol version says persistence is
     /// the default and the client did not ask to close. HTTP/1.0 has no persistent

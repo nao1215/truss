@@ -1451,9 +1451,12 @@ mod tests {
         let request = upload_request(&png_bytes(), Some(r#"{"width":8,"format":"jpeg"}"#));
         let boundary =
             super::multipart::parse_multipart_boundary(&request).expect("parse boundary");
-        let (file_bytes, options, _watermark) =
-            super::multipart::parse_upload_request(&request.body, &boundary)
-                .expect("parse upload body");
+        let (file_bytes, options, _watermark) = super::multipart::parse_upload_request(
+            &request.body,
+            &boundary,
+            &ServerConfig::new(std::env::temp_dir(), None),
+        )
+        .expect("parse upload body");
 
         assert_eq!(file_bytes, png_bytes());
         assert_eq!(options.width, Some(8));
@@ -4224,6 +4227,7 @@ mod tests {
                     sharpen: None,
                     grayscale: None,
                     without_enlargement: None,
+                    preset: None,
                 },
             );
             m
@@ -4303,6 +4307,7 @@ mod tests {
                     sharpen: None,
                     grayscale: None,
                     without_enlargement: None,
+                    preset: None,
                 },
             );
             m
@@ -4636,6 +4641,9 @@ mod tests {
         assert!(matches!(classify_route(&req), RouteMetric::Unknown));
     }
 
+    /// A method a route does not serve is still that route, so an operator watching
+    /// per-route metrics sees probe traffic filed under the route it was aimed at rather
+    /// than under the unknown one.
     #[test]
     fn classify_route_wrong_method() {
         let req = HttpRequest {
@@ -4645,7 +4653,7 @@ mod tests {
             headers: vec![],
             body: vec![],
         };
-        assert!(matches!(classify_route(&req), RouteMetric::Unknown));
+        assert!(matches!(classify_route(&req), RouteMetric::Health));
     }
 
     // ── HealthCache tests ────────────────────────────────────────────

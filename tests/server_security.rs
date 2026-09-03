@@ -529,3 +529,75 @@ fn metadata_spellings_are_refused_even_when_insecure_sources_are_allowed() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Rate limiting: what it applies to
+// ---------------------------------------------------------------------------
+
+/// A client that has exhausted its bucket is still answered by the health endpoints and the
+/// metrics scrape, and is still shed on an image route.
+///
+/// Both halves matter. Shedding `/health/live` is a failed liveness probe, and an
+/// orchestrator that fails enough of them restarts the process, so a burst of client traffic
+/// became a restart; `/metrics` is how the limiter is observed, so a scrape shed at the
+/// moment the limiter starts working is the moment the evidence of it working stops
+/// arriving. Asserting the image route is still shed is what pins the exemption as a rule
+/// rather than as a hole in the limiter.
+#[test]
+#[serial_test::serial]
+fn rate_limiting_sheds_the_image_routes_and_not_the_probes() {
+    let storage_root = temp_dir("rate-limit-exemptions");
+    fs::write(storage_root.join("image.png"), png_bytes()).expect("write source fixture");
+
+    // SAFETY: the test is serial, so nothing else reads the environment concurrently.
+    unsafe {
+        std::env::set_var("TRUSS_STORAGE_ROOT", &storage_root);
+        std::env::set_var("TRUSS_RATE_LIMIT_RPS", "3");
+        std::env::set_var("TRUSS_RATE_LIMIT_BURST", "3");
+    }
+    let mut config = ServerConfig::from_env().expect("configure a rate limited server");
+    // SAFETY: same as above.
+    unsafe {
+        std::env::remove_var("TRUSS_STORAGE_ROOT");
+        std::env::remove_var("TRUSS_RATE_LIMIT_RPS");
+        std::env::remove_var("TRUSS_RATE_LIMIT_BURST");
+    }
+    config.shutdown_drain_secs = 0;
+
+    let draining = std::sync::Arc::clone(&config.draining);
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let handle = std::thread::spawn(move || truss::serve_with_config(listener, config));
+
+    let get = |path: &str| -> u16 {
+        let response = common::send_raw_request(
+            addr,
+            &format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"),
+        );
+        let (header, _, _) = split_response(&response);
+        common::status_code(&header)
+    };
+
+    // Empty the bucket on an image route. The signature is missing, so each request is
+    // refused before any work happens, which is enough to spend a token.
+    let mut shed = false;
+    for _ in 0..12 {
+        if get("/images/by-path?path=image.png") == 429 {
+            shed = true;
+        }
+    }
+    assert!(shed, "the bucket should be exhausted by twelve requests");
+
+    for path in ["/health/live", "/health/ready", "/health", "/metrics"] {
+        assert_ne!(get(path), 429, "{path} should not be rate limited");
+    }
+    assert_eq!(
+        get("/images/by-path?path=image.png"),
+        429,
+        "an image route is still shed while the bucket is empty"
+    );
+
+    draining.store(true, std::sync::atomic::Ordering::SeqCst);
+    let _ = std::net::TcpStream::connect(addr);
+    let _ = handle.join().expect("join the server thread");
+}

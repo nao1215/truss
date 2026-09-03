@@ -436,3 +436,30 @@ scenarios:
           exit_code: 3
           stderr:
             contains: "error:"
+
+  - name: a negative crop origin is answered by the crop validator, not by the argument parser
+    steps:
+      - run:
+          command: truss convert "${fixtures}/1px.png" -o negcrop.png --crop -1,0,2,2
+      - assert:
+          exit_code: 1
+          stderr:
+            contains: "crop x must be a non-negative integer"
+
+  - name: an out-of-range blur sigma is invalid-options, the class every adapter reports
+    steps:
+      - run:
+          command: truss convert "${fixtures}/1px.png" -o blur.png --blur 0
+      - assert:
+          exit_code: 1
+          stderr:
+            contains: "(invalid-options)"
+
+  - name: an out-of-range sharpen sigma is invalid-options too
+    steps:
+      - run:
+          command: truss convert "${fixtures}/1px.png" -o sharpen.png --sharpen 100.1
+      - assert:
+          exit_code: 1
+          stderr:
+            contains: "(invalid-options)"

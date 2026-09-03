@@ -41,6 +41,7 @@ A dash means the adapter cannot reach the class: the CLI has no `Accept` header 
 | [unauthorized](#unauthorized) | — | 401 | — |
 | [forbidden](#forbidden) | — | 403 | — |
 | [not-found](#not-found) | 2 | 404 | — |
+| [method-not-allowed](#method-not-allowed) | — | 405 | — |
 | [not-acceptable](#not-acceptable) | — | 406 | — |
 | [request-timeout](#request-timeout) | — | 408 | — |
 | [payload-too-large](#payload-too-large) | — | 413 | — |
@@ -117,6 +118,10 @@ The credentials verified but do not allow this request, such as a source outside
 ### not-found
 
 The source the request named does not exist, which on the CLI is any file the command line named that is not there: the input, or a `--watermark`. A route that does not exist also answers 404, with `type` `about:blank`.
+
+### method-not-allowed
+
+The route exists and does not serve the method the request used, such as `POST /images/by-path` or `GET /images:transform`. The response carries an `Allow` header naming the methods that route does serve, which is what distinguishes it from `not-found`: a 404 says the URL is not there, and a caller that reads one stops trying rather than correcting itself. `OPTIONS` is answered on every route with `204 No Content` and the same `Allow` header rather than with this class; truss serves no CORS headers, so `Allow` is the whole of what it has to report.
 
 ### not-acceptable
 

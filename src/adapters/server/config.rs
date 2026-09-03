@@ -1283,7 +1283,7 @@ impl ServerConfig {
             parse_optional_env_u32("TRUSS_PUBLIC_STALE_WHILE_REVALIDATE")?
                 .unwrap_or(DEFAULT_PUBLIC_STALE_WHILE_REVALIDATE_SECONDS);
 
-        let allow_insecure_url_sources = env_flag("TRUSS_ALLOW_INSECURE_URL_SOURCES");
+        let allow_insecure_url_sources = env_flag("TRUSS_ALLOW_INSECURE_URL_SOURCES")?;
 
         let max_concurrent_transforms = parse_env_u64_ranged(
             "TRUSS_MAX_CONCURRENT_TRANSFORMS",
@@ -1406,7 +1406,7 @@ impl ServerConfig {
         let metrics_token = env::var("TRUSS_METRICS_TOKEN")
             .ok()
             .filter(|value| !value.trim().is_empty());
-        let disable_metrics = env_flag("TRUSS_DISABLE_METRICS");
+        let disable_metrics = env_flag("TRUSS_DISABLE_METRICS")?;
         let health_token = env::var("TRUSS_HEALTH_TOKEN")
             .ok()
             .filter(|value| !value.trim().is_empty());
@@ -1436,7 +1436,13 @@ impl ServerConfig {
 
         let custom_response_headers = parse_response_headers_from_env()?;
 
-        let enable_compression = !env_flag("TRUSS_DISABLE_COMPRESSION");
+        let enable_compression = !env_flag("TRUSS_DISABLE_COMPRESSION")?;
+        let disable_accept_negotiation = env_flag("TRUSS_DISABLE_ACCEPT_NEGOTIATION")?;
+        // Read for its side effect: the setting is consumed where the S3 client is
+        // built, long after startup, so a typo in it would otherwise survive both
+        // `truss validate` and the first requests.
+        #[cfg(feature = "s3")]
+        env_flag("TRUSS_S3_FORCE_PATH_STYLE")?;
         let compression_level =
             parse_env_u64_ranged("TRUSS_COMPRESSION_LEVEL", 0, 9)?.unwrap_or(1) as u32;
 
@@ -1489,7 +1495,7 @@ impl ServerConfig {
             cache_eviction_secs: Arc::new(AtomicU64::new(0)),
             public_max_age_seconds,
             public_stale_while_revalidate_seconds,
-            disable_accept_negotiation: env_flag("TRUSS_DISABLE_ACCEPT_NEGOTIATION"),
+            disable_accept_negotiation,
             format_preference,
             log_handler: None,
             log_level: Arc::new(AtomicU8::new(log_level as u8)),
@@ -1626,15 +1632,34 @@ pub(super) fn parse_format_preference_from_env() -> io::Result<Vec<crate::MediaT
     Ok(formats)
 }
 
-pub(super) fn env_flag(name: &str) -> bool {
-    env::var(name)
-        .map(|value| {
-            matches!(
-                value.as_str(),
-                "1" | "true" | "TRUE" | "yes" | "YES" | "on" | "ON"
-            )
-        })
-        .unwrap_or(false)
+/// Reads a boolean setting, refusing a value that is neither true nor false.
+///
+/// Every other setting is checked — a log level that is not one of the four, a rate limit
+/// past its range, a format preference naming no format — and a boolean was the exception:
+/// anything unrecognised meant `false`, silently. Three of the five variables that reach
+/// here name something to disable, so falling back to `false` left the thing the operator
+/// asked to switch off switched on, with nothing printed at startup and `truss validate`
+/// reporting the configuration as valid.
+///
+/// The comparison is case-insensitive, which is what `docs/configuration.md` has always
+/// said it was: `True` is what Python's `str(True)` produces and what several YAML emitters
+/// write, and there is nothing to gain by refusing it. Surrounding whitespace is not
+/// trimmed, so `' 1'` is refused rather than quietly accepted; a quoting mistake that
+/// changes the value is worth seeing.
+pub(super) fn env_flag(name: &str) -> io::Result<bool> {
+    let Ok(value) = env::var(name) else {
+        return Ok(false);
+    };
+    match value.to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Ok(true),
+        "0" | "false" | "no" | "off" => Ok(false),
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "{name} must be one of `1`, `true`, `yes`, `on`, `0`, `false`, `no`, `off` (case-insensitive), got `{value}`"
+            ),
+        )),
+    }
 }
 
 pub(super) fn parse_optional_env_u32(name: &str) -> io::Result<Option<u32>> {
@@ -1680,7 +1705,29 @@ pub(super) fn parse_presets_from_env()
                 format!("{source} must be valid JSON: {e}"),
             )
         })?;
+    reject_nested_presets(&presets, &source)?;
     Ok((presets, file_path))
+}
+
+/// Refuses a preset that names another preset.
+///
+/// `preset` is a field of the transform options every route takes, so it is also a field of
+/// the object a preset is written as. A preset naming one turns resolution into a graph with
+/// cycles and a depth, which is a question worth not having: the field is refused where
+/// presets are defined, and resolution stays one merge.
+fn reject_nested_presets(
+    presets: &HashMap<String, TransformOptionsPayload>,
+    source: &str,
+) -> io::Result<()> {
+    for (name, payload) in presets {
+        if payload.preset.is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{source}: preset `{name}` must not set `preset`"),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Parses a preset JSON file at the given path. Used by the hot-reload watcher.
@@ -1688,12 +1735,15 @@ pub(super) fn parse_presets_file(
     path: &std::path::Path,
 ) -> io::Result<HashMap<String, TransformOptionsPayload>> {
     let content = std::fs::read_to_string(path)?;
-    serde_json::from_str::<HashMap<String, TransformOptionsPayload>>(&content).map_err(|e| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("invalid preset JSON in `{}`: {e}", path.display()),
-        )
-    })
+    let presets = serde_json::from_str::<HashMap<String, TransformOptionsPayload>>(&content)
+        .map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("invalid preset JSON in `{}`: {e}", path.display()),
+            )
+        })?;
+    reject_nested_presets(&presets, &format!("`{}`", path.display()))?;
+    Ok(presets)
 }
 
 /// Parse `TRUSS_RESPONSE_HEADERS` (a JSON object `{"Header-Name": "value", ...}`) and
@@ -2057,6 +2107,7 @@ mod tests {
                 sharpen: None,
                 grayscale: None,
                 without_enlargement: None,
+                preset: None,
             },
         );
         let config = ServerConfig::new(PathBuf::from("."), None).with_presets(map);
@@ -2486,6 +2537,101 @@ mod tests {
     fn from_env_trusted_proxies_invalid_rejects() {
         let _env = ScopedEnv::set("TRUSS_TRUSTED_PROXIES", "not-an-ip");
         assert!(ServerConfig::from_env().is_err());
+    }
+
+    /// A boolean setting is read case-insensitively and refuses anything that is neither
+    /// true nor false. The mixed-case rows are what used to mean `false` silently, and the
+    /// refusals are what used to be accepted as `false` with nothing said.
+    #[test]
+    #[serial]
+    fn env_flag_reads_a_boolean_in_any_case_and_refuses_anything_else() {
+        let accepted: &[(&str, bool)] = &[
+            ("1", true),
+            ("true", true),
+            ("TRUE", true),
+            ("True", true),
+            ("tRuE", true),
+            ("yes", true),
+            ("YES", true),
+            ("Yes", true),
+            ("on", true),
+            ("ON", true),
+            ("On", true),
+            ("0", false),
+            ("false", false),
+            ("FALSE", false),
+            ("False", false),
+            ("no", false),
+            ("No", false),
+            ("off", false),
+            ("Off", false),
+        ];
+        for &(value, expected) in accepted {
+            let _env = ScopedEnv::set("TRUSS_DISABLE_METRICS", value);
+            assert_eq!(
+                env_flag("TRUSS_DISABLE_METRICS").expect("a documented boolean is accepted"),
+                expected,
+                "`{value}` should read as {expected}"
+            );
+        }
+
+        for value in ["maybe", "2", "-1", "", " 1", "1 ", "trUe\n"] {
+            let _env = ScopedEnv::set("TRUSS_DISABLE_METRICS", value);
+            let error = env_flag("TRUSS_DISABLE_METRICS")
+                .expect_err("a value that is neither true nor false is refused");
+            assert!(
+                error.to_string().contains("TRUSS_DISABLE_METRICS"),
+                "the error names the variable: {error}"
+            );
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn env_flag_is_false_when_the_variable_is_unset() {
+        let _env = ScopedEnv::remove("TRUSS_DISABLE_METRICS");
+        assert!(!env_flag("TRUSS_DISABLE_METRICS").expect("an unset boolean is false"));
+    }
+
+    /// Each boolean the server reads surfaces the refusal rather than swallowing it, which
+    /// is what makes a typo visible at startup and to `truss validate`.
+    #[test]
+    #[serial]
+    fn from_env_reports_a_boolean_it_cannot_read() {
+        for name in [
+            "TRUSS_DISABLE_METRICS",
+            "TRUSS_DISABLE_COMPRESSION",
+            "TRUSS_DISABLE_ACCEPT_NEGOTIATION",
+            "TRUSS_ALLOW_INSECURE_URL_SOURCES",
+        ] {
+            let _env = ScopedEnv::set(name, "maybe");
+            let error = ServerConfig::from_env()
+                .expect_err("a boolean that is neither true nor false stops startup");
+            assert!(
+                error.to_string().contains(name),
+                "the error names {name}: {error}"
+            );
+        }
+    }
+
+    /// The storage root's default is the working directory, which is the one setting whose
+    /// wrong value is a disclosure rather than an error, so the table an operator reads has
+    /// to say so.
+    #[test]
+    fn the_documented_storage_root_default_is_the_one_the_server_uses() {
+        assert_eq!(
+            DEFAULT_STORAGE_ROOT, ".",
+            "the default is the working directory, which is what the reference states"
+        );
+        let reference = include_str!("../../../docs/configuration.md");
+        let row = reference
+            .lines()
+            .find(|line| line.starts_with("| `TRUSS_STORAGE_ROOT`"))
+            .expect("docs/configuration.md has a TRUSS_STORAGE_ROOT row");
+        assert!(
+            row.contains("default: the process's current working directory"),
+            "the row states the default: {row}"
+        );
     }
 
     /// Every `TRUSS_*` name in the modules that read the environment has to appear
