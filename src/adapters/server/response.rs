@@ -1132,15 +1132,18 @@ mod tests {
     #[test]
     fn every_class_has_its_section_and_its_status_in_the_problem_types_page() {
         const PROBLEM_DOCS: &str = include_str!("../../../docs/problems.md");
+        // A Windows checkout has CRLF line endings, so the anchors are matched against the
+        // text with the carriage returns taken out.
+        let problem_docs = PROBLEM_DOCS.replace('\r', "");
 
         for class in ErrorClass::ALL {
             let slug = class.slug();
             assert!(
-                PROBLEM_DOCS.contains(&format!("### {slug}\n")),
+                problem_docs.contains(&format!("### {slug}\n")),
                 "docs/problems.md has no section for {slug}"
             );
             let (_, status) = class.status();
-            let row = PROBLEM_DOCS
+            let row = problem_docs
                 .lines()
                 .find(|line| line.starts_with(&format!("| [{slug}](#{slug})")))
                 .unwrap_or_else(|| panic!("docs/problems.md has no table row for {slug}"));

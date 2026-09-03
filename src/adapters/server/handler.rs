@@ -1704,7 +1704,9 @@ mod tests {
             "the field list was read wrong: {payload_fields:?}"
         );
 
-        let openapi = include_str!("../../../docs/openapi.yaml");
+        // A Windows checkout has CRLF line endings, so the document is matched against the
+        // text with the carriage returns taken out.
+        let openapi = include_str!("../../../docs/openapi.yaml").replace('\r', "");
         let schema = openapi
             .split("    ImageTransformOptions:")
             .nth(1)
