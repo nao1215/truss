@@ -311,6 +311,14 @@ pub struct TransformOptionsPayload {
     pub sharpen: Option<f32>,
     pub grayscale: Option<bool>,
     pub without_enlargement: Option<bool>,
+    /// Name of a server-side transform preset, whose fields this request's own fields
+    /// override.
+    ///
+    /// Every route that takes transform options takes this one, which is what
+    /// `docs/openapi.yaml` declares and what presets are for: the vocabulary lives on the
+    /// server rather than in each caller. It is not a field a preset may itself set —
+    /// `parse_presets` refuses it — so a preset cannot name another one.
+    pub preset: Option<String>,
 }
 
 impl TransformOptionsPayload {
@@ -336,7 +344,33 @@ impl TransformOptionsPayload {
             sharpen: overrides.sharpen.or(self.sharpen),
             grayscale: overrides.grayscale.or(self.grayscale),
             without_enlargement: overrides.without_enlargement.or(self.without_enlargement),
+            // The preset has been resolved by the time the merge runs, so the name has
+            // nothing left to say.
+            preset: None,
         }
+    }
+
+    /// Resolves a named preset into the fields it stands for, with this request's own
+    /// fields on top.
+    ///
+    /// One copy for every route, because it used to live inside the query parser and the
+    /// JSON body therefore reached no preset at all: `POST /images:transform` answered
+    /// `unknown field \`preset\`` for the field `docs/openapi.yaml` declares on the schema
+    /// its own body points at. The precedence is the one the document states and
+    /// `with_overrides` already implemented, and the resolved options are what the cache key
+    /// is computed from, so a request naming a preset and one naming the same values shares
+    /// an entry.
+    pub(super) fn resolve_preset(self, config: &ServerConfig) -> Result<Self, HttpResponse> {
+        let Some(name) = self.preset.clone() else {
+            return Ok(self);
+        };
+        let presets = config.presets.read().expect("presets lock poisoned");
+        let preset = presets
+            .get(&name)
+            .ok_or_else(|| bad_request_response(&format!("unknown preset `{name}`")))?
+            .clone();
+        drop(presets);
+        Ok(preset.with_overrides(&self))
     }
 
     /// Resolves the requested output format, refusing one truss reads but cannot write.
@@ -1082,7 +1116,11 @@ pub(super) fn handle_transform_request(
             ));
         }
     };
-    let options = match payload.options.into_options() {
+    let options = match payload
+        .options
+        .resolve_preset(config)
+        .and_then(TransformOptionsPayload::into_options)
+    {
         Ok(options) => options,
         Err(response) => return response,
     };
@@ -1259,10 +1297,11 @@ pub(super) fn handle_upload_request(request: HttpRequest, config: &ServerConfig)
         Ok(boundary) => boundary,
         Err(response) => return response,
     };
-    let (file_bytes, options, watermark) = match parse_upload_request(&request.body, &boundary) {
-        Ok(parts) => parts,
-        Err(response) => return response,
-    };
+    let (file_bytes, options, watermark) =
+        match parse_upload_request(&request.body, &boundary, config) {
+            Ok(parts) => parts,
+            Err(response) => return response,
+        };
     let watermark_identity = watermark.as_ref().map(|wm| {
         let content_hash = hex::encode(sha2::Sha256::digest(&wm.image.bytes));
         super::cache::compute_watermark_content_identity(
@@ -1365,20 +1404,10 @@ pub(super) fn parse_public_get_request(
         sharpen: parse_optional_float_query(query, "sharpen")?,
         grayscale: parse_optional_bool_query(query, "grayscale")?,
         without_enlargement: parse_optional_bool_query(query, "withoutEnlargement")?,
+        preset: query.get("preset").cloned(),
     };
 
-    // Resolve preset and merge with per-request overrides.
-    let merged = if let Some(preset_name) = query.get("preset") {
-        let presets = config.presets.read().expect("presets lock poisoned");
-        let preset = presets
-            .get(preset_name)
-            .ok_or_else(|| bad_request_response(&format!("unknown preset `{preset_name}`")))?;
-        preset.clone().with_overrides(&per_request)
-    } else {
-        per_request
-    };
-
-    let options = merged.into_options()?;
+    let options = per_request.resolve_preset(config)?.into_options()?;
 
     Ok((source, options, watermark))
 }
@@ -1646,6 +1675,66 @@ fn transform_source_bytes_inner(
 
 #[cfg(test)]
 mod tests {
+
+    /// The transform options object the JSON body deserializes into and the
+    /// `ImageTransformOptions` schema `docs/openapi.yaml` publishes name the same fields.
+    ///
+    /// They had drifted by one: the document declared `preset` and the payload refused it,
+    /// so a caller who generated a client from the document and sent the field it declares
+    /// got a 400 naming that field. The payload's names are read out of the error
+    /// `deny_unknown_fields` produces rather than repeated here, so the comparison is
+    /// against the struct rather than against a copy of it.
+    #[test]
+    fn the_transform_options_payload_and_the_openapi_schema_name_the_same_fields() {
+        let error = serde_json::from_str::<TransformOptionsPayload>(r#"{"nosuchfield":1}"#)
+            .expect_err("an unknown field is refused");
+        let message = error.to_string();
+        let listed = message
+            .split("expected one of ")
+            .nth(1)
+            .expect("the refusal lists the fields it expected");
+        let mut payload_fields: Vec<String> = listed
+            .split('`')
+            .filter(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_alphanumeric()))
+            .map(str::to_string)
+            .collect();
+        payload_fields.sort();
+        assert!(
+            payload_fields.len() > 15,
+            "the field list was read wrong: {payload_fields:?}"
+        );
+
+        let openapi = include_str!("../../../docs/openapi.yaml");
+        let schema = openapi
+            .split("    ImageTransformOptions:")
+            .nth(1)
+            .expect("docs/openapi.yaml declares ImageTransformOptions");
+        let properties = schema
+            .split("      properties:\n")
+            .nth(1)
+            .expect("the schema has properties");
+        let mut documented: Vec<String> = Vec::new();
+        for line in properties.lines() {
+            // A property is indented eight spaces; anything shallower ends the schema and
+            // anything deeper belongs to the property above.
+            if !line.starts_with("        ") {
+                break;
+            }
+            if line.starts_with("         ") {
+                continue;
+            }
+            let Some(name) = line.trim_end().strip_suffix(':') else {
+                continue;
+            };
+            documented.push(name.trim().to_string());
+        }
+        documented.sort();
+
+        assert_eq!(
+            payload_fields, documented,
+            "the JSON payload and ImageTransformOptions declare different fields"
+        );
+    }
     use super::*;
 
     use ThresholdDirection::{HigherIsWorse, LowerIsWorse};
