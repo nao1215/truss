@@ -117,3 +117,105 @@ fn head_public_by_url_returns_headers_with_empty_body() {
         "{header}"
     );
 }
+
+/// A method a route does not serve is 405 with `Allow`, and a path truss does not have is
+/// still 404, so the two cases a caller has to tell apart are told apart.
+///
+/// A wrong method used to answer with the same 404 body as a path that is not there, which
+/// is the answer that makes a probe stop trying rather than correct itself.
+#[rstest]
+#[case::post_by_path("POST", "/images/by-path", "GET, HEAD, OPTIONS")]
+#[case::put_by_url("PUT", "/images/by-url", "GET, HEAD, OPTIONS")]
+#[case::delete_metrics("DELETE", "/metrics", "GET, HEAD, OPTIONS")]
+#[case::patch_health_live("PATCH", "/health/live", "GET, HEAD, OPTIONS")]
+#[case::get_transform("GET", "/images:transform", "POST, OPTIONS")]
+#[case::get_upload("GET", "/images", "POST, OPTIONS")]
+fn a_method_a_route_does_not_serve_is_405_with_allow(
+    #[case] method: &str,
+    #[case] path: &str,
+    #[case] expected_allow: &str,
+) {
+    let storage_root = temp_dir("method-not-allowed");
+    let (addr, handle) = spawn_server(ServerConfig::new(storage_root, None));
+    let response = send_raw_request(
+        addr,
+        &format!(
+            "{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        ),
+    );
+
+    handle
+        .join()
+        .expect("join server thread")
+        .expect("serve one request");
+
+    let (header, content_type, body) = split_response(&response);
+    assert!(
+        header.starts_with("HTTP/1.1 405 Method Not Allowed"),
+        "{header}"
+    );
+    assert!(
+        header.contains(&format!("Allow: {expected_allow}")),
+        "{header}"
+    );
+    assert_eq!(content_type, "application/problem+json");
+    let problem: serde_json::Value =
+        serde_json::from_slice(&body).expect("the 405 body is a problem document");
+    assert_eq!(problem["status"], 405);
+    assert!(
+        problem["type"]
+            .as_str()
+            .expect("type is a string")
+            .ends_with("#method-not-allowed"),
+        "{problem}"
+    );
+}
+
+#[test]
+fn a_path_truss_does_not_serve_is_still_404() {
+    let storage_root = temp_dir("unknown-path");
+    let (addr, handle) = spawn_server(ServerConfig::new(storage_root, None));
+    let response = send_raw_request(
+        addr,
+        "DELETE /nope HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+    );
+
+    handle
+        .join()
+        .expect("join server thread")
+        .expect("serve one request");
+
+    let (header, _, _) = split_response(&response);
+    assert!(header.starts_with("HTTP/1.1 404 Not Found"), "{header}");
+    assert!(!header.contains("Allow:"), "{header}");
+}
+
+/// An `OPTIONS` probe is what a browser, a CDN and an uptime monitor send before they fetch.
+/// truss serves no CORS headers, so `Allow` is the whole of what it has to report.
+#[rstest]
+#[case::by_path("/images/by-path", "GET, HEAD, OPTIONS")]
+#[case::transform("/images:transform", "POST, OPTIONS")]
+#[case::health("/health", "GET, HEAD, OPTIONS")]
+fn options_on_a_route_answers_with_allow(#[case] path: &str, #[case] expected_allow: &str) {
+    let storage_root = temp_dir("options-probe");
+    let (addr, handle) = spawn_server(ServerConfig::new(storage_root, None));
+    let response = send_raw_request(
+        addr,
+        &format!(
+            "OPTIONS {path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        ),
+    );
+
+    handle
+        .join()
+        .expect("join server thread")
+        .expect("serve one request");
+
+    let (header, _, body) = split_response(&response);
+    assert!(header.starts_with("HTTP/1.1 204 No Content"), "{header}");
+    assert!(
+        header.contains(&format!("Allow: {expected_allow}")),
+        "{header}"
+    );
+    assert!(body.is_empty(), "an OPTIONS answer carries no body");
+}

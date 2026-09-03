@@ -295,6 +295,7 @@ impl ErrorClass {
             Self::Unauthorized => "Unauthorized",
             Self::Forbidden => "Forbidden",
             Self::NotFound => "Not Found",
+            Self::MethodNotAllowed => "Method Not Allowed",
             Self::NotAcceptable => "Not Acceptable",
             Self::RequestTimeout => "Request Timeout",
             Self::PayloadTooLarge => "Payload Too Large",
@@ -322,6 +323,7 @@ impl ErrorClass {
             Self::Unauthorized => ("401 Unauthorized", 401),
             Self::Forbidden => ("403 Forbidden", 403),
             Self::NotFound => ("404 Not Found", 404),
+            Self::MethodNotAllowed => ("405 Method Not Allowed", 405),
             Self::NotAcceptable => ("406 Not Acceptable", 406),
             Self::RequestTimeout => ("408 Request Timeout", 408),
             Self::PayloadTooLarge | Self::LimitExceeded => ("413 Payload Too Large", 413),
@@ -1118,6 +1120,36 @@ mod tests {
             assert_eq!(v["title"], *title, "{slug}");
             assert_eq!(v["status"], *status, "{slug}");
             assert_eq!(v["detail"], "x", "{slug}");
+        }
+    }
+
+    /// Every class has a section in `docs/problems.md` and a row in the table there naming
+    /// the status it answers with.
+    ///
+    /// The `type` URI a caller reads resolves to that section, so a class with no section
+    /// publishes a link to nothing, and the table is where a caller looks up what to branch
+    /// on. Both are read out of the document rather than repeated here.
+    #[test]
+    fn every_class_has_its_section_and_its_status_in_the_problem_types_page() {
+        const PROBLEM_DOCS: &str = include_str!("../../../docs/problems.md");
+
+        for class in ErrorClass::ALL {
+            let slug = class.slug();
+            assert!(
+                PROBLEM_DOCS.contains(&format!("### {slug}\n")),
+                "docs/problems.md has no section for {slug}"
+            );
+            let (_, status) = class.status();
+            let row = PROBLEM_DOCS
+                .lines()
+                .find(|line| line.starts_with(&format!("| [{slug}](#{slug})")))
+                .unwrap_or_else(|| panic!("docs/problems.md has no table row for {slug}"));
+            let columns: Vec<&str> = row.split('|').map(str::trim).collect();
+            assert_eq!(
+                columns.get(3).copied(),
+                Some(status.to_string().as_str()),
+                "the row for {slug} names a status the class does not answer with: {row}"
+            );
         }
     }
 
