@@ -308,3 +308,38 @@ fn keys_from_the_environment_without_a_base_url_still_warn() {
         "the environment-only case is the one that already warned: {stderr}"
     );
 }
+
+/// `truss validate` is where an operator finds a configuration mistake before the server
+/// runs, and a boolean typo used to pass it: anything the parser did not recognise meant
+/// `false`, so the thing the operator asked to switch off stayed on and the configuration
+/// was reported as valid.
+#[test]
+fn validate_refuses_a_boolean_that_is_neither_true_nor_false() {
+    let output = Command::new(env!("CARGO_BIN_EXE_truss"))
+        .arg("validate")
+        .env("TRUSS_DISABLE_METRICS", "maybe")
+        .output()
+        .expect("run truss validate");
+
+    assert!(!output.status.success(), "{output:?}");
+    let stderr = String::from_utf8(output.stderr).expect("utf8 stderr");
+    assert!(stderr.contains("TRUSS_DISABLE_METRICS"), "{stderr}");
+}
+
+/// The spellings the reference documents are accepted whatever their case, which `True` was
+/// not: it is what Python's `str(True)` produces and what several YAML emitters write.
+#[test]
+fn validate_accepts_a_boolean_in_any_case() {
+    for value in ["true", "TRUE", "True", "on", "No", "0"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_truss"))
+            .arg("validate")
+            .env("TRUSS_DISABLE_METRICS", value)
+            .output()
+            .expect("run truss validate");
+
+        assert!(
+            output.status.success(),
+            "`{value}` should be accepted: {output:?}"
+        );
+    }
+}

@@ -97,10 +97,12 @@ impl S3Context {
 /// `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and optionally
 /// `AWS_ENDPOINT_URL` for S3-compatible services like MinIO).
 ///
-/// When `TRUSS_S3_FORCE_PATH_STYLE` is set to `1`, `true`, `yes`, or `on`,
-/// the client uses path-style addressing (`http://endpoint/bucket/key`)
-/// instead of virtual-hosted-style (`http://bucket.endpoint/key`). This is
-/// required for most S3-compatible services (MinIO, LocalStack, adobe/s3mock).
+/// When `TRUSS_S3_FORCE_PATH_STYLE` is true, the client uses path-style addressing
+/// (`http://endpoint/bucket/key`) instead of virtual-hosted-style
+/// (`http://bucket.endpoint/key`). This is required for most S3-compatible services
+/// (MinIO, LocalStack, adobe/s3mock). The value is read by the same parser every other
+/// boolean setting is, so a value that is neither true nor false is an error rather than
+/// a silent `false`.
 pub fn build_s3_context(
     default_bucket: String,
     allow_insecure: bool,
@@ -118,13 +120,7 @@ pub fn build_s3_context(
     if let Some(ref url) = endpoint_url {
         super::remote::validate_backend_endpoint_url(url, "AWS_ENDPOINT_URL", allow_insecure)?;
     }
-    let force_path_style = matches!(
-        std::env::var("TRUSS_S3_FORCE_PATH_STYLE")
-            .unwrap_or_default()
-            .to_ascii_lowercase()
-            .as_str(),
-        "1" | "true" | "yes" | "on"
-    );
+    let force_path_style = super::config::env_flag("TRUSS_S3_FORCE_PATH_STYLE")?;
     let s3_config = aws_sdk_s3::config::Builder::from(&sdk_config)
         .force_path_style(force_path_style)
         .build();
