@@ -275,21 +275,17 @@ OPTIONS:
       --allow-insecure-url-sources    Allow private-network URLs (dev/test only)
 
 ENVIRONMENT VARIABLES:
+  Defaults, ranges and the full description of each setting are in docs/configuration.md.
+
+  Core:
   TRUSS_BIND_ADDR                     Listen address override
-  TRUSS_STORAGE_ROOT                  Storage root override
-  TRUSS_PUBLIC_BASE_URL               Public base URL override
+  TRUSS_STORAGE_ROOT                  Storage root override (default: working directory)
   TRUSS_BEARER_TOKEN                  Private API authentication token
-  TRUSS_SIGNED_URL_KEY_ID             Signing key identifier (single-key shorthand)
-  TRUSS_SIGNED_URL_SECRET             Signing shared secret (single-key shorthand)
-  TRUSS_SIGNING_KEYS                  Multiple signing keys as JSON {\"keyId\":\"secret\",...}
-  TRUSS_ALLOW_INSECURE_URL_SOURCES    Enable insecure URL sources
-  TRUSS_CACHE_ROOT                    On-disk transform cache directory
-  TRUSS_PRESETS                       Named transform presets as inline JSON
-  TRUSS_PRESETS_FILE                  Path to a JSON file containing named transform presets
 ",
     );
 
-    // Build the TRUSS_STORAGE_BACKEND description dynamically based on enabled features.
+    // The backends this build can resolve a public by-path source from, which is the one
+    // row whose accepted values depend on the features it was compiled with.
     {
         use std::fmt::Write as FmtWrite;
 
@@ -308,6 +304,56 @@ ENVIRONMENT VARIABLES:
         );
     }
 
+    s.push_str(
+        "  TRUSS_MAX_CONCURRENT_TRANSFORMS     Concurrent transforms before a request gets 503
+  TRUSS_TRANSFORM_DEADLINE_SECS       Per-transform deadline in seconds
+  TRUSS_MAX_INPUT_PIXELS              Input pixels accepted before decode
+  TRUSS_MAX_UPLOAD_BYTES              Upload body size accepted
+  TRUSS_MAX_SOURCE_BYTES              Source image size accepted from disk or a URL
+  TRUSS_MAX_WATERMARK_BYTES           Watermark image size accepted from a URL
+  TRUSS_MAX_REMOTE_REDIRECTS          Redirects followed when fetching a remote URL
+  TRUSS_STORAGE_TIMEOUT_SECS          Download timeout for object storage backends
+  TRUSS_KEEP_ALIVE_MAX_REQUESTS       Requests per keep-alive connection
+  TRUSS_SHUTDOWN_DRAIN_SECS           Drain period during graceful shutdown
+  TRUSS_RESPONSE_HEADERS              Custom image-response headers as JSON
+  TRUSS_DISABLE_COMPRESSION           Turn off gzip for non-image responses
+  TRUSS_COMPRESSION_LEVEL             Gzip level for non-image responses
+  TRUSS_LOG_LEVEL                     Log verbosity: error, warn, info, debug
+
+  Health and load:
+  TRUSS_HEALTH_TOKEN                  Bearer token for GET /health
+  TRUSS_HEALTH_CACHE_MIN_FREE_BYTES   Free bytes on the cache disk /health/ready needs
+  TRUSS_HEALTH_MAX_MEMORY_BYTES       Process RSS /health/ready allows (Linux)
+  TRUSS_HEALTH_HYSTERESIS_MARGIN      Recovery margin for the readiness thresholds
+  TRUSS_HEALTH_CACHE_TTL_SECS         How long /health/ready reuses a measurement
+  TRUSS_RATE_LIMIT_RPS                Sustained per-client requests per second
+  TRUSS_RATE_LIMIT_BURST              Requests a client may send back to back
+  TRUSS_TRUSTED_PROXIES               IPs or CIDRs whose forwarded-for headers are trusted
+
+  Metrics:
+  TRUSS_METRICS_TOKEN                 Bearer token for GET /metrics
+  TRUSS_DISABLE_METRICS               Turn the /metrics endpoint off entirely
+
+  Signed URLs, caching and presets:
+  TRUSS_PUBLIC_BASE_URL               Public base URL override
+  TRUSS_SIGNING_KEYS                  Multiple signing keys as JSON {\"keyId\":\"secret\",...}
+  TRUSS_SIGNED_URL_KEY_ID             Signing key identifier (single-key shorthand)
+  TRUSS_SIGNED_URL_SECRET             Signing shared secret (single-key shorthand)
+  TRUSS_CACHE_ROOT                    On-disk transform cache directory
+  TRUSS_CACHE_MAX_BYTES               Size budget for the cache directory
+  TRUSS_PUBLIC_MAX_AGE                Cache-Control max-age for public GET responses
+  TRUSS_PUBLIC_STALE_WHILE_REVALIDATE Cache-Control stale-while-revalidate for the same
+  TRUSS_FORMAT_PREFERENCE             Output formats ordered by server preference
+  TRUSS_DISABLE_ACCEPT_NEGOTIATION    Turn off Accept-based content negotiation
+  TRUSS_ALLOW_INSECURE_URL_SOURCES    Enable insecure URL sources
+  TRUSS_PRESETS                       Named transform presets as inline JSON
+  TRUSS_PRESETS_FILE                  Path to a JSON file containing named transform presets
+",
+    );
+
+    #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
+    s.push_str("\n  Storage backend:\n");
+
     #[cfg(feature = "s3")]
     s.push_str(
         "  TRUSS_S3_BUCKET                     Default S3 bucket name (required when backend=s3)
@@ -324,6 +370,7 @@ ENVIRONMENT VARIABLES:
         "  TRUSS_GCS_BUCKET                    Default GCS bucket name (required when backend=gcs)
   TRUSS_GCS_ENDPOINT                  Custom GCS endpoint URL (for testing with fake-gcs-server, etc.)
   GOOGLE_APPLICATION_CREDENTIALS      Path to GCS service account JSON key file
+  GOOGLE_APPLICATION_CREDENTIALS_JSON Service account JSON key given inline
 ",
     );
 
@@ -332,12 +379,6 @@ ENVIRONMENT VARIABLES:
         "  TRUSS_AZURE_CONTAINER               Default Azure container name (required when backend=azure)
   TRUSS_AZURE_ENDPOINT                Custom Azure Blob endpoint URL (for Azurite, etc.)
   AZURE_STORAGE_ACCOUNT_NAME          Storage account name (derives endpoint when TRUSS_AZURE_ENDPOINT is unset)
-",
-    );
-
-    #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
-    s.push_str(
-        "  TRUSS_STORAGE_TIMEOUT_SECS          Download timeout for storage backends in seconds (default: 30, range: 1-300)
 ",
     );
 
@@ -546,7 +587,12 @@ struct ClapConvertArgs {
     #[arg(long)]
     preserve_exif: bool,
     /// Explicit crop region as x,y,width,height
-    #[arg(long, value_parser = parse_crop)]
+    ///
+    /// `allow_hyphen_values` is here for the same reason it is on `--rotate`: without it
+    /// clap reads a leading `-` as the start of another flag and answers with its own
+    /// message, so a negative origin never reaches `parse_crop` and the caller is told to
+    /// pass the value after `--`, which turns the next word into an input path.
+    #[arg(long, value_parser = parse_crop, allow_hyphen_values = true)]
     crop: Option<CropRegion>,
     /// Apply Gaussian blur (sigma: 0.1-100.0)
     #[arg(long, value_parser = parse_blur)]
@@ -740,7 +786,12 @@ struct ClapSignArgs {
     #[arg(long)]
     preserve_exif: bool,
     /// Explicit crop region as x,y,width,height
-    #[arg(long, value_parser = parse_crop)]
+    ///
+    /// `allow_hyphen_values` is here for the same reason it is on `--rotate`: without it
+    /// clap reads a leading `-` as the start of another flag and answers with its own
+    /// message, so a negative origin never reaches `parse_crop` and the caller is told to
+    /// pass the value after `--`, which turns the next word into an input path.
+    #[arg(long, value_parser = parse_crop, allow_hyphen_values = true)]
     crop: Option<CropRegion>,
     /// Apply Gaussian blur (sigma: 0.1-100.0)
     #[arg(long, value_parser = parse_blur)]
@@ -888,24 +939,26 @@ fn parse_crop(s: &str) -> Result<CropRegion, String> {
     CropRegion::from_str(s)
 }
 
+/// Parses a blur sigma, leaving the range to `TransformOptions::normalize`.
+///
+/// The same convention as [`parse_quality`] and [`parse_dimension`], and for the same
+/// reason: a number the option can hold is handed on for the one copy every adapter reaches
+/// to judge, so a sigma outside the range is `invalid-options` on the CLI as it already was
+/// over HTTP and in the Wasm package. Checking the range here made these two flags the only
+/// ones that reported the same mistake as `invalid-request`. A value that is not a number
+/// at all is refused here, since there is nothing to hand on.
 fn parse_blur(s: &str) -> Result<f32, String> {
-    let v: f32 = s
-        .parse()
-        .map_err(|_| format!("invalid blur value: '{s}'"))?;
-    if !v.is_finite() || !(0.1..=100.0).contains(&v) {
-        return Err("blur must be between 0.1 and 100.0".to_string());
-    }
-    Ok(v)
+    parse_sigma(s, "blur")
 }
 
+/// The same for a sharpen sigma. See [`parse_blur`].
 fn parse_sharpen(s: &str) -> Result<f32, String> {
-    let v: f32 = s
-        .parse()
-        .map_err(|_| format!("invalid sharpen value: '{s}'"))?;
-    if !v.is_finite() || !(0.1..=100.0).contains(&v) {
-        return Err("sharpen must be between 0.1 and 100.0".to_string());
-    }
-    Ok(v)
+    parse_sigma(s, "sharpen")
+}
+
+fn parse_sigma(s: &str, name: &str) -> Result<f32, String> {
+    s.parse::<f32>()
+        .map_err(|_| format!("{name} sigma must be a number, got '{s}'"))
 }
 
 /// Parses a quality, reporting the range truss documents whatever the number's width.
@@ -2671,6 +2724,68 @@ mod tests {
         );
     }
 
+    /// The serve help names every setting that is not behind a storage feature, and names
+    /// nothing that `docs/configuration.md` does not document.
+    ///
+    /// The section used to be a hand-written block extended when someone remembered, and it
+    /// had drifted to 20 of the 45 documented variables with no rule separating the two
+    /// groups: `TRUSS_CACHE_ROOT` was in it and `TRUSS_CACHE_MAX_BYTES` was not, and neither
+    /// of the two tokens that keep `/metrics` and `/health` from being public was. Reading
+    /// the reference rather than repeating the list is what keeps the comparison honest;
+    /// the backend sections are left out because those rows are compiled in per feature and
+    /// this build may have none of them.
+    #[test]
+    fn the_serve_help_names_every_documented_setting_that_is_not_behind_a_feature() {
+        let reference = include_str!("../../../docs/configuration.md");
+        let help = super::help_serve();
+
+        let mut documented: Vec<&str> = Vec::new();
+        let mut in_backend_section = false;
+        for line in reference.lines() {
+            if let Some(heading) = line.strip_prefix("## ") {
+                in_backend_section = matches!(heading, "S3" | "GCS" | "Azure Blob Storage");
+            }
+            if in_backend_section {
+                continue;
+            }
+            let Some(rest) = line.strip_prefix("| `TRUSS_") else {
+                continue;
+            };
+            let Some(end) = rest.find('`') else { continue };
+            let name = &line[3..3 + "TRUSS_".len() + end];
+            if !documented.contains(&name) {
+                documented.push(name);
+            }
+        }
+        assert!(
+            documented.len() > 30,
+            "the reference was read wrong: {documented:?}"
+        );
+
+        let missing: Vec<&&str> = documented
+            .iter()
+            .filter(|name| !help.contains(*name))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "documented settings the serve help does not name: {missing:?}"
+        );
+
+        let undocumented: Vec<&str> = help
+            .lines()
+            .filter_map(|line| line.split_whitespace().next())
+            // The NOTE at the end of the section shows a variable being assigned, which is
+            // an example rather than a row.
+            .map(|word| word.split('=').next().unwrap_or(word))
+            .filter(|word| word.starts_with("TRUSS_"))
+            .filter(|word| !reference.contains(&format!("`{word}`")))
+            .collect();
+        assert!(
+            undocumented.is_empty(),
+            "settings the serve help names and docs/configuration.md does not: {undocumented:?}"
+        );
+    }
+
     #[test]
     fn help_serve_shows_serve_help() {
         let result = parse_args(vec![
@@ -2809,6 +2924,118 @@ mod tests {
                 allow_insecure_url_sources: true,
             })
         );
+    }
+
+    /// A crop origin written with a space reaches `parse_crop`, so the caller is told which
+    /// field is wrong rather than being sent to `--` by clap. The two spellings answer the
+    /// same way, which is the property `allow_hyphen_values` buys.
+    #[test]
+    fn a_negative_crop_origin_is_answered_by_the_crop_validator_however_it_is_written() {
+        let spaced = parse_args(vec![
+            "truss".to_string(),
+            "convert".to_string(),
+            "in.png".to_string(),
+            "-o".to_string(),
+            "out.png".to_string(),
+            "--crop".to_string(),
+            "-1,0,2,2".to_string(),
+        ])
+        .expect_err("a negative crop origin is refused");
+
+        let assigned = parse_args(vec![
+            "truss".to_string(),
+            "convert".to_string(),
+            "in.png".to_string(),
+            "-o".to_string(),
+            "out.png".to_string(),
+            "--crop=-1,0,2,2".to_string(),
+        ])
+        .expect_err("a negative crop origin is refused");
+
+        assert_eq!(spaced.message, assigned.message);
+        assert!(
+            spaced
+                .message
+                .contains("crop x must be a non-negative integer, got '-1'"),
+            "message: {}",
+            spaced.message,
+        );
+    }
+
+    /// The same for `sign`, which carries the same flag.
+    #[test]
+    fn sign_answers_a_negative_crop_origin_with_the_crop_validator() {
+        let error = parse_args(vec![
+            "truss".to_string(),
+            "sign".to_string(),
+            "--path".to_string(),
+            "a.png".to_string(),
+            "--crop".to_string(),
+            "-1,0,2,2".to_string(),
+        ])
+        .expect_err("a negative crop origin is refused");
+
+        assert!(
+            error
+                .message
+                .contains("crop x must be a non-negative integer, got '-1'"),
+            "message: {}",
+            error.message,
+        );
+    }
+
+    /// A sigma outside the range is the transform's judgement, not the parser's, so the CLI
+    /// reports the class every other adapter reports for the same number. A value that is
+    /// not a number at all stays the parser's, as it is for every other numeric flag.
+    #[test]
+    fn an_out_of_range_sigma_is_invalid_options_and_a_non_number_is_invalid_request() {
+        for flag in ["--blur", "--sharpen"] {
+            for value in ["0", "100.1"] {
+                let command = parse_args(vec![
+                    "truss".to_string(),
+                    "convert".to_string(),
+                    "in.png".to_string(),
+                    "-o".to_string(),
+                    "out.png".to_string(),
+                    flag.to_string(),
+                    value.to_string(),
+                ])
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "{flag} {value} should reach the transform: {}",
+                        error.message
+                    )
+                });
+                let options = match command {
+                    Command::Convert(convert) => convert.options,
+                    _ => panic!("expected convert command"),
+                };
+                let error = options
+                    .normalize(crate::MediaType::Png)
+                    .expect_err("a sigma outside the range is refused");
+                assert_eq!(
+                    error.class(),
+                    crate::core::error_class::ErrorClass::InvalidOptions,
+                    "{flag} {value}"
+                );
+            }
+
+            let error = parse_args(vec![
+                "truss".to_string(),
+                "convert".to_string(),
+                "in.png".to_string(),
+                "-o".to_string(),
+                "out.png".to_string(),
+                flag.to_string(),
+                "abc".to_string(),
+            ])
+            .expect_err("a sigma that is not a number is refused");
+            assert_eq!(
+                error.class,
+                crate::core::error_class::ErrorClass::InvalidRequest,
+                "{flag}"
+            );
+        }
     }
 
     #[test]
