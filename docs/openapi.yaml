@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: Truss Image Server API
-  version: 0.24.0
+  version: 0.25.0
   description: |
     HTTP API for the Truss image toolkit.
 
@@ -533,7 +533,7 @@ paths:
               example:
                 status: ok
                 service: truss
-                version: 0.24.0
+                version: 0.25.0
                 uptimeSeconds: 3600
                 checks:
                   - name: storageRoot
@@ -600,7 +600,7 @@ paths:
               example:
                 status: ok
                 service: truss
-                version: 0.24.0
+                version: 0.25.0
         '405':
           $ref: '#/components/responses/MethodNotAllowed'
         '429':
@@ -1567,7 +1567,7 @@ components:
         version:
           type: string
           description: Semantic version of the running binary.
-          example: "0.24.0"
+          example: "0.25.0"
     ReadinessResponse:
       type: object
       description: Readiness payload with individual dependency checks.
@@ -1596,7 +1596,7 @@ components:
         version:
           type: string
           description: Semantic version of the running binary.
-          example: "0.24.0"
+          example: "0.25.0"
         uptimeSeconds:
           type: integer
           format: int64
