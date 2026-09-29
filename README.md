@@ -1,7 +1,7 @@
 # truss
 
 <!-- ALL-CONTRIBUTORS-BADGE:START - Do not remove or modify this section -->
-[![All Contributors](https://img.shields.io/badge/all_contributors-2-orange.svg?style=flat-square)](#contributors)
+[![All Contributors](https://img.shields.io/badge/all_contributors-3-orange.svg?style=flat-square)](#contributors)
 <!-- ALL-CONTRIBUTORS-BADGE:END -->
 [![Build](https://github.com/nao1215/truss/actions/workflows/rust.yml/badge.svg)](https://github.com/nao1215/truss/actions/workflows/rust.yml)
 [![CLI Integration](https://github.com/nao1215/truss/actions/workflows/integration-cli.yml/badge.svg)](https://github.com/nao1215/truss/actions/workflows/integration-cli.yml)
@@ -11,7 +11,8 @@
 [![crates.io downloads](https://img.shields.io/crates/d/truss-image?label=crates.io%20downloads)](https://crates.io/crates/truss-image)
 [![release binary downloads](https://img.shields.io/github/downloads/nao1215/truss/total?label=release%20binary%20downloads)](https://github.com/nao1215/truss/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Rust](https://img.shields.io/badge/rust-stable-orange)](https://www.rust-lang.org/)
+[![MSRV](https://img.shields.io/crates/msrv/truss-image)](Cargo.toml)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/nao1215/truss/badge)](https://scorecard.dev/viewer/?uri=github.com/nao1215/truss)
 
 ![logo](./docs/img/logo-small.png)
 
@@ -736,9 +737,9 @@ Thanks goes to these wonderful people ([emoji key](https://allcontributors.org/d
 <table>
   <tbody>
     <tr>
-      <td align="center" valign="top" width="14.28%"><a href="https://debimate.jp/"><img src="https://avatars.githubusercontent.com/u/22737008?v=4?s=75" width="75px;" alt="CHIKAMATSU Naohiro"/><br /><sub><b>CHIKAMATSU Naohiro</b></sub></a><br /><a href="https://github.com/nao1215/truss/commits?author=nao1215" title="Code">&#128187;</a> <a href="https://github.com/nao1215/truss/commits?author=nao1215" title="Documentation">&#128214;</a></td>
-      <td align="center" valign="top" width="14.28%"><a href="https://mayankgupta.com"><img src="https://avatars.githubusercontent.com/u/8931305?v=4?s=75" width="75px;" alt="Mayank Gupta"/><br /><sub><b>Mayank Gupta</b></sub></a><br /><a href="https://github.com/nao1215/truss/issues?q=author%3Amayankguptadotcom" title="Ideas, Planning, &amp; Feedback">&#129300;</a></td>
-      <td align="center" valign="top" width="14.28%"><a href="https://rafaeldominiquini.ddns.net/"><img src="https://avatars.githubusercontent.com/u/1180808?v=4?s=75" width="75px;" alt="Rafael Baboni Dominiquini"/><br /><sub><b>Rafael Baboni Dominiquini</b></sub></a><br /><a href="#platform-Dominiquini" title="Packaging/porting to new platform">&#128230;</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://debimate.jp/"><img src="https://avatars.githubusercontent.com/u/22737008?v=4?s=75" width="75px;" alt="CHIKAMATSU Naohiro"/><br /><sub><b>CHIKAMATSU Naohiro</b></sub></a><br /><a href="https://github.com/nao1215/truss/commits?author=nao1215" title="Code">💻</a> <a href="https://github.com/nao1215/truss/commits?author=nao1215" title="Documentation">📖</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://mayankgupta.com"><img src="https://avatars.githubusercontent.com/u/8931305?v=4?s=75" width="75px;" alt="Mayank Gupta"/><br /><sub><b>Mayank Gupta</b></sub></a><br /><a href="#ideas-mayankguptadotcom" title="Ideas, Planning, & Feedback">🤔</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://rafaeldominiquini.ddns.net/"><img src="https://avatars.githubusercontent.com/u/1180808?v=4?s=75" width="75px;" alt="Rafael Baboni Dominiquini"/><br /><sub><b>Rafael Baboni Dominiquini</b></sub></a><br /><a href="#platform-Dominiquini" title="Packaging/porting to new platform">📦</a></td>
     </tr>
   </tbody>
 </table>
