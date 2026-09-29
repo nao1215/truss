@@ -1,0 +1,53 @@
+name: cargo-deny
+
+# RustSec advisories, dependency licenses, banned crates and allowed sources,
+# all read from deny.toml. The advisory database changes every day, so a check
+# that passed at merge time can fail tomorrow without a line of this repository
+# changing: the pull_request/push legs catch a newly added dependency, the
+# schedule catches a newly published advisory against Cargo.lock as it is.
+#
+# Advisories the repository reaches but defends against on its own side go in
+# deny.toml's [advisories] ignore, one { id, reason } each, with why, which test
+# holds the defense, and when to remove it. Mirror the same IDs in
+# osv-scanner.toml so Scorecard's Vulnerabilities check agrees.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "0 4 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  deny:
+    name: cargo-deny (${{ matrix.checks }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        # advisories on its own leg: it is the only one that changes without a
+        # commit, so a red schedule run names the cause in the job title.
+        checks:
+          - advisories
+          - bans licenses sources
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Pinned so a new cargo-deny release cannot change the verdict on its own.
+      # The advisory database is intentionally not pinned.
+      - uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172 # v2.87.20
+        with:
+          tool: cargo-deny@0.20.2
+
+      # --all-features: the release builds optional features (truss: s3,gcs,azure),
+      # and a license or advisory behind a feature flag still ships.
+      - name: cargo deny check ${{ matrix.checks }}
+        run: cargo deny --locked --all-features check --hide-inclusion-graph ${{ matrix.checks }}
