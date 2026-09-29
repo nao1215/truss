@@ -138,9 +138,9 @@ fn convert_url_writes_a_local_output_file() {
 }
 
 #[test]
-fn convert_url_can_infer_avif_output_from_the_file_extension() {
+fn convert_url_can_infer_webp_output_from_the_file_extension() {
     let (url, handle) = spawn_http_server(common::png_bytes(), "image/png");
-    let output_path = temp_file_path("convert-url-output-avif").with_extension("avif");
+    let output_path = temp_file_path("convert-url-output-webp").with_extension("webp");
     let output = Command::new(env!("CARGO_BIN_EXE_truss"))
         .arg("--url")
         .arg(url)
@@ -157,7 +157,7 @@ fn convert_url_can_infer_avif_output_from_the_file_extension() {
     let artifact = sniff_artifact(RawArtifact::new(bytes, None)).expect("sniff converted output");
     let _ = fs::remove_file(&output_path);
 
-    assert_eq!(artifact.media_type, MediaType::Avif);
+    assert_eq!(artifact.media_type, MediaType::Webp);
 }
 
 /// Answers every request with a 302 to `location`, and reports how many requests it saw.

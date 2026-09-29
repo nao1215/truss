@@ -196,7 +196,7 @@ changelog:
 
 # Check dependency licenses and advisories (requires cargo-deny)
 deny:
-    cargo deny check
+    cargo deny --locked --all-features check
 
 # Remove build artifacts
 clean:

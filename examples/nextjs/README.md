@@ -92,7 +92,7 @@ import { TrussImage } from "@/components/TrussImage";
 | `alt` | `string` | Alt text (required) |
 | `width` | `number` | Output width in pixels |
 | `height` | `number` | Output height in pixels |
-| `format` | `"webp" \| "avif" \| "jpeg" \| "png" \| ...` | Output format |
+| `format` | `"webp" \| "jpeg" \| "png" \| ...` | Output format |
 | `quality` | `number` | Quality 1–100 (lossy formats) |
 | `fit` | `"contain" \| "cover" \| "fill" \| "inside"` | Resize fit mode |
 

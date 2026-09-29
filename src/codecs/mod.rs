@@ -70,8 +70,7 @@ pub mod svg;
 ///
 /// let input = sniff_artifact(RawArtifact::new(bytes, Some(MediaType::Png))).unwrap();
 /// let mut options = TransformOptions::default();
-/// options.format = Some(MediaType::Avif);
-/// options.quality = Some(70);
+/// options.format = Some(MediaType::Webp);
 /// let output = transform(TransformRequest::new(
 ///     input,
 ///     options,
@@ -79,8 +78,8 @@ pub mod svg;
 /// .unwrap();
 /// let sniffed = sniff_artifact(RawArtifact::new(output.artifact.bytes.clone(), None)).unwrap();
 ///
-/// assert_eq!(output.artifact.media_type, MediaType::Avif);
-/// assert_eq!(sniffed.media_type, MediaType::Avif);
+/// assert_eq!(output.artifact.media_type, MediaType::Webp);
+/// assert_eq!(sniffed.media_type, MediaType::Webp);
 /// ```
 ///
 /// ```
@@ -191,7 +190,7 @@ pub fn transform(request: TransformRequest) -> Result<TransformResult, Transform
     }
 
     // The rule is about frames, not about one container. Gating it on GIF let an animated
-    // WebP, an APNG, and an animated AVIF through, where the decoder kept the first frame
+    // WebP and an APNG through, where the decoder kept the first frame
     // and the caller was told nothing.
     if request.input.metadata.frame_count > 1 {
         return Err(TransformError::UnsupportedInputMediaType(format!(
@@ -235,7 +234,6 @@ mod tests {
             (MediaType::Gif, b"GIF89a"),
             (MediaType::Png, b"\x89PNG\r\n\x1a\n"),
             (MediaType::Webp, b"RIFF\0\0\0\0WEBP"),
-            (MediaType::Avif, b"\0\0\0\x18ftypavis"),
         ];
 
         for &(media_type, signature) in cases {

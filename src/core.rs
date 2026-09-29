@@ -5,19 +5,8 @@ use std::fmt;
 use std::str::FromStr;
 use std::time::Duration;
 
-#[cfg(feature = "avif")]
-pub(crate) use avif::avif_clean_aperture;
-// Not gated with the decoder: `smaller_passthrough` is compiled in every build and reads
-// this, and the container walk needs no decoder anyway.
-pub(crate) use avif::avif_carries_metadata;
-#[cfg(feature = "avif")]
-pub(crate) use avif::{avif_metadata, avif_with_metadata};
-use avif::{avif_orientation, has_avif_brand, sniff_avif};
-
 // The shared failure vocabulary is only read by the adapters, so a build with none of them
 // (`--no-default-features`) leaves it out rather than carrying an unused table.
-/// The AVIF container walk, which is long enough to read on its own.
-mod avif;
 #[cfg(any(feature = "server", feature = "wasm"))]
 pub(crate) mod error_class;
 /// Gated with the `url` crate the address rules parse with, which the server feature brings
@@ -278,8 +267,6 @@ pub enum MediaType {
     Png,
     /// WebP image data.
     Webp,
-    /// AVIF image data.
-    Avif,
     /// SVG image data.
     Svg,
     /// BMP image data.
@@ -302,7 +289,6 @@ impl MediaType {
             Self::Jpeg => "jpeg",
             Self::Png => "png",
             Self::Webp => "webp",
-            Self::Avif => "avif",
             Self::Svg => "svg",
             Self::Bmp => "bmp",
             Self::Tiff => "tiff",
@@ -317,7 +303,6 @@ impl MediaType {
             Self::Jpeg => "image/jpeg",
             Self::Png => "image/png",
             Self::Webp => "image/webp",
-            Self::Avif => "image/avif",
             Self::Svg => "image/svg+xml",
             Self::Bmp => "image/bmp",
             Self::Tiff => "image/tiff",
@@ -328,28 +313,27 @@ impl MediaType {
     /// Reports whether the media type is typically encoded with lossy quality controls.
     #[must_use]
     pub const fn is_lossy(self) -> bool {
-        matches!(self, Self::Jpeg | Self::Webp | Self::Avif)
+        matches!(self, Self::Jpeg | Self::Webp)
     }
 
     /// Returns `true` if the format participates in the optimization pipeline.
     #[must_use]
     pub const fn supports_optimization(self) -> bool {
-        matches!(self, Self::Jpeg | Self::Png | Self::Webp | Self::Avif)
+        matches!(self, Self::Jpeg | Self::Png | Self::Webp)
     }
 
     /// Returns `true` if the format supports lossy optimization controls.
     #[must_use]
     pub const fn supports_lossy_optimization(self) -> bool {
-        matches!(self, Self::Jpeg | Self::Webp | Self::Avif)
+        matches!(self, Self::Jpeg | Self::Webp)
     }
 
     /// The longest an axis of this format's output can be, when the format sets a limit.
     ///
     /// `MAX_OUTPUT_PIXELS` bounds the area and says nothing about the shape, so an output can
-    /// be tens of thousands of pixels on one axis as long as the other is small. Three of the
+    /// be tens of thousands of pixels on one axis as long as the other is small. Two of the
     /// encoders refuse that, for reasons outside truss: a JPEG frame header stores each
-    /// dimension in sixteen bits, WebP caps an image at 16383 on an axis, and rav1e refuses an
-    /// axis outside 16 to 65535, which is narrower than AV1's own frame size fields. The
+    /// dimension in sixteen bits, and WebP caps an image at 16383 on an axis. The
     /// number is the smaller of what the format can hold and what the encoder truss reaches
     /// will write, so WebP is 16383 rather than the 16384 the `image` crate's lossless encoder
     /// alone would accept: the mode that selects the encoder is a separate option, and one
@@ -360,7 +344,7 @@ impl MediaType {
     /// sanitized document rather than a raster of a chosen size.
     pub(crate) const fn max_output_dimension(self) -> Option<u32> {
         match self {
-            Self::Jpeg | Self::Avif => Some(65_535),
+            Self::Jpeg => Some(65_535),
             Self::Webp => Some(16_383),
             Self::Png | Self::Bmp | Self::Tiff | Self::Gif | Self::Svg => None,
         }
@@ -368,8 +352,7 @@ impl MediaType {
 
     /// Returns `true` if the encoded format can carry an embedded ICC profile.
     ///
-    /// AVIF signals color through the container's `colr` box rather than a profile truss can
-    /// write, and BMP/TIFF/SVG output has no profile path in this pipeline.
+    /// BMP/TIFF/SVG output has no profile path in this pipeline.
     #[must_use]
     pub const fn supports_icc_profile(self) -> bool {
         matches!(self, Self::Jpeg | Self::Png | Self::Webp)
@@ -403,7 +386,7 @@ impl MediaType {
     pub(crate) fn unencodable_reason(self) -> Option<String> {
         (!self.is_encodable()).then(|| {
             format!(
-                "{} is an input-only format; choose an output format such as png, jpeg, webp, or avif",
+                "{} is an input-only format; choose an output format such as png, jpeg, or webp",
                 self.as_name()
             )
         })
@@ -447,7 +430,6 @@ impl FromStr for MediaType {
             "jpeg" | "jpg" => Ok(Self::Jpeg),
             "png" => Ok(Self::Png),
             "webp" => Ok(Self::Webp),
-            "avif" => Ok(Self::Avif),
             "svg" => Ok(Self::Svg),
             "bmp" => Ok(Self::Bmp),
             "tiff" | "tif" => Ok(Self::Tiff),
@@ -801,7 +783,6 @@ impl FromStr for TargetQuality {
 pub(crate) fn default_lossy_target_quality(media_type: MediaType) -> Option<TargetQuality> {
     let value = match media_type {
         MediaType::Jpeg | MediaType::Webp => 0.985,
-        MediaType::Avif => 0.99,
         _ => return None,
     };
 
@@ -1048,7 +1029,7 @@ impl TransformOptions {
 
         if optimize == OptimizeMode::Lossy && !format.supports_lossy_optimization() {
             return Err(TransformError::InvalidOptions(format!(
-                "lossy optimization requires jpeg, webp, or avif output, got {}",
+                "lossy optimization requires jpeg or webp output, got {}",
                 format.as_name()
             )));
         }
@@ -1095,7 +1076,7 @@ impl TransformOptions {
 
         if self.target_quality.is_some() && !format.supports_lossy_optimization() {
             return Err(TransformError::InvalidOptions(
-                "targetQuality requires jpeg, webp, or avif output".to_string(),
+                "targetQuality requires jpeg or webp output".to_string(),
             ));
         }
 
@@ -1629,11 +1610,11 @@ impl fmt::Display for TransformError {
             Self::UnsupportedOutputMediaType(media_type) => match media_type {
                 MediaType::Svg => write!(
                     f,
-                    "svg output requires an svg input; choose a raster output format such as png, jpeg, webp, or avif"
+                    "svg output requires an svg input; choose a raster output format such as png, jpeg, or webp"
                 ),
                 MediaType::Gif => write!(
                     f,
-                    "gif is an input-only format; choose an output format such as png, jpeg, webp, or avif"
+                    "gif is an input-only format; choose an output format such as png, jpeg, or webp"
                 ),
                 other => write!(f, "unsupported output media type: {other}"),
             },
@@ -1781,7 +1762,8 @@ pub struct TransformResult {
 /// [`RawArtifact`], this function verifies that the declared type matches the detected
 /// signature before returning the classified [`Artifact`].
 ///
-/// Detection currently supports JPEG, PNG, WebP, AVIF, and BMP recognition.
+/// Detection covers JPEG, PNG, WebP, BMP, TIFF, GIF, and SVG. An AVIF is recognized by its
+/// `ftyp` brand only so that it can be refused by name: truss does not read or write AVIF.
 /// Width, height, and alpha extraction are best-effort and depend on the underlying format
 /// and any container metadata the file exposes.
 ///
@@ -1811,24 +1793,6 @@ pub struct TransformResult {
 /// assert_eq!(artifact.metadata.height, Some(3));
 /// ```
 ///
-/// ```ignore
-/// use image::codecs::avif::AvifEncoder;
-/// use image::{ColorType, ImageEncoder, Rgba, RgbaImage};
-/// use truss::{sniff_artifact, MediaType, RawArtifact};
-///
-/// let image = RgbaImage::from_pixel(3, 2, Rgba([10, 20, 30, 0]));
-/// let mut bytes = Vec::new();
-/// AvifEncoder::new(&mut bytes)
-///     .write_image(&image, 3, 2, ColorType::Rgba8.into())
-///     .unwrap();
-///
-/// let artifact = sniff_artifact(RawArtifact::new(bytes, Some(MediaType::Avif))).unwrap();
-///
-/// assert_eq!(artifact.media_type, MediaType::Avif);
-/// assert_eq!(artifact.metadata.width, Some(3));
-/// assert_eq!(artifact.metadata.height, Some(2));
-/// assert_eq!(artifact.metadata.has_alpha, Some(true));
-/// ```
 #[must_use = "this function returns the detected artifact without side effects"]
 pub fn sniff_artifact(input: RawArtifact) -> Result<Artifact, TransformError> {
     let (media_type, metadata) = detect_artifact(&input.bytes)?;
@@ -2126,7 +2090,9 @@ fn detect_artifact(bytes: &[u8]) -> Result<(MediaType, ArtifactMetadata), Transf
     }
 
     if is_avif(bytes) {
-        return Ok((MediaType::Avif, sniff_avif(bytes)?));
+        return Err(TransformError::UnsupportedInputMediaType(
+            AVIF_INPUT_REFUSAL.to_string(),
+        ));
     }
 
     if is_bmp(bytes) {
@@ -2170,8 +2136,33 @@ fn is_webp(bytes: &[u8]) -> bool {
     bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP"
 }
 
+/// Why an AVIF input is refused.
+///
+/// truss read and wrote AVIF until its decoder turned out to be licensed AGPL-3.0 or
+/// commercial, which an MIT project cannot ship. The file is still recognized so that the
+/// refusal names the format rather than calling a well-formed image an unknown signature.
+const AVIF_INPUT_REFUSAL: &str =
+    "AVIF is not supported; convert the image to PNG, JPEG, or WebP before passing it to truss";
+
+/// Reports whether the bytes open with an ISOBMFF `ftyp` box that lists an AVIF brand.
+///
+/// Only the brands inside the `ftyp` box are read: its major brand and then its compatible
+/// brands, four bytes each after the minor version. A HEIC or MP4 file has the same box and
+/// different brands, and stays an unknown signature.
 fn is_avif(bytes: &[u8]) -> bool {
-    bytes.len() >= 16 && &bytes[4..8] == b"ftyp" && has_avif_brand(&bytes[8..])
+    if bytes.len() < 16 || &bytes[4..8] != b"ftyp" {
+        return false;
+    }
+    let declared = usize::try_from(read_u32_be(&bytes[0..4]).unwrap_or(0)).unwrap_or(0);
+    let end = declared.clamp(16, bytes.len());
+    let is_avif_brand = |brand: &[u8]| matches!(brand, b"avif" | b"avis");
+    // Major brand at 8, minor version at 12, compatible brands from 16.
+    is_avif_brand(&bytes[8..12])
+        || bytes[16..end]
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .any(|brand| is_avif_brand(brand))
 }
 
 /// Detects SVG by consuming the XML prolog and checking that the root element is
@@ -2741,8 +2732,7 @@ fn png_ancillary_facts(bytes: &[u8]) -> PngAncillaryFacts {
 /// The tag says how the stored pixels are meant to be displayed, so a reader that honours
 /// it in one container and not the next makes the container a photo happens to arrive in
 /// decide whether the picture comes out upright. Browsers honour it in JPEG, PNG, WebP, and
-/// TIFF alike, and honour the AVIF properties that mean the same, so truss reads all five
-/// through here, and the sniffers and the transform pipeline both go through this function
+/// TIFF alike, so truss reads all four through here, and the sniffers and the transform pipeline both go through this function
 /// so what `inspect` reports and what `convert` applies cannot drift.
 ///
 /// A file with no EXIF block, no Orientation field, or an unreadable one reports `None`,
@@ -2750,9 +2740,7 @@ fn png_ancillary_facts(bytes: &[u8]) -> PngAncillaryFacts {
 /// by decoding it, which is what keeps the common file — the one carrying no metadata at
 /// all — from paying for a container scan on every `sniff_artifact` call.
 ///
-/// BMP and GIF have nowhere to put the tag. AVIF signals the same transform without an Exif
-/// field, as `irot` and `imir` item properties, and [`avif_orientation`] folds those into
-/// the same eight values, so a caller reads one number whatever the container.
+/// BMP and GIF have nowhere to put the tag.
 pub(crate) fn exif_orientation(media_type: MediaType, bytes: &[u8]) -> Option<u16> {
     let payload = match media_type {
         MediaType::Jpeg => jpeg_exif_payload(bytes)?,
@@ -2760,7 +2748,6 @@ pub(crate) fn exif_orientation(media_type: MediaType, bytes: &[u8]) -> Option<u1
         MediaType::Webp => webp_exif_payload(bytes)?,
         // A TIFF file is an Exif block from byte zero, so it needs no locating.
         MediaType::Tiff => return tiff_orientation(bytes),
-        MediaType::Avif => return avif_orientation(bytes),
         MediaType::Bmp | MediaType::Gif | MediaType::Svg => return None,
     };
     exif_orientation_from_payload(payload)
@@ -3207,13 +3194,6 @@ fn read_u32_le(bytes: &[u8]) -> Result<u32, TransformError> {
     Ok(u32::from_le_bytes(array))
 }
 
-fn read_u64_be(bytes: &[u8]) -> Result<u64, TransformError> {
-    let array: [u8; 8] = bytes
-        .try_into()
-        .map_err(|_| TransformError::DecodeFailed("expected 8 bytes".to_string()))?;
-    Ok(u64::from_be_bytes(array))
-}
-
 #[cfg(test)]
 mod tests {
     /// The two input caps are the numbers `docs/openapi.yaml` publishes, so a change to
@@ -3290,15 +3270,12 @@ mod tests {
     #[cfg(any(feature = "server", feature = "wasm"))]
     use super::single_line;
     use super::{
-        Artifact, ArtifactMetadata, Dimensions, Fit, MediaType, MetadataPolicy, OptimizeMode,
-        Position, QualityMetric, RawArtifact, Rgba8, Rotation, TargetQuality, TransformError,
-        TransformOptions, TransformRequest, exif_orientation, sniff_artifact,
+        Artifact, ArtifactMetadata, Fit, MediaType, MetadataPolicy, OptimizeMode, Position,
+        QualityMetric, RawArtifact, Rgba8, Rotation, TargetQuality, TransformError,
+        TransformOptions, TransformRequest, normalize_metadata_policy, sniff_artifact,
         validate_height_value, validate_quality_value, validate_watermark_opacity_value,
         validate_width_value,
     };
-    #[cfg(feature = "avif")]
-    use image::codecs::avif::AvifEncoder;
-    use image::{ColorType, ImageEncoder, Rgba, RgbaImage};
     use rstest::rstest;
 
     /// One spelling per named value, across every parser that takes one.
@@ -3506,24 +3483,18 @@ mod tests {
         bytes
     }
 
-    fn avif_bytes() -> Vec<u8> {
+    /// An ISOBMFF `ftyp` box with the given major and compatible brands, which is all the
+    /// sniffer reads to tell an AVIF from a HEIC or an MP4.
+    fn ftyp_bytes(major: &[u8; 4], compatible: &[&[u8; 4]]) -> Vec<u8> {
+        let size = u32::try_from(16 + 4 * compatible.len()).expect("ftyp size");
         let mut bytes = Vec::new();
-        bytes.extend_from_slice(&24_u32.to_be_bytes());
+        bytes.extend_from_slice(&size.to_be_bytes());
         bytes.extend_from_slice(b"ftyp");
-        bytes.extend_from_slice(b"avif");
+        bytes.extend_from_slice(major);
         bytes.extend_from_slice(&0_u32.to_be_bytes());
-        bytes.extend_from_slice(b"mif1");
-        bytes.extend_from_slice(b"avif");
-        bytes
-    }
-
-    #[cfg(feature = "avif")]
-    fn encoded_avif_bytes(width: u32, height: u32, fill: Rgba<u8>) -> Vec<u8> {
-        let image = RgbaImage::from_pixel(width, height, fill);
-        let mut bytes = Vec::new();
-        AvifEncoder::new(&mut bytes)
-            .write_image(&image, width, height, ColorType::Rgba8.into())
-            .expect("encode avif");
+        for brand in compatible {
+            bytes.extend_from_slice(*brand);
+        }
         bytes
     }
 
@@ -3676,20 +3647,18 @@ mod tests {
 
     /// A format that cannot carry a profile has nothing to preserve, and asking for it
     /// there is what made `--strip-metadata` fail outright before the upgrade was limited
-    /// to formats that can take one. AVIF is the only such format an optimization mode
-    /// reaches: TIFF and BMP refuse the mode itself.
-    #[test]
-    fn an_optimization_strips_for_a_format_that_carries_no_profile() {
-        let normalized = TransformOptions {
-            optimize: OptimizeMode::Auto,
-            strip_metadata: true,
-            format: Some(MediaType::Avif),
-            ..TransformOptions::default()
-        }
-        .normalize(MediaType::Jpeg)
-        .expect("normalize the metadata policy");
-
-        assert_eq!(normalized.metadata_policy, MetadataPolicy::StripAll);
+    /// to formats that can take one. Every format an optimization mode currently reaches
+    /// carries a profile, since TIFF and BMP refuse the mode itself, so the rule is held
+    /// here directly rather than through a request no adapter can send.
+    #[rstest]
+    #[case::auto(OptimizeMode::Auto)]
+    #[case::lossless(OptimizeMode::Lossless)]
+    #[case::lossy(OptimizeMode::Lossy)]
+    fn an_optimization_strips_for_a_format_that_carries_no_profile(#[case] optimize: OptimizeMode) {
+        assert_eq!(
+            normalize_metadata_policy(true, false, optimize, MediaType::Bmp),
+            MetadataPolicy::StripAll
+        );
     }
 
     #[test]
@@ -3704,23 +3673,6 @@ mod tests {
         .expect("normalize lossy webp metadata policy");
 
         assert_eq!(normalized.metadata_policy, MetadataPolicy::PreserveIcc);
-    }
-
-    // Regression test for https://github.com/nao1215/truss/issues/279: the ICC upgrade must
-    // not apply to a format that cannot carry a profile, or `--strip-metadata` puts the
-    // pipeline into a state the encoder rejects.
-    #[test]
-    fn normalize_lossy_optimize_strips_all_for_a_format_without_icc_support() {
-        let normalized = TransformOptions {
-            optimize: OptimizeMode::Lossy,
-            format: Some(MediaType::Avif),
-            strip_metadata: true,
-            ..TransformOptions::default()
-        }
-        .normalize(MediaType::Jpeg)
-        .expect("normalize lossy avif metadata policy");
-
-        assert_eq!(normalized.metadata_policy, MetadataPolicy::StripAll);
     }
 
     #[test]
@@ -3959,7 +3911,7 @@ mod tests {
                     }),
                     ..TransformOptions::default()
                 },
-                expected_error: Some("targetQuality requires jpeg, webp, or avif output"),
+                expected_error: Some("targetQuality requires jpeg or webp output"),
             },
             Case {
                 name: "quality cannot combine with lossless optimize",
@@ -3980,9 +3932,7 @@ mod tests {
                     optimize: OptimizeMode::Lossy,
                     ..TransformOptions::default()
                 },
-                expected_error: Some(
-                    "lossy optimization requires jpeg, webp, or avif output, got png",
-                ),
+                expected_error: Some("lossy optimization requires jpeg or webp output, got png"),
             },
             Case {
                 name: "optimize unsupported for svg output",
@@ -4202,7 +4152,6 @@ mod tests {
             MediaType::Jpeg,
             MediaType::Png,
             MediaType::Webp,
-            MediaType::Avif,
             MediaType::Svg,
             MediaType::Bmp,
             MediaType::Tiff,
@@ -4282,63 +4231,6 @@ mod tests {
                 "{value:?} should be a color"
             );
         }
-    }
-
-    #[test]
-    fn sniff_artifact_detects_an_animated_avif() {
-        // An animated AVIF is a moving-image sequence, and the container says so in its
-        // brands: `avis` is the sequence brand, which `is_avif_brand` already accepts as a
-        // reason to call the file an AVIF at all.
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(&24_u32.to_be_bytes());
-        bytes.extend_from_slice(b"ftyp");
-        bytes.extend_from_slice(b"avis");
-        bytes.extend_from_slice(&0_u32.to_be_bytes());
-        bytes.extend_from_slice(b"avis");
-        bytes.extend_from_slice(b"avif");
-        let artifact =
-            sniff_artifact(RawArtifact::new(bytes, None)).expect("sniff an animated avif");
-
-        assert!(
-            artifact.metadata.frame_count > 1,
-            "an animated avif reported {} frames",
-            artifact.metadata.frame_count
-        );
-    }
-
-    #[test]
-    fn sniff_artifact_counts_the_frames_of_an_animated_avif() {
-        // The frames are samples of a `moov` track, and the count is in `stsz`. The refusal
-        // prints the number, so a placeholder there would state a count nothing measured.
-        fn mp4_box(box_type: &[u8; 4], payload: &[u8]) -> Vec<u8> {
-            let mut out = ((payload.len() + 8) as u32).to_be_bytes().to_vec();
-            out.extend_from_slice(box_type);
-            out.extend_from_slice(payload);
-            out
-        }
-
-        let mut stsz = vec![0_u8; 4];
-        stsz.extend_from_slice(&0_u32.to_be_bytes());
-        stsz.extend_from_slice(&7_u32.to_be_bytes());
-        let stbl = mp4_box(b"stbl", &mp4_box(b"stsz", &stsz));
-        let minf = mp4_box(b"minf", &stbl);
-        let mdia = mp4_box(b"mdia", &minf);
-        let trak = mp4_box(b"trak", &mdia);
-        let moov = mp4_box(b"moov", &trak);
-
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(&24_u32.to_be_bytes());
-        bytes.extend_from_slice(b"ftyp");
-        bytes.extend_from_slice(b"avis");
-        bytes.extend_from_slice(&0_u32.to_be_bytes());
-        bytes.extend_from_slice(b"avis");
-        bytes.extend_from_slice(b"avif");
-        bytes.extend_from_slice(&moov);
-
-        let artifact =
-            sniff_artifact(RawArtifact::new(bytes, None)).expect("sniff an animated avif");
-
-        assert_eq!(artifact.metadata.frame_count, 7);
     }
 
     #[test]
@@ -4538,393 +4430,42 @@ mod tests {
         assert_eq!(artifact.metadata.has_alpha, Some(true));
     }
 
-    #[test]
-    fn sniff_artifact_detects_avif_brand() {
-        let artifact = sniff_artifact(RawArtifact::new(avif_bytes(), None)).expect("sniff avif");
+    /// AVIF is recognized only to be refused by name, as the unsupported-input class every
+    /// other unreadable format gets, so each adapter answers it the way it answers an
+    /// unknown signature and the message says which format it was.
+    #[rstest]
+    #[case::still(ftyp_bytes(b"avif", &[b"mif1", b"avif"]))]
+    #[case::sequence(ftyp_bytes(b"avis", &[b"avis", b"msf1"]))]
+    #[case::compatible_brand_only(ftyp_bytes(b"mif1", &[b"miaf", b"avif"]))]
+    fn sniff_artifact_refuses_an_avif_by_name(#[case] bytes: Vec<u8>) {
+        let err = sniff_artifact(RawArtifact::new(bytes, None)).expect_err("avif is refused");
 
-        assert_eq!(artifact.media_type, MediaType::Avif);
-        assert_eq!(artifact.metadata, ArtifactMetadata::default());
+        match err {
+            TransformError::UnsupportedInputMediaType(ref message) => {
+                assert!(message.contains("AVIF is not supported"), "{message}");
+            }
+            other => panic!("expected an unsupported input, got {other:?}"),
+        }
     }
 
-    #[cfg(feature = "avif")]
-    #[test]
-    fn sniff_artifact_detects_avif_dimensions_and_alpha() {
-        let artifact = sniff_artifact(RawArtifact::new(
-            encoded_avif_bytes(7, 5, Rgba([10, 20, 30, 0])),
-            None,
-        ))
-        .expect("sniff avif with alpha");
-
-        assert_eq!(artifact.media_type, MediaType::Avif);
-        assert_eq!(artifact.metadata.width, Some(7));
-        assert_eq!(artifact.metadata.height, Some(5));
-        assert_eq!(artifact.metadata.has_alpha, Some(true));
-    }
-
-    #[cfg(feature = "avif")]
-    #[test]
-    fn sniff_artifact_detects_opaque_avif_without_alpha_item() {
-        let artifact = sniff_artifact(RawArtifact::new(
-            encoded_avif_bytes(9, 4, Rgba([10, 20, 30, 255])),
-            None,
-        ))
-        .expect("sniff opaque avif");
-
-        assert_eq!(artifact.media_type, MediaType::Avif);
-        assert_eq!(artifact.metadata.width, Some(9));
-        assert_eq!(artifact.metadata.height, Some(4));
-        assert_eq!(artifact.metadata.has_alpha, Some(false));
-    }
-
-    fn mp4_box(box_type: &[u8; 4], payload: &[u8]) -> Vec<u8> {
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(
-            &u32::try_from(payload.len() + 8)
-                .expect("box size")
-                .to_be_bytes(),
-        );
-        bytes.extend_from_slice(box_type);
-        bytes.extend_from_slice(payload);
+    /// Other ISOBMFF images share the `ftyp` box and differ in brand, and a brand that only
+    /// appears after the box ends is picture data rather than a declaration.
+    #[rstest]
+    #[case::heic(ftyp_bytes(b"heic", &[b"mif1", b"heic"]))]
+    #[case::brand_past_the_box({
+        let mut bytes = ftyp_bytes(b"heic", &[b"mif1"]);
+        bytes.extend_from_slice(b"avif");
         bytes
-    }
+    })]
+    fn sniff_artifact_does_not_call_other_isobmff_files_avif(#[case] bytes: Vec<u8>) {
+        let err = sniff_artifact(RawArtifact::new(bytes, None)).expect_err("heic is refused");
 
-    fn mp4_full_box(box_type: &[u8; 4], version: u8, flags: u32, payload: &[u8]) -> Vec<u8> {
-        let mut body = vec![version];
-        body.extend_from_slice(&flags.to_be_bytes()[1..]);
-        body.extend_from_slice(payload);
-        mp4_box(box_type, &body)
-    }
-
-    fn avif_ispe(width: u32, height: u32) -> Vec<u8> {
-        let mut payload = width.to_be_bytes().to_vec();
-        payload.extend_from_slice(&height.to_be_bytes());
-        mp4_full_box(b"ispe", 0, 0, &payload)
-    }
-
-    /// An `ipma` box in the given encoding: version 1 widens item ids to 32 bits, and flag
-    /// bit 0 widens property positions to 15 bits.
-    fn avif_ipma(version: u8, flags: u32, associations: &[(u32, &[u16])]) -> Vec<u8> {
-        let mut payload = u32::try_from(associations.len())
-            .expect("entry count")
-            .to_be_bytes()
-            .to_vec();
-        for (item, positions) in associations {
-            if version == 0 {
-                payload.extend_from_slice(&u16::try_from(*item).expect("item id").to_be_bytes());
-            } else {
-                payload.extend_from_slice(&item.to_be_bytes());
+        match err {
+            TransformError::UnsupportedInputMediaType(ref message) => {
+                assert!(message.contains("unknown file signature"), "{message}");
             }
-            payload.push(u8::try_from(positions.len()).expect("association count"));
-            for position in *positions {
-                if flags & 1 == 1 {
-                    payload.extend_from_slice(&position.to_be_bytes());
-                } else {
-                    payload.push(u8::try_from(*position).expect("narrow position"));
-                }
-            }
+            other => panic!("expected an unsupported input, got {other:?}"),
         }
-        mp4_full_box(b"ipma", version, flags, &payload)
-    }
-
-    /// A structurally complete AVIF with no coded picture: the sniffer reads the item
-    /// properties and never the payload, so none is needed to ask it about orientation.
-    fn avif_bytes_with_properties(
-        primary_item: u32,
-        properties: &[Vec<u8>],
-        ipma: Vec<u8>,
-    ) -> Vec<u8> {
-        let pitm = mp4_full_box(
-            b"pitm",
-            0,
-            0,
-            &u16::try_from(primary_item).expect("item id").to_be_bytes(),
-        );
-        let ipco = mp4_box(b"ipco", &properties.concat());
-        let iprp = mp4_box(b"iprp", &[ipco, ipma].concat());
-        let meta = mp4_full_box(b"meta", 0, 0, &[pitm, iprp].concat());
-        let mut bytes = avif_bytes();
-        bytes.extend_from_slice(&meta);
-        bytes
-    }
-
-    fn avif_bytes_with_transforms(rotation: Option<u8>, mirror: Option<u8>) -> Vec<u8> {
-        let mut properties = vec![avif_ispe(40, 20)];
-        let mut positions = vec![1_u16];
-        if let Some(angle) = rotation {
-            properties.push(mp4_box(b"irot", &[angle]));
-            positions.push(u16::try_from(properties.len()).expect("position"));
-        }
-        if let Some(mode) = mirror {
-            properties.push(mp4_box(b"imir", &[mode]));
-            positions.push(u16::try_from(properties.len()).expect("position"));
-        }
-        avif_bytes_with_properties(1, &properties, avif_ipma(0, 0, &[(1, &positions)]))
-    }
-
-    /// Every combination of the two properties, against the table Chrome and Firefox use.
-    /// The rotation is applied before the mirror, which is what tells 5 from 7.
-    #[rstest]
-    #[case(None, None, None)]
-    #[case(Some(0), None, Some(1))]
-    #[case(Some(1), None, Some(8))]
-    #[case(Some(2), None, Some(3))]
-    #[case(Some(3), None, Some(6))]
-    #[case(None, Some(0), Some(4))]
-    #[case(None, Some(1), Some(2))]
-    #[case(Some(1), Some(0), Some(5))]
-    #[case(Some(1), Some(1), Some(7))]
-    #[case(Some(2), Some(0), Some(2))]
-    #[case(Some(2), Some(1), Some(4))]
-    #[case(Some(3), Some(0), Some(7))]
-    #[case(Some(3), Some(1), Some(5))]
-    fn sniff_artifact_folds_avif_irot_and_imir_into_an_orientation(
-        #[case] rotation: Option<u8>,
-        #[case] mirror: Option<u8>,
-        #[case] expected: Option<u16>,
-    ) {
-        let bytes = avif_bytes_with_transforms(rotation, mirror);
-        let artifact = sniff_artifact(RawArtifact::new(bytes.clone(), None)).expect("sniff avif");
-
-        assert_eq!(
-            artifact.metadata.orientation, expected,
-            "irot {rotation:?}, imir {mirror:?}"
-        );
-        assert_eq!(
-            (artifact.metadata.width, artifact.metadata.height),
-            (Some(40), Some(20)),
-            "the dimensions are still read from the same property container"
-        );
-        assert_eq!(
-            exif_orientation(MediaType::Avif, &bytes),
-            expected,
-            "the pipeline reads what the sniffer reports"
-        );
-    }
-
-    /// The properties of another item — an alpha plane with its own `irot` — say nothing
-    /// about the primary picture.
-    #[test]
-    fn sniff_artifact_ignores_avif_transforms_on_other_items() {
-        let properties = vec![avif_ispe(40, 20), mp4_box(b"irot", &[3])];
-        let bytes =
-            avif_bytes_with_properties(1, &properties, avif_ipma(0, 0, &[(1, &[1]), (2, &[1, 2])]));
-
-        let artifact = sniff_artifact(RawArtifact::new(bytes, None)).expect("sniff avif");
-
-        assert_eq!(artifact.metadata.orientation, None);
-    }
-
-    /// `ipma` has two encodings for ids and two for positions, and encoders use both.
-    #[test]
-    fn sniff_artifact_reads_avif_associations_in_the_wide_ipma_encoding() {
-        let properties = vec![avif_ispe(40, 20), mp4_box(b"irot", &[3])];
-        let bytes = avif_bytes_with_properties(1, &properties, avif_ipma(1, 1, &[(1, &[1, 2])]));
-
-        let artifact = sniff_artifact(RawArtifact::new(bytes, None)).expect("sniff avif");
-
-        assert_eq!(artifact.metadata.orientation, Some(6));
-    }
-
-    /// The order the file lists the two properties in does not change the answer: MIAF
-    /// fixes the rotation before the mirror.
-    #[test]
-    fn sniff_artifact_applies_avif_rotation_before_mirror_whatever_the_listed_order() {
-        let properties = vec![
-            avif_ispe(40, 20),
-            mp4_box(b"imir", &[1]),
-            mp4_box(b"irot", &[3]),
-        ];
-        let bytes = avif_bytes_with_properties(1, &properties, avif_ipma(0, 0, &[(1, &[3, 2, 1])]));
-
-        let artifact = sniff_artifact(RawArtifact::new(bytes, None)).expect("sniff avif");
-
-        assert_eq!(artifact.metadata.orientation, Some(5));
-    }
-
-    /// An `ipma` that promises more entries than it holds is refused, not read past.
-    #[test]
-    fn sniff_artifact_rejects_a_truncated_avif_ipma() {
-        let ipma = mp4_full_box(b"ipma", 0, 0, &5_u32.to_be_bytes());
-        let bytes = avif_bytes_with_properties(1, &[avif_ispe(4, 4)], ipma);
-
-        let error = sniff_artifact(RawArtifact::new(bytes, None)).expect_err("truncated ipma");
-
-        assert!(
-            error.to_string().contains("ipma box is too short"),
-            "{error}"
-        );
-    }
-
-    fn avif_clap(width: u32, height: u32, horizontal: i32, vertical: i32) -> Vec<u8> {
-        let mut payload = Vec::new();
-        for value in [width, 1, height, 1] {
-            payload.extend_from_slice(&value.to_be_bytes());
-        }
-        for offset in [horizontal, vertical] {
-            payload.extend_from_slice(&offset.to_be_bytes());
-            payload.extend_from_slice(&1_u32.to_be_bytes());
-        }
-        mp4_box(b"clap", &payload)
-    }
-
-    /// A clean aperture whose denominator is large enough to overflow the arithmetic that
-    /// places it is answered rather than aborting the process that read the file.
-    ///
-    /// The product of the picture size and the denominator reaches about 1.8e19 with both read
-    /// from the file, which is past what an `i64` holds. Whether such a file is accepted or
-    /// refused is a property of the fraction: a maximum denominator against a maximum picture
-    /// centres a one-pixel aperture exactly, and one pixel less does not divide evenly. What
-    /// this pins is that both answers come back at all.
-    #[rstest]
-    #[case::a_fraction_that_does_not_divide(4_000_000_000, 4_000_000_000, None)]
-    #[case::a_fraction_that_does(u32::MAX, u32::MAX, Some((1, 1)))]
-    fn sniff_artifact_places_a_clean_aperture_without_overflowing(
-        #[case] picture: u32,
-        #[case] denominator: u32,
-        #[case] expected: Option<(u32, u32)>,
-    ) {
-        let mut clap = Vec::new();
-        // An aperture of one pixel: the numerator over the denominator, so the aperture is
-        // small and the picture it is cut from is enormous, which is what makes the product
-        // large.
-        for value in [denominator, denominator, denominator, denominator] {
-            clap.extend_from_slice(&value.to_be_bytes());
-        }
-        for _ in 0..2 {
-            clap.extend_from_slice(&0_i32.to_be_bytes());
-            clap.extend_from_slice(&denominator.to_be_bytes());
-        }
-        let bytes = avif_bytes_with_properties(
-            1,
-            &[avif_ispe(picture, picture), mp4_box(b"clap", &clap)],
-            avif_ipma(0, 0, &[(1, &[1, 2])]),
-        );
-
-        match (sniff_artifact(RawArtifact::new(bytes, None)), expected) {
-            (Ok(artifact), Some((width, height))) => {
-                assert_eq!(
-                    (artifact.metadata.width, artifact.metadata.height),
-                    (Some(width), Some(height))
-                );
-            }
-            (Err(TransformError::DecodeFailed(_)), None) => {}
-            (actual, expected) => panic!("expected {expected:?}, got {actual:?}"),
-        }
-    }
-
-    /// The clean aperture is the picture, so the sniffer reports its size, and it is cut
-    /// before the orientation turns it, so the oriented size follows from the cut.
-    #[rstest]
-    #[case::centred(30, 20, 0, 0, None, (30, 20), (30, 20))]
-    #[case::offset_to_the_left(30, 20, -5, 0, None, (30, 20), (30, 20))]
-    #[case::then_rotated(30, 20, 0, 0, Some(3), (30, 20), (20, 30))]
-    #[case::whole_picture(40, 20, 0, 0, None, (40, 20), (40, 20))]
-    fn sniff_artifact_reports_the_avif_clean_aperture_as_the_picture(
-        #[case] width: u32,
-        #[case] height: u32,
-        #[case] horizontal: i32,
-        #[case] vertical: i32,
-        #[case] rotation: Option<u8>,
-        #[case] expected: (u32, u32),
-        #[case] expected_oriented: (u32, u32),
-    ) {
-        let mut properties = vec![
-            avif_ispe(40, 20),
-            avif_clap(width, height, horizontal, vertical),
-        ];
-        let mut positions = vec![1_u16, 2];
-        if let Some(angle) = rotation {
-            properties.push(mp4_box(b"irot", &[angle]));
-            positions.push(3);
-        }
-        let bytes = avif_bytes_with_properties(1, &properties, avif_ipma(0, 0, &[(1, &positions)]));
-
-        let artifact = sniff_artifact(RawArtifact::new(bytes, None)).expect("sniff avif");
-
-        assert_eq!(
-            (artifact.metadata.width, artifact.metadata.height),
-            (Some(expected.0), Some(expected.1))
-        );
-        assert_eq!(
-            artifact.metadata.oriented_dimensions(),
-            Some(Dimensions::new(expected_oriented.0, expected_oriented.1))
-        );
-    }
-
-    /// An aperture that does not land on whole pixels or does not fit is refused, not
-    /// rounded: MIAF requires whole pixels for an AV1 image, and a viewer that rounds shows
-    /// a different picture from one that does not.
-    #[rstest]
-    #[case::off_the_pixel_grid(31, 20, 0, 0, "does not land on a whole pixel")]
-    #[case::wider_than_the_picture(50, 20, 0, 0, "larger than the 40-pixel picture")]
-    #[case::pushed_out_of_the_picture(30, 20, 6, 0, "leaves the picture")]
-    fn sniff_artifact_refuses_an_avif_clean_aperture_that_is_not_a_pixel_rectangle(
-        #[case] width: u32,
-        #[case] height: u32,
-        #[case] horizontal: i32,
-        #[case] vertical: i32,
-        #[case] reason: &str,
-    ) {
-        let properties = vec![
-            avif_ispe(40, 20),
-            avif_clap(width, height, horizontal, vertical),
-        ];
-        let bytes = avif_bytes_with_properties(1, &properties, avif_ipma(0, 0, &[(1, &[1, 2])]));
-
-        let error = sniff_artifact(RawArtifact::new(bytes, None)).expect_err("refused");
-
-        assert!(error.to_string().contains(reason), "{error}");
-    }
-
-    /// Two files patched from what libheif wrote, since no encoder here writes the box: a
-    /// 40x20 picture with a centred 30x20 aperture, and the same aperture on a rotated one.
-    #[test]
-    fn sniff_artifact_reads_the_clean_aperture_of_a_patched_avif() {
-        let cropped = include_bytes!("../integration/fixtures/clap-cropped.avif");
-        let rotated = include_bytes!("../integration/fixtures/clap-rotated.avif");
-
-        let cropped = sniff_artifact(RawArtifact::new(cropped.to_vec(), None)).expect("sniff");
-        assert_eq!(
-            (cropped.metadata.width, cropped.metadata.height),
-            (Some(30), Some(20))
-        );
-        assert_eq!(cropped.metadata.orientation, None);
-
-        let rotated = sniff_artifact(RawArtifact::new(rotated.to_vec(), None)).expect("sniff");
-        assert_eq!(
-            (rotated.metadata.width, rotated.metadata.height),
-            (Some(30), Some(20))
-        );
-        assert_eq!(rotated.metadata.orientation, Some(6));
-        assert_eq!(
-            rotated.metadata.oriented_dimensions(),
-            Some(Dimensions::new(20, 30))
-        );
-    }
-
-    /// Two files ImageMagick wrote through libheif, which is the encoder behind the phones
-    /// and the CMSes that produce AVIF: the transform is in the properties and there is no
-    /// Exif block at all.
-    #[test]
-    fn sniff_artifact_reads_the_orientation_libheif_writes() {
-        let rotated = include_bytes!("../integration/fixtures/irot-rotated.avif");
-        let transposed = include_bytes!("../integration/fixtures/imir-transposed-5.avif");
-
-        let rotated = sniff_artifact(RawArtifact::new(rotated.to_vec(), None)).expect("sniff");
-        assert_eq!(rotated.metadata.orientation, Some(6));
-        assert_eq!(
-            (rotated.metadata.width, rotated.metadata.height),
-            (Some(40), Some(20))
-        );
-        assert_eq!(
-            rotated.metadata.oriented_dimensions(),
-            Some(Dimensions::new(20, 40)),
-            "the oriented dimensions are what convert will produce"
-        );
-
-        let transposed =
-            sniff_artifact(RawArtifact::new(transposed.to_vec(), None)).expect("sniff");
-        assert_eq!(transposed.metadata.orientation, Some(5));
     }
 
     #[test]

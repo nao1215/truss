@@ -45,6 +45,8 @@ fn serve_once_private_transform_sets_no_store_and_safety_headers() {
     assert_eq!(artifact.media_type, MediaType::Jpeg);
 }
 
+/// The `Accept` names AVIF first, and truss no longer writes AVIF, so the range is one it
+/// cannot serve and the next one the client allows wins.
 #[test]
 fn serve_once_public_get_negotiates_accept_and_sets_cache_headers() {
     let storage_root = temp_dir("public-negotiate");
@@ -79,7 +81,7 @@ fn serve_once_public_get_negotiates_accept_and_sets_cache_headers() {
     let artifact = sniff_artifact(RawArtifact::new(body, None)).expect("sniff transformed output");
 
     assert!(header.starts_with("HTTP/1.1 200 OK"));
-    assert_eq!(content_type, "image/avif");
+    assert_eq!(content_type, "image/webp");
     assert!(
         header.lines().any(|line| {
             line == "Cache-Control: public, max-age=3600, stale-while-revalidate=60"
@@ -95,9 +97,9 @@ fn serve_once_public_get_negotiates_accept_and_sets_cache_headers() {
     assert!(
         header
             .lines()
-            .any(|line| line == "Content-Disposition: inline; filename=\"truss.avif\"")
+            .any(|line| line == "Content-Disposition: inline; filename=\"truss.webp\"")
     );
-    assert_eq!(artifact.media_type, MediaType::Avif);
+    assert_eq!(artifact.media_type, MediaType::Webp);
 }
 
 /// `Vary` describes the resource, not the request that happened to arrive. A

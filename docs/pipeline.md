@@ -10,8 +10,8 @@ decode → auto-orient → rotate → crop → resize → blur → sharpen → g
 
 | # | Stage | Guard | Description |
 |---|-------|-------|-------------|
-| 1 | **Decode** | — | Parse input bytes into a `DynamicImage` using the detected codec (JPEG, PNG, WebP, AVIF, BMP, TIFF, GIF). An AVIF clean aperture (`clap`) is cut here, so the next stage sees the picture rather than the frame it was coded in. |
-| 2 | **Auto-orient** | `auto_orient == true` | Apply the EXIF orientation tag, tags 2–8. Read from a JPEG APP1 segment, a PNG `eXIf` chunk, a WebP `EXIF` chunk, a TIFF IFD entry, or an AVIF's `irot` and `imir` item properties, which name the same eight transforms; BMP and GIF cannot carry one, and the Orientation field of an Exif item inside an AVIF is ignored, as browsers ignore it, even though the item itself is read when metadata is retained. When the metadata is retained, the tag is reset so the viewer does not turn the pixels again. With auto-orient off, a tag the output does not record — because the input's metadata is not read, or the output format cannot carry it, or it was stripped — is reported as a warning. |
+| 1 | **Decode** | — | Parse input bytes into a `DynamicImage` using the detected codec (JPEG, PNG, WebP, BMP, TIFF, GIF). An AVIF input never reaches this stage: it is refused as an unsupported input when it is sniffed. |
+| 2 | **Auto-orient** | `auto_orient == true` | Apply the EXIF orientation tag, tags 2–8. Read from a JPEG APP1 segment, a PNG `eXIf` chunk, a WebP `EXIF` chunk, or a TIFF IFD entry; BMP and GIF cannot carry one. When the metadata is retained, the tag is reset so the viewer does not turn the pixels again. With auto-orient off, a tag the output does not record — because the input's metadata is not read, or the output format cannot carry it, or it was stripped — is reported as a warning. |
 | 3 | **Rotate** | `rotate != 0` | Clockwise rotation by any whole number of degrees. A multiple of 90 permutes pixels exactly; any other angle resamples bilinearly, grows the canvas to the rotated bounding box, and fills the exposed corners with `background`. |
 | 4 | **Crop** | `crop` set | Extract a sub-region defined by `(x, y, width, height)`. |
 | 5 | **Resize** | `width` and/or `height` set | Scale the image according to `fit` and `position`, honouring `without_enlargement`. See [Resize](#resize). |
@@ -19,7 +19,7 @@ decode → auto-orient → rotate → crop → resize → blur → sharpen → g
 | 7 | **Sharpen** | `sharpen` set | Unsharp mask with the given sigma (0.1–100.0). |
 | 8 | **Grayscale** | `grayscale == true` | Collapse the color channels to luminance (Rec. 601 weights), preserving alpha. Runs before the watermark so an overlay keeps its own colors, and after the stages that fill with `background`, so rotation corners and `fit=contain` padding are desaturated along with the image. |
 | 9 | **Watermark** | `watermark` provided | Alpha-composite a watermark image at the specified position, opacity, and margin. |
-| 10 | **Encode** | — | Encode to the output format (JPEG, PNG, WebP, AVIF, BMP, TIFF) with optional quality and metadata injection. GIF is not an output format. AVIF picks its encoder speed from the output size: outputs up to 2 megapixels use the setting truss has always used, and larger ones use faster settings, because at the pixel ceiling the slow setting takes minutes. |
+| 10 | **Encode** | — | Encode to the output format (JPEG, PNG, WebP, BMP, TIFF) with optional quality and metadata injection. GIF and AVIF are not output formats. |
 
 Each stage checks the optional deadline (server: 30 s) and returns `TransformError::LimitExceeded` if exceeded. The check happens between stages, so a stage already running is not interrupted and a transform can return after the deadline rather than at it. Encoding is where that shows, since no encoder truss calls can be stopped part way.
 
@@ -89,14 +89,13 @@ alone, before the buffer is allocated.
 `MAX_OUTPUT_PIXELS` is 67,108,864 and bounds the area. It says nothing about the shape, so an
 output can be tens of thousands of pixels on one axis as long as the other is small.
 
-The output format's own ceiling bounds each axis. Three of the raster output formats set one,
+The output format's own ceiling bounds each axis. Two of the raster output formats set one,
 and it comes from the format, or from the encoder truss reaches, rather than from truss:
 
 | Output | Longest axis |
 |---|---|
 | `jpeg` | 65535 |
 | `webp` | 16383 |
-| `avif` | 65535 |
 | `png`, `bmp`, `tiff` | no limit below `MAX_OUTPUT_PIXELS` |
 
 An `svg` output is the sanitized document rather than a raster of a chosen size, so no ceiling
@@ -104,8 +103,7 @@ applies to it.
 
 A request past either is `limit-exceeded`, exit 4 on the CLI and 413 over HTTP, refused before
 the resize rather than by the encoder. The WebP number is the one the format states; truss's own
-lossless path could write 16384 and no longer does. The AVIF number is rav1e's, which is
-narrower than AV1's own frame size fields.
+lossless path could write 16384 and no longer does.
 
 ## Rotation
 

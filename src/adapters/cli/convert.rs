@@ -353,10 +353,25 @@ where
 /// out, but `-o out.gif` reached the same wall from the other side and surfaced
 /// `unsupported output media type` from deep in the pipeline with a different exit code.
 /// Both spellings ask for the same impossible thing, so both are usage errors now.
+///
+/// `.avif` is refused the same way. Any other extension truss does not know leaves the
+/// format to the input, but truss wrote AVIF until it was removed, so `-o out.avif` is a
+/// request with a known meaning, and quietly writing the input's format under that name
+/// would hand back a file that is not what it says. The refusal is the one `--format avif`
+/// gets.
 fn reject_unencodable_output_extension<F>(output: &OutputTarget, error: F) -> Result<(), CliError>
 where
     F: Fn(&str) -> CliError,
 {
+    if let OutputTarget::Path(path) = output
+        && path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("avif"))
+        && let Err(reason) = <MediaType as std::str::FromStr>::from_str("avif")
+    {
+        return Err(error(&reason));
+    }
     let Some(media_type) = infer_output_format(output) else {
         return Ok(());
     };

@@ -99,14 +99,9 @@ fn bench_format_conversion(c: &mut Criterion) {
     let targets: &[(&str, MediaType, Option<u8>)] = &[
         ("jpeg_to_png", MediaType::Png, None),
         ("jpeg_to_webp", MediaType::Webp, Some(80)),
-        #[cfg(feature = "avif")]
-        ("jpeg_to_avif", MediaType::Avif, Some(80)),
     ];
 
     let mut group = c.benchmark_group("format_conversion");
-    // An AVIF encode of this size is measured in tenths of a second, so the default hundred
-    // samples would put the group into the minutes on its own.
-    group.sample_size(20);
     for (label, target_format, quality) in targets {
         group.bench_with_input(
             BenchmarkId::new(*label, BENCH_LABEL),

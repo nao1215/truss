@@ -15,9 +15,10 @@ Current official feature set:
 
 - `wasm`
 - `svg`
-- `avif`
 
 This package intentionally does **not** include `webp-lossy`. In browser builds, WebP output stays lossless in this package.
+
+AVIF is not supported. An AVIF input is refused with an `unsupportedInputMediaType` error, and `format: "avif"` is refused as an unknown format; convert AVIF images with another tool first, and use WebP for a modern output format.
 
 ## Installation
 

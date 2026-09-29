@@ -5,7 +5,7 @@
 //! - **Sanitize-only** (SVG→SVG): removes dangerous elements (`<script>`, `<foreignObject>`,
 //!   `<iframe>`, `<embed>`, `<object>`), event handlers, `javascript:` URIs, external hrefs,
 //!   `xml:base`, external CSS `url()` references, and `@import` rules.
-//! - **Rasterize** (SVG→JPEG/PNG/WebP/AVIF): sanitizes first, then renders via `resvg` and
+//! - **Rasterize** (SVG→JPEG/PNG/WebP/BMP/TIFF): sanitizes first, then renders via `resvg` and
 //!   encodes to the requested raster format.
 //!
 //! # Security model
@@ -107,7 +107,7 @@ use std::io::Cursor;
 ///
 /// When the output format is SVG, the input is sanitized (dangerous elements and attributes
 /// are removed) and returned as sanitized SVG. When the output format is a raster type
-/// (JPEG, PNG, WebP, AVIF, BMP), the SVG is rasterized using `resvg` and encoded into the
+/// (JPEG, PNG, WebP, BMP, TIFF), the SVG is rasterized using `resvg` and encoded into the
 /// target format.
 ///
 /// # Errors
@@ -1093,27 +1093,6 @@ fn encode_raster_output(
                     .map_err(|e| {
                         TransformError::EncodeFailed(format!("WebP encode failed: {e}"))
                     })?;
-            }
-        }
-        MediaType::Avif => {
-            #[cfg(feature = "avif")]
-            {
-                let quality = quality.unwrap_or(80);
-                let encoder = image::codecs::avif::AvifEncoder::new_with_speed_quality(
-                    &mut bytes, 4, quality,
-                );
-                encoder
-                    .write_image(image.as_ref(), width, height, ColorType::Rgba8.into())
-                    .map_err(|e| {
-                        TransformError::EncodeFailed(format!("AVIF encode failed: {e}"))
-                    })?;
-            }
-            #[cfg(not(feature = "avif"))]
-            {
-                let _ = quality;
-                return Err(TransformError::CapabilityMissing(
-                    "AVIF encoding is not enabled in this build".to_string(),
-                ));
             }
         }
         MediaType::Bmp => {

@@ -60,7 +60,7 @@ fn help_top_level() -> String {
         "\
 truss {version} - an image transformation tool and server
 
-Converts, resizes, and re-encodes images (JPEG, PNG, WebP, AVIF, BMP, TIFF, SVG).
+Converts, resizes, and re-encodes images (JPEG, PNG, WebP, BMP, TIFF, SVG).
 Can also run as an HTTP image-transform server.
 
 USAGE:
@@ -137,7 +137,7 @@ OPTIONS:
       --position <POS>     Crop anchor for cover mode (default: center)
                            center, top, right, bottom, left,
                            top-left, top-right, bottom-left, bottom-right
-      --format <FMT>       Output format: jpeg, png, webp, avif, bmp, tiff, svg
+      --format <FMT>       Output format: jpeg, png, webp, bmp, tiff, svg
                            (default: inferred from output extension)
       --quality <1-100>    Encoding quality for lossy formats
       --optimize <MODE>    Optimization mode: none, auto, lossless, lossy
@@ -208,7 +208,7 @@ USAGE:
 OPTIONS:
   -o, --output <OUTPUT>    Output file path, or - for stdout (required)
       --url <URL>          Fetch input from an HTTP(S) URL
-      --format <FMT>       Output format: jpeg, png, webp, avif
+      --format <FMT>       Output format: jpeg, png, webp
                            (default: inferred from output extension or input format)
       --mode <MODE>        Optimization mode: auto (default), lossless, lossy
                            For a plain re-encode with no optimization, use truss convert
@@ -550,7 +550,7 @@ struct ClapConvertArgs {
     /// Crop anchor for cover mode
     #[arg(long, value_parser = parse_position)]
     position: Option<Position>,
-    /// Output format (jpeg, png, webp, avif, bmp, svg)
+    /// Output format (jpeg, png, webp, bmp, tiff, svg)
     #[arg(long, value_parser = parse_media_type)]
     format: Option<MediaType>,
     /// Encoding quality for lossy formats (1-100)
@@ -634,7 +634,7 @@ struct ClapOptimizeArgs {
     /// Fetch input from an HTTP(S) URL
     #[arg(long)]
     url: Option<String>,
-    /// Output format (jpeg, png, webp, avif)
+    /// Output format (jpeg, png, webp)
     #[arg(long, value_parser = parse_optimizable_media_type)]
     format: Option<MediaType>,
     /// Quality cap for lossy optimization (1-100)
@@ -1111,7 +1111,7 @@ where
 
 /// Flushes standard output and folds a flush failure into the exit code.
 ///
-/// `StdoutLock` buffers. A payload that ends without a newline — a small WebP or AVIF
+/// `StdoutLock` buffers. A payload that ends without a newline — a small WebP or PNG
 /// written to `-o -` — can sit entirely in that buffer, so the only write that reaches
 /// the file descriptor is the runtime's flush after `main` returns, and nothing observes
 /// its error. Flushing here turns that silent truncation into exit code 5 with a reason.
@@ -4365,7 +4365,7 @@ mod tests {
             assert_eq!(error.exit_code, 1, "{args:?} should be a usage error");
             assert!(
                 error.message.contains("input-only format")
-                    && error.message.contains("png, jpeg, webp, or avif"),
+                    && error.message.contains("png, jpeg, or webp"),
                 "{args:?} should name the alternatives, got: {}",
                 error.message
             );
@@ -4386,6 +4386,34 @@ mod tests {
         match command {
             Command::Convert(convert) => assert_eq!(convert.options.format, Some(MediaType::Png)),
             other => panic!("expected a convert command, got {other:?}"),
+        }
+    }
+
+    /// AVIF output was removed, and each way of asking for it is refused as a usage error
+    /// with the sentence an unknown format name gets, rather than falling back to the input's
+    /// format under a name that says AVIF.
+    #[test]
+    fn an_avif_output_is_refused_like_an_unknown_format() {
+        for args in [
+            vec![
+                "truss", "convert", "in.png", "-o", "out.png", "--format", "avif",
+            ],
+            vec!["truss", "convert", "in.png", "-o", "out.avif"],
+            vec!["truss", "convert", "in.png", "-o", "out.AVIF"],
+            vec!["truss", "optimize", "in.png", "-o", "out.avif"],
+            vec![
+                "truss", "optimize", "in.png", "-o", "out.png", "--format", "avif",
+            ],
+        ] {
+            let error = parse_args(args.iter().map(|value| (*value).to_string()))
+                .expect_err("avif output should not parse");
+
+            assert_eq!(error.exit_code, 1, "{args:?} should be a usage error");
+            assert!(
+                error.message.contains("unsupported media type `avif`"),
+                "{args:?} should call avif unsupported, got: {}",
+                error.message
+            );
         }
     }
 

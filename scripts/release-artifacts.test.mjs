@@ -230,7 +230,6 @@ describe("release distribution tooling", () => {
       // The workflow passes s3,gcs,azure on top of the default feature set;
       // the manifest reports the transitive closure a consumer actually gets.
       assert.deepEqual(artifact.features, [
-        "avif",
         "azure",
         "cli",
         "gcs",

@@ -49,7 +49,7 @@ const signedUrl = signPublicUrl({
     width: 800,
     height: 800,
     fit: "cover",
-    format: "avif",
+    format: "webp",
   },
   watermark: {
     url: "https://cdn.example.com/logo.png",

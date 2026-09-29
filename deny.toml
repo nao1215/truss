@@ -1,38 +1,52 @@
+# cargo-deny configuration (https://embarkstudios.github.io/cargo-deny/).
+# .github/workflows/cargo-deny.yml runs `cargo deny --locked --all-features check`
+# on pull requests, on main and every day; `just deny` runs the same locally.
+
+[graph]
+# The platforms release.yml ships (.github/release-targets.json), so a
+# dependency that only one of them links is still checked.
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+    "wasm32-unknown-unknown",
+]
+all-features = true
+
 [advisories]
-vulnerability = "deny"
-unmaintained = "warn"
-yanked = "warn"
+# Vulnerabilities always fail. unmaintained and unsound advisories fail too;
+# one that cannot be fixed goes in `ignore` as { id = "RUSTSEC-...", reason = "..." }
+# with why it does not reach truss and when to remove it.
+unmaintained = "all"
+yanked = "deny"
+ignore = []
 
 [licenses]
-unlicensed = "deny"
+confidence-threshold = 0.9
 allow = [
     "MIT",
     "Apache-2.0",
-    "Apache-2.0 WITH LLVM-exception",
     "BSD-2-Clause",
     "BSD-3-Clause",
     "ISC",
     "Unicode-3.0",
-    "Unicode-DFS-2016",
     "Zlib",
-    "MPL-2.0",
-    "OpenSSL",
     "BSL-1.0",
     "CC0-1.0",
     "0BSD",
+    # webpki-roots, through ureq and rustls: Mozilla's CA certificate data.
+    # A permissive data license with no copyleft terms.
+    "CDLA-Permissive-2.0",
 ]
-
-[[licenses.clarify]]
-name = "ring"
-expression = "MIT AND ISC AND OpenSSL"
-license-files = [{ path = "LICENSE", hash = 0xbd0eed23 }]
 
 [bans]
 multiple-versions = "warn"
-wildcards = "allow"
+wildcards = "deny"
 
 [sources]
-unknown-registry = "warn"
-unknown-git = "warn"
+unknown-registry = "deny"
+unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 allow-git = []

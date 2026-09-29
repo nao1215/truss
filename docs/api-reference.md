@@ -93,16 +93,15 @@ Requests must follow the HTTP/1.1 grammar. An HTTP/1.1 request with no `Host`, a
 
 ## Supported Formats
 
-| Input \ Output | JPEG | PNG | WebP | AVIF | BMP | TIFF | SVG |
-|-------------|:----:|:---:|:----:|:----:|:---:|:----:|:---:|
-| JPEG        | Yes  | Yes | Yes  | Yes  | Yes | Yes  | -   |
-| PNG         | Yes  | Yes | Yes  | Yes  | Yes | Yes  | -   |
-| WebP        | Yes  | Yes | Yes  | Yes  | Yes | Yes  | -   |
-| AVIF        | Yes  | Yes | Yes  | Yes  | Yes | Yes  | -   |
-| BMP         | Yes  | Yes | Yes  | Yes  | Yes | Yes  | -   |
-| TIFF        | Yes  | Yes | Yes  | Yes  | Yes | Yes  | -   |
-| SVG         | Yes  | Yes | Yes  | Yes  | Yes | Yes  | Yes |
-| GIF (static) | Yes  | Yes | Yes  | Yes  | Yes | Yes  | -   |
+| Input \ Output | JPEG | PNG | WebP | BMP | TIFF | SVG |
+|-------------|:----:|:---:|:----:|:---:|:----:|:---:|
+| JPEG        | Yes  | Yes | Yes  | Yes | Yes  | -   |
+| PNG         | Yes  | Yes | Yes  | Yes | Yes  | -   |
+| WebP        | Yes  | Yes | Yes  | Yes | Yes  | -   |
+| BMP         | Yes  | Yes | Yes  | Yes | Yes  | -   |
+| TIFF        | Yes  | Yes | Yes  | Yes | Yes  | -   |
+| SVG         | Yes  | Yes | Yes  | Yes | Yes  | Yes |
+| GIF (static) | Yes  | Yes | Yes  | Yes | Yes  | -   |
 
 SVG to SVG performs sanitization only, removing scripts and external references. Because the
 document comes back as its author wrote it, a request that also asks for a different picture —
@@ -114,16 +113,16 @@ GIF has no output column: truss decodes it but never encodes it, so `format=gif`
 `415 Unsupported Media Type`. A GIF request that does not name a format is served as PNG
 rather than echoing the input format back. A source with more than one frame is rejected with
 `415`, naming the format and the frame count, instead of being reduced to its first frame;
-that covers GIF, animated WebP, APNG, and animated AVIF, and the CLI `truss inspect` reports
+that covers GIF, animated WebP, and APNG, and the CLI `truss inspect` reports
 `isAnimated` for all of them.
 
-`optimize=lossless` asks for a re-encode that changes no pixel, and AVIF output is answered `501 Not Implemented` for it. The AV1 encoder truss reaches offers a quality setting and no bit-exact mode: at the top setting a decode still differs from the input by a channel or two, so advertising it as lossless would be a claim about the pixels that is not true. `optimize=auto` is what produces the smallest AVIF, and PNG or lossless WebP is what produces bit-exact pixels. Metadata retention is unaffected: `preserveExif` and the metadata policy work for AVIF output as they do for JPEG, PNG and WebP.
+AVIF is not supported, as input or as output. An AVIF source is answered `415 Unsupported Media Type` with the `unsupported-input-media-type` problem type and a `detail` that names AVIF, and `format=avif` is answered `400 Bad Request` like any other format name truss does not know. Convert AVIF images with another tool before sending them, and ask for `webp` when you want a modern compressed output.
 
 ## Choosing the Output Format
 
 When a request names `format`, that is the output format. When it does not, the server reads `Accept` and picks the format it prefers among the ones the header names, falling back to the input's own format when the header names none.
 
-A header that only says `*/*` names none. RFC 9110 section 12.5.1 makes `Accept: */*` and a missing `Accept` the same request, so truss answers both the same way and returns the input's format rather than transcoding. This is what a caller using a default HTTP client gets, `curl` included. A browser fetching an `<img>` sends `image/avif,image/webp,image/apng,*/*;q=0.8`, which names AVIF and WebP, and is negotiated as before.
+A header that only says `*/*` names none. RFC 9110 section 12.5.1 makes `Accept: */*` and a missing `Accept` the same request, so truss answers both the same way and returns the input's format rather than transcoding. This is what a caller using a default HTTP client gets, `curl` included. A browser fetching an `<img>` sends `image/avif,image/webp,image/apng,*/*;q=0.8`, which names WebP, and is negotiated to WebP. `image/avif` is not a format truss offers, so a header that names only it is answered `406 Not Acceptable`, as any other image type truss does not write is.
 
 `TRUSS_FORMAT_PREFERENCE` orders the formats a request asked for. It does not apply to a request that asked for none.
 

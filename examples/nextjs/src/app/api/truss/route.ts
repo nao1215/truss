@@ -7,7 +7,6 @@ const ALLOWED_FORMATS = new Set([
   "jpeg",
   "png",
   "webp",
-  "avif",
   "bmp",
   "tiff",
   "svg",

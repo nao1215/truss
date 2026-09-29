@@ -75,11 +75,11 @@ The input bytes were recognised but are not what was declared, such as a `declar
 
 ### decode-failed
 
-The input is a supported format but could not be decoded: a truncated file, a corrupt container, a clean aperture that does not fall on whole pixels. The CLI reports it as a transform failure wherever it is raised, including the media sniff that runs before the transform.
+The input is a supported format but could not be decoded: a truncated file or a corrupt container. The CLI reports it as a transform failure wherever it is raised, including the media sniff that runs before the transform.
 
 ### unsupported-input-media-type
 
-The input is not a format truss decodes, or is one it decodes only in part, such as an animated GIF.
+The input is not a format truss decodes, or is one it decodes only in part, such as an animated GIF. AVIF is one truss does not decode: it is recognized from its signature only so that the `detail` can say the input was an AVIF.
 
 ### unsupported-output-media-type
 
@@ -91,7 +91,7 @@ The transform ran but the output could not be encoded.
 
 ### capability-missing
 
-The request needs a codec or feature this build was compiled without, such as lossy WebP or AVIF, or one the format itself does not have. The second is `optimize=lossless` with AVIF output: the AV1 encoder truss reaches has a quality setting and no bit-exact mode, so the mode is refused rather than approximated. See [Choosing the Output Format](api-reference.md#choosing-the-output-format).
+The request needs a codec or feature this build was compiled without, such as lossy WebP, or one the format itself does not have, such as `optimize=lossless` for a JPEG whose pixels have to change.
 
 ### limit-exceeded
 

@@ -96,7 +96,7 @@ impl HttpResponse {
 const MIN_COMPRESS_BYTES: usize = 128;
 
 /// Content types eligible for gzip compression.  Image types are excluded
-/// because they are already compressed (JPEG, PNG, WebP, AVIF, etc.).
+/// because they are already compressed (JPEG, PNG, WebP, etc.).
 ///
 /// **Security note (BREACH):** If a future endpoint returns compressed
 /// responses that mix attacker-controlled input with secret tokens, it may
@@ -884,7 +884,7 @@ mod tests {
         let v = parse_body(&resp);
         assert_eq!(
             v["detail"],
-            "gif is an input-only format; choose an output format such as png, jpeg, webp, or avif"
+            "gif is an input-only format; choose an output format such as png, jpeg, or webp"
         );
 
         let resp =
@@ -893,7 +893,7 @@ mod tests {
         let v = parse_body(&resp);
         assert_eq!(
             v["detail"],
-            "svg output requires an svg input; choose a raster output format such as png, jpeg, webp, or avif"
+            "svg output requires an svg input; choose a raster output format such as png, jpeg, or webp"
         );
     }
 
@@ -911,11 +911,14 @@ mod tests {
     #[test]
     fn test_transform_error_response_capability_missing() {
         let resp = transform_error_response(TransformError::CapabilityMissing(
-            "AVIF not compiled".into(),
+            "lossy WebP encoding is not enabled in this build".into(),
         ));
         assert_eq!(resp.status, "501 Not Implemented");
         let v = parse_body(&resp);
-        assert_eq!(v["detail"], "AVIF not compiled");
+        assert_eq!(
+            v["detail"],
+            "lossy WebP encoding is not enabled in this build"
+        );
     }
 
     #[test]

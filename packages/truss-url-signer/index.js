@@ -12,10 +12,10 @@ const POSITIONS = new Set([
   "bottom-left",
   "bottom-right",
 ]);
-const OUTPUT_FORMATS = new Set(["jpeg", "png", "webp", "avif", "svg", "bmp", "tiff"]);
+const OUTPUT_FORMATS = new Set(["jpeg", "png", "webp", "svg", "bmp", "tiff"]);
 const OPTIMIZE_MODES = new Set(["none", "auto", "lossless", "lossy"]);
-const LOSSY_FORMATS = new Set(["jpeg", "webp", "avif"]);
-const OPTIMIZABLE_FORMATS = new Set(["jpeg", "png", "webp", "avif"]);
+const LOSSY_FORMATS = new Set(["jpeg", "webp"]);
+const OPTIMIZABLE_FORMATS = new Set(["jpeg", "png", "webp"]);
 const HEX_COLOR_PATTERN = /^[0-9A-Fa-f]{6}([0-9A-Fa-f]{2})?$/;
 const TARGET_QUALITY_VALUE_PATTERN = /^(?:0(?:\.[0-9]+)?|[1-9][0-9]*(?:\.[0-9]+)?)$/;
 
@@ -414,7 +414,7 @@ function validateTransformMatrix(transforms) {
     !LOSSY_FORMATS.has(transforms.format)
   ) {
     throw new TypeError(
-      `lossy optimization requires jpeg, webp, or avif output, got ${transforms.format}`,
+      `lossy optimization requires jpeg or webp output, got ${transforms.format}`,
     );
   }
 
@@ -448,7 +448,7 @@ function validateTransformMatrix(transforms) {
     transforms.format !== undefined &&
     !LOSSY_FORMATS.has(transforms.format)
   ) {
-    throw new TypeError("targetQuality requires jpeg, webp, or avif output");
+    throw new TypeError("targetQuality requires jpeg or webp output");
   }
 }
 

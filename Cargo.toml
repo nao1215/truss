@@ -9,12 +9,11 @@ license = "MIT"
 readme = "README.md"
 repository = "https://github.com/nao1215/truss"
 homepage = "https://nao1215.github.io/truss/"
-keywords = ["image", "image-processing", "webp", "avif", "image-server"]
+keywords = ["image", "image-processing", "webp", "image-server"]
 categories = ["command-line-utilities", "multimedia::images", "web-programming::http-server"]
 
 [features]
-default = ["cli", "server", "svg", "webp-lossy", "avif"]
-avif = ["dep:rav1d-safe", "dep:mp4parse", "dep:yuvutils-rs", "image/avif", "image/rayon"]
+default = ["cli", "server", "svg", "webp-lossy"]
 cli = ["dep:clap", "dep:clap_complete", "dep:ureq", "server"]
 server = ["dep:hmac", "dep:hex", "dep:serde_json", "dep:sha2", "dep:subtle", "dep:ureq", "dep:url", "dep:uuid", "dep:libc", "dep:flate2", "svg"]
 s3 = ["server", "dep:aws-sdk-s3", "dep:aws-config", "dep:tokio"]
@@ -48,9 +47,6 @@ subtle = { version = "2", optional = true }
 ureq = { version = "3.3.0", optional = true }
 url = { version = "2.5.8", optional = true }
 uuid = { version = "1", features = ["v4"], optional = true }
-rav1d-safe = { version = "0.6", default-features = false, features = ["bitdepth_8", "bitdepth_16"], optional = true }
-mp4parse = { version = "0.17", optional = true }
-yuvutils-rs = { version = "0.8", optional = true }
 wasm-bindgen = { version = "0.2.129", optional = true }
 webp = { version = "0.3", optional = true }
 quick-xml = { version = "0.42", optional = true }

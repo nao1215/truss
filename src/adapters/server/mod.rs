@@ -493,12 +493,12 @@ mod tests {
     }
 
     #[test]
-    fn negotiate_output_format_prefers_avif_for_wildcard_accept() {
+    fn negotiate_output_format_prefers_webp_for_wildcard_accept() {
         let format = negotiate_output_format(Some("image/*"), &artifact_with_alpha(false), &[])
             .expect("negotiate output format")
             .expect("resolved output format");
 
-        assert_eq!(format, MediaType::Avif);
+        assert_eq!(format, MediaType::Webp);
     }
 
     #[test]
@@ -723,14 +723,14 @@ mod tests {
             format: Some(MediaType::Webp),
             ..TransformOptions::default()
         };
-        let avif = TransformOptions {
-            format: Some(MediaType::Avif),
+        let png = TransformOptions {
+            format: Some(MediaType::Png),
             ..TransformOptions::default()
         };
 
         assert_ne!(
             super::cache::compute_cache_key("src", &webp, None),
-            super::cache::compute_cache_key("src", &avif, None)
+            super::cache::compute_cache_key("src", &png, None)
         );
     }
 

@@ -183,6 +183,57 @@ scenarios:
               - "animated gif is not supported"
               - "(unsupported-input-media-type)"
 
+  # AVIF was removed because its decoder is AGPL-3.0 licensed. The file is still recognized
+  # so the refusal can name it, and it is refused as the unsupported input it now is, by
+  # both commands that read an input.
+  - name: "exit 3: an AVIF input is not supported"
+    steps:
+      - run:
+          command: truss convert "${fixtures}/sample.avif" -o from-avif.png
+      - assert:
+          exit_code: 3
+          stderr:
+            contains:
+              - "AVIF is not supported"
+              - "(unsupported-input-media-type)"
+          file:
+            path: from-avif.png
+            exists: false
+      - run:
+          command: truss inspect "${fixtures}/sample.avif"
+      - assert:
+          exit_code: 3
+          stdout:
+            equals: ""
+          stderr:
+            contains:
+              - "AVIF is not supported"
+              - "(unsupported-input-media-type)"
+
+  # Asking for an AVIF output is a command line truss does not accept, spelled as a flag or
+  # as an output extension, and it is refused with the sentence any unknown format gets.
+  - name: "exit 1: an AVIF output is refused like an unknown format"
+    steps:
+      - run:
+          command: truss convert "${fixtures}/sample.png" -o out.png --format avif
+      - assert:
+          exit_code: 1
+          stderr:
+            contains:
+              - "unsupported media type `avif`"
+              - "(invalid-request)"
+      - run:
+          command: truss convert "${fixtures}/sample.png" -o out.avif
+      - assert:
+          exit_code: 1
+          stderr:
+            contains:
+              - "unsupported media type `avif`"
+              - "(invalid-request)"
+          file:
+            path: out.avif
+            exists: false
+
   - name: "exit 4: an output larger than the pixel budget"
     steps:
       - run:

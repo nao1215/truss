@@ -95,7 +95,7 @@ All histograms use the following bucket boundaries (seconds):
 
 #### `format` values
 
-`jpeg`, `png`, `webp`, `avif`, `svg`, `bmp`, `tiff`
+`jpeg`, `png`, `webp`, `svg`, `bmp`, `tiff`
 
 #### `backend` values
 

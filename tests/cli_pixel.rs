@@ -443,46 +443,79 @@ fn fit_contain_with_without_enlargement_pads_around_the_source() {
     );
 }
 
-/// The compiled binary decodes an AVIF.
+/// An AVIF is refused by the compiled binary, as the unsupported input it now is.
 ///
-/// This ran through the library and never through the binary until it did, and the binary is
-/// where the thread the process starts on decides how much stack the decoder gets: one
-/// megabyte on Windows, which an AV1 decode does not fit in a build without optimizations. The
-/// requirement does not depend on the size of the picture, since what wants the room is the
-/// decoder's own working set, so the smallest image reaches it.
-#[cfg(feature = "avif")]
+/// truss read and wrote AVIF until the decoder turned out to be AGPL-3.0 licensed, and a file
+/// that used to convert has to fail the way every other unsupported format does: exit code 3,
+/// the input class, and a sentence that names the format so the caller knows what to convert.
 #[test]
-fn convert_decodes_an_avif_through_the_binary() {
-    let source = temp_file_path("avif-source").with_extension("png");
-    let avif = temp_file_path("avif-middle").with_extension("avif");
-    let output = temp_file_path("avif-output").with_extension("png");
-    fs::write(&source, create_red_blue_4x2_png()).expect("write png source");
+fn convert_and_inspect_refuse_an_avif_input() {
+    let input = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/integration/fixtures/sample.avif"
+    );
+    let output = temp_file_path("avif-refused").with_extension("png");
 
-    let to_avif = Command::new(env!("CARGO_BIN_EXE_truss"))
-        .arg(&source)
-        .arg("-o")
-        .arg(&avif)
-        .output()
-        .expect("run truss convert to avif");
-    assert!(to_avif.status.success(), "{to_avif:?}");
-
-    let from_avif = Command::new(env!("CARGO_BIN_EXE_truss"))
-        .arg(&avif)
+    let convert = Command::new(env!("CARGO_BIN_EXE_truss"))
+        .arg(input)
         .arg("-o")
         .arg(&output)
         .output()
-        .expect("run truss convert from avif");
-
-    let decoded = fs::read(&output).ok();
-    let _ = fs::remove_file(&source);
-    let _ = fs::remove_file(&avif);
+        .expect("run truss convert");
+    let inspect = Command::new(env!("CARGO_BIN_EXE_truss"))
+        .arg("inspect")
+        .arg(input)
+        .output()
+        .expect("run truss inspect");
+    let written = output.exists();
     let _ = fs::remove_file(&output);
 
-    assert!(from_avif.status.success(), "{from_avif:?}");
-    let decoded = ImageReader::new(std::io::Cursor::new(decoded.expect("the png was written")))
-        .with_guessed_format()
-        .expect("guess the output format")
-        .decode()
-        .expect("decode the output");
-    assert_eq!(decoded.dimensions(), (4, 2));
+    for (name, result) in [("convert", &convert), ("inspect", &inspect)] {
+        assert_eq!(result.status.code(), Some(3), "{name}: {result:?}");
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        assert!(
+            stderr.contains("AVIF is not supported")
+                && stderr.contains("unsupported-input-media-type"),
+            "{name}: {stderr}"
+        );
+    }
+    assert!(!written, "a refused convert must not write an output");
+}
+
+/// Asking for an AVIF output is a usage error, whichever way it is asked for.
+#[test]
+fn convert_refuses_an_avif_output() {
+    let source = temp_file_path("avif-output-source").with_extension("png");
+    let output = temp_file_path("avif-output").with_extension("avif");
+    fs::write(&source, create_red_blue_4x2_png()).expect("write png source");
+
+    let by_extension = Command::new(env!("CARGO_BIN_EXE_truss"))
+        .arg(&source)
+        .arg("-o")
+        .arg(&output)
+        .output()
+        .expect("run truss convert");
+    let by_flag = Command::new(env!("CARGO_BIN_EXE_truss"))
+        .arg("convert")
+        .arg(&source)
+        .arg("-o")
+        .arg("-")
+        .arg("--format")
+        .arg("avif")
+        .output()
+        .expect("run truss convert");
+    let written = output.exists();
+    let _ = fs::remove_file(&source);
+    let _ = fs::remove_file(&output);
+
+    for (name, result) in [("extension", &by_extension), ("flag", &by_flag)] {
+        assert_eq!(result.status.code(), Some(1), "{name}: {result:?}");
+        assert!(result.stdout.is_empty(), "{name} wrote to stdout");
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        assert!(
+            stderr.contains("unsupported media type `avif`"),
+            "{name}: {stderr}"
+        );
+    }
+    assert!(!written, "a refused convert must not write an output");
 }
