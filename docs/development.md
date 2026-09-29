@@ -123,6 +123,8 @@ Measured with `docs/img/logo.png` (1536 x 1024 PNG, 1.6 MB) on AMD Ryzen 7 5800U
 | JPEG quality 50 | 54 ms | 53 ms | 61 ms |
 | Inspect metadata | 5 ms | 5 ms | 6 ms |
 
+This table is a past hand measurement. The CLI is now measured with [himorime](https://github.com/nao1215/himorime) by the suite in [`bench/`](../bench/README.md): run `just bench-cli` to measure the working tree, or `just bench-cli-compare` (`BASE=<rev>`, default `main`) to compare a revision with it.
+
 ### Criterion Suite
 
 `cargo bench --bench transform` runs the criterion suite in `benches/transform.rs`. Every case that touches pixels builds its own 640x427 source, so the size in a case name is the size it ran at.
