@@ -53,7 +53,7 @@ truss completions powershell > truss.ps1
 
 The [browser demo](https://nao1215.github.io/truss/) is a static application built from the WASM target. Images are processed locally and never leave the browser.
 
-The Pages build intentionally enables `wasm,svg` only. If you need AVIF support or lossy WebP output in your own browser build, generate a custom artifact with `avif` and/or `webp-lossy`. See [WASM Integration](wasm.md) for the JS API contract, feature matrix, limits, and caveats.
+The Pages build intentionally enables `wasm,svg` only. If you need lossy WebP output in your own browser build, generate a custom artifact with `webp-lossy`. See [WASM Integration](wasm.md) for the JS API contract, feature matrix, limits, and caveats.
 
 To build the demo locally, use [`scripts/build-wasm-demo.sh`](../scripts/build-wasm-demo.sh):
 
@@ -78,7 +78,7 @@ Release tags also update the Homebrew tap formula in `nao1215/homebrew-tap`; con
 
 ### WASM package
 
-The WASM package uses a bundler-oriented build and currently ships the fixed feature set `wasm,svg,avif`.
+The WASM package uses a bundler-oriented build and currently ships the fixed feature set `wasm,svg`.
 
 To build and smoke-check it locally:
 
@@ -116,16 +116,12 @@ Measured with `docs/img/logo.png` (1536 x 1024 PNG, 1.6 MB) on AMD Ryzen 7 5800U
 |---|---|---|---|
 | PNG -> JPEG | 60 ms | 58 ms | 73 ms |
 | PNG -> WebP | 46 ms | 45 ms | 50 ms |
-| PNG -> AVIF | 6 956 ms | 6 427 ms | 8 092 ms |
 | PNG -> BMP | 40 ms | 38 ms | 42 ms |
 | Resize 800w + JPEG | 69 ms | 67 ms | 75 ms |
 | Resize 400w + WebP | 46 ms | 44 ms | 51 ms |
-| Resize 200w + AVIF | 190 ms | 185 ms | 205 ms |
 | Resize 500x500 cover + JPEG | 64 ms | 63 ms | 66 ms |
 | JPEG quality 50 | 54 ms | 53 ms | 61 ms |
 | Inspect metadata | 5 ms | 5 ms | 6 ms |
-
-The AVIF rows predate v0.19.0, which turned on the encoder's thread pool. They are the cost of encoding on one core, and are no longer representative on a machine with cores to spare.
 
 ### Criterion Suite
 
@@ -137,7 +133,6 @@ Baseline on a 32-core machine, median of each case, for comparison rather than a
 |---|---|
 | `format_conversion/jpeg_to_png/640x427` | 21.3 ms |
 | `format_conversion/jpeg_to_webp/640x427` | 18.2 ms |
-| `format_conversion/jpeg_to_avif/640x427` | 327.8 ms |
 | `resize/cover/100x100` | 3.3 ms |
 | `resize/cover/1920x1080` | 87.2 ms |
 | `fit_modes/cover/300x300` | 6.6 ms |
@@ -146,8 +141,6 @@ Baseline on a 32-core machine, median of each case, for comparison rather than a
 | `watermark/bottom_right` | 21.7 ms |
 | `svg/rasterize_to_png_1024w` | 639 µs |
 | `sniff_artifact/sample.jpg` | 19 ns |
-
-The AVIF case is the one that varies most with the machine, because it is the only encoder that uses more than one core.
 
 ## Contributing
 

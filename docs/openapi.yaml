@@ -929,7 +929,7 @@ components:
         When `height` is omitted, the image is resized proportionally.
         The resulting output is refused with `limit-exceeded` when it exceeds the output pixel
         budget, or when it is longer on an axis than the requested format holds: 65535 for
-        `jpeg` and `avif`, 16383 for `webp`, and no limit below the pixel budget for `png`,
+        `jpeg`, 16383 for `webp`, and no limit below the pixel budget for `png`,
         `bmp`, `tiff` and `svg`.
       schema:
         type: integer
@@ -997,17 +997,20 @@ components:
         `gif` is not an output format: truss decodes GIF but does not encode it, so
         requesting it returns 415. A GIF source with no `format` is served as PNG.
         A source with more than one frame is rejected with 415 rather than reduced to
-        one frame, whether it is a GIF, an animated WebP, an APNG, or an animated AVIF.
+        one frame, whether it is a GIF, an animated WebP, or an APNG.
+        AVIF is not supported: `avif` is refused with 400 like any other unknown format
+        name, and an AVIF source is refused with 415 and the
+        `unsupported-input-media-type` problem type.
       schema:
         type: string
-        enum: [jpeg, png, webp, avif, bmp, tiff, svg]
+        enum: [jpeg, png, webp, bmp, tiff, svg]
       example: webp
     Quality:
       name: quality
       in: query
       required: false
       description: |
-        Encoding quality for lossy formats (jpeg, webp, avif).
+        Encoding quality for lossy formats (jpeg, webp).
         Returns 400 for lossless formats.
       schema:
         type: integer
@@ -1022,11 +1025,7 @@ components:
         Optimization mode for the final encoding stage.
         `none` preserves the existing behavior.
         `auto` picks a format-appropriate strategy.
-        `lossless` uses only pixel-preserving techniques, and is answered
-        `501 Not Implemented` for AVIF output: the AV1 encoder truss reaches
-        offers a quality setting and no bit-exact mode, and a near-lossless
-        encode is not what the name promises. Use `auto` for the smallest
-        AVIF, or a lossless format for bit-exact pixels.
+        `lossless` uses only pixel-preserving techniques.
         `lossy` may reduce quality to save more bytes.
       schema:
         type: string
@@ -1363,13 +1362,13 @@ components:
           description: Crop anchor or padding placement for bounded resizes.
         format:
           type: string
-          enum: [jpeg, png, webp, avif, bmp, tiff, svg]
+          enum: [jpeg, png, webp, bmp, tiff, svg]
           description: Explicit output format. When omitted, the server negotiates or keeps the input format.
         quality:
           type: integer
           minimum: 1
           maximum: 100
-          description: Quality for lossy outputs (`jpeg`, `webp`, `avif`).
+          description: Quality for lossy outputs (`jpeg`, `webp`).
         optimize:
           type: string
           enum: [none, auto, lossless, lossy]
@@ -1740,10 +1739,6 @@ components:
             type: string
             format: binary
         image/webp:
-          schema:
-            type: string
-            format: binary
-        image/avif:
           schema:
             type: string
             format: binary

@@ -36,7 +36,7 @@ Use the CLI for local files and shell pipelines, run the server behind a CDN or 
 
 - One Rust core across the CLI, the HTTP server, and the browser/WASM build.
 - Signed URLs, SSRF protections, and SVG sanitization are built in.
-- Supports JPEG, PNG, WebP, AVIF, BMP, TIFF, and SVG, plus GIF as a decode-only input.
+- Supports JPEG, PNG, WebP, BMP, TIFF, and SVG, plus GIF as a decode-only input. AVIF is not supported.
 - Runs on Linux, macOS, and Windows.
 - CLI behavior is covered by [atago](https://github.com/nao1215/atago), and the HTTP API by [runn](https://github.com/k1LoW/runn).
 
@@ -74,7 +74,7 @@ Every release attaches `release-manifest.json` next to the archives. For each pu
 
 Check the SHA-256 of a downloaded archive against the manifest before extracting it, and check the extracted executable against `binary.sha256`. `checksums.txt` lists the same archive digests and is generated from the manifest.
 
-The `features` array tells you which optional features a given binary was built with, such as `avif` or `svg`.
+The `features` array tells you which optional features a given binary was built with, such as `s3` or `svg`.
 
 Pin a tag rather than following the latest release. Archive names, URLs and digests are all specific to one tag.
 
@@ -115,7 +115,7 @@ truss photo.png -o thumb.webp --width 800 --format webp --quality 75
 truss optimize photo.jpg -o photo-optimized.jpg --mode auto
 
 # Convert from a remote URL
-truss --url https://example.com/img.png -o out.avif --format avif
+truss --url https://example.com/img.png -o out.webp --format webp
 
 # Sanitize SVG (remove scripts and external references)
 truss diagram.svg -o safe.svg
@@ -146,7 +146,9 @@ $ truss inspect portrait.jpg
 
 #### Format conversion & quality
 
-truss supports **JPEG, PNG, WebP, AVIF, BMP, TIFF, and SVG**. The output format is inferred from the file extension, or you can specify it explicitly with `--format`.
+truss supports **JPEG, PNG, WebP, BMP, TIFF, and SVG**. The output format is inferred from the file extension, or you can specify it explicitly with `--format`.
+
+AVIF is not supported, as input or as output. The AVIF decoder truss used is licensed AGPL-3.0 or commercially, which an MIT tool cannot ship, so truss refuses an AVIF input as an unsupported format and `--format avif` as an unknown one. Convert AVIF images with another tool before passing them to truss, and use WebP when you want a modern compressed output.
 
 GIF is read but never written. `--format gif` is rejected, and a GIF input with no other
 format hint converts to PNG rather than back to GIF.
@@ -155,15 +157,11 @@ format hint converts to PNG rather than back to GIF.
 |--------|----------------------:|-------|
 | JPEG (original) | 80 KB | Lossy, widely supported |
 | WebP (`--quality 80`) | 38 KB | ~52 % smaller than JPEG |
-| AVIF (`--quality 50`) | 17 KB | ~79 % smaller than JPEG |
 | PNG | 480 KB | Lossless |
 
 ```sh
 # JPEG -> WebP (smaller file, same visual quality)
 truss photo.jpg -o photo.webp --quality 80
-
-# JPEG -> AVIF (best compression)
-truss photo.jpg -o photo.avif --quality 50
 
 # Explicit format override (ignore extension)
 truss photo.jpg -o output.bin --format png
@@ -193,7 +191,7 @@ truss inspect upload.gif
 ```
 
 An animation is refused rather than reduced to its first frame, whether it arrived as a
-GIF, an animated WebP, an APNG, or an animated AVIF:
+GIF, an animated WebP, or an APNG:
 
 ```sh
 $ truss convert animated.gif -o out.png
@@ -380,16 +378,12 @@ Metadata support per output format:
 | JPEG | yes | yes | yes | yes |
 | PNG | yes | yes | yes | no |
 | WebP | yes | yes | yes | no |
-| AVIF | yes | yes | no | no |
 | BMP | no | no | no | no |
 | TIFF | yes | no | no | no |
 
 Asking to keep metadata an output format cannot carry is not silent: the request succeeds and
 each kind that did not survive is reported as a `warning:` line on stderr, as a `Truss-Warning`
-response header from the server, and in `warnings` from the Wasm package. AVIF keeps EXIF as an
-item of its own and the profile as a `colr` property, both written into the container after the
-encode; XMP would be a third item and IPTC has no place in the container, so those two are
-reported as dropped like anywhere else.
+response header from the server, and in `warnings` from the Wasm package.
 
 ```sh
 # Keep all metadata (useful for archival)
@@ -522,7 +516,7 @@ See [`packages/truss-url-signer`](./packages/truss-url-signer) for the full API 
 
 truss also ships a browser-oriented WASM adapter for local, client-side image processing. The generated package exposes a small JS-facing API over the same Rust core used by the CLI and HTTP server.
 
-For bundler-based browser apps, the repository includes the source for the official npm package in [`packages/truss-wasm`](./packages/truss-wasm). It uses the fixed feature set `wasm,svg,avif`, so AVIF is available and WebP stays lossless in the package build.
+For bundler-based browser apps, the repository includes the source for the official npm package in [`packages/truss-wasm`](./packages/truss-wasm). It uses the fixed feature set `wasm,svg`, so WebP stays lossless in the package build.
 
 ```sh
 npm install @nao1215/truss-wasm
@@ -591,7 +585,7 @@ const outputBlob = new Blob([result.bytes], {
 });
 ```
 
-The GitHub Pages demo is intentionally built with `wasm,svg`. The official npm package uses `wasm,svg,avif`. Check capabilities at runtime and see [WASM Integration](docs/wasm.md) for package and raw-build usage, feature differences, import-path assumptions, API shapes, constraints, limits, and error handling.
+The GitHub Pages demo and the official npm package are both built with `wasm,svg`. Check capabilities at runtime and see [WASM Integration](docs/wasm.md) for package and raw-build usage, feature differences, import-path assumptions, API shapes, constraints, limits, and error handling.
 
 ## Commands
 
@@ -663,7 +657,6 @@ Benchmarks are defined in [`benches/transform.rs`](./benches/transform.rs). The 
 |-----------|-----:|
 | JPEG -> PNG | 8.2 us |
 | JPEG -> WebP (q 80) | 37 us |
-| JPEG -> AVIF (q 80) | 242 us |
 | Resize 100 x 100 (cover) | 317 us |
 | Resize 800 x 600 (cover) | 11.4 ms |
 | Resize 1920 x 1080 (cover) | 68 ms |
@@ -684,7 +677,8 @@ Feature comparison with [imgproxy](https://github.com/imgproxy/imgproxy) and [im
 | CLI | Yes | No | No |
 | WASM browser demo | Yes | No | No |
 | Signed URLs | Yes | Yes | Yes |
-| JPEG / PNG / WebP / AVIF | Yes | Yes | Yes |
+| JPEG / PNG / WebP | Yes | Yes | Yes |
+| AVIF | No | Yes | Yes |
 | JPEG XL (JXL) | No | Input only | Yes |
 | TIFF | Yes | Yes | Yes |
 | GIF (static) | Input only | Yes | Yes |

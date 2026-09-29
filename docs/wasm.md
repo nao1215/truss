@@ -22,7 +22,6 @@ Its official build uses:
 
 - `wasm`
 - `svg`
-- `avif`
 - `wasm-bindgen --target web`
 - a small npm wrapper that initializes the Wasm module at import time
 
@@ -30,7 +29,6 @@ Implication:
 
 - bundler-based consumers can import the package directly
 - the package does not require an explicit `init()` call
-- AVIF decode/encode is enabled
 - WebP output stays lossless in the official package
 
 ### GitHub Pages demo build
@@ -56,12 +54,11 @@ cargo build \
 Implication:
 
 - SVG processing is enabled.
-- AVIF decode/encode is disabled.
 - Lossy WebP encoding is disabled.
 
 ### Custom browser build
 
-If your product needs AVIF or lossy WebP support, build your own artifact with the matching feature flags:
+If your product needs lossy WebP support, build your own artifact with the matching feature flag:
 
 ```sh
 rustup target add wasm32-unknown-unknown
@@ -74,7 +71,7 @@ cargo build \
   --target wasm32-unknown-unknown \
   --lib \
   --no-default-features \
-  --features "wasm,svg,avif,webp-lossy"
+  --features "wasm,svg,webp-lossy"
 
 wasm-bindgen \
   --target web \
@@ -88,7 +85,6 @@ Feature flags relevant to browser builds:
 |------|------|
 | `wasm` | Enables the `wasm-bindgen` browser adapter |
 | `svg` | Enables SVG sanitization, SVG input handling, and SVG output for SVG inputs |
-| `avif` | Enables AVIF decode and encode |
 | `webp-lossy` | Enables quality-controlled lossy WebP output |
 
 For bundler-based apps, the official package build is the recommended default. The raw `wasm-bindgen` output pair remains useful for static-page or custom hosting flows.
@@ -183,7 +179,7 @@ const outputBlob = new Blob([result.bytes], {
 
 This example assumes a main-thread browser page with `File`, `Blob`, and object URL APIs available. The low-level WASM exports themselves only require byte arrays and strings.
 
-If you already know the input format, `declaredMediaType` may be one of `jpeg`, `png`, `webp`, `avif`, `bmp`, `tiff`, or `svg`. Pass `undefined` if you want `truss` to rely on byte sniffing alone.
+If you already know the input format, `declaredMediaType` may be one of `jpeg`, `png`, `webp`, `bmp`, `tiff`, or `svg`. Pass `undefined` if you want `truss` to rely on byte sniffing alone.
 
 ## Runtime Capabilities
 
@@ -193,7 +189,6 @@ Browser builds can differ based on compile-time features. Always inspect capabil
 type WasmCapabilities = {
   svg: boolean;
   webpLossy: boolean;
-  avif: boolean;
 };
 ```
 
@@ -201,9 +196,8 @@ type WasmCapabilities = {
 |------|------|
 | `svg` | SVG input/output processing is available |
 | `webpLossy` | Quality-controlled lossy WebP output is available |
-| `avif` | AVIF decode and encode are available |
 
-The GitHub Pages demo uses `svg: true`, `webpLossy: false`, `avif: false`.
+The GitHub Pages demo uses `svg: true`, `webpLossy: false`.
 
 ## Exported API
 
@@ -312,7 +306,7 @@ type WasmTransformOptions = {
   height?: number;
   fit?: "contain" | "cover" | "fill" | "inside";
   position?: "center" | "top" | "right" | "bottom" | "left" | "top-left" | "top-right" | "bottom-left" | "bottom-right";
-  format?: "jpeg" | "png" | "webp" | "avif" | "bmp" | "tiff" | "svg";
+  format?: "jpeg" | "png" | "webp" | "bmp" | "tiff" | "svg";
   quality?: number;
   optimize?: "none" | "auto" | "lossless" | "lossy";
   targetQuality?: string;
@@ -416,7 +410,7 @@ Frontend note:
 - The WASM adapter accepts bytes only. It does not fetch remote URLs and does not use storage backends.
 - Raster input cannot be converted into SVG output.
 - Watermarks must be raster images. SVG watermark input is rejected.
-- AVIF encode/decode requires the `avif` feature.
+- AVIF is not supported in any build. An AVIF input is refused with `unsupportedInputMediaType` and a message naming AVIF, and `format: "avif"` is refused with `invalidOptions` like any other unknown format name. Convert AVIF images with another tool first, and use WebP for a modern output format.
 - Lossy WebP output requires the `webp-lossy` feature.
 - WebP output carries ICC, EXIF, and XMP in container chunks (lossy included); IPTC has no WebP chunk and is dropped.
 - The WASM adapter does not inject a transform deadline. Browser apps should own their own UX for cancellation, progress, and timeouts.
@@ -431,7 +425,7 @@ These limits come from the shared core and apply to browser builds too:
 | Max decoded input pixels | `100000000` |
 | Max output pixels | `67108864` |
 | Max watermark pixels | `4000000` |
-| Longest output axis, `jpeg` and `avif` | `65535` |
+| Longest output axis, `jpeg` | `65535` |
 | Longest output axis, `webp` | `16383` |
 
 The last two come from the format, or from the encoder truss reaches, rather than from truss,

@@ -129,7 +129,7 @@ src/
 │   │   └── azure.rs         # Azure Blob Storage backend
 │   └── wasm.rs              # Browser WASM adapter
 └── codecs/
-    ├── raster.rs            # JPEG, PNG, WebP, AVIF, BMP codec
+    ├── raster.rs            # JPEG, PNG, WebP, BMP, TIFF, GIF codec
     └── svg.rs               # SVG sanitization and rasterization
 
 e2e/
