@@ -10,7 +10,7 @@ WASM_PATH="$ROOT_DIR/target/wasm32-unknown-unknown/release/truss.wasm"
 
 if ! command -v wasm-bindgen >/dev/null 2>&1; then
   echo "wasm-bindgen CLI is required. Install it with:" >&2
-  echo "  cargo install wasm-bindgen-cli --version 0.2.114" >&2
+  echo "  cargo install wasm-bindgen-cli --version 0.2.129" >&2
   exit 1
 fi
 

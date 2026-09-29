@@ -110,7 +110,7 @@ Not covered: the feature set listed above, which is a property of this build rat
 
 ```sh
 rustup target add wasm32-unknown-unknown
-cargo install wasm-bindgen-cli --version 0.2.114
+cargo install wasm-bindgen-cli --version 0.2.129
 
 cd packages/truss-wasm
 npm run build
