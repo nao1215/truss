@@ -1,0 +1,5 @@
+target
+artifacts
+coverage
+# What a local run discovers; `just fuzz` writes here so fuzz/corpus keeps only the seeds.
+corpus-local

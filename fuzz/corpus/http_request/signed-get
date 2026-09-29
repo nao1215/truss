@@ -1,0 +1,5 @@
+GET /images/by-path?expires=4102444800&format=jpeg&keyId=fuzz-key&path=sample.png&width=16&signature=34b89a621fd830c5e756477816635518a4a3795ace8889e843c3da9072a95d8e HTTP/1.1
+Host: fuzz
+Accept: image/webp,*/*
+If-None-Match: "x"
+

@@ -1,0 +1,11 @@
+#multipart/form-data; boundary="q u"--q u
+Content-Disposition: form-data; name="file"; filename="file.bin"
+Content-Type: image/svg+xml
+
+<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"/>
+
+--q u
+Content-Disposition: form-data; name="options"
+
+{"format":"png","width":8,"height":8}
+--q u--

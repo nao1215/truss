@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<?xml-stylesheet type="text/xsl" href="https://evil.example.com/x.xsl"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100">
+  <style>@\69 mport "https://evil.example.com/x.css";</style>
+  <rect width="100" height="100" fill="url(https://evil.example.com/paint.svg#g)"
+        filter="url(https://evil.example.com/filter.svg#f)"/>
+</svg>

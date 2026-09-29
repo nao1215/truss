@@ -57,6 +57,12 @@ bench-cli:
 bench-cli-compare:
     himorime compare --against "${BASE:-main}" bench
 
+# Fuzz one target (needs nightly and cargo-fuzz; `just fuzz sniff -max_total_time=60`).
+# New inputs go to fuzz/corpus-local/, so fuzz/corpus/ keeps only the committed seeds.
+fuzz TARGET *ARGS:
+    mkdir -p fuzz/corpus-local/{{TARGET}}
+    cargo +nightly fuzz run {{TARGET}} fuzz/corpus-local/{{TARGET}} fuzz/corpus/{{TARGET}} -- {{ARGS}}
+
 # ---------------------------------------------------------------------------
 # Build
 # ---------------------------------------------------------------------------

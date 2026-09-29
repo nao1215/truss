@@ -1,0 +1,6 @@
+GET /health HTTP/1.1
+Host: fuzz
+X-Forwarded-For: 10.0.0.1, 2001:db8::1
+X-Request-Id: abc
+Connection: close
+
