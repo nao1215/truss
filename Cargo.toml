@@ -55,7 +55,10 @@ wasm-bindgen = { version = "0.2.129", optional = true }
 webp = { version = "0.3", optional = true }
 quick-xml = { version = "0.42", optional = true }
 resvg = { version = "0.48", optional = true }
-aws-sdk-s3 = { version = "1", optional = true }
+# The default features include `rustls`, the legacy hyper 0.14 / rustls 0.21 client
+# (rustls-webpki 0.101, h2 0.3), which has advisories with no fix on that line. The
+# client truss uses is `default-https-client`; the rest of the defaults are kept.
+aws-sdk-s3 = { version = "1", optional = true, default-features = false, features = ["sigv4a", "http-1x", "default-https-client", "rt-tokio"] }
 aws-config = { version = "1", optional = true }
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "io-util", "time"], optional = true }
 google-cloud-storage = { version = "1", optional = true }

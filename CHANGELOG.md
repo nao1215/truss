@@ -5,6 +5,7 @@
 ### Security
 
 - rustls is 0.23.45, which fixes RUSTSEC-2026-0285: rustls 0.23.43 accepted TLS 1.3 handshake messages across a change of encryption level. truss reaches rustls through ureq whenever it fetches a remote image, which is `truss convert --url` on the CLI and the remote source on the server, so every binary, container image and crate of v0.25.0 carried it. The rest of the lockfile moved within the declared ranges at the same time, which also drops the unsound event-listener 5.4.1 and the yanked chacha20, core2 and spin versions. rav1d-safe, the AVIF decoder, is 0.6.
+- The S3 backend no longer links the AWS SDK's legacy HTTP client (hyper 0.14, rustls 0.21, rustls-webpki 0.101.7, h2 0.3.27), whose advisories RUSTSEC-2026-0098, 0099, 0104 and 0258 had no fix on those lines and were ignored in `.cargo/audit.toml`. `aws-sdk-s3` is built without its `rustls` feature, which only selects that client; the client truss uses, `default-https-client` on rustls 0.23, is unchanged. The ignore list is gone with it.
 
 ### Fixed
 
