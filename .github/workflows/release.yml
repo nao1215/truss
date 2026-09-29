@@ -856,10 +856,13 @@ jobs:
   # must be referenced by tag: slsa-verifier checks the tag the provenance names.
   provenance:
     needs: prepare-release
+    # contents: write although nothing is uploaded here: the generator's own
+    # upload job declares it, and a called workflow may not ask for more than
+    # the caller grants, so contents: read stops the whole run at startup.
     permissions:
       actions: read
       id-token: write
-      contents: read
+      contents: write
     uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.1.0
     with:
       base64-subjects: ${{ needs.prepare-release.outputs.hashes }}
