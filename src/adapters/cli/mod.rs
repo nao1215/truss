@@ -995,31 +995,30 @@ fn parse_height(s: &str) -> Result<u32, String> {
     parse_dimension(s, "height", crate::core::validate_height_value)
 }
 
+/// Reads a whole number of any length, holding one past `i64` at the nearest end.
+///
+/// Every range a numeric flag is judged by lies inside `i64`, so the held value reads the
+/// same range sentence the number itself would, where parsing straight into `i64` said a
+/// twenty-digit number was not a whole number.
+fn parse_whole_number(s: &str) -> Option<i64> {
+    crate::core::WideInteger::parse(s).map(crate::core::WideInteger::saturated)
+}
+
 fn parse_dimension(
     s: &str,
     axis: &str,
     validate: fn(i64) -> Result<u32, &'static str>,
 ) -> Result<u32, String> {
-    #[expect(
-        clippy::map_err_ignore,
-        reason = "the sentence names the option, the rule, and the value given, which is everything a `ParseIntError` would add"
-    )]
-    let value: i64 = s
-        .parse()
-        .map_err(|_| format!("{axis} must be a whole number of pixels, got '{s}'"))?;
+    let value = parse_whole_number(s)
+        .ok_or_else(|| format!("{axis} must be a whole number of pixels, got '{s}'"))?;
     // A value the option can hold is handed on for the transform to judge, which keeps the
     // failure class the CLI reported before and the one the other adapters report.
     validate(value).map_err(str::to_string)
 }
 
 fn parse_quality(s: &str) -> Result<u8, String> {
-    #[expect(
-        clippy::map_err_ignore,
-        reason = "the sentence names the option, the rule, and the value given, which is everything a `ParseIntError` would add"
-    )]
-    let value: i64 = s
-        .parse()
-        .map_err(|_| format!("quality must be a whole number, got '{s}'"))?;
+    let value = parse_whole_number(s)
+        .ok_or_else(|| format!("quality must be a whole number, got '{s}'"))?;
     // A value the option can hold is handed on for `TransformOptions::normalize` to judge,
     // which keeps the failure class the CLI reported before and the one the server reports
     // for the same number. One that cannot be held is refused here, with the sentence that
@@ -1041,13 +1040,8 @@ fn parse_quality(s: &str) -> Result<u8, String> {
 }
 
 fn parse_watermark_opacity(s: &str) -> Result<u8, String> {
-    #[expect(
-        clippy::map_err_ignore,
-        reason = "the sentence names the option, the rule, and the value given, which is everything a `ParseIntError` would add"
-    )]
-    let value: i64 = s
-        .parse()
-        .map_err(|_| format!("watermark opacity must be a whole number, got '{s}'"))?;
+    let value = parse_whole_number(s)
+        .ok_or_else(|| format!("watermark opacity must be a whole number, got '{s}'"))?;
     crate::core::validate_watermark_opacity_value(value).map_err(str::to_string)
 }
 
@@ -3020,6 +3014,90 @@ mod tests {
             "message: {}",
             spaced.message,
         );
+    }
+
+    /// A whole number too long for any integer type is still a whole number. Each numeric
+    /// flag answers it with the sentence it gives a smaller number past its limit, with the
+    /// same exit code, instead of saying the number is not a number.
+    #[test]
+    fn a_number_past_every_integer_type_reads_the_range_sentence() {
+        let huge = "99999999999999999999";
+        let cases = [
+            (
+                "--width",
+                huge.to_string(),
+                "4294967296".to_string(),
+                "width is too large to be a number of pixels",
+            ),
+            (
+                "--height",
+                huge.to_string(),
+                "4294967296".to_string(),
+                "height is too large to be a number of pixels",
+            ),
+            (
+                "--width",
+                format!("-{huge}"),
+                "-1".to_string(),
+                "width must be greater than zero",
+            ),
+            (
+                "--quality",
+                huge.to_string(),
+                "256".to_string(),
+                "quality must be between 1 and 100",
+            ),
+            (
+                "--watermark-opacity",
+                huge.to_string(),
+                "256".to_string(),
+                "watermark opacity must be between 1 and 100",
+            ),
+            (
+                "--watermark-margin",
+                huge.to_string(),
+                "4294967296".to_string(),
+                "watermark margin is too large to be a number of pixels",
+            ),
+            (
+                "--crop",
+                format!("{huge},0,1,1"),
+                "4294967296,0,1,1".to_string(),
+                "crop x must be at most 4294967295",
+            ),
+            (
+                "--crop",
+                format!("0,0,1,{huge}"),
+                "0,0,1,4294967296".to_string(),
+                "crop height must be at most 4294967295",
+            ),
+        ];
+        for (flag, value, narrower, expected) in cases {
+            let parse = |value: &str| {
+                parse_args(vec![
+                    "truss".to_string(),
+                    "convert".to_string(),
+                    "in.png".to_string(),
+                    "-o".to_string(),
+                    "out.png".to_string(),
+                    format!("{flag}={value}"),
+                ])
+                .expect_err("an out-of-range number is refused")
+            };
+            let error = parse(&value);
+            let reference = parse(&narrower);
+            assert!(
+                error.message.contains(expected),
+                "{flag} {value}: {}",
+                error.message
+            );
+            assert!(
+                reference.message.contains(expected),
+                "{flag} {narrower}: {}",
+                reference.message
+            );
+            assert_eq!(error.exit_code, reference.exit_code, "{flag}");
+        }
     }
 
     /// The same for `sign`, which carries the same flag.

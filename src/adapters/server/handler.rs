@@ -483,7 +483,9 @@ use crate::core::{
 pub(super) struct WatermarkPayload {
     pub(super) url: Option<String>,
     pub(super) position: Option<String>,
+    #[serde(deserialize_with = "crate::core::deserialize_watermark_opacity")]
     pub(super) opacity: Option<u8>,
+    #[serde(deserialize_with = "crate::core::deserialize_watermark_margin")]
     pub(super) margin: Option<u32>,
 }
 
@@ -1927,6 +1929,53 @@ mod tests {
             .unwrap_or_else(|_| panic!("rotate {degrees} is a whole number of degrees"));
 
             assert_eq!(options.rotate, expected, "rotate {degrees}");
+        }
+    }
+
+    /// A JSON number past every integer type is still a number, so it reads the rule the
+    /// same field gives a smaller number past its limit. serde_json hands a number past
+    /// `u64` over as a float, which used to read `invalid type: floating point`.
+    #[test]
+    fn a_json_number_past_every_integer_type_reads_the_documented_rule() {
+        let cases = [
+            (
+                r#"{"width":18446744073709551615}"#,
+                "width is too large to be a number of pixels",
+            ),
+            (
+                r#"{"height":99999999999999999999}"#,
+                "height is too large to be a number of pixels",
+            ),
+            (
+                r#"{"quality":-99999999999999999999}"#,
+                "quality must be between 1 and 100",
+            ),
+            (r#"{"rotate":1e20}"#, "rotate is out of range"),
+        ];
+        for (json, expected) in cases {
+            let error = serde_json::from_str::<TransformOptionsPayload>(json)
+                .expect_err("the value is out of range")
+                .to_string();
+            assert!(error.contains(expected), "{json}: {error}");
+        }
+
+        let cases = [
+            (
+                r#"{"opacity":300}"#,
+                "watermark opacity must be between 1 and 100",
+            ),
+            (
+                r#"{"margin":4294967296}"#,
+                "watermark margin is too large to be a number of pixels",
+            ),
+            (r#"{"margin":-1}"#, "watermark margin must not be negative"),
+        ];
+        for (json, expected) in cases {
+            let error = serde_json::from_str::<WatermarkPayload>(json)
+                .expect_err("the value is out of range")
+                .to_string();
+            assert!(error.contains(expected), "{json}: {error}");
+            assert!(!error.contains("u8") && !error.contains("u32"), "{error}");
         }
     }
 

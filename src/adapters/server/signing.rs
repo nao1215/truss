@@ -248,6 +248,10 @@ pub fn sign_public_url_with_method(
 /// `127.0.0.1:8080`. This is the only way to learn the address truss would bind, since
 /// [`serve_with_config`](crate::serve_with_config) takes a listener the caller has already
 /// bound.
+///
+/// A value that is not UTF-8 also falls back here, since this function cannot report an
+/// error; [`ServerConfig::from_env`](crate::ServerConfig::from_env) refuses such a value, so
+/// a caller that loads the configuration first never binds the fallback by mistake.
 pub fn bind_addr() -> String {
     std::env::var("TRUSS_BIND_ADDR").unwrap_or_else(|_| DEFAULT_BIND_ADDR.to_string())
 }

@@ -156,14 +156,22 @@ impl TrustedProxy {
                 .trim()
                 .parse()
                 .map_err(|e| format!("invalid IP in CIDR `{s}`: {e}"))?;
-            let prefix: u8 = prefix_str
-                .trim()
-                .parse()
-                .map_err(|e| format!("invalid prefix length in CIDR `{s}`: {e}"))?;
             let max_prefix = match addr {
                 IpAddr::V4(_) => 32,
                 IpAddr::V6(_) => 128,
             };
+            let prefix_str = prefix_str.trim();
+            // A prefix too large for a `u8` is past the maximum too, so it reads the same
+            // sentence as one that fits the byte but not the address.
+            let prefix: u8 =
+                prefix_str
+                    .parse()
+                    .map_err(|e: std::num::ParseIntError| match e.kind() {
+                        std::num::IntErrorKind::PosOverflow => format!(
+                            "prefix length {prefix_str} exceeds maximum {max_prefix} for `{s}`"
+                        ),
+                        _ => format!("invalid prefix length in CIDR `{s}`: {e}"),
+                    })?;
             if prefix > max_prefix {
                 return Err(format!(
                     "prefix length {prefix} exceeds maximum {max_prefix} for `{s}`"
@@ -1215,17 +1223,14 @@ impl ServerConfig {
     /// ```
     pub fn from_env() -> io::Result<Self> {
         #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
-        let storage_backend = match env::var("TRUSS_STORAGE_BACKEND")
-            .ok()
-            .filter(|v| !v.is_empty())
-        {
+        let storage_backend = match env_nonempty("TRUSS_STORAGE_BACKEND")? {
             Some(value) => StorageBackend::parse(&value)
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?,
             None => StorageBackend::Filesystem,
         };
 
         let storage_root =
-            env::var("TRUSS_STORAGE_ROOT").unwrap_or_else(|_| DEFAULT_STORAGE_ROOT.to_string());
+            env_var("TRUSS_STORAGE_ROOT")?.unwrap_or_else(|| DEFAULT_STORAGE_ROOT.to_string());
         // Every other setting names itself when it is wrong. This one used to surface as
         // the bare OS message — "No such file or directory (os error 2)" on Linux, "The
         // system cannot find the path specified. (os error 3)" on Windows — leaving the
@@ -1238,20 +1243,12 @@ impl ServerConfig {
                     format!("TRUSS_STORAGE_ROOT `{storage_root}` cannot be resolved: {error}"),
                 )
             })?;
-        let bearer_token = env::var("TRUSS_BEARER_TOKEN")
-            .ok()
-            .filter(|value| !value.is_empty());
-        let public_base_url = env::var("TRUSS_PUBLIC_BASE_URL")
-            .ok()
-            .filter(|value| !value.is_empty())
+        let bearer_token = env_nonempty("TRUSS_BEARER_TOKEN")?;
+        let public_base_url = env_nonempty("TRUSS_PUBLIC_BASE_URL")?
             .map(validate_public_base_url)
             .transpose()?;
-        let signed_url_key_id = env::var("TRUSS_SIGNED_URL_KEY_ID")
-            .ok()
-            .filter(|value| !value.is_empty());
-        let signed_url_secret = env::var("TRUSS_SIGNED_URL_SECRET")
-            .ok()
-            .filter(|value| !value.is_empty());
+        let signed_url_key_id = env_nonempty("TRUSS_SIGNED_URL_KEY_ID")?;
+        let signed_url_secret = env_nonempty("TRUSS_SIGNED_URL_SECRET")?;
 
         if signed_url_key_id.is_some() != signed_url_secret.is_some() {
             return Err(io::Error::new(
@@ -1264,9 +1261,7 @@ impl ServerConfig {
         if let (Some(kid), Some(sec)) = (&signed_url_key_id, &signed_url_secret) {
             signing_keys.insert(kid.clone(), sec.clone());
         }
-        if let Ok(json) = env::var("TRUSS_SIGNING_KEYS")
-            && !json.is_empty()
-        {
+        if let Some(json) = env_nonempty("TRUSS_SIGNING_KEYS")? {
             let extra: HashMap<String, String> = serde_json::from_str(&json).map_err(|e| {
                 io::Error::new(
                     io::ErrorKind::InvalidInput,
@@ -1284,10 +1279,7 @@ impl ServerConfig {
             signing_keys.extend(extra);
         }
 
-        let cache_root = env::var("TRUSS_CACHE_ROOT")
-            .ok()
-            .filter(|value| !value.is_empty())
-            .map(PathBuf::from);
+        let cache_root = env_nonempty("TRUSS_CACHE_ROOT")?.map(PathBuf::from);
 
         let cache_max_bytes =
             parse_env_u64_ranged("TRUSS_CACHE_MAX_BYTES", 0, u64::MAX)?.unwrap_or(0);
@@ -1341,15 +1333,12 @@ impl ServerConfig {
 
         #[cfg(feature = "s3")]
         let s3_context = if storage_backend == StorageBackend::S3 {
-            let bucket = env::var("TRUSS_S3_BUCKET")
-                .ok()
-                .filter(|v| !v.is_empty())
-                .ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        "TRUSS_S3_BUCKET is required when TRUSS_STORAGE_BACKEND=s3",
-                    )
-                })?;
+            let bucket = env_nonempty("TRUSS_S3_BUCKET")?.ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "TRUSS_S3_BUCKET is required when TRUSS_STORAGE_BACKEND=s3",
+                )
+            })?;
             Some(Arc::new(s3::build_s3_context(
                 bucket,
                 allow_insecure_url_sources,
@@ -1360,25 +1349,18 @@ impl ServerConfig {
 
         #[cfg(feature = "gcs")]
         let gcs_context = if storage_backend == StorageBackend::Gcs {
-            let bucket = env::var("TRUSS_GCS_BUCKET")
-                .ok()
-                .filter(|v| !v.is_empty())
-                .ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        "TRUSS_GCS_BUCKET is required when TRUSS_STORAGE_BACKEND=gcs",
-                    )
-                })?;
+            let bucket = env_nonempty("TRUSS_GCS_BUCKET")?.ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "TRUSS_GCS_BUCKET is required when TRUSS_STORAGE_BACKEND=gcs",
+                )
+            })?;
             Some(Arc::new(gcs::build_gcs_context(
                 bucket,
                 allow_insecure_url_sources,
             )?))
         } else {
-            if env::var("TRUSS_GCS_BUCKET")
-                .ok()
-                .filter(|v| !v.is_empty())
-                .is_some()
-            {
+            if env_nonempty("TRUSS_GCS_BUCKET")?.is_some() {
                 eprintln!(
                     "truss: warning: TRUSS_GCS_BUCKET is set but TRUSS_STORAGE_BACKEND is not \
                      `gcs`. The GCS bucket will be ignored. Set TRUSS_STORAGE_BACKEND=gcs to \
@@ -1390,25 +1372,18 @@ impl ServerConfig {
 
         #[cfg(feature = "azure")]
         let azure_context = if storage_backend == StorageBackend::Azure {
-            let container = env::var("TRUSS_AZURE_CONTAINER")
-                .ok()
-                .filter(|v| !v.is_empty())
-                .ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        "TRUSS_AZURE_CONTAINER is required when TRUSS_STORAGE_BACKEND=azure",
-                    )
-                })?;
+            let container = env_nonempty("TRUSS_AZURE_CONTAINER")?.ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "TRUSS_AZURE_CONTAINER is required when TRUSS_STORAGE_BACKEND=azure",
+                )
+            })?;
             Some(Arc::new(azure::build_azure_context(
                 container,
                 allow_insecure_url_sources,
             )?))
         } else {
-            if env::var("TRUSS_AZURE_CONTAINER")
-                .ok()
-                .filter(|v| !v.is_empty())
-                .is_some()
-            {
+            if env_nonempty("TRUSS_AZURE_CONTAINER")?.is_some() {
                 eprintln!(
                     "truss: warning: TRUSS_AZURE_CONTAINER is set but TRUSS_STORAGE_BACKEND is not \
                      `azure`. The Azure container will be ignored. Set TRUSS_STORAGE_BACKEND=azure to \
@@ -1418,13 +1393,10 @@ impl ServerConfig {
             None
         };
 
-        let metrics_token = env::var("TRUSS_METRICS_TOKEN")
-            .ok()
-            .filter(|value| !value.trim().is_empty());
+        let metrics_token =
+            env_var("TRUSS_METRICS_TOKEN")?.filter(|value| !value.trim().is_empty());
         let disable_metrics = env_flag("TRUSS_DISABLE_METRICS")?;
-        let health_token = env::var("TRUSS_HEALTH_TOKEN")
-            .ok()
-            .filter(|value| !value.trim().is_empty());
+        let health_token = env_var("TRUSS_HEALTH_TOKEN")?.filter(|value| !value.trim().is_empty());
         if health_token.is_some() {
             eprintln!(
                 "truss: /health endpoint requires Bearer authentication (TRUSS_HEALTH_TOKEN is set)"
@@ -1458,10 +1430,13 @@ impl ServerConfig {
         // `truss validate` and the first requests.
         #[cfg(feature = "s3")]
         env_flag("TRUSS_S3_FORCE_PATH_STYLE")?;
+        // The same for the listen address, which `bind_addr` reads and cannot refuse: a value
+        // that is not UTF-8 would otherwise bind the default address without a word.
+        env_var("TRUSS_BIND_ADDR")?;
         let compression_level =
             parse_env_u64_ranged("TRUSS_COMPRESSION_LEVEL", 0, 9)?.unwrap_or(1) as u32;
 
-        let log_level = match env::var("TRUSS_LOG_LEVEL").ok().filter(|v| !v.is_empty()) {
+        let log_level = match env_nonempty("TRUSS_LOG_LEVEL")? {
             Some(val) => val
                 .parse::<LogLevel>()
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?,
@@ -1484,10 +1459,7 @@ impl ServerConfig {
             }
         };
 
-        let trusted_proxies = match env::var("TRUSS_TRUSTED_PROXIES")
-            .ok()
-            .filter(|v| !v.is_empty())
-        {
+        let trusted_proxies = match env_nonempty("TRUSS_TRUSTED_PROXIES")? {
             Some(val) => val
                 .split(',')
                 .filter(|s| !s.trim().is_empty())
@@ -1552,28 +1524,57 @@ impl ServerConfig {
     }
 }
 
+/// Reads a setting from the environment, telling a variable that is not set apart from one
+/// whose value is not UTF-8.
+///
+/// `env::var(..).ok()` reads both as unset. A value the operator gave is a value the
+/// operator meant, so one that cannot be read stops startup with the variable's name, the
+/// way an out-of-range number or an unknown log level does, instead of leaving a bearer
+/// token, a signing secret or a storage root quietly at its default. An empty value is
+/// returned as it is; each caller decides what empty means for its setting.
+pub(super) fn env_var(name: &str) -> io::Result<Option<String>> {
+    match env::var(name) {
+        Ok(value) => Ok(Some(value)),
+        Err(env::VarError::NotPresent) => Ok(None),
+        Err(env::VarError::NotUnicode(_)) => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{name} must be valid UTF-8"),
+        )),
+    }
+}
+
+/// [`env_var`] with an empty value read as unset, which is what most settings mean by it.
+pub(super) fn env_nonempty(name: &str) -> io::Result<Option<String>> {
+    Ok(env_var(name)?.filter(|value| !value.is_empty()))
+}
+
 /// Parse an optional environment variable as `u64`, validating that its value
 /// falls within `[min, max]`. Returns `Ok(None)` when the variable is unset or
 /// empty, `Ok(Some(value))` on success, or an `io::Error` on parse / range
 /// failure.
 pub(super) fn parse_env_u64_ranged(name: &str, min: u64, max: u64) -> io::Result<Option<u64>> {
-    match env::var(name).ok().filter(|v| !v.is_empty()) {
+    match env_nonempty(name)? {
         Some(value) => {
-            #[expect(
-                clippy::map_err_ignore,
-                reason = "the sentence names the variable and the rule its value breaks, and the parser's own wording in a `ParseIntError` says nothing more an operator can act on"
-            )]
-            let n: u64 = value.parse().map_err(|_| {
+            let out_of_range = || {
                 io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    format!("{name} must be a positive integer"),
-                )
-            })?;
-            if n < min || n > max {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
                     format!("{name} must be between {min} and {max}"),
-                ));
+                )
+            };
+            // A number too large for `u64` is past `max` too, so it reads the range rather
+            // than a claim that it is not an integer.
+            let n: u64 =
+                value
+                    .parse()
+                    .map_err(|error: std::num::ParseIntError| match error.kind() {
+                        std::num::IntErrorKind::PosOverflow => out_of_range(),
+                        _ => io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            format!("{name} must be a positive integer"),
+                        ),
+                    })?;
+            if n < min || n > max {
+                return Err(out_of_range());
             }
             Ok(Some(n))
         }
@@ -1586,7 +1587,7 @@ pub(super) fn parse_env_u64_ranged(name: &str, min: u64, max: u64) -> io::Result
 /// empty, `Ok(Some(value))` on success, or an `io::Error` on parse / range
 /// failure.
 fn parse_env_f64_ranged(name: &str, min: f64, max: f64) -> io::Result<Option<f64>> {
-    match env::var(name).ok().filter(|v| !v.is_empty()) {
+    match env_nonempty(name)? {
         Some(value) => {
             #[expect(
                 clippy::map_err_ignore,
@@ -1617,10 +1618,7 @@ fn parse_env_f64_ranged(name: &str, min: f64, max: f64) -> io::Result<Option<f64
 /// Returns an empty `Vec` when the variable is unset or empty, which tells the
 /// negotiation layer to use its built-in default order.
 pub(super) fn parse_format_preference_from_env() -> io::Result<Vec<crate::MediaType>> {
-    let Some(value) = env::var("TRUSS_FORMAT_PREFERENCE")
-        .ok()
-        .filter(|v| !v.is_empty())
-    else {
+    let Some(value) = env_nonempty("TRUSS_FORMAT_PREFERENCE")? else {
         return Ok(Vec::new());
     };
 
@@ -1670,7 +1668,7 @@ pub(super) fn parse_format_preference_from_env() -> io::Result<Vec<crate::MediaT
 /// trimmed, so `' 1'` is refused rather than quietly accepted; a quoting mistake that
 /// changes the value is worth seeing.
 pub(super) fn env_flag(name: &str) -> io::Result<bool> {
-    let Ok(value) = env::var(name) else {
+    let Some(value) = env_var(name)? else {
         return Ok(false);
     };
     match value.to_ascii_lowercase().as_str() {
@@ -1686,16 +1684,16 @@ pub(super) fn env_flag(name: &str) -> io::Result<bool> {
 }
 
 pub(super) fn parse_optional_env_u32(name: &str) -> io::Result<Option<u32>> {
-    match env::var(name) {
-        #[expect(
-            clippy::map_err_ignore,
-            reason = "the sentence names the variable and the rule its value breaks, and the parser's own wording in a `ParseIntError` says nothing more an operator can act on"
-        )]
-        Ok(value) if !value.is_empty() => value.parse::<u32>().map(Some).map_err(|_| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("{name} must be a non-negative integer"),
-            )
+    match env_var(name)? {
+        Some(value) if !value.is_empty() => value.parse::<u32>().map(Some).map_err(|error| {
+            // A number too large for `u32` is a number, so it reads the range it is past.
+            let message = match error.kind() {
+                std::num::IntErrorKind::PosOverflow => {
+                    format!("{name} must be between 0 and {}", u32::MAX)
+                }
+                _ => format!("{name} must be a non-negative integer"),
+            };
+            io::Error::new(io::ErrorKind::InvalidInput, message)
         }),
         _ => Ok(None),
     }
@@ -1705,10 +1703,7 @@ pub(super) fn parse_optional_env_u32(name: &str) -> io::Result<Option<u32>> {
 /// and the file path (if loaded from `TRUSS_PRESETS_FILE`).
 pub(super) fn parse_presets_from_env()
 -> io::Result<(HashMap<String, TransformOptionsPayload>, Option<PathBuf>)> {
-    let (json_str, source, file_path) = match env::var("TRUSS_PRESETS_FILE")
-        .ok()
-        .filter(|v| !v.is_empty())
-    {
+    let (json_str, source, file_path) = match env_nonempty("TRUSS_PRESETS_FILE")? {
         Some(path) => {
             let content = std::fs::read_to_string(&path).map_err(|e| {
                 io::Error::new(
@@ -1719,7 +1714,7 @@ pub(super) fn parse_presets_from_env()
             let pb = PathBuf::from(&path);
             (content, format!("TRUSS_PRESETS_FILE `{path}`"), Some(pb))
         }
-        None => match env::var("TRUSS_PRESETS").ok().filter(|v| !v.is_empty()) {
+        None => match env_nonempty("TRUSS_PRESETS")? {
             Some(value) => (value, "TRUSS_PRESETS".to_string(), None),
             None => return Ok((HashMap::new(), None)),
         },
@@ -1777,10 +1772,7 @@ pub(super) fn parse_presets_file(
 /// validate that every name and value conforms to RFC 7230. Returns an empty vec when the
 /// variable is unset or empty.
 fn parse_response_headers_from_env() -> io::Result<Vec<(String, String)>> {
-    let Some(raw) = env::var("TRUSS_RESPONSE_HEADERS")
-        .ok()
-        .filter(|v| !v.is_empty())
-    else {
+    let Some(raw) = env_nonempty("TRUSS_RESPONSE_HEADERS")? else {
         return Ok(Vec::new());
     };
 
@@ -1962,6 +1954,28 @@ mod tests {
         let _env = ScopedEnv::set("TRUSS_KEEP_ALIVE_MAX_REQUESTS", "100001");
         let result = parse_env_u64_ranged("TRUSS_KEEP_ALIVE_MAX_REQUESTS", 1, 100_000);
         assert!(result.is_err());
+    }
+
+    /// A number too large for the integer type is a number past the setting's range, and
+    /// the error says which range rather than that it is not a number.
+    #[test]
+    #[serial]
+    fn a_numeric_setting_past_its_integer_type_names_its_range() {
+        let _env = ScopedEnv::set("TRUSS_KEEP_ALIVE_MAX_REQUESTS", "99999999999999999999");
+        let error = parse_env_u64_ranged("TRUSS_KEEP_ALIVE_MAX_REQUESTS", 1, 100_000)
+            .expect_err("past u64 is out of range");
+        assert_eq!(
+            error.to_string(),
+            "TRUSS_KEEP_ALIVE_MAX_REQUESTS must be between 1 and 100000"
+        );
+
+        let _env = ScopedEnv::set("TRUSS_PUBLIC_MAX_AGE", "4294967296");
+        let error =
+            parse_optional_env_u32("TRUSS_PUBLIC_MAX_AGE").expect_err("past u32 is out of range");
+        assert_eq!(
+            error.to_string(),
+            "TRUSS_PUBLIC_MAX_AGE must be between 0 and 4294967295"
+        );
     }
 
     #[test]
@@ -2486,6 +2500,20 @@ mod tests {
         assert!(TrustedProxy::parse("::1/129").is_err());
     }
 
+    /// A prefix too large for the byte it is held in is too large for the address as well,
+    /// and reads the sentence `/33` does rather than the parser's wording about the byte.
+    #[test]
+    fn trusted_proxy_parse_prefix_past_u8_names_the_maximum() {
+        assert_eq!(
+            TrustedProxy::parse("10.0.0.0/256").unwrap_err(),
+            "prefix length 256 exceeds maximum 32 for `10.0.0.0/256`"
+        );
+        assert_eq!(
+            TrustedProxy::parse("::1/99999999999999999999").unwrap_err(),
+            "prefix length 99999999999999999999 exceeds maximum 128 for `::1/99999999999999999999`"
+        );
+    }
+
     #[test]
     fn trusted_proxy_contains_exact_match() {
         let tp = TrustedProxy::Addr("10.0.0.1".parse().unwrap());
@@ -2618,6 +2646,73 @@ mod tests {
             assert!(
                 error.to_string().contains("TRUSS_DISABLE_METRICS"),
                 "the error names the variable: {error}"
+            );
+        }
+    }
+
+    /// A value the platform cannot hand over as UTF-8: a lone `0xFF` byte on Unix, an
+    /// unpaired surrogate on Windows.
+    fn not_unicode() -> std::ffi::OsString {
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt;
+            std::ffi::OsString::from_vec(vec![b'a', 0xFF])
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::ffi::OsStringExt;
+            std::ffi::OsString::from_wide(&[u16::from(b'a'), 0xD800])
+        }
+    }
+
+    /// A setting that is present but not UTF-8 is a setting the operator gave, so it stops
+    /// startup with its name, the way any other unreadable value does. Reading it as unset
+    /// used to drop a bearer token or a signing secret and carry on without them.
+    #[test]
+    #[serial]
+    fn from_env_refuses_a_setting_that_is_not_utf8() {
+        let names = [
+            #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
+            "TRUSS_STORAGE_BACKEND",
+            #[cfg(feature = "gcs")]
+            "TRUSS_GCS_BUCKET",
+            #[cfg(feature = "azure")]
+            "TRUSS_AZURE_CONTAINER",
+            "TRUSS_STORAGE_ROOT",
+            "TRUSS_BEARER_TOKEN",
+            "TRUSS_PUBLIC_BASE_URL",
+            "TRUSS_SIGNED_URL_KEY_ID",
+            "TRUSS_SIGNED_URL_SECRET",
+            "TRUSS_SIGNING_KEYS",
+            "TRUSS_CACHE_ROOT",
+            "TRUSS_CACHE_MAX_BYTES",
+            "TRUSS_PUBLIC_MAX_AGE",
+            "TRUSS_ALLOW_INSECURE_URL_SOURCES",
+            "TRUSS_MAX_CONCURRENT_TRANSFORMS",
+            "TRUSS_HEALTH_HYSTERESIS_MARGIN",
+            "TRUSS_METRICS_TOKEN",
+            "TRUSS_HEALTH_TOKEN",
+            "TRUSS_PRESETS_FILE",
+            "TRUSS_PRESETS",
+            "TRUSS_RESPONSE_HEADERS",
+            "TRUSS_LOG_LEVEL",
+            "TRUSS_FORMAT_PREFERENCE",
+            "TRUSS_TRUSTED_PROXIES",
+            "TRUSS_BIND_ADDR",
+        ];
+
+        for name in names {
+            // SAFETY: the test is #[serial]; the variable is removed before the next one.
+            unsafe { env::set_var(name, not_unicode()) };
+            let result = ServerConfig::from_env();
+            // SAFETY: as above.
+            unsafe { env::remove_var(name) };
+            let error = result.expect_err("a setting that is not UTF-8 stops startup");
+            assert_eq!(error.kind(), io::ErrorKind::InvalidInput, "{name}: {error}");
+            assert_eq!(
+                error.to_string(),
+                format!("{name} must be valid UTF-8"),
+                "the error names the variable"
             );
         }
     }

@@ -395,8 +395,16 @@ pub struct WasmWatermarkOptions {
     /// Watermark placement position (e.g. `bottom-right`, `center`).
     pub position: Option<String>,
     /// Watermark opacity (1–100). Default: 50.
+    #[serde(
+        default,
+        deserialize_with = "crate::core::deserialize_watermark_opacity"
+    )]
     pub opacity: Option<u8>,
     /// Margin in pixels from the nearest edge. Default: 10.
+    #[serde(
+        default,
+        deserialize_with = "crate::core::deserialize_watermark_margin"
+    )]
     pub margin: Option<u32>,
 }
 
@@ -603,6 +611,24 @@ mod tests {
         r#"{"height":4294967296}"#,
         "height is too large to be a number of pixels"
     )]
+    #[case(
+        r#"{"width":18446744073709551615}"#,
+        "width is too large to be a number of pixels"
+    )]
+    #[case(
+        r#"{"width":99999999999999999999}"#,
+        "width is too large to be a number of pixels"
+    )]
+    #[case(
+        r#"{"width":-99999999999999999999}"#,
+        "width must be greater than zero"
+    )]
+    #[case(
+        r#"{"quality":99999999999999999999}"#,
+        "quality must be between 1 and 100"
+    )]
+    #[case(r#"{"rotate":9223372036854775808}"#, "rotate is out of range")]
+    #[case(r#"{"rotate":1e20}"#, "rotate is out of range")]
     fn an_out_of_range_option_reports_the_documented_rule(
         #[case] options_json: &str,
         #[case] expected: &str,
@@ -612,12 +638,34 @@ mod tests {
             .to_string();
 
         assert!(error.contains(expected), "{error}");
-        for rust_type in ["u8", "u32", "i32", "0..="] {
+        for rust_type in ["u8", "u32", "i32", "i64", "u64", "floating point", "0..="] {
             assert!(
                 !error.contains(rust_type),
                 "a Rust integer is not the caller's vocabulary: {error}"
             );
         }
+    }
+
+    /// The watermark options read their numbers the way the transform options do, so an
+    /// opacity or margin past the field's integer type reads the documented rule.
+    #[rstest]
+    #[case(r#"{"opacity":300}"#, "watermark opacity must be between 1 and 100")]
+    #[case(r#"{"opacity":-5}"#, "watermark opacity must be between 1 and 100")]
+    #[case(
+        r#"{"margin":4294967296}"#,
+        "watermark margin is too large to be a number of pixels"
+    )]
+    #[case(r#"{"margin":-1}"#, "watermark margin must not be negative")]
+    fn an_out_of_range_watermark_option_reports_the_documented_rule(
+        #[case] options_json: &str,
+        #[case] expected: &str,
+    ) {
+        let error = serde_json::from_str::<WasmWatermarkOptions>(options_json)
+            .expect_err("the value is out of range")
+            .to_string();
+
+        assert!(error.contains(expected), "{error}");
+        assert!(!error.contains("u8") && !error.contains("u32"), "{error}");
     }
 
     /// A value the field can hold reaches the transform, so its sentence comes from the

@@ -13,6 +13,22 @@ pub(super) struct MultipartPart {
     pub(super) body_range: std::ops::Range<usize>,
 }
 
+/// Reads a numeric form field into the integer its option is held in.
+///
+/// Read the way the query reads the same option, so `watermark_opacity=300` and
+/// `watermark_margin=-1` name the rule they break rather than `must be an integer`, which
+/// both are. Text that is not an integer at all still says so, with the field's name.
+fn narrow_form_integer<T: TryFrom<i64> + std::fmt::Debug>(
+    text: &str,
+    field: &str,
+    validate: fn(i64) -> Result<T, &'static str>,
+) -> Result<T, HttpResponse> {
+    let value = crate::core::WideInteger::parse(text.trim())
+        .map(crate::core::WideInteger::saturated)
+        .ok_or_else(|| bad_request_response(&format!("{field} must be an integer")))?;
+    super::auth::narrow_integer(value, validate)
+}
+
 pub(super) fn parse_upload_request(
     body: &[u8],
     boundary: &str,
@@ -114,15 +130,11 @@ pub(super) fn parse_upload_request(
                 )]
                 let text = std::str::from_utf8(&body[part.body_range])
                     .map_err(|_| bad_request_response("watermark_opacity must be valid UTF-8"))?;
-                #[expect(
-                    clippy::map_err_ignore,
-                    reason = "the sentence names the field and the rule it breaks, and the parser's own wording in a `ParseIntError` says nothing more a caller can act on"
-                )]
-                let parsed = text
-                    .trim()
-                    .parse::<u8>()
-                    .map_err(|_| bad_request_response("watermark_opacity must be an integer"))?;
-                watermark_opacity = Some(parsed);
+                watermark_opacity = Some(narrow_form_integer(
+                    text,
+                    "watermark_opacity",
+                    crate::core::validate_watermark_opacity_value,
+                )?);
             }
             "watermark_margin" => {
                 if watermark_margin.is_some() {
@@ -136,15 +148,11 @@ pub(super) fn parse_upload_request(
                 )]
                 let text = std::str::from_utf8(&body[part.body_range])
                     .map_err(|_| bad_request_response("watermark_margin must be valid UTF-8"))?;
-                #[expect(
-                    clippy::map_err_ignore,
-                    reason = "the sentence names the field and the rule it breaks, and the parser's own wording in a `ParseIntError` says nothing more a caller can act on"
-                )]
-                let parsed = text
-                    .trim()
-                    .parse::<u32>()
-                    .map_err(|_| bad_request_response("watermark_margin must be an integer"))?;
-                watermark_margin = Some(parsed);
+                watermark_margin = Some(narrow_form_integer(
+                    text,
+                    "watermark_margin",
+                    crate::core::validate_watermark_margin_value,
+                )?);
             }
             field_name => {
                 return Err(bad_request_response(&format!(
@@ -928,6 +936,54 @@ mod tests {
         let err = parse_upload_request(&body, boundary, &no_presets()).unwrap_err();
         assert_eq!(err.status, "400 Bad Request");
         assert!(String::from_utf8_lossy(&err.body).contains("integer"));
+    }
+
+    /// A whole number past what the field holds is refused with the range the query and
+    /// JSON spellings of the same option give, not as something that is not an integer.
+    #[test]
+    fn test_upload_request_watermark_numbers_out_of_range_read_the_range_sentence() {
+        let cases: [(&str, &[u8], &str); 5] = [
+            (
+                "watermark_opacity",
+                b"300",
+                "watermark opacity must be between 1 and 100",
+            ),
+            (
+                "watermark_opacity",
+                b"-5",
+                "watermark opacity must be between 1 and 100",
+            ),
+            (
+                "watermark_opacity",
+                b"99999999999999999999",
+                "watermark opacity must be between 1 and 100",
+            ),
+            (
+                "watermark_margin",
+                b"4294967296",
+                "watermark margin is too large to be a number of pixels",
+            ),
+            (
+                "watermark_margin",
+                b"-1",
+                "watermark margin must not be negative",
+            ),
+        ];
+        let boundary = "b";
+        for (field, value, expected) in cases {
+            let body = build_multipart_body(
+                boundary,
+                &[
+                    ("file", Some("image/png"), b"IMG"),
+                    ("watermark", Some("image/png"), b"WM"),
+                    (field, None, value),
+                ],
+            );
+            let err = parse_upload_request(&body, boundary, &no_presets()).unwrap_err();
+            assert_eq!(err.status, "400 Bad Request");
+            let text = String::from_utf8_lossy(&err.body);
+            assert!(text.contains(expected), "{field}: {text}");
+        }
     }
 
     #[test]
