@@ -306,7 +306,9 @@ jobs:
   # ── 5. Publish crate to crates.io ───────────────────────────────────
   publish-crate:
     runs-on: ubuntu-latest
-    needs: [verify, release-artifacts]
+    # After verify-release: a version on crates.io cannot be taken back, so it
+    # goes out only once the signed release has been checked.
+    needs: [verify, release-artifacts, verify-release]
     permissions:
       contents: read
       id-token: write
@@ -429,7 +431,7 @@ jobs:
           path: packages/truss-url-signer/*.tgz
 
   publish-url-signer-package:
-    needs: [build-url-signer-package, release-artifacts]
+    needs: [build-url-signer-package, release-artifacts, verify-release]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -451,7 +453,7 @@ jobs:
         run: npm publish --access public ./npm-release/*.tgz
 
   publish-wasm-package:
-    needs: [build-wasm-package, release-artifacts]
+    needs: [build-wasm-package, release-artifacts, verify-release]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -474,7 +476,7 @@ jobs:
 
   publish-homebrew-formula:
     if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v') && !contains(github.ref_name, '-') && !contains(github.ref_name, '+')
-    needs: create-release
+    needs: [create-release, verify-release]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -561,7 +563,7 @@ jobs:
   # ── 6. Build & push container image ─────────────────────────────────
   publish-container:
     runs-on: ubuntu-latest
-    needs: [publish-crate, build-binaries, licenses]
+    needs: [verify-release, build-binaries, licenses]
     # id-token signs the image with cosign and the attestation with the
     # workflow's identity; attestations stores the attestation.
     permissions:
@@ -665,11 +667,11 @@ jobs:
         run: |
           IMAGE="${{ steps.image.outputs.name }}"
           TAGS=(${{ steps.meta.outputs.tags }})
-          ARGS=""
+          args=()
           for t in "${TAGS[@]}"; do
-            ARGS+=" -t ${t}"
+            args+=(-t "${t}")
           done
-          docker buildx imagetools create ${ARGS} \
+          docker buildx imagetools create "${args[@]}" \
             "${IMAGE}:${{ github.ref_name }}-amd64" \
             "${IMAGE}:${{ github.ref_name }}-arm64"
 
@@ -709,12 +711,11 @@ jobs:
   prepare-release:
     runs-on: ubuntu-latest
     needs:
-      - publish-container
       - release-artifacts
       - build-sbom
       - licenses
-      - publish-wasm-package
-      - publish-url-signer-package
+      - build-wasm-package
+      - build-url-signer-package
     permissions:
       contents: read
       id-token: write
@@ -899,8 +900,9 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   # ── 10. Verify the published release as a user would ────────────────
+  # Nothing is published to crates.io, npm or GHCR before this passes.
   verify-release:
-    needs: [create-release, publish-container]
+    needs: create-release
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -938,6 +940,16 @@ jobs:
               --source-tag "${GITHUB_REF_NAME}"
             gh attestation verify "${f}" --repo "${GITHUB_REPOSITORY}"
           done
+
+  # ── 11. Verify the pushed image as a user would ────────────────────
+  verify-container:
+    needs: publish-container
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
 
       - name: Verify the container image signature
         run: |
