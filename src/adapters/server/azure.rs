@@ -246,7 +246,9 @@ fn build_blob_client(
     })?;
     container_url
         .path_segments_mut()
-        .map_err(|_| {
+        // `path_segments_mut` fails with `()`, and the only reason it has is the one the
+        // message gives: the URL cannot be a base, such as `mailto:` or `data:`.
+        .map_err(|()| {
             azure_core::Error::with_message(
                 azure_core::error::ErrorKind::Other,
                 format!("{endpoint_url} is not a valid base URL"),

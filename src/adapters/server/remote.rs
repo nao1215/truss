@@ -169,7 +169,7 @@ fn fetch_remote_bytes(
     // Validate the URL against current security policy (scheme, port, IP range)
     // *before* checking the origin cache. This ensures that cached responses from
     // a permissive configuration cannot be served after tightening restrictions.
-    let _ = prepare_remote_fetch_target(url, config)?;
+    let _: RemoteFetchTarget = prepare_remote_fetch_target(url, config)?;
 
     // Check the origin response cache before making an HTTP request.
     let origin_cache = config

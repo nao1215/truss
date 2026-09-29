@@ -106,7 +106,10 @@ impl SignedWatermarkParams {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the signature is public API, and grouping the arguments into a struct would break every caller for no change in what they mean"
+)]
 pub fn sign_public_url(
     base_url: &str,
     source: SignedUrlSource,
@@ -152,7 +155,10 @@ pub(crate) fn signing_input_error(
 
 /// Like [`sign_public_url`] but allows the caller to specify the HTTP method
 /// included in the canonical string (e.g. `"GET"` or `"HEAD"`).
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the signature is public API, and grouping the arguments into a struct would break every caller for no change in what they mean"
+)]
 pub fn sign_public_url_with_method(
     method: &str,
     base_url: &str,
