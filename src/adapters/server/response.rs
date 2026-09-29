@@ -509,9 +509,17 @@ pub(super) fn transform_error_response(error: TransformError) -> HttpResponse {
     problem_response(class, &detail)
 }
 
+/// Maps a failure to read a stored source onto the response that presents it.
+///
+/// A name the operating system refuses as a name, one too long for the file system or one
+/// holding a character it does not allow, is about the path the caller sent rather than about
+/// the server's storage, so it is answered as the other unusable paths are.
 pub(super) fn map_source_io_error(error: io::Error) -> HttpResponse {
     match error.kind() {
         io::ErrorKind::NotFound => not_found_response("source artifact was not found"),
+        io::ErrorKind::InvalidInput | io::ErrorKind::InvalidFilename => {
+            bad_request_response("source path is not a usable file name")
+        }
         _ => internal_error_response(&format!("failed to access source artifact: {error}")),
     }
 }
@@ -954,6 +962,18 @@ mod tests {
             detail.starts_with("failed to access source artifact:"),
             "detail should describe the IO error, got: {detail}"
         );
+    }
+
+    /// The operating system refusing a name as a name is about the path the caller sent,
+    /// not about the server, so it is answered as the other unusable paths are.
+    #[rstest]
+    #[case::invalid_input(io::ErrorKind::InvalidInput)]
+    #[case::invalid_filename(io::ErrorKind::InvalidFilename)]
+    fn map_source_io_error_answers_an_unusable_name_as_a_bad_request(#[case] kind: io::ErrorKind) {
+        let resp = map_source_io_error(io::Error::new(kind, "file name contained a NUL byte"));
+        assert_eq!(resp.status, "400 Bad Request");
+        let v = parse_body(&resp);
+        assert_eq!(v["status"], 400);
     }
 
     #[test]

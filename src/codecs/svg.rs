@@ -32,7 +32,9 @@ use image::codecs::jpeg::JpegEncoder;
 use image::codecs::png::PngEncoder;
 use image::codecs::webp::WebPEncoder;
 use image::{ColorType, ImageEncoder, RgbaImage};
-use quick_xml::events::{BytesStart, Event};
+use quick_xml::XmlVersion;
+use quick_xml::escape::partial_escape;
+use quick_xml::events::{BytesRef, BytesStart, BytesText, Event};
 
 /// Maps a crop rectangle from the drawing's own coordinates into the space it is rasterized
 /// in, and returns the size the whole drawing has to be rasterized at.
@@ -350,11 +352,20 @@ const MAX_SVG_NESTING_DEPTH: usize = 256;
 /// - External references in `href`/`xlink:href` (keeps internal `#fragment` refs)
 /// - `data:` URLs containing scripts (allows `data:image/*`)
 /// - External `url()` references wherever they appear: `<style>` text, the `style`
-///   attribute, and the presentation attributes that take a `<funciri>`
+///   attribute, and the presentation attributes that take a `<funciri>`, however the
+///   function name is spelled; and external string arguments of the functions in
+///   [`URL_STRING_FUNCTIONS`]
 /// - At-rules outside [`ALLOWED_AT_RULES`], which is what removes `@import` however
 ///   its at-keyword is spelled
 /// - Processing instructions, which a browser honours and which can load an external
 ///   stylesheet; the XML declaration is kept
+/// - Elements nested inside a `<style>`, which are not part of its stylesheet
+///
+/// The CSS is judged as a renderer reads it: character and entity references are resolved
+/// and a `<style>` element's text is taken whole before it is read, and it is written back
+/// escaped. A reference to an entity the internal subset declares is replaced by its text,
+/// so no expansion is left for the renderer to do. The output is a fixed point: sanitizing
+/// it again returns it unchanged.
 ///
 /// Refuses a document whose doctype declares an external entity or nests one entity
 /// inside another, because removing only the declarations would leave the references
@@ -366,19 +377,71 @@ fn sanitize_svg(bytes: &[u8]) -> Result<String, TransformError> {
     let mut reader = Reader::from_str(input);
     let mut writer = Writer::new(Cursor::new(Vec::new()));
     let mut skip_depth: usize = 0;
-    let mut in_style = false;
+    let mut stylesheet: Option<Stylesheet> = None;
+    let mut entities = DeclaredEntities::default();
     let mut element_count: usize = 0;
     let mut nesting_depth: usize = 0;
 
     loop {
-        match reader.read_event() {
+        let event = match reader.read_event() {
             Ok(Event::Eof) => break,
-            Ok(Event::Start(ref e)) => {
-                let name = local_name(e.name().as_ref());
-                if skip_depth > 0 {
-                    skip_depth += 1;
-                    continue;
+            Ok(event) => event,
+            Err(_) => return Err(TransformError::DecodeFailed(svg_parse_failure())),
+        };
+
+        if skip_depth > 0 {
+            match event {
+                Event::Start(_) => skip_depth += 1,
+                Event::End(_) => skip_depth -= 1,
+                _ => {}
+            }
+            continue;
+        }
+
+        // Everything up to a `<style>` element's end tag is its stylesheet. A renderer reads
+        // the element's child text as one stylesheet, with the references in it resolved, so
+        // that is what is collected and sanitized: judging each text node alone let a
+        // reference, a comment, or an element sit inside a `url(` that no single piece
+        // spelled. Elements inside the stylesheet are not part of it and are dropped, which
+        // also keeps a nested `<style>` from ending the outer one early.
+        if let Some(sheet) = stylesheet.as_mut() {
+            match event {
+                Event::Start(_) => sheet.nested += 1,
+                Event::End(_) if sheet.nested > 0 => sheet.nested -= 1,
+                Event::End(ref end) => {
+                    let css = sanitize_css(&sheet.text);
+                    stylesheet = None;
+                    if !css.is_empty() {
+                        write_svg_event(
+                            &mut writer,
+                            Event::Text(BytesText::from_escaped(partial_escape(css.as_str()))),
+                        )?;
+                    }
+                    nesting_depth = nesting_depth.saturating_sub(1);
+                    write_svg_event(&mut writer, Event::End(end.to_owned()))?;
                 }
+                Event::Text(ref text) if sheet.nested == 0 => {
+                    sheet.text.push_str(&text.xml10_content());
+                }
+                Event::CData(ref data) if sheet.nested == 0 => {
+                    sheet.text.push_str(&data.xml10_content());
+                }
+                Event::GeneralRef(ref reference) if sheet.nested == 0 => {
+                    sheet.text.push_str(&entities.resolve_reference(reference));
+                }
+                _ => {}
+            }
+            continue;
+        }
+
+        match event {
+            Event::Start(ref e) => {
+                // The parser takes whatever stands before the first whitespace as the name,
+                // quotes and `=` included; written back, such a name no longer parses.
+                if !is_xml_name(e.name().as_ref()) {
+                    return Err(TransformError::DecodeFailed(svg_parse_failure()));
+                }
+                let name = local_name(e.name().as_ref());
                 if is_forbidden_element(&name) {
                     skip_depth = 1;
                     continue;
@@ -396,30 +459,17 @@ fn sanitize_svg(bytes: &[u8]) -> Result<String, TransformError> {
                     )));
                 }
                 if name == "style" {
-                    in_style = true;
+                    stylesheet = Some(Stylesheet::default());
                 }
-                let sanitized = sanitize_attributes(e);
-                writer
-                    .write_event(Event::Start(sanitized))
-                    .map_err(|e| TransformError::DecodeFailed(format!("SVG write error: {e}")))?;
+                write_svg_event(&mut writer, Event::Start(sanitize_attributes(e, &entities)))?;
             }
-            Ok(Event::End(ref e)) => {
-                if skip_depth > 0 {
-                    skip_depth -= 1;
-                    continue;
-                }
-                let name = local_name(e.name().as_ref());
-                if name == "style" {
-                    in_style = false;
-                }
+            Event::End(ref e) => {
                 nesting_depth = nesting_depth.saturating_sub(1);
-                writer
-                    .write_event(Event::End(e.to_owned()))
-                    .map_err(|e| TransformError::DecodeFailed(format!("SVG write error: {e}")))?;
+                write_svg_event(&mut writer, Event::End(e.to_owned()))?;
             }
-            Ok(Event::Empty(ref e)) => {
-                if skip_depth > 0 {
-                    continue;
+            Event::Empty(ref e) => {
+                if !is_xml_name(e.name().as_ref()) {
+                    return Err(TransformError::DecodeFailed(svg_parse_failure()));
                 }
                 let name = local_name(e.name().as_ref());
                 if is_forbidden_element(&name) {
@@ -431,54 +481,28 @@ fn sanitize_svg(bytes: &[u8]) -> Result<String, TransformError> {
                         "SVG exceeds maximum element count ({MAX_SVG_ELEMENTS})"
                     )));
                 }
-                let sanitized = sanitize_attributes(e);
-                writer
-                    .write_event(Event::Empty(sanitized))
-                    .map_err(|e| TransformError::DecodeFailed(format!("SVG write error: {e}")))?;
+                write_svg_event(&mut writer, Event::Empty(sanitize_attributes(e, &entities)))?;
             }
-            Ok(Event::Text(ref e)) => {
-                if skip_depth > 0 {
-                    continue;
-                }
-                if in_style {
-                    let text = quick_xml::escape::unescape(e.as_ref()).unwrap_or_default();
-                    let sanitized_css = sanitize_css_urls(&text);
-                    let text_event = quick_xml::events::BytesText::new(&sanitized_css);
-                    writer
-                        .write_event(Event::Text(text_event.into_owned()))
-                        .map_err(|e| {
-                            TransformError::DecodeFailed(format!("SVG write error: {e}"))
-                        })?;
+            // A character reference and a predefined entity stand for one character of text
+            // and are kept as written. A declared entity expands to whatever its declaration
+            // holds, markup included, so its text is written in its place and escaped;
+            // leaving the reference would leave the expansion to the renderer, past every
+            // rule above. A reference that resolves to nothing becomes U+FFFD.
+            Event::GeneralRef(ref reference) => {
+                let is_single_character = match reference.resolve_char_ref() {
+                    Ok(resolved) => {
+                        resolved.is_some()
+                            || quick_xml::escape::resolve_predefined_entity(reference).is_some()
+                    }
+                    Err(_) => false,
+                };
+                let event = if is_single_character {
+                    Event::GeneralRef(reference.to_owned())
                 } else {
-                    writer.write_event(Event::Text(e.to_owned())).map_err(|e| {
-                        TransformError::DecodeFailed(format!("SVG write error: {e}"))
-                    })?;
-                }
-            }
-            Ok(Event::CData(ref e)) => {
-                if skip_depth > 0 {
-                    continue;
-                }
-                if in_style {
-                    // CDATA inside <style> can contain @import/url() that loads
-                    // external resources.  Sanitize the CSS content, then emit
-                    // as a regular Text event (the CDATA wrapper is unnecessary
-                    // after sanitization and would hide the content from further
-                    // processing by downstream parsers).
-                    let sanitized_css = sanitize_css_urls(e.as_ref());
-                    let text_event = quick_xml::events::BytesText::new(&sanitized_css);
-                    writer
-                        .write_event(Event::Text(text_event.into_owned()))
-                        .map_err(|e| {
-                            TransformError::DecodeFailed(format!("SVG write error: {e}"))
-                        })?;
-                } else {
-                    writer
-                        .write_event(Event::CData(e.to_owned()))
-                        .map_err(|e| {
-                            TransformError::DecodeFailed(format!("SVG write error: {e}"))
-                        })?;
-                }
+                    let text = entities.resolve_reference(reference);
+                    Event::Text(BytesText::from_escaped(partial_escape(text.as_str())).into_owned())
+                };
+                write_svg_event(&mut writer, event)?;
             }
             // A processing instruction is honoured by a browser rendering the
             // document, and `<?xml-stylesheet?>` loads an external stylesheet —
@@ -486,7 +510,7 @@ fn sanitize_svg(bytes: &[u8]) -> Result<String, TransformError> {
             // and attribute rule at once. Declarative styling from outside the
             // document is not something a sanitizing image pipeline preserves.
             // The XML declaration is a separate event and is kept.
-            Ok(Event::PI(_)) => {}
+            Event::PI(_) => {}
             // The doctype itself is inert in every renderer, and an editor's
             // literal entity declarations have to survive or the references to
             // them dangle. A subset that declares an external entity or nests one
@@ -494,36 +518,109 @@ fn sanitize_svg(bytes: &[u8]) -> Result<String, TransformError> {
             // document is refused rather than stripped, because the content
             // references those entities and removing only the declarations would
             // emit a document that is no longer well-formed.
-            Ok(Event::DocType(ref e)) => {
-                if skip_depth > 0 {
-                    continue;
-                }
+            Event::DocType(ref e) => {
                 if doctype_carries_unsafe_declarations(e.as_ref()) {
                     return Err(TransformError::DecodeFailed(
                         "SVG doctype declares external or nested entities".to_string(),
                     ));
                 }
-                writer
-                    .write_event(Event::DocType(e.to_owned()))
-                    .map_err(|e| TransformError::DecodeFailed(format!("SVG write error: {e}")))?;
+                entities = DeclaredEntities::from_doctype(e.as_ref());
+                write_svg_event(&mut writer, Event::DocType(e.to_owned()))?;
             }
-            Ok(event) => {
-                if skip_depth > 0 {
-                    continue;
-                }
-                writer
-                    .write_event(event)
-                    .map_err(|e| TransformError::DecodeFailed(format!("SVG write error: {e}")))?;
-            }
-            Err(_) => {
-                return Err(TransformError::DecodeFailed(svg_parse_failure()));
-            }
+            event => write_svg_event(&mut writer, event)?,
         }
     }
 
     let result = writer.into_inner().into_inner();
+    // What truss serves as SVG it has to accept as SVG when it comes back. The sniffer and
+    // the XML parser can still read a malformed prolog their own ways, and a document they
+    // disagree about is refused here rather than served as something truss would refuse.
+    if !crate::core::is_svg(&result) {
+        return Err(TransformError::DecodeFailed(svg_parse_failure()));
+    }
     String::from_utf8(result)
         .map_err(|e| TransformError::DecodeFailed(format!("SVG output is not valid UTF-8: {e}")))
+}
+
+/// Writes one event of the sanitized document.
+fn write_svg_event(
+    writer: &mut Writer<Cursor<Vec<u8>>>,
+    event: Event<'_>,
+) -> Result<(), TransformError> {
+    writer
+        .write_event(event)
+        .map_err(|e| TransformError::DecodeFailed(format!("SVG write error: {e}")))
+}
+
+/// The text of a `<style>` element collected so far, and how deep inside it the reader is.
+#[derive(Default)]
+struct Stylesheet {
+    text: String,
+    nested: usize,
+}
+
+/// The general entities a document's internal subset declares, with their replacement text.
+///
+/// A subset that declares an external entity or references one entity from another is
+/// refused before this is built, so every replacement text here is a literal.
+#[derive(Default)]
+struct DeclaredEntities(Vec<(String, String)>);
+
+impl DeclaredEntities {
+    /// Reads the `<!ENTITY name "text">` declarations of a doctype's internal subset.
+    ///
+    /// Parameter entities are skipped: they are used inside the subset, never in the
+    /// document. The first declaration of a name is the one that binds, as in XML.
+    fn from_doctype(doctype: &str) -> Self {
+        let mut entities: Vec<(String, String)> = Vec::new();
+        let Some((_, mut rest)) = doctype.split_once('[') else {
+            return Self(entities);
+        };
+        while let Some(start) = rest.find("<!ENTITY") {
+            rest = rest[start + "<!ENTITY".len()..].trim_start();
+            if rest.starts_with('%') {
+                continue;
+            }
+            let name_end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+            let name = &rest[..name_end];
+            rest = rest[name_end..].trim_start();
+            let Some(quote) = rest.chars().next().filter(|c| *c == '"' || *c == '\'') else {
+                continue;
+            };
+            let Some(length) = rest[1..].find(quote) else {
+                break;
+            };
+            let text = &rest[1..1 + length];
+            if !entities.iter().any(|(declared, _)| declared == name) {
+                entities.push((name.to_string(), text.to_string()));
+            }
+            rest = &rest[1 + length + 1..];
+        }
+        Self(entities)
+    }
+
+    /// The replacement text of `&name;`, which is U+FFFD for a name neither XML nor the
+    /// document declares.
+    fn resolve(&self, name: &str) -> &str {
+        quick_xml::escape::resolve_predefined_entity(name)
+            .or_else(|| {
+                self.0
+                    .iter()
+                    .find(|(declared, _)| declared == name)
+                    .map(|(_, text)| text.as_str())
+            })
+            .unwrap_or("\u{FFFD}")
+    }
+
+    /// The text a reference in content stands for, which is U+FFFD for a character
+    /// reference to a character XML does not allow.
+    fn resolve_reference(&self, reference: &BytesRef<'_>) -> String {
+        match reference.resolve_char_ref() {
+            Ok(Some(ch)) => ch.to_string(),
+            Ok(None) => self.resolve(reference).to_string(),
+            Err(_) => "\u{FFFD}".to_string(),
+        }
+    }
 }
 
 /// Returns `true` when a doctype's internal subset declares something a
@@ -585,28 +682,37 @@ fn is_event_handler(attr_name: &str) -> bool {
     lower.starts_with("on") && lower.len() > 2 && lower.as_bytes()[2].is_ascii_alphabetic()
 }
 
-/// Returns `true` if the href value is dangerous.
+/// Returns `true` if a reference, in `href` or in a CSS function, is dangerous.
 ///
 /// Uses an allowlist approach: only empty values, `#fragment` references, and
 /// `data:image/*` URLs are considered safe.  Everything else — including
 /// `file:`, `ftp:`, `javascript:`, `http://`, unknown schemes, and bare
 /// paths — is blocked.
+///
+/// A value is safe only when it is safe both as written and as the URL parser a renderer
+/// uses reads it, which drops every tab and newline wherever it stands: read that way,
+/// `data:image/sv<TAB>g+xml` is the embedded SVG it becomes. Only ASCII whitespace is
+/// trimmed from the ends, so a value that starts with anything else, a no-break space or a
+/// control character, is not taken for the fragment or the raster URL that follows it.
 fn is_dangerous_href(value: &str) -> bool {
-    let trimmed = value.trim();
+    let trimmed = value.trim_matches(|c: char| c.is_ascii_whitespace());
+    let parsed: String = trimmed
+        .chars()
+        .filter(|c| !matches!(c, '\t' | '\n' | '\r'))
+        .collect();
+    names_an_external_resource(trimmed) || names_an_external_resource(&parsed)
+}
 
-    // Allow empty hrefs (harmless).
-    if trimmed.is_empty() {
-        return false;
-    }
-
-    // Allow internal fragment references (#id).
-    if trimmed.starts_with('#') {
+/// The allowlist [`is_dangerous_href`] applies to one reading of a value.
+fn names_an_external_resource(value: &str) -> bool {
+    // Allow empty hrefs (harmless) and internal fragment references (#id).
+    if value.is_empty() || value.starts_with('#') {
         return false;
     }
 
     // Allow safe raster data:image/* URLs, but reject data:image/svg+xml
     // to prevent embedded SVGs from bypassing sanitization.
-    let lower = trimmed.to_ascii_lowercase();
+    let lower = value.to_ascii_lowercase();
     if lower.starts_with("data:image/") {
         return lower.starts_with("data:image/svg");
     }
@@ -615,18 +721,44 @@ fn is_dangerous_href(value: &str) -> bool {
     true
 }
 
+/// Returns `true` when `name` can be written back as an XML element or attribute name.
+///
+/// The parser hands back whatever stood before the whitespace or the `=` that ends a name,
+/// quotes included, and writing such a name back produced a document that no longer parsed.
+fn is_xml_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars.next().is_some_and(|first| {
+        first.is_ascii_alphabetic() || matches!(first, '_' | ':') || !first.is_ascii()
+    }) && chars
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | ':' | '-' | '.') || !c.is_ascii())
+}
+
 /// Sanitizes attributes on an SVG element, removing dangerous attributes.
 ///
 /// Removes event handlers, dangerous `href`/`xlink:href` values, `xml:base`
 /// (which can redirect relative references externally), and external `url()`
-/// references inside inline `style` attributes. Non-UTF-8 attributes are
-/// dropped entirely as a safety measure.
-fn sanitize_attributes<'a>(element: &'a BytesStart<'a>) -> BytesStart<'a> {
+/// references inside inline `style` attributes. An attribute whose name or value does not
+/// parse is dropped entirely as a safety measure.
+///
+/// Each value is decided on as a renderer reads it, with its references resolved, and
+/// written back escaped exactly once. Taking the raw value and escaping it again turned
+/// `&amp;` into `&amp;amp;` on every pass.
+fn sanitize_attributes(
+    element: &BytesStart<'_>,
+    entities: &DeclaredEntities,
+) -> BytesStart<'static> {
     let mut sanitized = BytesStart::new(element.name().as_ref().to_string());
 
     for attr in element.attributes().flatten() {
         let key: &str = attr.key.as_ref();
-        let value: &str = &attr.value;
+        if !is_xml_name(key) {
+            continue;
+        }
+        let Ok(value) = attr.normalized_value_with(XmlVersion::Implicit1_0, 1, |name| {
+            Some(entities.resolve(name))
+        }) else {
+            continue;
+        };
 
         let key_lower = key.to_ascii_lowercase();
         let key_local = key_lower
@@ -646,7 +778,7 @@ fn sanitize_attributes<'a>(element: &'a BytesStart<'a>) -> BytesStart<'a> {
         }
 
         // Check href/xlink:href for dangerous values.
-        if key_local == "href" && is_dangerous_href(value) {
+        if key_local == "href" && is_dangerous_href(&value) {
             continue;
         }
 
@@ -656,27 +788,43 @@ fn sanitize_attributes<'a>(element: &'a BytesStart<'a>) -> BytesStart<'a> {
         // `marker-*` family, `cursor` — is another spelling of the same
         // declaration. Deciding from the value rather than from a list of names does
         // not need revisiting when SVG grows another such attribute.
-        if key_local == "style" || contains_css_url(value) {
-            let sanitized_value = sanitize_css_urls(value);
-            sanitized.push_attribute((key, sanitized_value.as_str()));
+        if key_local == "style" || mentions_css_resource(&value) {
+            let css = sanitize_css(&value);
+            sanitized.push_attribute((key, css.as_str()));
             continue;
         }
 
-        sanitized.push_attribute((key, value));
+        sanitized.push_attribute((key, value.as_ref()));
     }
 
     sanitized
 }
 
-/// Returns `true` when the value contains a CSS `url(` token, ignoring case.
+/// Functions a renderer reads a string argument of as a URL to fetch.
 ///
-/// Avoids allocating a lowercased copy of every attribute value just to answer
-/// whether the value is worth rewriting.
-fn contains_css_url(value: &str) -> bool {
-    value
-        .as_bytes()
-        .windows(4)
-        .any(|window| window.eq_ignore_ascii_case(b"url("))
+/// `url()` is not listed: its argument is a URL however it is written, and it has a token
+/// of its own.
+const URL_STRING_FUNCTIONS: &[&str] = &["image", "image-set", "-webkit-image-set", "src"];
+
+/// Returns `true` when `value`, with its CSS escapes decoded and its case folded, spells a
+/// function that fetches a resource.
+fn mentions_css_resource(value: &str) -> bool {
+    // Nearly every attribute holds neither, and it is asked of every attribute.
+    if !value.contains(['(', '\\']) {
+        return false;
+    }
+    // `-webkit-image-set(` contains `image-set(`, so the list needs no entry of its own.
+    const SPELLINGS: [&str; 4] = ["url(", "image(", "image-set(", "src("];
+    let decoded = decode_css_escapes(value).to_ascii_lowercase();
+    SPELLINGS.iter().any(|spelling| decoded.contains(spelling))
+}
+
+/// Returns `true` when `text`, with its CSS escapes decoded and its case folded, contains
+/// the spelling `url(`.
+fn spells_url_function(text: &str) -> bool {
+    decode_css_escapes(text)
+        .to_ascii_lowercase()
+        .contains("url(")
 }
 
 /// At-rules kept in sanitized CSS.
@@ -703,247 +851,482 @@ const ALLOWED_AT_RULES: &[&str] = &[
     "supports",
 ];
 
-/// Reads a CSS identifier starting at `s`, decoding escapes.
+/// Returns `true` for the characters CSS treats as a newline.
+fn is_css_newline(ch: char) -> bool {
+    matches!(ch, '\n' | '\r' | '\x0c')
+}
+
+/// Returns `true` for the characters CSS treats as whitespace.
+fn is_css_whitespace(ch: char) -> bool {
+    ch == ' ' || ch == '\t' || is_css_newline(ch)
+}
+
+/// Returns the offset of the first character at or after `index` that is not CSS whitespace.
+fn skip_css_whitespace(s: &str, index: usize) -> usize {
+    s[index..]
+        .find(|ch: char| !is_css_whitespace(ch))
+        .map_or(s.len(), |offset| index + offset)
+}
+
+/// Returns `true` when `s` starts with a backslash that begins an escape.
 ///
-/// Returns the lowercased identifier and the number of bytes it occupies in the
-/// input. An escape is a backslash followed by one to six hex digits and at most
-/// one trailing whitespace character, or a backslash followed by any other
-/// character, which stands for that character.
+/// A backslash before a newline is not one: CSS reads it as a delimiter of its own, and
+/// the newline ends whatever token it was in.
+fn starts_valid_escape(s: &str) -> bool {
+    let mut chars = s.chars();
+    chars.next() == Some('\\') && !chars.next().is_some_and(is_css_newline)
+}
+
+/// Decodes the escape that starts just after a backslash, returning the character it stands
+/// for and the number of bytes it occupies after the backslash.
+///
+/// An escape is one to six hex digits and at most one whitespace character, which ends it
+/// and is consumed (a `\r\n` pair counts as one), or any other character, which stands for
+/// itself. A backslash at the end of the text, a zero, a surrogate, and a value past the
+/// last code point all stand for U+FFFD.
+fn decode_css_escape(s: &str) -> (char, usize) {
+    let hex_length = s.bytes().take(6).take_while(u8::is_ascii_hexdigit).count();
+    if hex_length == 0 {
+        return s
+            .chars()
+            .next()
+            .map_or(('\u{FFFD}', 0), |ch| (ch, ch.len_utf8()));
+    }
+    let ch = u32::from_str_radix(&s[..hex_length], 16)
+        .ok()
+        .filter(|value| *value != 0)
+        .and_then(char::from_u32)
+        .unwrap_or('\u{FFFD}');
+    let after = &s[hex_length..];
+    let terminator = if after.starts_with("\r\n") {
+        2
+    } else {
+        usize::from(after.starts_with(is_css_whitespace))
+    };
+    (ch, hex_length + terminator)
+}
+
+/// Decodes every CSS escape in `text`.
+fn decode_css_escapes(text: &str) -> String {
+    let mut decoded = String::with_capacity(text.len());
+    let mut index = 0;
+    while let Some(ch) = text[index..].chars().next() {
+        if starts_valid_escape(&text[index..]) {
+            let (escaped, length) = decode_css_escape(&text[index + 1..]);
+            decoded.push(escaped);
+            index += 1 + length;
+        } else {
+            decoded.push(ch);
+            index += ch.len_utf8();
+        }
+    }
+    decoded
+}
+
+/// Returns `true` when `s` starts a CSS name: a name character or an escape.
+fn starts_css_name(s: &str) -> bool {
+    s.chars()
+        .next()
+        .is_some_and(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' || !ch.is_ascii())
+        || starts_valid_escape(s)
+}
+
+/// Reads a CSS name starting at `s`, decoding escapes.
+///
+/// Returns the lowercased name and the number of bytes it occupies in the input. The name
+/// runs as far as name characters and escapes do, which is how a CSS tokenizer reads one:
+/// `u\72 l` is the name `url`, and a backslash before a newline ends the name rather than
+/// escaping the newline.
 fn read_css_identifier(s: &str) -> (String, usize) {
-    let bytes = s.as_bytes();
     let mut name = String::new();
     let mut index = 0;
 
-    while index < bytes.len() {
-        let byte = bytes[index];
-        if byte == b'\\' {
-            index += 1;
-            let mut hex = String::new();
-            while index < bytes.len() && hex.len() < 6 && bytes[index].is_ascii_hexdigit() {
-                hex.push(bytes[index] as char);
-                index += 1;
+    while let Some(ch) = s[index..].chars().next() {
+        if ch == '\\' {
+            if !starts_valid_escape(&s[index..]) {
+                break;
             }
-            if hex.is_empty() {
-                // A backslash before a non-hex character stands for that character.
-                if index < bytes.len() {
-                    let ch = s[index..].chars().next().unwrap_or('\u{FFFD}');
-                    name.push(ch);
-                    index += ch.len_utf8();
-                }
-            } else {
-                // One whitespace character after the hex digits terminates the
-                // escape and is consumed rather than being part of the name.
-                if index < bytes.len() && bytes[index].is_ascii_whitespace() {
-                    index += 1;
-                }
-                if let Some(ch) = u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32) {
-                    name.push(ch);
-                }
-            }
+            let (escaped, length) = decode_css_escape(&s[index + 1..]);
+            name.push(escaped.to_ascii_lowercase());
+            index += 1 + length;
             continue;
         }
-
-        if byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_' || byte >= 0x80 {
-            let ch = s[index..].chars().next().unwrap_or('\u{FFFD}');
-            name.push(ch);
+        if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' || !ch.is_ascii() {
+            name.push(ch.to_ascii_lowercase());
             index += ch.len_utf8();
             continue;
         }
-
         break;
     }
 
-    (name.to_ascii_lowercase(), index)
+    (name, index)
+}
+
+/// Reads a CSS string token starting at its opening quote.
+///
+/// Returns the number of bytes it occupies, its value with escapes decoded, and whether it
+/// is a bad string. A string ends at its closing quote or at the end of the text, and a
+/// newline that is not escaped ends it as a bad string, the newline itself not consumed:
+/// a renderer reads what follows the newline as CSS, not as more of the string.
+fn consume_css_string(s: &str) -> (usize, String, bool) {
+    let mut chars = s.chars();
+    let quote = chars.next().unwrap_or('"');
+    let mut value = String::new();
+    let mut index = quote.len_utf8();
+
+    while let Some(ch) = s[index..].chars().next() {
+        if ch == quote {
+            return (index + 1, value, false);
+        }
+        if is_css_newline(ch) {
+            return (index, value, true);
+        }
+        if ch == '\\' {
+            let after = &s[index + 1..];
+            match after.chars().next() {
+                // A backslash at the end of the text stands for nothing.
+                None => index += 1,
+                // An escaped newline continues the string and adds nothing to it.
+                Some(next) if is_css_newline(next) => {
+                    index += 1 + if after.starts_with("\r\n") { 2 } else { 1 };
+                }
+                Some(_) => {
+                    let (escaped, length) = decode_css_escape(after);
+                    value.push(escaped);
+                    index += 1 + length;
+                }
+            }
+            continue;
+        }
+        value.push(ch);
+        index += ch.len_utf8();
+    }
+
+    (index, value, false)
+}
+
+/// Returns the length of the comment at the start of `s`, which runs to its `*/` or to the
+/// end of the text.
+fn css_comment_len(s: &str) -> usize {
+    s[2..].find("*/").map_or(s.len(), |end| 2 + end + 2)
+}
+
+/// Returns `true` for the characters CSS calls non-printable, which end a url token as a
+/// bad url.
+fn is_css_non_printable(ch: char) -> bool {
+    matches!(ch, '\u{0}'..='\u{8}' | '\u{b}' | '\u{e}'..='\u{1f}' | '\u{7f}')
+}
+
+/// Returns the length of what is left of a bad url, which a renderer discards up to and
+/// including the next `)` that is not escaped.
+fn bad_url_remnants_len(s: &str) -> usize {
+    let mut index = 0;
+    while let Some(ch) = s[index..].chars().next() {
+        if ch == ')' {
+            return index + 1;
+        }
+        if starts_valid_escape(&s[index..]) {
+            index += 1 + decode_css_escape(&s[index + 1..]).1;
+            continue;
+        }
+        index += ch.len_utf8();
+    }
+    index
+}
+
+/// Reads a url token, starting just after `url(`, as CSS Syntax Level 3 does.
+///
+/// Returns the number of bytes consumed, including the closing `)`, and the URL, or `None`
+/// for a bad url. A url token ends at the first `)`, not at a balanced one: a quote, an
+/// open parenthesis, a non-printable character, or whitespace before anything but the `)`
+/// makes it a bad url, which a renderer discards up to the next `)` and does not load. The
+/// end of the text ends it as a url token, which a renderer does load.
+fn consume_css_url_token(s: &str) -> (usize, Option<String>) {
+    let mut index = skip_css_whitespace(s, 0);
+    let mut value = String::new();
+
+    loop {
+        let Some(ch) = s[index..].chars().next() else {
+            return (index, Some(value));
+        };
+        match ch {
+            ')' => return (index + 1, Some(value)),
+            _ if is_css_whitespace(ch) => {
+                index = skip_css_whitespace(s, index);
+                return match s[index..].chars().next() {
+                    None => (index, Some(value)),
+                    Some(')') => (index + 1, Some(value)),
+                    Some(_) => (index + bad_url_remnants_len(&s[index..]), None),
+                };
+            }
+            '"' | '\'' | '(' => return (index + bad_url_remnants_len(&s[index..]), None),
+            _ if is_css_non_printable(ch) => {
+                return (index + bad_url_remnants_len(&s[index..]), None);
+            }
+            '\\' if starts_valid_escape(&s[index..]) => {
+                let (escaped, length) = decode_css_escape(&s[index + 1..]);
+                value.push(escaped);
+                index += 1 + length;
+            }
+            '\\' => return (index + bad_url_remnants_len(&s[index..]), None),
+            _ => {
+                value.push(ch);
+                index += ch.len_utf8();
+            }
+        }
+    }
+}
+
+/// Returns the length of a function's remaining arguments, up to and including the `)`
+/// that closes it.
+///
+/// Strings, comments, escapes, nested parentheses, and url tokens are stepped over whole,
+/// so a `)` inside one of them does not end the function.
+fn css_function_rest_len(s: &str) -> usize {
+    let mut depth = 0usize;
+    let mut index = 0;
+
+    while let Some(ch) = s[index..].chars().next() {
+        let rest = &s[index..];
+        match ch {
+            '"' | '\'' => {
+                index += consume_css_string(rest).0;
+                continue;
+            }
+            '/' if rest.starts_with("/*") => {
+                index += css_comment_len(rest);
+                continue;
+            }
+            '(' => depth += 1,
+            ')' => {
+                if depth == 0 {
+                    return index + 1;
+                }
+                depth -= 1;
+            }
+            _ if starts_css_name(rest) => {
+                index += css_name_or_url_len(rest, &mut depth);
+                continue;
+            }
+            _ => {}
+        }
+        index += ch.len_utf8();
+    }
+
+    index
+}
+
+/// Steps over a name at the start of `s`, and over the url token after it when the name is
+/// `url` and a url token follows, returning the bytes stepped over.
+///
+/// A `url(` whose argument is a string is a function like any other, so its parenthesis
+/// opens a level of `depth`; the parenthesis of any other function is left to the caller.
+fn css_name_or_url_len(s: &str, depth: &mut usize) -> usize {
+    let (name, length) = read_css_identifier(s);
+    if name != "url" || !s[length..].starts_with('(') {
+        return length;
+    }
+    let after = &s[length + 1..];
+    if after[skip_css_whitespace(after, 0)..].starts_with(['"', '\'']) {
+        *depth += 1;
+        return length + 1;
+    }
+    length + 1 + consume_css_url_token(after).0
+}
+
+/// Reads a `url(` whose argument is a string, starting just after the parenthesis.
+///
+/// Returns the number of bytes consumed, including the closing `)`, and the URL when the
+/// function holds that one string and nothing else, or `None` when it holds anything more,
+/// which a renderer does not load and the caller removes.
+fn consume_css_url_function(s: &str) -> (usize, Option<String>) {
+    let start = skip_css_whitespace(s, 0);
+    let (length, value, bad) = consume_css_string(&s[start..]);
+    let mut index = skip_css_whitespace(s, start + length);
+    if !bad {
+        match s[index..].chars().next() {
+            None => return (index, Some(value)),
+            Some(')') => return (index + 1, Some(value)),
+            Some(_) => {}
+        }
+    }
+    index += css_function_rest_len(&s[index..]);
+    (index, None)
 }
 
 /// Returns the byte offset just past an at-rule, where `s` starts just after its at-keyword.
 ///
 /// A statement at-rule ends at the first top-level `;`; a block at-rule ends at
-/// the matching `}`. Quoted strings are skipped so a `;` or `}` inside one does
-/// not end the rule early.
+/// the matching `}`. Strings, comments, escapes, and url tokens are stepped over so a `;`
+/// or `}` inside one does not end the rule early, and a `}` that closes the block the rule
+/// stands in ends the rule without being removed with it.
 fn end_of_at_rule(s: &str) -> usize {
-    let bytes = s.as_bytes();
     let mut index = 0;
     let mut depth = 0usize;
-    let mut quote: Option<u8> = None;
 
-    while index < bytes.len() {
-        let byte = bytes[index];
-        if let Some(open) = quote {
-            if byte == b'\\' {
-                // Skip the escaped character whole. Advancing a fixed two bytes
-                // would leave the scan inside a multi-byte character; every byte
-                // it could then stop on is a continuation byte, so nothing is
-                // currently misread, but the offset this returns is used to slice
-                // the string and should not depend on that.
-                index += 1;
-                if let Some(escaped) = s[index..].chars().next() {
-                    index += escaped.len_utf8();
-                }
+    while let Some(ch) = s[index..].chars().next() {
+        let rest = &s[index..];
+        match ch {
+            '"' | '\'' => {
+                index += consume_css_string(rest).0;
                 continue;
             }
-            if byte == open {
-                quote = None;
+            '/' if rest.starts_with("/*") => {
+                index += css_comment_len(rest);
+                continue;
             }
-            index += 1;
-            continue;
-        }
-
-        match byte {
-            b'"' | b'\'' => quote = Some(byte),
-            b'{' => depth += 1,
-            b'}' => {
-                if depth <= 1 {
+            '{' => depth += 1,
+            '}' => {
+                if depth == 0 {
+                    return index;
+                }
+                if depth == 1 {
                     return index + 1;
                 }
                 depth -= 1;
             }
-            b';' if depth == 0 => return index + 1,
+            ';' if depth == 0 => return index + 1,
+            _ if starts_css_name(rest) => {
+                // A `url(` parenthesis is not a block this scan tracks.
+                let mut ignored = 0;
+                index += css_name_or_url_len(rest, &mut ignored);
+                continue;
+            }
             _ => {}
         }
-        index += 1;
-    }
-
-    bytes.len()
-}
-
-/// Removes at-rules outside [`ALLOWED_AT_RULES`] from CSS text.
-fn strip_disallowed_at_rules(css: &str) -> String {
-    let bytes = css.as_bytes();
-    let mut result = String::with_capacity(css.len());
-    let mut index = 0;
-    let mut quote: Option<u8> = None;
-
-    while index < bytes.len() {
-        let byte = bytes[index];
-
-        if let Some(open) = quote {
-            // Advance by characters, not bytes: pushing each byte of a multi-byte
-            // character as its own `char` would turn `content: "café"` into mojibake.
-            let ch = css[index..].chars().next().unwrap_or('\u{FFFD}');
-            result.push(ch);
-            index += ch.len_utf8();
-            if ch == '\\' {
-                if let Some(escaped) = css[index..].chars().next() {
-                    result.push(escaped);
-                    index += escaped.len_utf8();
-                }
-                continue;
-            }
-            if ch == open as char {
-                quote = None;
-            }
-            continue;
-        }
-
-        if byte == b'"' || byte == b'\'' {
-            quote = Some(byte);
-            result.push(byte as char);
-            index += 1;
-            continue;
-        }
-
-        if byte == b'@' {
-            let (name, consumed) = read_css_identifier(&css[index + 1..]);
-            if !name.is_empty() && !ALLOWED_AT_RULES.contains(&name.as_str()) {
-                let after_keyword = index + 1 + consumed;
-                index = after_keyword + end_of_at_rule(&css[after_keyword..]);
-                continue;
-            }
-        }
-
-        let ch = css[index..].chars().next().unwrap_or('\u{FFFD}');
-        result.push(ch);
         index += ch.len_utf8();
     }
 
-    result
+    s.len()
 }
 
-/// Removes external `url()` references and disallowed at-rules from CSS text.
+/// Removes external resource references and disallowed at-rules from CSS text.
 ///
-/// Keeps local references like `url(#gradientId)` and `url(data:image/...)`, but removes
-/// external URLs (`url(http://...)`, `url(https://...)`, `url(//)`) and non-image data URLs
-/// by replacing them with `url()` (empty, which CSS treats as invalid and ignores).
-/// At-rules outside [`ALLOWED_AT_RULES`] are dropped whole, which is what removes
-/// `@import` and anything else that could load a stylesheet.
-fn sanitize_css_urls(css: &str) -> String {
-    let css_after_import = strip_disallowed_at_rules(css);
-    let lower_after_import = css_after_import.to_ascii_lowercase();
-    let mut result = String::with_capacity(css_after_import.len());
-    let mut offset = 0;
+/// The text is read token by token, the way CSS Syntax Level 3 tokenizes it, so the
+/// sanitizer and a renderer agree on where a `url(` starts and ends:
+///
+/// - A function whose name is `url` however it is spelled — `URL(`, `u\72 l(` — keeps a
+///   `#fragment` or raster `data:image/` argument and is replaced by `url()` otherwise. A
+///   bad url, and a `url(` holding more than one string, is replaced too.
+/// - A string argument of a function in [`URL_STRING_FUNCTIONS`] that is not a local
+///   reference is replaced by `""`.
+/// - At-rules outside [`ALLOWED_AT_RULES`] are dropped whole, which is what removes
+///   `@import` and anything else that could load a stylesheet; a space takes their place so
+///   the text on either side does not join into one token.
+/// - Text that spells `url(` without being a function a renderer fetches through — inside a
+///   string or a comment, as the tail of a longer name such as `xurl(`, or through an
+///   escaped parenthesis in a name — is emptied or separated, so that a reader who tokenizes
+///   CSS differently cannot take it for one.
+fn sanitize_css(css: &str) -> String {
+    let mut out = String::with_capacity(css.len());
+    // One entry per open parenthesis: `true` when a string inside it is a URL.
+    let mut parens: Vec<bool> = Vec::new();
+    let mut index = 0;
 
-    while let Some(start) = lower_after_import[offset..].find("url(") {
-        result.push_str(&css_after_import[offset..offset + start]);
-        let url_open = offset + start + 4;
-        let after_url = &css_after_import[url_open..];
-
-        let (url_value, rest) = extract_css_url_value(after_url);
-        let consumed = after_url.len() - rest.len();
-        let trimmed = url_value
-            .trim()
-            .trim_matches(|c| c == '\'' || c == '"')
-            .trim();
-
-        if is_dangerous_css_url(trimmed) {
-            result.push_str("url()");
-        } else {
-            result.push_str("url(");
-            result.push_str(url_value);
-            result.push(')');
-        }
-        offset = url_open + consumed;
-    }
-
-    result.push_str(&css_after_import[offset..]);
-    result
-}
-
-/// Extracts the value between `url(` and `)`, returning (value, rest_after_closing_paren).
-fn extract_css_url_value(s: &str) -> (&str, &str) {
-    let mut depth = 0u32;
-    for (i, c) in s.char_indices() {
-        match c {
-            '(' => depth += 1,
-            ')' => {
-                if depth == 0 {
-                    return (&s[..i], &s[i + 1..]);
+    while let Some(ch) = css[index..].chars().next() {
+        let rest = &css[index..];
+        match ch {
+            '"' | '\'' => {
+                let (length, value, _) = consume_css_string(rest);
+                let token = &rest[..length];
+                let fetched = parens.contains(&true) && is_dangerous_href(&value);
+                if fetched || spells_url_function(token) {
+                    out.push_str("\"\"");
+                } else {
+                    out.push_str(token);
                 }
-                depth -= 1;
+                index += length;
             }
-            _ => {}
+            '/' if rest.starts_with("/*") => {
+                let length = css_comment_len(rest);
+                let comment = &rest[..length];
+                out.push_str(if spells_url_function(comment) {
+                    "/**/"
+                } else {
+                    comment
+                });
+                index += length;
+            }
+            '@' => {
+                let (name, length) = read_css_identifier(&rest[1..]);
+                let after_keyword = 1 + length;
+                if !name.is_empty() && !ALLOWED_AT_RULES.contains(&name.as_str()) {
+                    index += after_keyword + end_of_at_rule(&rest[after_keyword..]);
+                    out.push(' ');
+                } else {
+                    out.push_str(&rest[..after_keyword]);
+                    index += after_keyword;
+                }
+            }
+            '(' => {
+                parens.push(false);
+                out.push('(');
+                index += 1;
+            }
+            ')' => {
+                parens.pop();
+                out.push(')');
+                index += 1;
+            }
+            _ if starts_css_name(rest) => {
+                // Most names are plain words that open no function, and need no decoding.
+                let plain = rest
+                    .bytes()
+                    .take_while(|byte| {
+                        byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_') || *byte >= 0x80
+                    })
+                    .count();
+                if plain > 0 && !rest[plain..].starts_with(['\\', '(']) {
+                    out.push_str(&rest[..plain]);
+                    index += plain;
+                    continue;
+                }
+                let (name, length) = read_css_identifier(rest);
+                let written = &rest[..length];
+                index += length;
+                // A name can only hold a parenthesis through an escape, so this one is no
+                // function, but it decodes to the spelling and nothing is lost without it.
+                if name.contains("url(") {
+                    out.push(' ');
+                    continue;
+                }
+                if !css[index..].starts_with('(') {
+                    out.push_str(written);
+                    continue;
+                }
+                let after = &css[index + 1..];
+                if name == "url" {
+                    let (consumed, url) =
+                        if after[skip_css_whitespace(after, 0)..].starts_with(['"', '\'']) {
+                            consume_css_url_function(after)
+                        } else {
+                            consume_css_url_token(after)
+                        };
+                    match url {
+                        Some(url) if !is_dangerous_href(&url) => {
+                            out.push_str(&rest[..length + 1 + consumed]);
+                        }
+                        _ => out.push_str("url()"),
+                    }
+                    index += 1 + consumed;
+                } else if name.ends_with("url") {
+                    out.push_str(written);
+                    out.push(' ');
+                } else {
+                    out.push_str(written);
+                    out.push('(');
+                    parens.push(URL_STRING_FUNCTIONS.contains(&name.as_str()));
+                    index += 1;
+                }
+            }
+            _ => {
+                out.push(ch);
+                index += ch.len_utf8();
+            }
         }
     }
-    // No closing paren found; treat the rest as the value.
-    (s, "")
-}
 
-/// Returns `true` if a CSS `url()` value points to a dangerous resource.
-///
-/// Uses an allowlist approach: only `#fragment` references and `data:image/*`
-/// URLs are considered safe.  Everything else is blocked.
-fn is_dangerous_css_url(value: &str) -> bool {
-    let trimmed = value.trim();
-
-    // Allow empty url() (harmless, CSS treats it as invalid).
-    if trimmed.is_empty() {
-        return false;
-    }
-
-    // Allow local fragment references (#id).
-    if trimmed.starts_with('#') {
-        return false;
-    }
-
-    // Allow safe raster data:image/* URLs, but reject data:image/svg+xml
-    // to prevent embedded SVGs from bypassing sanitization.
-    let lower = trimmed.to_ascii_lowercase();
-    if lower.starts_with("data:image/") {
-        return lower.starts_with("data:image/svg");
-    }
-
-    // Everything else is dangerous.
-    true
+    out
 }
 
 /// The size a pre-parsed SVG tree describes, which is where a resize starts from.
@@ -2367,6 +2750,422 @@ mod tests {
         );
     }
 
+    // --- The stylesheet a renderer reads, not the one the sanitizer read ---
+
+    /// Every stylesheet in `document`, read the way a renderer reads it.
+    ///
+    /// This is an oracle written apart from the sanitizer: the XML references are resolved,
+    /// and a `<style>` element's stylesheet is its child text taken whole, which is what a
+    /// browser applies. Text inside an element nested in the `<style>` is not part of it.
+    /// A reference to an entity other than the predefined ones is a failure, because a
+    /// renderer would expand it and this oracle cannot say to what.
+    fn stylesheets_as_rendered(document: &str) -> Vec<String> {
+        let mut reader = Reader::from_str(document);
+        let mut sheets = Vec::new();
+        // The stylesheet being collected, and how deep inside it the reader is.
+        let mut current: Option<(String, usize)> = None;
+        loop {
+            let event = reader
+                .read_event()
+                .unwrap_or_else(|error| panic!("the output is not well-formed: {error}"));
+            match event {
+                Event::Eof => break,
+                Event::Start(ref element) => match current {
+                    Some((_, ref mut depth)) => *depth += 1,
+                    None if local_name(element.name().as_ref()) == "style" => {
+                        current = Some((String::new(), 0));
+                    }
+                    None => {}
+                },
+                Event::End(_) => match current {
+                    Some((_, ref mut depth)) if *depth > 0 => *depth -= 1,
+                    Some(_) => sheets.extend(current.take().map(|(sheet, _)| sheet)),
+                    None => {}
+                },
+                Event::Text(ref text) => {
+                    if let Some((ref mut sheet, 0)) = current {
+                        sheet.push_str(&text.xml10_content());
+                    }
+                }
+                Event::CData(ref data) => {
+                    if let Some((ref mut sheet, 0)) = current {
+                        sheet.push_str(data);
+                    }
+                }
+                Event::GeneralRef(ref reference) => {
+                    if let Some((ref mut sheet, 0)) = current {
+                        let resolved = match reference.resolve_char_ref() {
+                            Ok(Some(ch)) => ch.to_string(),
+                            _ => quick_xml::escape::resolve_predefined_entity(reference)
+                                .unwrap_or_else(|| {
+                                    panic!("the output references the entity {reference:?}")
+                                })
+                                .to_string(),
+                        };
+                        sheet.push_str(&resolved);
+                    }
+                }
+                _ => {}
+            }
+        }
+        sheets
+    }
+
+    /// Decodes CSS escapes the way a CSS tokenizer does, for the oracle below.
+    fn decode_css_escapes_for_oracle(css: &str) -> String {
+        let mut out = String::new();
+        let mut chars = css.chars().peekable();
+        while let Some(ch) = chars.next() {
+            if ch != '\\' {
+                out.push(ch);
+                continue;
+            }
+            let mut hex = String::new();
+            while hex.len() < 6 && chars.peek().is_some_and(char::is_ascii_hexdigit) {
+                hex.extend(chars.next());
+            }
+            if hex.is_empty() {
+                out.extend(chars.next());
+                continue;
+            }
+            if chars.peek().is_some_and(char::is_ascii_whitespace) {
+                chars.next();
+            }
+            out.push(
+                u32::from_str_radix(&hex, 16)
+                    .ok()
+                    .and_then(char::from_u32)
+                    .unwrap_or('\u{FFFD}'),
+            );
+        }
+        out
+    }
+
+    /// Asserts that no stylesheet in the sanitized `document` names anything but a fragment
+    /// or a raster `data:` URL in a `url()`, however the `url(` is spelled.
+    fn assert_no_external_url_in_stylesheets(document: &str) {
+        for sheet in stylesheets_as_rendered(document) {
+            let decoded = decode_css_escapes_for_oracle(&sheet).to_ascii_lowercase();
+            let mut rest = decoded.as_str();
+            while let Some(start) = rest.find("url(") {
+                let after = &rest[start + 4..];
+                let end = after.find(')').unwrap_or(after.len());
+                let value = after[..end]
+                    .trim()
+                    .trim_matches(|c| c == '\'' || c == '"')
+                    .trim();
+                assert!(
+                    value.is_empty()
+                        || value.starts_with('#')
+                        || (value.starts_with("data:image/")
+                            && !value.starts_with("data:image/svg")),
+                    "url({value}) survived in the stylesheet {sheet:?} of {document}"
+                );
+                rest = &after[end..];
+            }
+        }
+    }
+
+    /// quick-xml reports a reference in text as an event of its own, so the stylesheet
+    /// arrives in pieces. Sanitizing each piece on its own let a reference sit in the middle
+    /// of a `url(` that neither half contained, and the reference was written back for the
+    /// renderer to resolve. A declared entity is the same shape with a longer name.
+    #[rstest]
+    #[case::hex_reference_in_the_function_name(
+        "<style>rect{fill:u&#x72;l(http://evil.example/a)}</style>"
+    )]
+    #[case::decimal_reference_in_the_function_name(
+        "<style>rect{fill:&#117;rl(http://evil.example/a)}</style>"
+    )]
+    #[case::reference_for_the_parenthesis(
+        "<style>rect{fill:url&#40;http://evil.example/a)}</style>"
+    )]
+    #[case::predefined_entity_splitting_the_text(
+        "<style>rect{fill:url(http://evil.example/a?x=1&amp;y=2)}</style>"
+    )]
+    #[case::declared_entity_spelling_the_whole_url("<style>rect{fill:&u;}</style>")]
+    #[case::declared_entity_in_a_presentation_attribute("<rect fill=\"&u;\"/>")]
+    #[case::declared_entity_in_a_style_attribute("<rect style=\"fill:&u;\"/>")]
+    fn sanitize_resolves_references_before_reading_css(#[case] body: &str) {
+        let document = format!(
+            "<!DOCTYPE svg [<!ENTITY u \"url(http://evil.example/a)\">]><svg xmlns=\"http://www.w3.org/2000/svg\">{body}</svg>"
+        );
+        let result = sanitize_svg(document.as_bytes()).unwrap();
+        assert_no_external_url_in_stylesheets(&result);
+        let root = &result[result.find("<svg").expect("root element")..];
+        assert!(
+            !root.contains("evil.example") && !root.contains("&u;"),
+            "the reference must be resolved and the url removed: {result}"
+        );
+    }
+
+    /// A declared entity expands to markup wherever it is referenced in content, so leaving
+    /// the reference in the output left the expansion to the renderer, past every element
+    /// rule the sanitizer has.
+    #[test]
+    fn sanitize_does_not_leave_a_declared_entity_for_the_renderer_to_expand() {
+        let document = "<!DOCTYPE svg [<!ENTITY x \"<script>alert(1)</script>\">]><svg xmlns=\"http://www.w3.org/2000/svg\"><text>&x;</text></svg>";
+        let result = sanitize_svg(document.as_bytes()).unwrap();
+        let root = &result[result.find("<svg").expect("root element")..];
+        assert!(
+            !root.contains("&x;") && !root.contains("<script"),
+            "the entity must not reach the renderer as markup: {result}"
+        );
+    }
+
+    /// CSS identifiers admit escapes, so `u\72 l(` is the function `url(` to a renderer. The
+    /// at-rule search already decoded them; the `url(` search looked for the literal spelling.
+    #[rstest]
+    #[case::hex_escape("rect{fill:u\\72 l(http://evil.example/a)}")]
+    #[case::hex_escape_first_letter("rect{fill:\\75 rl(http://evil.example/a)}")]
+    #[case::padded_hex_escape("rect{fill:\\000075rl(http://evil.example/a)}")]
+    #[case::letter_escapes("rect{fill:\\u\\r\\l(http://evil.example/a)}")]
+    #[case::uppercase_escape("rect{fill:U\\52L(http://evil.example/a)}")]
+    #[case::quoted_argument("rect{fill:u\\72 l(\"http://evil.example/a\")}")]
+    #[case::image_set("rect{fill:image-set(\"http://evil.example/a\" 1x)}")]
+    #[case::webkit_image_set("rect{fill:-webkit-image-set(\"http://evil.example/a\" 1x)}")]
+    #[case::escaped_image_set("rect{fill:im\\61ge-set('http://evil.example/a' 1x)}")]
+    fn sanitize_decodes_css_escapes_in_function_names(#[case] css: &str) {
+        let svg = format!("<svg xmlns=\"http://www.w3.org/2000/svg\"><style>{css}</style></svg>");
+        let result = sanitize_svg(svg.as_bytes()).unwrap();
+        assert!(
+            !result.contains("evil.example"),
+            "`{css}` still names the external resource: {result}"
+        );
+
+        let attribute = format!(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"><rect style=\"{}\"/></svg>",
+            css.trim_start_matches("rect{")
+                .trim_end_matches('}')
+                .replace('"', "&quot;")
+        );
+        let result = sanitize_svg(attribute.as_bytes()).unwrap();
+        assert!(
+            !result.contains("evil.example"),
+            "the `style` attribute spelling of `{css}` still names it: {result}"
+        );
+    }
+
+    /// A stylesheet is the `<style>` element's child text taken whole. An inner `</style>`
+    /// ended the outer element's sanitizing early, and an element or a comment between two
+    /// halves of a `url(` hid it from a search that ran over each text node alone.
+    #[rstest]
+    #[case::nested_style("<style><style></style>rect{fill:url(http://evil.example/a)}</style>")]
+    #[case::nested_style_with_text(
+        "<style>rect{fill:red}<style>b{}</style>rect{fill:url(http://evil.example/a)}</style>"
+    )]
+    #[case::element_splitting_the_function_name(
+        "<style>rect{fill:u<g/>rl(http://evil.example/a)}</style>"
+    )]
+    #[case::comment_splitting_the_function_name(
+        "<style>rect{fill:u<!-- x -->rl(http://evil.example/a)}</style>"
+    )]
+    #[case::cdata_splitting_the_function_name(
+        "<style>rect{fill:u<![CDATA[rl(http://evil.]]>example/a)}</style>"
+    )]
+    fn sanitize_reads_a_stylesheet_as_one_text(#[case] body: &str) {
+        let document = format!("<svg xmlns=\"http://www.w3.org/2000/svg\">{body}</svg>");
+        let result = sanitize_svg(document.as_bytes()).unwrap();
+        assert_no_external_url_in_stylesheets(&result);
+        assert!(
+            !result.contains("evil.example"),
+            "the external url survived: {result}"
+        );
+    }
+
+    /// A `url(` that is not a well-formed url token is a bad-url token, and a renderer ends it
+    /// at the first `)` rather than at a balanced one. Counting parentheses to the end of the
+    /// text judged the whole remainder by its leading `#` and kept the declaration after it.
+    #[rstest]
+    #[case::open_parenthesis("rect{fill:url(#a(x);stroke:url(http://evil.example/x);}")]
+    #[case::quote_inside("rect{fill:url(#a\"x);stroke:url(http://evil.example/x);}")]
+    #[case::whitespace_inside("rect{fill:url(#a b);stroke:url(http://evil.example/x);}")]
+    #[case::unterminated_at_the_end("rect{stroke:url(http://evil.example/x")]
+    #[case::string_ending_at_a_newline("rect{content:\"a\nstroke:url(http://evil.example/x);}")]
+    fn sanitize_ends_a_url_where_a_renderer_does(#[case] css: &str) {
+        let svg = format!("<svg xmlns=\"http://www.w3.org/2000/svg\"><style>{css}</style></svg>");
+        let result = sanitize_svg(svg.as_bytes()).unwrap();
+        assert_no_external_url_in_stylesheets(&result);
+        assert!(
+            !result.contains("evil.example"),
+            "`{css}` still names the external resource: {result}"
+        );
+    }
+
+    /// Text a renderer does not fetch through but that spells `url(` once its escapes are
+    /// decoded is not kept either: another reader of the document may tokenize CSS less
+    /// carefully than a browser does, and nothing a drawing needs is lost with it.
+    #[rstest]
+    #[case::in_a_string("text::after{content:\"url(http://evil.example/a)\"}")]
+    #[case::escaped_in_a_string("text::after{content:\"u\\72 l(http://evil.example/a)\"}")]
+    #[case::in_a_comment("/* url(http://evil.example/a) */rect{fill:red}")]
+    #[case::longer_function_name("rect{fill:xurl(http://evil.example/a)}")]
+    #[case::escaped_parenthesis_in_a_name("rect{fill:url\\28 http://evil.example/a)}")]
+    fn sanitize_does_not_keep_the_spelling_of_url_anywhere(#[case] css: &str) {
+        let svg = format!("<svg xmlns=\"http://www.w3.org/2000/svg\"><style>{css}</style></svg>");
+        let once = sanitize_svg(svg.as_bytes()).unwrap();
+        assert_no_external_url_in_stylesheets(&once);
+        let twice = sanitize_svg(once.as_bytes()).unwrap();
+        assert_eq!(once, twice, "sanitizing `{css}` is not a fixed point");
+    }
+
+    /// An attribute is sent through the CSS sanitizer when its value spells one of the
+    /// functions that fetch, so that list has to cover every function the sanitizer checks.
+    #[test]
+    fn every_url_string_function_sends_an_attribute_through_the_css_sanitizer() {
+        for name in URL_STRING_FUNCTIONS.iter().chain(&["url"]) {
+            assert!(
+                mentions_css_resource(&format!("{name}(\"http://evil.example/a\")")),
+                "{name}"
+            );
+            let svg = format!(
+                "<svg xmlns=\"http://www.w3.org/2000/svg\"><rect fill='{name}(\"http://evil.example/a\")'/></svg>"
+            );
+            let result = sanitize_svg(svg.as_bytes()).unwrap();
+            assert!(!result.contains("evil.example"), "{name}: {result}");
+        }
+    }
+
+    /// Local references are what these functions are normally for, whatever the spelling.
+    #[rstest]
+    #[case::plain("rect{fill:url(#g)}", "url(#g)")]
+    #[case::quoted("rect{fill:url(\"#g\")}", "url(\"#g\")")]
+    #[case::padded("rect{fill:url( #g )}", "url( #g )")]
+    #[case::escaped_name("rect{fill:u\\72 l(#g)}", "u\\72 l(#g)")]
+    #[case::raster_data("rect{fill:url(data:image/png;base64,iVBORw0KGgo=)}", "data:image/png")]
+    #[case::image_set_local("rect{fill:image-set(\"#g\" 1x)}", "image-set(\"#g\" 1x)")]
+    #[case::string_mentioning_a_word(
+        "text::after{content:\"see the url\"}",
+        "content:\"see the url\""
+    )]
+    fn sanitize_keeps_local_css_references(#[case] css: &str, #[case] expected: &str) {
+        let svg = format!("<svg xmlns=\"http://www.w3.org/2000/svg\"><style>{css}</style></svg>");
+        let result = sanitize_svg(svg.as_bytes()).unwrap();
+        assert!(
+            result.contains(expected),
+            "`{css}` should keep `{expected}`, got: {result}"
+        );
+    }
+
+    /// The URL parser a renderer uses drops tabs and newlines anywhere in a URL, so a value
+    /// that only looks like a raster `data:` URL until they are dropped is an embedded SVG.
+    #[rstest]
+    #[case::css_tab("<style>rect{fill:url(\"data:image/sv\\9 g+xml,x\")}</style>")]
+    #[case::href_tab("<image href=\"data:image/sv&#9;g+xml,x\"/>")]
+    #[case::href_newline("<image href=\"data:image/sv&#10;g+xml,x\"/>")]
+    fn sanitize_reads_a_url_the_way_the_url_parser_does(#[case] body: &str) {
+        let document = format!("<svg xmlns=\"http://www.w3.org/2000/svg\">{body}</svg>");
+        let result = sanitize_svg(document.as_bytes()).unwrap();
+        assert!(
+            !result.contains("g+xml"),
+            "an embedded SVG survived: {result}"
+        );
+    }
+
+    /// Sanitizing an attribute value must not escape what is already escaped. The value was
+    /// taken raw and escaped again, so `A &amp; B` gained an `amp;` on every pass, and a
+    /// single-quoted value holding a `"` was written back unescaped inside double quotes.
+    #[rstest]
+    #[case::ampersand("<text font-family=\"A &amp; B\"/>", "font-family", "A & B")]
+    #[case::less_than("<text aria-label=\"a &lt; b\"/>", "aria-label", "a < b")]
+    #[case::double_quote_in_single_quotes(
+        "<text aria-label='say \"hi\"'/>",
+        "aria-label",
+        "say \"hi\""
+    )]
+    #[case::character_reference("<text aria-label=\"&#65;\"/>", "aria-label", "A")]
+    #[case::sanitized_value(
+        "<rect style=\"fill:url(#g);content:'&amp;'\"/>",
+        "style",
+        "fill:url(#g);content:'&'"
+    )]
+    fn sanitize_writes_attribute_values_escaped_once(
+        #[case] body: &str,
+        #[case] attribute: &str,
+        #[case] expected: &str,
+    ) {
+        let document = format!("<svg xmlns=\"http://www.w3.org/2000/svg\">{body}</svg>");
+        let once = sanitize_svg(document.as_bytes()).unwrap();
+        let twice = sanitize_svg(once.as_bytes()).unwrap();
+        assert_eq!(once, twice, "sanitizing is not a fixed point");
+
+        let mut reader = Reader::from_str(&once);
+        let mut found = None;
+        loop {
+            match reader.read_event().expect("the output is well-formed") {
+                Event::Eof => break,
+                Event::Start(ref element) | Event::Empty(ref element) => {
+                    for attr in element.attributes() {
+                        let attr = attr.expect("the output's attributes are well-formed");
+                        if attr.key.as_ref() == attribute {
+                            found = Some(
+                                attr.normalized_value(quick_xml::XmlVersion::Implicit1_0)
+                                    .expect("the value decodes")
+                                    .into_owned(),
+                            );
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(found.as_deref(), Some(expected), "in {once}");
+    }
+
+    /// An attribute whose name is not an XML name was written back as it came, and its
+    /// quote characters broke the document that the sanitizer then served.
+    #[rstest]
+    #[case::fuzzer_reproducer(
+        "<svg xmlns\"httpilter=\"url(www.wF-8\"?>\n<svg xmorg/2000/svg\"`</svg>"
+    )]
+    #[case::quote_in_a_name("<svg xmlns=\"http://www.w3.org/2000/svg\"><rect a\"b=\"1\"/></svg>")]
+    #[case::quote_in_an_element_name(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\"><a=\"x\"y=\"z>\n<b c=\"d\"/></svg>"
+    )]
+    fn sanitize_output_is_well_formed(#[case] document: &str) {
+        let Ok(once) = sanitize_svg(document.as_bytes()) else {
+            return;
+        };
+        let mut reader = Reader::from_str(&once);
+        loop {
+            match reader.read_event() {
+                Ok(Event::Eof) => break,
+                Ok(Event::Start(ref element) | Event::Empty(ref element)) => {
+                    for attr in element.attributes() {
+                        attr.unwrap_or_else(|error| {
+                            panic!("the output has a broken attribute ({error}): {once}")
+                        });
+                    }
+                }
+                Ok(_) => {}
+                Err(error) => panic!("the output is not well-formed ({error}): {once}"),
+            }
+        }
+        let twice = sanitize_svg(once.as_bytes()).expect("the output sanitizes again");
+        assert_eq!(once, twice, "sanitizing is not a fixed point");
+    }
+
+    /// What the sanitizer produces is a document truss has to accept again: an element whose
+    /// only attribute is dropped comes out as `<svg/>`, which the sniffer did not recognize.
+    ///
+    /// A quote inside a processing instruction in the internal subset made the sniffer end
+    /// the doctype somewhere the XML parser did not; the sanitizer escaped the attribute the
+    /// sniffer had mistaken for the root, and the output no longer sniffed.
+    #[rstest]
+    #[case::root_left_without_attributes("<svg a/>")]
+    #[case::quote_in_a_processing_instruction_in_the_subset(
+        "<!DOCTYPE svg [<?pi \"?>]><svg xmlns=\"http://www.w3.org/2000/svg\" a=\"]><svg \"/>"
+    )]
+    fn a_sanitized_document_is_still_an_svg(#[case] document: &str) {
+        let input = sniff_artifact(RawArtifact::new(document.as_bytes().to_vec(), None))
+            .expect("the input is an SVG");
+        assert_eq!(input.media_type, MediaType::Svg);
+        let once = sanitize_svg(document.as_bytes()).unwrap();
+        let artifact = sniff_artifact(RawArtifact::new(once.clone().into_bytes(), None))
+            .unwrap_or_else(|error| panic!("{once:?} is not recognized: {error}"));
+        assert_eq!(artifact.media_type, MediaType::Svg);
+    }
+
     #[test]
     fn is_dangerous_href_blocks_file_scheme() {
         assert!(is_dangerous_href("file:///etc/passwd"));
@@ -2394,19 +3193,22 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn is_dangerous_css_url_blocks_file_scheme() {
-        assert!(is_dangerous_css_url("file:///etc/passwd"));
-    }
-
-    #[test]
-    fn is_dangerous_css_url_allows_fragment() {
-        assert!(!is_dangerous_css_url("#gradientId"));
-    }
-
-    #[test]
-    fn is_dangerous_css_url_allows_data_image() {
-        assert!(!is_dangerous_css_url("data:image/png;base64,abc"));
+    /// `href` and a CSS `url()` share one rule. A value has to be safe both as written and
+    /// as the URL parser reads it, with tabs and newlines gone wherever they are, and only
+    /// ASCII whitespace is trimmed from its ends.
+    #[rstest]
+    #[case::padded_fragment(" \t#a\n", false)]
+    #[case::no_break_space_before_a_fragment("\u{a0}#a", true)]
+    #[case::control_character_before_raster_data("\u{15}data:image/png;base64,AA==", true)]
+    #[case::tab_inside_the_scheme_of_raster_data("da\tta:image/png;base64,AA==", true)]
+    #[case::tab_inside_an_embedded_svg("data:image/sv\tg+xml,x", true)]
+    #[case::newline_inside_a_scheme("jav\nascript:alert(1)", true)]
+    #[case::padded_raster_data(" data:image/png;base64,abc ", false)]
+    fn is_dangerous_href_reads_a_value_as_the_url_parser_does(
+        #[case] value: &str,
+        #[case] dangerous: bool,
+    ) {
+        assert_eq!(is_dangerous_href(value), dangerous, "{value:?}");
     }
 
     /// A rasterized SVG reaches the pixel stages, which is what `docs/pipeline.md` says

@@ -49,8 +49,12 @@ mod signing;
 pub use config::StorageBackend;
 pub use config::{LogHandler, LogLevel, ServerConfig, TrustedProxy};
 pub use handler::TransformOptionsPayload;
+// The CLI's storage check before `serve` and `validate`, and its `sign`, are the only
+// callers outside this module, so a server-only build has no use for them.
+#[cfg(feature = "cli")]
 pub(crate) use handler::storage_health_check;
 pub use lifecycle::{serve_once_with_config, serve_with_config};
+#[cfg(feature = "cli")]
 pub(crate) use signing::signing_input_error;
 pub use signing::{
     SignedUrlSource, SignedWatermarkParams, bind_addr, sign_public_url, sign_public_url_with_method,
