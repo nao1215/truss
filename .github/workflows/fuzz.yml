@@ -1,0 +1,76 @@
+name: Fuzz
+
+# Explores the fuzz targets in fuzz/ (cargo-fuzz, libFuzzer) for a few minutes
+# each night. Pull requests do not run this; `just fuzz TARGET` runs one target
+# locally, starting from the seed corpus under fuzz/corpus/<target>/.
+#
+# A crash uploads its input as an artifact. Commit that input to
+# fuzz/corpus/<target>/ and to a unit test, then fix it on a fix/* branch.
+# Never delete corpus entries to make this green.
+
+on:
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: Seconds per target
+        default: "300"
+  schedule:
+    - cron: "0 3 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  targets:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      list: ${{ steps.list.outputs.list }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Every [[bin]] in fuzz/Cargo.toml is a target, so adding one needs no edit here.
+      - id: list
+        run: |
+          set -o pipefail
+          list="$(grep -A1 '^\[\[bin\]\]' fuzz/Cargo.toml | sed -n 's/^name *= *"\(.*\)"/\1/p' | jq -R . | jq -cs .)"
+          test "$list" != "[]"
+          echo "list=${list}" >> "$GITHUB_OUTPUT"
+
+  fuzz:
+    needs: targets
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(needs.targets.outputs.list) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # cargo-fuzz needs nightly (-Z sanitizer). Only this workflow uses it; every
+      # other job stays on stable and the MSRV.
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: nightly
+
+      - uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172 # v2.87.20
+        with:
+          tool: cargo-fuzz@0.13.2
+
+      - name: cargo fuzz run ${{ matrix.target }}
+        env:
+          SECONDS_PER_TARGET: ${{ inputs.seconds || '300' }}
+        # The installed cargo-fuzz is a musl binary and would default to the musl target,
+        # where AddressSanitizer cannot link against the static libc; name the gnu target.
+        run: cargo fuzz run --target x86_64-unknown-linux-gnu "${{ matrix.target }}" -- -max_total_time="${SECONDS_PER_TARGET}"
+
+      - if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: crash-${{ matrix.target }}
+          path: fuzz/artifacts/${{ matrix.target }}/
+          retention-days: 30

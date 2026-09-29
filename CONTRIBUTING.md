@@ -88,6 +88,16 @@ just integration       # Both
 - **API tests** (`integration/api/`): Written as [runn](https://github.com/k1LoW/runn) runbooks. These runbooks also serve as API documentation.
 - **Test fixtures**: Shared images in `integration/fixtures/`.
 
+#### Fuzzing
+
+`fuzz/` holds [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz) targets for the code that reads untrusted input: the sniffer, the transform pipeline, SVG sanitization, signed URLs, raw HTTP requests, and multipart uploads. It is its own workspace, is not published, and needs nightly (`rustup toolchain install nightly` and `cargo install cargo-fuzz --locked`). Each target asserts a property beyond not panicking, such as round trips, idempotence, or agreement between two paths, and says which in its header comment.
+
+```sh
+just fuzz sniff -max_total_time=60   # one target for a minute
+```
+
+The committed seeds are in `fuzz/corpus/<target>/`; `just fuzz` writes what it discovers to `fuzz/corpus-local/`, which is ignored. The `Fuzz` workflow runs every `[[bin]]` in `fuzz/Cargo.toml` nightly. When it finds a crash, add the input to `fuzz/corpus/<target>/` and to a unit test before fixing it, and never delete a corpus entry to make the run pass.
+
 ### 5. Code style
 
 - Follow standard Rust conventions and idioms.
@@ -208,6 +218,7 @@ Run `just` with no arguments to see the full list. Key recipes:
 | `just ci` | All CI checks locally |
 | `just coverage` | Code coverage summary |
 | `just integration` | Docker-based CLI + API tests |
+| `just fuzz TARGET` | Run one cargo-fuzz target (nightly) |
 | `just url-signer-package-typecheck` | Compile-check the TypeScript URL signer package definitions |
 | `just url-signer-package-test` | Run the TypeScript URL signer package tests |
 | `just url-signer-package-pack` | Pack the TypeScript URL signer package without publishing |

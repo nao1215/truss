@@ -1,0 +1,77 @@
+[package]
+name = "truss-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "cargo-fuzz targets for truss. Not published; see CONTRIBUTING.md."
+license = "MIT"
+
+[package.metadata]
+cargo-fuzz = true
+
+# Its own workspace, so the fuzz crate never joins the main crate's build, lock file, or
+# `cargo test --all-targets`, and needs nightly only when it is built itself.
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4.13"
+quick-xml = "0.42"
+url = "2.5.8"
+
+[dependencies.truss]
+package = "truss-image"
+path = ".."
+default-features = false
+features = ["server", "svg", "webp-lossy"]
+
+[lib]
+name = "truss_fuzz"
+path = "src/lib.rs"
+test = false
+doc = false
+bench = false
+
+# Every [[bin]] below is a fuzz target, and the nightly workflow reads the name on the line
+# right after each `[[bin]]`, so keep `name` first.
+
+[[bin]]
+name = "sniff"
+path = "fuzz_targets/sniff.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "transform"
+path = "fuzz_targets/transform.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "svg_sanitize"
+path = "fuzz_targets/svg_sanitize.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "signed_url"
+path = "fuzz_targets/signed_url.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "http_request"
+path = "fuzz_targets/http_request.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "http_multipart"
+path = "fuzz_targets/http_multipart.rs"
+test = false
+doc = false
+bench = false

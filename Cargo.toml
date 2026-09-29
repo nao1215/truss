@@ -11,6 +11,8 @@ repository = "https://github.com/nao1215/truss"
 homepage = "https://nao1215.github.io/truss/"
 keywords = ["image", "image-processing", "webp", "image-server"]
 categories = ["command-line-utilities", "multimedia::images", "web-programming::http-server"]
+# The fuzz crate is a separate workspace built on nightly; it is not part of the library.
+exclude = ["/fuzz"]
 
 [features]
 default = ["cli", "server", "svg", "webp-lossy"]
