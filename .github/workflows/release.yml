@@ -677,8 +677,10 @@ jobs:
         id: digest
         env:
           IMAGE: ${{ steps.image.outputs.name }}
+        # metadata-action tags the multi-arch image with the version without
+        # the tag's leading v (0.26.1, 0.26, latest), not with the tag itself.
         run: |
-          digest="$(docker buildx imagetools inspect "${IMAGE}:${GITHUB_REF_NAME}" --format '{{json .Manifest}}' | jq -r .digest)"
+          digest="$(docker buildx imagetools inspect "${IMAGE}:${GITHUB_REF_NAME#v}" --format '{{json .Manifest}}' | jq -r .digest)"
           [[ "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]]
           echo "digest=${digest}" >> "$GITHUB_OUTPUT"
 
