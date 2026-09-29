@@ -77,13 +77,7 @@ pub(super) fn authorize_signed_request(
         .get(key_id)
         .ok_or_else(|| signed_url_unauthorized_response("signed URL is invalid or expired"))?;
 
-    #[expect(
-        clippy::map_err_ignore,
-        reason = "the sentence names the parameter and the rule it breaks, and the parser's own wording in a `ParseIntError` says nothing more a caller can act on"
-    )]
-    let expires = expires.parse::<u64>().map_err(|_| {
-        bad_request_response("query parameter `expires` must be a positive integer")
-    })?;
+    let expires = parse_expires(expires)?;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|error| {
@@ -373,6 +367,57 @@ pub(super) fn required_auth_query_param<'a>(
         .ok_or_else(|| signed_url_unauthorized_response("signed URL is invalid or expired"))
 }
 
+/// Reads the expiry of a signed URL.
+///
+/// A number past `u64` is a whole number the server cannot represent, so it is refused as
+/// out of range rather than as not being a positive integer.
+fn parse_expires(expires: &str) -> Result<u64, HttpResponse> {
+    use std::num::IntErrorKind;
+    expires.parse::<u64>().map_err(|error| match error.kind() {
+        IntErrorKind::PosOverflow => bad_request_response(&format!(
+            "query parameter `expires` must be at most {}",
+            u64::MAX
+        )),
+        _ => bad_request_response("query parameter `expires` must be a positive integer"),
+    })
+}
+
+/// Reads a query parameter as an integer of any length.
+///
+/// A number past `i64` is held at the nearest end, which every range `validate` checks
+/// answers the same way as the number itself, so `width=99999999999999999999` reads the
+/// width's range rather than `must be an integer`, which it is.
+fn parse_query_integer(value: &str, name: &str) -> Result<i64, HttpResponse> {
+    crate::core::WideInteger::parse(value)
+        .map(crate::core::WideInteger::saturated)
+        .ok_or_else(|| {
+            bad_request_response(&format!("query parameter `{name}` must be an integer"))
+        })
+}
+
+/// Narrows a number to the integer an option is held in, judging what does not fit by
+/// `validate`.
+///
+/// A value that fits is handed on so the transform reports it with the class it always
+/// did; one that does not is refused with the sentence the range check gives, rather than
+/// with a claim about integers. The query and the multipart form both read their numbers
+/// through this, so the two spellings of an option answer alike.
+pub(super) fn narrow_integer<T: TryFrom<i64> + std::fmt::Debug>(
+    value: i64,
+    validate: fn(i64) -> Result<T, &'static str>,
+) -> Result<T, HttpResponse> {
+    match T::try_from(value) {
+        Ok(value) => Ok(value),
+        #[expect(
+            clippy::expect_used,
+            reason = "every range `validate` accepts lies inside the integer it returns, so a value that does not fit is one it refuses"
+        )]
+        Err(_) => Err(bad_request_response(validate(value).expect_err(
+            "a value outside the field is outside the documented range",
+        ))),
+    }
+}
+
 /// Reads a query parameter that ends up in a `u32`, judging what does not fit by `validate`.
 ///
 /// Parsing straight into `u32` made `width=4294967296` answered `query parameter `width`
@@ -387,23 +432,7 @@ pub(super) fn parse_optional_integer_query(
     let Some(value) = query.get(name) else {
         return Ok(None);
     };
-    #[expect(
-        clippy::map_err_ignore,
-        reason = "the sentence names the parameter and the rule it breaks, and the parser's own wording in a `ParseIntError` says nothing more a caller can act on"
-    )]
-    let parsed: i64 = value.parse().map_err(|_| {
-        bad_request_response(&format!("query parameter `{name}` must be an integer"))
-    })?;
-    match u32::try_from(parsed) {
-        Ok(value) => Ok(Some(value)),
-        #[expect(
-            clippy::expect_used,
-            reason = "every range `validate` accepts lies inside u32, so a value that does not fit is one it refuses"
-        )]
-        Err(_) => Err(bad_request_response(
-            validate(parsed).expect_err("a value outside u32 is outside the documented range"),
-        )),
-    }
+    narrow_integer(parse_query_integer(value, name)?, validate).map(Some)
 }
 
 /// Reads a query parameter that ends up in a `u8`, judging what does not fit by `validate`.
@@ -420,23 +449,7 @@ pub(super) fn parse_optional_u8_query(
     let Some(value) = query.get(name) else {
         return Ok(None);
     };
-    #[expect(
-        clippy::map_err_ignore,
-        reason = "the sentence names the parameter and the rule it breaks, and the parser's own wording in a `ParseIntError` says nothing more a caller can act on"
-    )]
-    let parsed: i64 = value.parse().map_err(|_| {
-        bad_request_response(&format!("query parameter `{name}` must be an integer"))
-    })?;
-    match u8::try_from(parsed) {
-        Ok(value) => Ok(Some(value)),
-        #[expect(
-            clippy::expect_used,
-            reason = "every range `validate` accepts lies inside u8, so a value that does not fit is one it refuses"
-        )]
-        Err(_) => Err(bad_request_response(
-            validate(parsed).expect_err("a value outside u8 is outside the documented range"),
-        )),
-    }
+    narrow_integer(parse_query_integer(value, name)?, validate).map(Some)
 }
 
 pub(super) fn parse_optional_float_query(
@@ -630,6 +643,26 @@ mod tests {
         ]);
         let err = authorize_signed_request(&request, &q, &config).unwrap_err();
         assert_eq!(err.status, "400 Bad Request");
+    }
+
+    /// An expiry past what the server can represent is a whole number, so it is refused as
+    /// out of range rather than as not being one.
+    #[test]
+    fn test_signed_request_expires_past_u64_is_out_of_range() {
+        let config = test_config(None).with_signed_url_credentials("k1", "secret");
+        let request = test_request("GET", "/images/by-path", vec![("host", "example.com")]);
+        let q = query(&[
+            ("keyId", "k1"),
+            ("expires", "18446744073709551616"),
+            ("signature", "aa"),
+        ]);
+        let err = authorize_signed_request(&request, &q, &config).unwrap_err();
+        assert_eq!(err.status, "400 Bad Request");
+        let body = String::from_utf8(err.body).unwrap();
+        assert!(
+            body.contains("query parameter `expires` must be at most 18446744073709551615"),
+            "{body}"
+        );
     }
 
     #[test]
@@ -1102,6 +1135,49 @@ mod tests {
         let err = parse_optional_integer_query(&q, "width", crate::core::validate_width_value)
             .unwrap_err();
         assert_eq!(err.status, "400 Bad Request");
+    }
+
+    /// A whole number too long for any integer type is still a whole number, so it reads
+    /// the range sentence the same parameter gives for a smaller value past its limit.
+    #[test]
+    fn test_parse_integer_past_i64_reads_the_range_sentence() {
+        let cases = [
+            ("width", "99999999999999999999", "width is too large"),
+            (
+                "width",
+                "-99999999999999999999",
+                "width must be greater than zero",
+            ),
+            ("height", "99999999999999999999", "height is too large"),
+        ];
+        for (name, value, expected) in cases {
+            let q = query(&[(name, value)]);
+            let validate = if name == "width" {
+                crate::core::validate_width_value
+            } else {
+                crate::core::validate_height_value
+            };
+            let err = parse_optional_integer_query(&q, name, validate).unwrap_err();
+            assert_eq!(err.status, "400 Bad Request");
+            let body = String::from_utf8(err.body).unwrap();
+            assert!(body.contains(expected), "{name}={value}: {body}");
+            assert!(
+                !body.contains("must be an integer"),
+                "{name}={value}: {body}"
+            );
+        }
+
+        for value in ["99999999999999999999", "-99999999999999999999"] {
+            let q = query(&[("quality", value)]);
+            let err = parse_optional_u8_query(&q, "quality", crate::core::validate_quality_value)
+                .unwrap_err();
+            assert_eq!(err.status, "400 Bad Request");
+            let body = String::from_utf8(err.body).unwrap();
+            assert!(
+                body.contains("quality must be between 1 and 100"),
+                "quality={value}: {body}"
+            );
+        }
     }
 
     // ── parse_optional_u8_query ──

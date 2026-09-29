@@ -191,6 +191,17 @@ scenarios:
           stderr:
             contains: "unsupported rotation"
 
+  - name: an angle too large for any integer type is out of range, not a fraction
+    steps:
+      - run:
+          command: truss convert "${fixtures}/sample.png" -o out.png --rotate 99999999999999999999
+      - assert:
+          exit_code: 1
+          stderr:
+            contains:
+              - "unsupported rotation"
+              - "out of range"
+
   - name: an SVG rasterizes and rotates through the same path
     steps:
       # svg-minimal.svg is 1x1, so the turn grows it to 2x2 and the resize then fits that

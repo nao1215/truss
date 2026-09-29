@@ -156,14 +156,22 @@ impl TrustedProxy {
                 .trim()
                 .parse()
                 .map_err(|e| format!("invalid IP in CIDR `{s}`: {e}"))?;
-            let prefix: u8 = prefix_str
-                .trim()
-                .parse()
-                .map_err(|e| format!("invalid prefix length in CIDR `{s}`: {e}"))?;
             let max_prefix = match addr {
                 IpAddr::V4(_) => 32,
                 IpAddr::V6(_) => 128,
             };
+            let prefix_str = prefix_str.trim();
+            // A prefix too large for a `u8` is past the maximum too, so it reads the same
+            // sentence as one that fits the byte but not the address.
+            let prefix: u8 =
+                prefix_str
+                    .parse()
+                    .map_err(|e: std::num::ParseIntError| match e.kind() {
+                        std::num::IntErrorKind::PosOverflow => format!(
+                            "prefix length {prefix_str} exceeds maximum {max_prefix} for `{s}`"
+                        ),
+                        _ => format!("invalid prefix length in CIDR `{s}`: {e}"),
+                    })?;
             if prefix > max_prefix {
                 return Err(format!(
                     "prefix length {prefix} exceeds maximum {max_prefix} for `{s}`"
@@ -1547,21 +1555,26 @@ pub(super) fn env_nonempty(name: &str) -> io::Result<Option<String>> {
 pub(super) fn parse_env_u64_ranged(name: &str, min: u64, max: u64) -> io::Result<Option<u64>> {
     match env_nonempty(name)? {
         Some(value) => {
-            #[expect(
-                clippy::map_err_ignore,
-                reason = "the sentence names the variable and the rule its value breaks, and the parser's own wording in a `ParseIntError` says nothing more an operator can act on"
-            )]
-            let n: u64 = value.parse().map_err(|_| {
+            let out_of_range = || {
                 io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    format!("{name} must be a positive integer"),
-                )
-            })?;
-            if n < min || n > max {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
                     format!("{name} must be between {min} and {max}"),
-                ));
+                )
+            };
+            // A number too large for `u64` is past `max` too, so it reads the range rather
+            // than a claim that it is not an integer.
+            let n: u64 =
+                value
+                    .parse()
+                    .map_err(|error: std::num::ParseIntError| match error.kind() {
+                        std::num::IntErrorKind::PosOverflow => out_of_range(),
+                        _ => io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            format!("{name} must be a positive integer"),
+                        ),
+                    })?;
+            if n < min || n > max {
+                return Err(out_of_range());
             }
             Ok(Some(n))
         }
@@ -1672,15 +1685,15 @@ pub(super) fn env_flag(name: &str) -> io::Result<bool> {
 
 pub(super) fn parse_optional_env_u32(name: &str) -> io::Result<Option<u32>> {
     match env_var(name)? {
-        #[expect(
-            clippy::map_err_ignore,
-            reason = "the sentence names the variable and the rule its value breaks, and the parser's own wording in a `ParseIntError` says nothing more an operator can act on"
-        )]
-        Some(value) if !value.is_empty() => value.parse::<u32>().map(Some).map_err(|_| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("{name} must be a non-negative integer"),
-            )
+        Some(value) if !value.is_empty() => value.parse::<u32>().map(Some).map_err(|error| {
+            // A number too large for `u32` is a number, so it reads the range it is past.
+            let message = match error.kind() {
+                std::num::IntErrorKind::PosOverflow => {
+                    format!("{name} must be between 0 and {}", u32::MAX)
+                }
+                _ => format!("{name} must be a non-negative integer"),
+            };
+            io::Error::new(io::ErrorKind::InvalidInput, message)
         }),
         _ => Ok(None),
     }
@@ -1941,6 +1954,28 @@ mod tests {
         let _env = ScopedEnv::set("TRUSS_KEEP_ALIVE_MAX_REQUESTS", "100001");
         let result = parse_env_u64_ranged("TRUSS_KEEP_ALIVE_MAX_REQUESTS", 1, 100_000);
         assert!(result.is_err());
+    }
+
+    /// A number too large for the integer type is a number past the setting's range, and
+    /// the error says which range rather than that it is not a number.
+    #[test]
+    #[serial]
+    fn a_numeric_setting_past_its_integer_type_names_its_range() {
+        let _env = ScopedEnv::set("TRUSS_KEEP_ALIVE_MAX_REQUESTS", "99999999999999999999");
+        let error = parse_env_u64_ranged("TRUSS_KEEP_ALIVE_MAX_REQUESTS", 1, 100_000)
+            .expect_err("past u64 is out of range");
+        assert_eq!(
+            error.to_string(),
+            "TRUSS_KEEP_ALIVE_MAX_REQUESTS must be between 1 and 100000"
+        );
+
+        let _env = ScopedEnv::set("TRUSS_PUBLIC_MAX_AGE", "4294967296");
+        let error =
+            parse_optional_env_u32("TRUSS_PUBLIC_MAX_AGE").expect_err("past u32 is out of range");
+        assert_eq!(
+            error.to_string(),
+            "TRUSS_PUBLIC_MAX_AGE must be between 0 and 4294967295"
+        );
     }
 
     #[test]
@@ -2463,6 +2498,20 @@ mod tests {
     #[test]
     fn trusted_proxy_parse_prefix_too_large_v6() {
         assert!(TrustedProxy::parse("::1/129").is_err());
+    }
+
+    /// A prefix too large for the byte it is held in is too large for the address as well,
+    /// and reads the sentence `/33` does rather than the parser's wording about the byte.
+    #[test]
+    fn trusted_proxy_parse_prefix_past_u8_names_the_maximum() {
+        assert_eq!(
+            TrustedProxy::parse("10.0.0.0/256").unwrap_err(),
+            "prefix length 256 exceeds maximum 32 for `10.0.0.0/256`"
+        );
+        assert_eq!(
+            TrustedProxy::parse("::1/99999999999999999999").unwrap_err(),
+            "prefix length 99999999999999999999 exceeds maximum 128 for `::1/99999999999999999999`"
+        );
     }
 
     #[test]

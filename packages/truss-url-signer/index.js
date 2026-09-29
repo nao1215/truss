@@ -186,10 +186,16 @@ function normalizeMethod(method) {
   return method.toUpperCase();
 }
 
+const MAX_EXPIRES = 18446744073709551615n;
+
 function normalizeExpires(expires) {
   if (typeof expires === "bigint") {
     if (expires < 1n) {
       throw new TypeError("expires must be a safe integer >= 1 or bigint >= 1");
+    }
+    // The server reads `expires` as a 64-bit unsigned integer and refuses anything past it.
+    if (expires > MAX_EXPIRES) {
+      throw new TypeError(`expires must be at most ${MAX_EXPIRES}`);
     }
     return expires.toString();
   }
@@ -525,24 +531,42 @@ function normalizeOptionalBoolean(name, value) {
   return value;
 }
 
+// The largest count of pixels the server holds; a width, height, or margin past it is
+// refused there with the sentence below, so it is refused here before it is signed.
+const MAX_PIXELS = 4294967295;
+
 function normalizeOptionalPositiveInteger(name, value) {
-  const normalized = normalizeOptionalInteger(name, value);
+  const tooLarge = `${name} is too large to be a number of pixels`;
+  const notPositive = `${name} must be greater than zero`;
+  const normalized = normalizeOptionalInteger(name, value, (whole) =>
+    whole > 0 ? tooLarge : notPositive,
+  );
   if (normalized !== undefined && normalized <= 0) {
-    throw new TypeError(`${name} must be greater than zero`);
+    throw new TypeError(notPositive);
+  }
+  if (normalized !== undefined && normalized > MAX_PIXELS) {
+    throw new TypeError(tooLarge);
   }
   return normalized;
 }
 
 function normalizeOptionalNonNegativeInteger(name, value) {
-  const normalized = normalizeOptionalInteger(name, value);
+  const tooLarge = `${name} is too large to be a number of pixels`;
+  const negative = `${name} must be a non-negative integer`;
+  const normalized = normalizeOptionalInteger(name, value, (whole) =>
+    whole > 0 ? tooLarge : negative,
+  );
   if (normalized !== undefined && normalized < 0) {
-    throw new TypeError(`${name} must be a non-negative integer`);
+    throw new TypeError(negative);
+  }
+  if (normalized !== undefined && normalized > MAX_PIXELS) {
+    throw new TypeError(tooLarge);
   }
   return normalized;
 }
 
 function normalizeOptionalBoundedInteger(name, value, min, max, message) {
-  const normalized = normalizeOptionalInteger(name, value);
+  const normalized = normalizeOptionalInteger(name, value, () => message);
   if (
     normalized !== undefined &&
     (normalized < min || normalized > max)
@@ -552,9 +576,19 @@ function normalizeOptionalBoundedInteger(name, value, min, max, message) {
   return normalized;
 }
 
-function normalizeOptionalInteger(name, value) {
+/**
+ * Reads an optional integer option.
+ *
+ * A whole number past `Number.MAX_SAFE_INTEGER`, such as `1e20`, is still a whole number,
+ * so it is refused with `outOfRange(value)`, the sentence naming the range it is past,
+ * rather than as something that is not an integer.
+ */
+function normalizeOptionalInteger(name, value, outOfRange) {
   if (value === undefined) {
     return undefined;
+  }
+  if (Number.isInteger(value) && !Number.isSafeInteger(value)) {
+    throw new TypeError(outOfRange(value));
   }
   if (!Number.isSafeInteger(value)) {
     throw new TypeError(`${name} must be a finite integer`);
@@ -595,7 +629,12 @@ function normalizeOptionalRotation(value) {
   if (value === undefined) {
     return null;
   }
-  const normalized = normalizeOptionalInteger("rotate", value);
+  const normalized = normalizeOptionalInteger(
+    "rotate",
+    value,
+    () =>
+      "rotate is out of range: the angle must be between -9007199254740991 and 9007199254740991 degrees",
+  );
   if (normalized === undefined) {
     return null;
   }
@@ -653,6 +692,9 @@ function normalizeOptionalCrop(value) {
 function assertCropInteger(name, value) {
   if (!/^\d+$/.test(value)) {
     throw new TypeError(`crop ${name} must be a non-negative integer, got '${value}'`);
+  }
+  if (BigInt(value) > BigInt(MAX_PIXELS)) {
+    throw new TypeError(`crop ${name} must be at most ${MAX_PIXELS}, got '${value}'`);
   }
 }
 

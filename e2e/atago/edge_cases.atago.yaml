@@ -446,6 +446,24 @@ scenarios:
           stderr:
             contains: "crop x must be a non-negative integer"
 
+  - name: a crop field too large for any integer type names the limit, not a claim that it is not an integer
+    steps:
+      - run:
+          command: truss convert "${fixtures}/1px.png" -o bigcrop.png --crop 0,0,99999999999999999999,1
+      - assert:
+          exit_code: 1
+          stderr:
+            contains: "crop width must be at most 4294967295, got '99999999999999999999'"
+
+  - name: a width too large for any integer type reads the width's own limit
+    steps:
+      - run:
+          command: truss convert "${fixtures}/1px.png" -o bigwidth.png --width 99999999999999999999
+      - assert:
+          exit_code: 1
+          stderr:
+            contains: "width is too large to be a number of pixels"
+
   - name: an out-of-range blur sigma is invalid-options, the class every adapter reports
     steps:
       - run:

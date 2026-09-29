@@ -256,6 +256,29 @@ test("rejects invalid base URLs and expires values", () => {
       }),
     />= 1/,
   );
+
+  // The server reads `expires` as a 64-bit unsigned integer, so a bigint past it signs a
+  // URL every request for which is refused.
+  assert.throws(
+    () =>
+      signPublicUrl({
+        baseUrl: "https://images.example.com",
+        source: { kind: "path", path: "image.png" },
+        keyId: "public-demo",
+        secret: "secret-value",
+        expires: 18446744073709551616n,
+      }),
+    /^TypeError: expires must be at most 18446744073709551615$/,
+  );
+  assert.doesNotThrow(() =>
+    signPublicUrl({
+      baseUrl: "https://images.example.com",
+      source: { kind: "path", path: "image.png" },
+      keyId: "public-demo",
+      secret: "secret-value",
+      expires: 18446744073709551615n,
+    }),
+  );
 });
 
 test("rejects invalid source and watermark URLs", () => {
@@ -406,6 +429,49 @@ test("rejects transform combinations that truss would reject", () => {
         watermark: { url: "https://cdn.example.com/logo.png", opacity: 0 },
       },
       pattern: /watermarkOpacity must be between 1 and 100/,
+    },
+    // A whole number past what the server can hold is refused as out of range, with the
+    // sentence the server gives, rather than as something that is not an integer.
+    {
+      options: { transforms: { width: 4294967296 } },
+      pattern: /^TypeError: width is too large to be a number of pixels$/,
+    },
+    {
+      options: { transforms: { height: 1e20 } },
+      pattern: /^TypeError: height is too large to be a number of pixels$/,
+    },
+    {
+      options: { transforms: { width: -1e20 } },
+      pattern: /^TypeError: width must be greater than zero$/,
+    },
+    {
+      options: { transforms: { quality: 1e20 } },
+      pattern: /^TypeError: quality must be between 1 and 100$/,
+    },
+    {
+      options: { transforms: { rotate: 1e20 } },
+      pattern: /^TypeError: rotate is out of range/,
+    },
+    {
+      options: {
+        watermark: { url: "https://cdn.example.com/logo.png", opacity: 1e20 },
+      },
+      pattern: /^TypeError: watermarkOpacity must be between 1 and 100$/,
+    },
+    {
+      options: {
+        watermark: { url: "https://cdn.example.com/logo.png", margin: 4294967296 },
+      },
+      pattern: /^TypeError: watermarkMargin is too large to be a number of pixels$/,
+    },
+    {
+      options: { transforms: { crop: "4294967296,0,1,1" } },
+      pattern: /^TypeError: crop x must be at most 4294967295, got '4294967296'$/,
+    },
+    {
+      options: { transforms: { crop: "0,0,1,99999999999999999999" } },
+      pattern:
+        /^TypeError: crop height must be at most 4294967295, got '99999999999999999999'$/,
     },
   ];
 
