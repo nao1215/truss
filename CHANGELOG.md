@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.26.1
+
+### Fixed
+
+- The release is signed and published in full. The v0.26.0 release workflow published the crate, the two npm packages and the container image, then stopped before signing the image, because it looked the image up by the tag `v0.26.0` while the image is tagged `0.26.0`. So v0.26.0 has no GitHub Release, no signed archives, no SLSA provenance and no Homebrew update, and its image is unsigned. v0.26.1 contains the same code as v0.26.0 with that step fixed. Use v0.26.1.
+
 ## v0.26.0
 
 ### Breaking Changes
