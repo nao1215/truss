@@ -1657,14 +1657,17 @@ where
 /// Names the class of a file system fault.
 ///
 /// A source that is not there is `not-found`, the class the server gives the same miss and
-/// the one `docs/problems.md` describes as an input file that is not there; anything else
-/// about the file system is `internal-error`. Every path the command line names is read
-/// through this, so a mistyped `--watermark` is classified like a mistyped input.
+/// the one `docs/problems.md` describes as an input file that is not there. A path the
+/// operating system refuses as a name, one longer than the file system holds or one with a
+/// character it does not allow, is `invalid-request`, which is what the server answers for
+/// the same path. Anything else about the file system is `internal-error`. Every path the
+/// command line names is read through this, so a mistyped `--watermark` is classified like
+/// a mistyped input.
 fn class_for_io_error(error: &io::Error) -> ErrorClass {
-    if error.kind() == io::ErrorKind::NotFound {
-        ErrorClass::NotFound
-    } else {
-        ErrorClass::InternalError
+    match error.kind() {
+        io::ErrorKind::NotFound => ErrorClass::NotFound,
+        io::ErrorKind::InvalidInput | io::ErrorKind::InvalidFilename => ErrorClass::InvalidRequest,
+        _ => ErrorClass::InternalError,
     }
 }
 
@@ -2606,6 +2609,33 @@ mod tests {
         assert_eq!(code, 2);
         let rendered = String::from_utf8(stderr).expect("utf-8 stderr");
         assert!(rendered.contains("(not-found)"), "{rendered}");
+    }
+
+    /// A name the file system cannot hold is the caller's path being unusable, which the
+    /// server answers with `invalid-request`; the CLI called it `internal-error`. The exit
+    /// code stays 2, the code of a failed read. Unix only: the error Windows gives for the
+    /// same name depends on how the path reaches its file system.
+    #[cfg(unix)]
+    #[test]
+    fn an_input_name_the_file_system_cannot_hold_reports_the_invalid_request_class() {
+        let mut stdin = Cursor::new(Vec::<u8>::new());
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let code = run_with_io(
+            vec![
+                "truss".to_string(),
+                "inspect".to_string(),
+                format!("{}.png", "a".repeat(300)),
+            ],
+            &mut stdin,
+            &mut stdout,
+            &mut stderr,
+        );
+
+        assert_eq!(code, 2);
+        let rendered = String::from_utf8(stderr).expect("utf-8 stderr");
+        assert!(rendered.contains("(invalid-request)"), "{rendered}");
     }
 
     /// A decode failure is exit 4 wherever it is raised. The sniff that runs before the
