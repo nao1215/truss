@@ -20,7 +20,7 @@ env:
   # Release binaries are built with an explicit compiler rather than whatever
   # `stable` happens to be on the day of the tag. The `verify` job checks this
   # against the crate's rust-version.
-  RUST_TOOLCHAIN: "1.94.1"
+  RUST_TOOLCHAIN: "1.98.1"
   # Cargo features every published binary is built with. The release manifest
   # records the transitive closure of these plus the default features.
   RELEASE_FEATURES: "s3,gcs,azure"
@@ -113,7 +113,7 @@ jobs:
         run: cargo install cross --locked
 
       - name: Install cross-compilation toolchain
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        if: matrix.cross && matrix.target == 'aarch64-unknown-linux-gnu'
         run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
 
       - name: Build release binary
@@ -134,8 +134,31 @@ jobs:
         run: strip ${{ steps.bin.outputs.path }}
 
       - name: Strip binary (cross aarch64)
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        if: matrix.cross && matrix.target == 'aarch64-unknown-linux-gnu'
         run: aarch64-linux-gnu-strip ${{ steps.bin.outputs.path }}
+
+      # A glibc binary runs only where the C library is at least as new as the
+      # newest GLIBC_x.y symbol version it links. v0.25.0 was built on Ubuntu
+      # 24.04, needed GLIBC_2.39, and did not start in the debian:bookworm-slim
+      # image (glibc 2.36) the container ships, nor on Debian 12 or Ubuntu
+      # 22.04. The Linux targets build on Ubuntu 22.04, and this step fails the
+      # release if a binary needs anything newer than that system's glibc.
+      # MAX_GLIBC must also stay at or below the glibc of the base image in
+      # Dockerfile.release.
+      - name: Check the glibc the binary requires
+        if: endsWith(matrix.target, '-linux-gnu')
+        env:
+          MAX_GLIBC: "2.35"
+        run: |
+          set -o pipefail
+          need="$(objdump -T "${{ steps.bin.outputs.path }}" | grep -oE 'GLIBC_[0-9]+\.[0-9]+(\.[0-9]+)?' | sed 's/^GLIBC_//' | sort -uV | tail -n 1)"
+          test -n "${need}"
+          highest="$(printf '%s\n%s\n' "${need}" "${MAX_GLIBC}" | sort -V | tail -n 1)"
+          if [ "${highest}" != "${MAX_GLIBC}" ]; then
+            echo "::error title=glibc too new::${{ matrix.target }} requires GLIBC_${need}, the release allows up to ${MAX_GLIBC}"
+            exit 1
+          fi
+          echo "${{ matrix.target }} requires GLIBC_${need} (allowed up to ${MAX_GLIBC})"
 
       - name: Create archive
         shell: bash
@@ -538,7 +561,17 @@ jobs:
         run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+
+      # Start each image before anything is pushed. The archive check runs the
+      # binary on the runner that built it, which cannot notice that the
+      # image's base has an older C library than the binary needs.
+      - name: Smoke-test the images
+        run: |
+          for arch in amd64 arm64; do
+            docker build --platform "linux/${arch}" -t "truss-smoke:${arch}" "context-${arch}"
+            docker run --rm --platform "linux/${arch}" --entrypoint /truss "truss-smoke:${arch}" --version
+          done
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4

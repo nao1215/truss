@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Security
+
+- rustls is 0.23.45, which fixes RUSTSEC-2026-0285: rustls 0.23.43 accepted TLS 1.3 handshake messages across a change of encryption level. truss reaches rustls through ureq whenever it fetches a remote image, which is `truss convert --url` on the CLI and the remote source on the server, so every binary, container image and crate of v0.25.0 carried it. The rest of the lockfile moved within the declared ranges at the same time, which also drops the unsound event-listener 5.4.1 and the yanked chacha20, core2 and spin versions. rav1d-safe, the AVIF decoder, is 0.6.
+
+### Fixed
+
+- The Linux binaries and the container image start on the systems they are meant for again. v0.25.0 was built on Ubuntu 24.04 and linked `GLIBC_2.39`, so the archives did not run on Debian 12, Ubuntu 22.04 or RHEL 9, and the `ghcr.io/nao1215/truss` image, whose base is `debian:bookworm-slim` with glibc 2.36, exited with ``version `GLIBC_2.39' not found`` before printing anything. The Linux targets are built on Ubuntu 22.04 now, aarch64 natively rather than with cross, the release fails if a binary needs a glibc newer than the 2.35 of Ubuntu 22.04, and each container image is started with `--version` before it is pushed.
+
 ## v0.25.0
 
 ### Fixed

@@ -1,16 +1,15 @@
 [
   {
     "target": "x86_64-unknown-linux-gnu",
-    "os": "ubuntu-latest",
+    "os": "ubuntu-22.04",
     "archive": "tar.gz",
     "executable": true
   },
   {
     "target": "aarch64-unknown-linux-gnu",
-    "os": "ubuntu-latest",
+    "os": "ubuntu-22.04-arm",
     "archive": "tar.gz",
-    "cross": true,
-    "executable": false
+    "executable": true
   },
   {
     "target": "x86_64-apple-darwin",
