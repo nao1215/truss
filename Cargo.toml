@@ -48,10 +48,10 @@ subtle = { version = "2", optional = true }
 ureq = { version = "3.3.0", optional = true }
 url = { version = "2.5.8", optional = true }
 uuid = { version = "1", features = ["v4"], optional = true }
-rav1d-safe = { version = "0.5", default-features = false, features = ["bitdepth_8", "bitdepth_16"], optional = true }
+rav1d-safe = { version = "0.6", default-features = false, features = ["bitdepth_8", "bitdepth_16"], optional = true }
 mp4parse = { version = "0.17", optional = true }
 yuvutils-rs = { version = "0.8", optional = true }
-wasm-bindgen = { version = "0.2.114", optional = true }
+wasm-bindgen = { version = "0.2.129", optional = true }
 webp = { version = "0.3", optional = true }
 quick-xml = { version = "0.42", optional = true }
 resvg = { version = "0.48", optional = true }
@@ -78,7 +78,7 @@ bytes = "1"
 criterion = { version = "0.8", features = ["html_reports"] }
 http = "1"
 rustls = { version = "0.23", features = ["ring"] }
-rstest = "0.26.1"
+rstest = "0.27.0"
 serial_test = "3"
 tempfile = "3"
 

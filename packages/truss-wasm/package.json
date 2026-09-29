@@ -21,7 +21,7 @@
     "./dist/truss.js"
   ],
   "trussWasmBuild": {
-    "wasmBindgenVersion": "0.2.114"
+    "wasmBindgenVersion": "0.2.129"
   },
   "scripts": {
     "build": "node ../../scripts/build-wasm-package.mjs",

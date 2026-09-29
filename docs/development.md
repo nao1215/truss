@@ -60,7 +60,7 @@ To build the demo locally, use [`scripts/build-wasm-demo.sh`](../scripts/build-w
 ```sh
 rustup target add wasm32-unknown-unknown
 # The wasm-bindgen-cli version must match the wasm-bindgen dependency in Cargo.toml.
-cargo install wasm-bindgen-cli --version 0.2.114
+cargo install wasm-bindgen-cli --version 0.2.129
 ./scripts/build-wasm-demo.sh
 ```
 
@@ -86,7 +86,7 @@ To build and smoke-check it locally:
 cat .nvmrc  # Node.js version used in CI
 rustup target add wasm32-unknown-unknown
 # The wasm-bindgen-cli version must match the wasm-bindgen dependency in Cargo.toml.
-cargo install wasm-bindgen-cli --version 0.2.114
+cargo install wasm-bindgen-cli --version 0.2.129
 just wasm-package-pack
 just wasm-package-consumer-smoke
 just wasm-vite-example-smoke
