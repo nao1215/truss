@@ -45,9 +45,17 @@ audit:
 # Run all CI checks locally (test + lint + fmt + doc + audit + release tooling)
 ci: test lint fmt-check doc audit release-test
 
-# Run criterion benchmarks (use `just bench -- <filter>` to run a subset)
+# Run the criterion benchmarks of the library's pixel path (use `just bench -- <filter>` to run a subset)
 bench *ARGS:
     cargo bench --bench transform -- {{ARGS}}
+
+# Measure the truss CLI with the himorime suite in bench/ (requires himorime on PATH)
+bench-cli:
+    himorime run bench
+
+# Compare main with the working tree on the himorime suite (BASE=main)
+bench-cli-compare:
+    himorime compare --against "${BASE:-main}" bench
 
 # Fuzz one target (needs nightly and cargo-fuzz; `just fuzz sniff -max_total_time=60`).
 # New inputs go to fuzz/corpus-local/, so fuzz/corpus/ keeps only the committed seeds.
@@ -214,5 +222,6 @@ setup:
     rustup component add llvm-tools-preview
     @echo "Optional: cargo install cargo-deny"
     @echo "Optional: cargo install git-cliff"
+    @echo "Optional: go install github.com/nao1215/himorime@latest"
     @echo "Optional: cargo install wasm-bindgen-cli --version 0.2.129"
     @echo "Optional: rustup target add wasm32-unknown-unknown"

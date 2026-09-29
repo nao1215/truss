@@ -1,0 +1,45 @@
+{
+  "files": [
+    "README.md"
+  ],
+  "imageSize": 75,
+  "commit": false,
+  "commitType": "docs",
+  "commitConvention": "angular",
+  "contributorsPerLine": 7,
+  "skipCi": true,
+  "repoType": "github",
+  "repoHost": "https://github.com",
+  "projectName": "truss",
+  "projectOwner": "nao1215",
+  "contributors": [
+    {
+      "login": "nao1215",
+      "name": "CHIKAMATSU Naohiro",
+      "avatar_url": "https://avatars.githubusercontent.com/u/22737008?v=4",
+      "profile": "https://debimate.jp/",
+      "contributions": [
+        "code",
+        "doc"
+      ]
+    },
+    {
+      "login": "mayankguptadotcom",
+      "name": "Mayank Gupta",
+      "avatar_url": "https://avatars.githubusercontent.com/u/8931305?v=4",
+      "profile": "https://mayankgupta.com",
+      "contributions": [
+        "ideas"
+      ]
+    },
+    {
+      "login": "Dominiquini",
+      "name": "Rafael Baboni Dominiquini",
+      "avatar_url": "https://avatars.githubusercontent.com/u/1180808?v=4",
+      "profile": "https://rafaeldominiquini.ddns.net/",
+      "contributions": [
+        "platform"
+      ]
+    }
+  ]
+}

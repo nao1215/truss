@@ -41,7 +41,7 @@ jobs:
       matrix: ${{ steps.read.outputs.matrix }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Read distribution targets
         id: read
@@ -54,7 +54,7 @@ jobs:
       contents: read
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
@@ -90,7 +90,7 @@ jobs:
       contents: read
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
@@ -99,7 +99,7 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Setup Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ env.NODE_VERSION }}
 
@@ -180,7 +180,7 @@ jobs:
             ${{ matrix.executable && '--exec' || '' }}
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: binary-${{ matrix.target }}
           path: ${{ env.ARCHIVE }}
@@ -195,15 +195,15 @@ jobs:
       contents: read
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Setup Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ env.NODE_VERSION }}
 
       - name: Download all binary artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: binary-*
           path: release-assets
@@ -226,7 +226,7 @@ jobs:
             --exec-target x86_64-unknown-linux-gnu
 
       - name: Upload release manifest
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-manifest
           path: |
@@ -241,7 +241,7 @@ jobs:
       contents: read
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
@@ -264,7 +264,7 @@ jobs:
             --override-filename "truss-${GITHUB_REF_NAME}-sbom.cdx"
 
       - name: Upload SBOM artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: sbom
           path: truss-${{ github.ref_name }}-sbom.cdx.json
@@ -280,7 +280,7 @@ jobs:
       contents: read
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
@@ -297,7 +297,7 @@ jobs:
           test -s "${out}"
 
       - name: Upload license artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: licenses
           path: truss-*-THIRD_PARTY_LICENSES.html
@@ -314,7 +314,7 @@ jobs:
       HAS_CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN != '' }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
@@ -348,7 +348,7 @@ jobs:
       contents: read
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
@@ -357,7 +357,7 @@ jobs:
           targets: wasm32-unknown-unknown
 
       - name: Setup Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ env.NODE_VERSION }}
 
@@ -383,7 +383,7 @@ jobs:
           npm pack
 
       - name: Upload package artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: npm-package-truss-wasm
           path: packages/truss-wasm/*.tgz
@@ -395,10 +395,10 @@ jobs:
       contents: read
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Setup Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ env.NODE_VERSION }}
 
@@ -423,7 +423,7 @@ jobs:
           npm pack
 
       - name: Upload package artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: npm-package-truss-url-signer
           path: packages/truss-url-signer/*.tgz
@@ -436,13 +436,13 @@ jobs:
       id-token: write
     steps:
       - name: Setup Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
           registry-url: https://registry.npmjs.org/
 
       - name: Download npm TypeScript URL signer package artifact
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: npm-package-truss-url-signer
           path: npm-release
@@ -458,13 +458,13 @@ jobs:
       id-token: write
     steps:
       - name: Setup Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
           registry-url: https://registry.npmjs.org/
 
       - name: Download npm Wasm package artifact
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: npm-package-truss-wasm
           path: npm-release
@@ -488,15 +488,15 @@ jobs:
           exit 1
 
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Setup Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ env.NODE_VERSION }}
 
       - name: Download release manifest
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: release-manifest
           path: homebrew-assets
@@ -514,7 +514,7 @@ jobs:
         run: ruby -c truss.rb
 
       - name: Checkout Homebrew tap
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: nao1215/homebrew-tap
           path: homebrew-tap
@@ -537,7 +537,7 @@ jobs:
           git push
 
       - name: Upload Homebrew formula artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: homebrew-formula-truss
           path: homebrew-tap/truss.rb
@@ -571,22 +571,22 @@ jobs:
       attestations: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Download x86_64 Linux binary
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: binary-x86_64-unknown-linux-gnu
           path: binaries
 
       - name: Download aarch64 Linux binary
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: binary-aarch64-unknown-linux-gnu
           path: binaries
 
       - name: Download the third-party licenses
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: licenses
           path: licenses
@@ -695,7 +695,7 @@ jobs:
         run: cosign sign --yes "${IMAGE}@${DIGEST}"
 
       - name: Attest the image build provenance
-        uses: actions/attest-build-provenance@v4
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-name: ${{ steps.image.outputs.name }}
           subject-digest: ${{ steps.digest.outputs.digest }}
@@ -723,42 +723,42 @@ jobs:
       hashes: ${{ steps.hashes.outputs.hashes }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 
       - name: Setup Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ env.NODE_VERSION }}
 
       - name: Download all binary artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: binary-*
           path: release-assets
           merge-multiple: true
 
       - name: Download release manifest and checksums
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: release-manifest
           path: release-assets
 
       - name: Download SBOM
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: sbom
           path: release-assets
 
       - name: Download the third-party licenses
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: licenses
           path: release-assets
 
       - name: Download npm package artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: npm-package-*
           path: release-assets
@@ -793,7 +793,7 @@ jobs:
           echo "hashes=$(sha256sum -- truss-* release-manifest.json checksums.txt nao1215-*.tgz | base64 -w0)" >> "$GITHUB_OUTPUT"
 
       - name: Attest build provenance
-        uses: actions/attest-build-provenance@v4
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: |
             release-assets/truss-*.tar.gz
@@ -840,7 +840,7 @@ jobs:
         run: printf '%s\n' "${BODY}" > release-notes.md
 
       - name: Upload the release bundle
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-bundle
           path: |
@@ -873,13 +873,13 @@ jobs:
       contents: write
     steps:
       - name: Download the release bundle
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: release-bundle
           path: bundle
 
       - name: Download the SLSA provenance
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: ${{ needs.provenance.outputs.provenance-name }}
           path: bundle/release-assets

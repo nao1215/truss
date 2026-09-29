@@ -6,6 +6,12 @@ updates:
       interval: weekly
       day: monday
     open-pull-requests-limit: 10
+  # The base images are pinned by digest; this keeps the digests current.
+  - package-ecosystem: docker
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
   - package-ecosystem: cargo
     directory: "/fuzz"
     schedule:

@@ -1,0 +1,104 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/nao1215/himorime/main/schema/himorime.schema.json
+#
+# The truss CLI measured end to end with himorime
+# (https://github.com/nao1215/himorime): the process a user starts, from its
+# first instruction to its exit.
+#
+#   himorime run bench                     measure the working tree
+#   himorime compare --against main bench  compare main with the working tree
+#
+# On a pull request, .github/workflows/bench.yml runs `himorime ci bench`:
+# the base of the pull request and its head are built and measured in
+# interleaved rounds on the same runner. See bench/README.md.
+#
+# The input pictures are written by bench/gen.sh into each benchmark's
+# workdir from a fixed seed. It is called through ${head_root}, so the base
+# and the head read the same bytes. No benchmark touches the network, and
+# `truss serve` is not measured: it does not exit.
+version: "1"
+
+name: truss
+description: Start-up, converting a small and a large picture to WebP and JPEG, reading a picture's header, and a conversion that fails.
+
+# The default features, as `cargo install truss-image` builds them. The
+# release archives add s3, gcs and azure, which the measured commands do not
+# reach.
+build:
+  command: [sh, -c, 'cargo build --release --locked --quiet && cp "target/release/truss$1" "$2"', sh, "${exe}", "${artifact}"]
+  cwd: ..
+
+defaults:
+  warmup: 2
+  runs: 20
+  metrics:
+    cpu: true
+    memory: true
+  regression:
+    confidence: 0.95
+    latency:
+      max_percent: 10
+      min_difference: 1ms
+    cpu_total:
+      max_percent: 15
+      min_difference: 2ms
+    peak_rss:
+      max_percent: 15
+      min_difference: 2MiB
+
+benchmarks:
+  - name: version
+    description: Starting truss and exiting.
+    tags: [smoke]
+    commands:
+      truss:
+        command: ["${artifact}", --version]
+
+  - name: convert 640x480
+    description: >-
+      A 640x480 PNG resized to 320 pixels wide and written as WebP and as
+      JPEG at quality 80, the size of a web picture, where starting and
+      writing the file weigh as much as the pixels.
+    setup:
+      - command: [sh, "${head_root}/gen.sh", png, 640x480, "${workdir}/small.png"]
+    tags: [smoke]
+    baseline: jpeg
+    commands:
+      jpeg:
+        command: ["${artifact}", convert, "${workdir}/small.png", -o, "${workdir}/out.jpg", --width, "320", --quality, "80"]
+      webp:
+        command: ["${artifact}", convert, "${workdir}/small.png", -o, "${workdir}/out.webp", --width, "320", --quality, "80"]
+
+  - name: convert 4000x3000
+    description: >-
+      A 12-megapixel PNG (34 MB, the size of a phone photograph) resized to
+      1600 pixels wide and written as WebP and as JPEG at quality 80, where
+      decoding, resizing and encoding the pixels dominate.
+    setup:
+      - command: [sh, "${head_root}/gen.sh", png, 4000x3000, "${workdir}/large.png"]
+    tags: [large]
+    baseline: jpeg
+    metrics:
+      throughput:
+        work: {file_size: "${workdir}/large.png"}
+    commands:
+      jpeg:
+        command: ["${artifact}", convert, "${workdir}/large.png", -o, "${workdir}/out.jpg", --width, "1600", --quality, "80"]
+      webp:
+        command: ["${artifact}", convert, "${workdir}/large.png", -o, "${workdir}/out.webp", --width, "1600", --quality, "80"]
+
+  - name: convert error
+    description: A conversion whose input file does not exist, which truss reports with exit code 2.
+    tags: [smoke]
+    commands:
+      truss:
+        command: ["${artifact}", convert, "${workdir}/missing.png", -o, "${workdir}/out.webp"]
+        exit_codes: [2]
+
+  - name: inspect 4000x3000
+    description: The format and size of the 12-megapixel PNG, which truss reads whole but does not decode.
+    setup:
+      - command: [sh, "${head_root}/gen.sh", png, 4000x3000, "${workdir}/large.png"]
+    tags: [smoke]
+    commands:
+      truss:
+        command: ["${artifact}", inspect, "${workdir}/large.png"]
