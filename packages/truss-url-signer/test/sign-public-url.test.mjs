@@ -413,6 +413,15 @@ test("rejects transform combinations that truss would reject", () => {
       pattern: /unsupported color/,
     },
     {
+      // A sign is not a hex digit; the server refuses it too.
+      options: { transforms: { background: "+1ffff" } },
+      pattern: /unsupported color `\+1ffff`/,
+    },
+    {
+      options: { transforms: { crop: "+10,0,5,5" } },
+      pattern: /^TypeError: crop x must be a non-negative integer, got '\+10'$/,
+    },
+    {
       options: {
         transforms: { blur: 0.0 },
       },

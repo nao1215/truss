@@ -455,6 +455,19 @@ scenarios:
           stderr:
             contains: "crop width must be at most 4294967295, got '99999999999999999999'"
 
+  - name: a colour with a sign in it is refused, as the URL signer refuses it
+    steps:
+      - run:
+          command: truss convert "${fixtures}/1px.png" -o signed-color.png --background +1ffff
+      - assert:
+          exit_code: 1
+          stderr:
+            contains: "unsupported color `+1ffff`"
+      - assert:
+          file:
+            path: signed-color.png
+            exists: false
+
   - name: a width too large for any integer type reads the width's own limit
     steps:
       - run:

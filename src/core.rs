@@ -637,6 +637,13 @@ impl FromStr for CropRegion {
 /// instead of calling itself not an integer, which is what parsing straight into `u32` said.
 fn crop_field(name: &str, text: &str) -> Result<u32, String> {
     let too_large = || format!("crop {name} must be at most {}, got '{text}'", u32::MAX);
+    // Digits only, the rule the signer checks: the integer parser would also take a
+    // leading `+`, and a crop the signer refuses must not be one the server accepts.
+    if !text.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(format!(
+            "crop {name} must be a non-negative integer, got '{text}'"
+        ));
+    }
     match WideInteger::parse(text) {
         Some(WideInteger::Fits(value)) if value >= 0 => match u32::try_from(value) {
             Ok(value) => Ok(value),
@@ -1471,7 +1478,11 @@ impl Rgba8 {
             )
         }
 
-        if !value.is_ascii() || (value.len() != 6 && value.len() != 8) {
+        // Every byte is checked here rather than left to `from_str_radix`, which takes a
+        // leading `+` on each pair it reads and would make `+1ffff` the colour `01ffff`.
+        if !value.bytes().all(|byte| byte.is_ascii_hexdigit())
+            || (value.len() != 6 && value.len() != 8)
+        {
             return Err(rule(value));
         }
 
@@ -4395,6 +4406,20 @@ mod tests {
         }
     }
 
+    /// A sign is not a hexadecimal digit. `from_str_radix` takes a leading `+` on each pair
+    /// it reads, so `+1ffff` was the colour `01ffff` and `+1+1+1` was `010101`, while the
+    /// URL signer refused both.
+    #[test]
+    fn a_color_with_a_sign_in_it_is_refused() {
+        for value in ["+1ffff", "+1+1+1", "ff+1ff", "ffffff+1", "+fffff", "-1ffff"] {
+            let message = Rgba8::from_hex(value).expect_err("a sign is not a hex digit");
+            assert!(
+                message.contains("hexadecimal digits"),
+                "{value:?}: {message}"
+            );
+        }
+    }
+
     #[test]
     fn sniff_artifact_counts_the_frames_of_an_animated_png() {
         // An APNG announces its frame count in an `acTL` chunk before the image data. The
@@ -5179,6 +5204,22 @@ mod tests {
         }
         let fits: CropRegion = "4294967295,0,1,1".parse().expect("u32::MAX fits");
         assert_eq!(fits.x, u32::MAX);
+    }
+
+    /// A field is digits only, which is the rule `@nao1215/truss-url-signer` checks. The
+    /// integer parser also takes a leading `+`, so `+10,0,5,5` was a crop here and a
+    /// refusal there.
+    #[test]
+    fn crop_region_from_str_refuses_a_sign() {
+        use super::CropRegion;
+        assert_eq!(
+            "+10,0,5,5".parse::<CropRegion>().unwrap_err(),
+            "crop x must be a non-negative integer, got '+10'"
+        );
+        assert_eq!(
+            "0,0,5,+5".parse::<CropRegion>().unwrap_err(),
+            "crop height must be a non-negative integer, got '+5'"
+        );
     }
 
     /// An angle too long for `i64` is still a whole number of degrees; it is refused as out
