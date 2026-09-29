@@ -701,8 +701,12 @@ jobs:
           subject-digest: ${{ steps.digest.outputs.digest }}
           push-to-registry: true
 
-  # ── 7. Create GitHub Release ────────────────────────────────────────
-  create-release:
+  # ── 7. Assemble, verify and sign what the release will publish ─────
+  # Everything is prepared before the release exists: GitHub Releases in this
+  # repository are immutable, so an asset cannot be added after publishing
+  # (v0.26.1 lost its SLSA provenance that way). The directory is handed to
+  # create-release, which publishes it together with the provenance at once.
+  prepare-release:
     runs-on: ubuntu-latest
     needs:
       - publish-container
@@ -712,7 +716,7 @@ jobs:
       - publish-wasm-package
       - publish-url-signer-package
     permissions:
-      contents: write
+      contents: read
       id-token: write
       attestations: write
     outputs:
@@ -830,38 +834,73 @@ jobs:
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Create Release
-        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
-        with:
-          tag_name: ${{ steps.tag.outputs.TAG_NAME }}
-          name: ${{ steps.tag.outputs.TAG_NAME }}
-          body: ${{ steps.changelog.outputs.BODY }}
-          draft: false
-          prerelease: ${{ contains(steps.tag.outputs.TAG_NAME, '-') }}
-          generate_release_notes: false
-          files: release-assets/*
+      - name: Write the release notes file
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BODY: ${{ steps.changelog.outputs.BODY }}
+        run: printf '%s\n' "${BODY}" > release-notes.md
+
+      - name: Upload the release bundle
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-bundle
+          path: |
+            release-assets/
+            release-notes.md
+          if-no-files-found: error
 
   # ── 8. SLSA provenance ──────────────────────────────────────────────
-  # Attached to the release as truss-<tag>.intoto.jsonl. The reusable workflow
+  # truss-<tag>.intoto.jsonl for everything prepare-release hashed. It is kept
+  # as a workflow artifact and published by create-release, since assets
+  # cannot be added to an immutable release afterwards. The reusable workflow
   # must be referenced by tag: slsa-verifier checks the tag the provenance names.
   provenance:
-    needs: create-release
+    needs: prepare-release
     permissions:
       actions: read
       id-token: write
-      contents: write
+      contents: read
     uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.1.0
     with:
-      base64-subjects: ${{ needs.create-release.outputs.hashes }}
+      base64-subjects: ${{ needs.prepare-release.outputs.hashes }}
       provenance-name: truss-${{ github.ref_name }}.intoto.jsonl
-      upload-assets: true
-      upload-tag-name: ${{ github.ref_name }}
+      upload-assets: false
 
-  # ── 9. Verify the published release as a user would ─────────────────
+  # ── 9. Create GitHub Release ────────────────────────────────────────
+  create-release:
+    runs-on: ubuntu-latest
+    needs: [prepare-release, provenance]
+    permissions:
+      contents: write
+    steps:
+      - name: Download the release bundle
+        uses: actions/download-artifact@v8
+        with:
+          name: release-bundle
+          path: bundle
+
+      - name: Download the SLSA provenance
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ needs.provenance.outputs.provenance-name }}
+          path: bundle/release-assets
+
+      - name: Create Release
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          body_path: bundle/release-notes.md
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          generate_release_notes: false
+          files: bundle/release-assets/*
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ── 10. Verify the published release as a user would ────────────────
   verify-release:
-    needs: [provenance, publish-container]
+    needs: [create-release, publish-container]
     runs-on: ubuntu-latest
     permissions:
       contents: read
