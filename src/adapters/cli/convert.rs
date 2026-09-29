@@ -18,27 +18,27 @@ use super::{
 // Clap -> Command conversion
 // ---------------------------------------------------------------------------
 
-/// Reports whether the value names a URL rather than a path.
+/// Returns the value as a URL when it names one rather than a path.
 ///
 /// A value is a URL when it names a scheme followed by `://`. A bare `scheme:` with no
 /// authority, as in `mailto:`, stays a path: nothing is fetched from one, and a file whose
 /// name holds a colon is likelier than a caller who meant a URI. Requiring the authority
 /// also keeps `C:\images\logo.png` the Windows path it is rather than a URL with the
 /// scheme `c`.
-fn watermark_is_a_url(watermark: &Path) -> bool {
+///
+/// The text is returned rather than a yes or no so that the caller fetches the same string
+/// this judged, without converting the path a second time.
+fn watermark_url(watermark: &Path) -> Option<&str> {
     // A value that is not valid UTF-8 cannot be a URL, so it is a path, which is also what a
     // caller who named a file with an unusual encoding meant.
-    let Some(value) = watermark.to_str() else {
-        return false;
-    };
-    let Some((scheme, _)) = value.split_once("://") else {
-        return false;
-    };
-    !scheme.is_empty()
+    let value = watermark.to_str()?;
+    let (scheme, _) = value.split_once("://")?;
+    let names_a_scheme = !scheme.is_empty()
         && scheme.starts_with(|c: char| c.is_ascii_alphabetic())
         && scheme
             .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'));
+    names_a_scheme.then_some(value)
 }
 
 /// Reads the watermark image, from a URL when the value is one and from the filesystem
@@ -48,8 +48,7 @@ fn watermark_is_a_url(watermark: &Path) -> bool {
 /// ones already written rather than a second copy of them. The size cap is
 /// [`MAX_REMOTE_WATERMARK_BYTES`], not the input's.
 fn read_watermark_bytes(watermark: &Path) -> Result<Vec<u8>, CliError> {
-    if watermark_is_a_url(watermark) {
-        let value = watermark.to_str().expect("a URL is valid UTF-8");
+    if let Some(value) = watermark_url(watermark) {
         validate_url(value, "--watermark")?;
         return read_url_bytes(value, MAX_REMOTE_WATERMARK_BYTES);
     }
@@ -65,7 +64,7 @@ fn read_watermark_bytes(watermark: &Path) -> Result<Vec<u8>, CliError> {
 
 #[cfg(test)]
 mod watermark_tests {
-    use super::watermark_is_a_url;
+    use super::watermark_url;
     use std::path::Path;
 
     /// Which values `--watermark` sends to the fetcher.
@@ -81,7 +80,7 @@ mod watermark_tests {
         ];
         for value in urls {
             assert!(
-                watermark_is_a_url(Path::new(value)),
+                watermark_url(Path::new(value)).is_some(),
                 "{value} names a scheme, so it is a URL"
             );
         }
@@ -100,7 +99,7 @@ mod watermark_tests {
         ];
         for value in paths {
             assert!(
-                !watermark_is_a_url(Path::new(value)),
+                watermark_url(Path::new(value)).is_none(),
                 "{value} is a path, not a URL"
             );
         }
@@ -458,10 +457,23 @@ fn replace_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         fs::rename(&temporary, path)
     })();
 
-    if outcome.is_err() {
-        let _ = fs::remove_file(&temporary);
+    match outcome {
+        Ok(()) => Ok(()),
+        // The temporary file is the caller's disk space under a name they did not choose, so
+        // one that stays behind is named in the error rather than left to be found later.
+        Err(error) => match fs::remove_file(&temporary) {
+            Err(cleanup) if cleanup.kind() != std::io::ErrorKind::NotFound => {
+                Err(std::io::Error::new(
+                    error.kind(),
+                    format!(
+                        "{error}; the temporary file {} could not be removed either: {cleanup}",
+                        temporary.display()
+                    ),
+                ))
+            }
+            _ => Err(error),
+        },
     }
-    outcome
 }
 
 /// Fails with the error a direct write would have given for a destination that exists and
@@ -525,7 +537,11 @@ fn temporary_sibling(path: &Path) -> Option<PathBuf> {
 /// the write, so nothing is reported.
 fn copy_permissions(path: &Path, temporary: &Path) {
     if let Ok(metadata) = fs::metadata(path) {
-        let _ = fs::set_permissions(temporary, metadata.permissions());
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "the temporary file was just created by this process, so the only way this fails is a file system that keeps no Unix modes, which the comment above says is not a failure of the write"
+        )]
+        let _: std::io::Result<()> = fs::set_permissions(temporary, metadata.permissions());
     }
 }
 

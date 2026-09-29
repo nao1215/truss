@@ -1,0 +1,5 @@
+# A test that cannot unwrap its setup should fail right there, so the error-handling lints in
+# Cargo.toml hold the shipped code to them and leave tests alone.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true

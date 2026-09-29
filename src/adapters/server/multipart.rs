@@ -94,6 +94,10 @@ pub(super) fn parse_upload_request(
                         "multipart upload must not include multiple `watermark_position` fields",
                     ));
                 }
+                #[expect(
+                    clippy::map_err_ignore,
+                    reason = "the sentence states the rule the bytes break; the byte offset a `Utf8Error` carries is not something the client that sent them can act on"
+                )]
                 let text = std::str::from_utf8(&body[part.body_range])
                     .map_err(|_| bad_request_response("watermark_position must be valid UTF-8"))?;
                 watermark_position = Some(text.trim().to_string());
@@ -104,12 +108,21 @@ pub(super) fn parse_upload_request(
                         "multipart upload must not include multiple `watermark_opacity` fields",
                     ));
                 }
+                #[expect(
+                    clippy::map_err_ignore,
+                    reason = "the sentence states the rule the bytes break; the byte offset a `Utf8Error` carries is not something the client that sent them can act on"
+                )]
                 let text = std::str::from_utf8(&body[part.body_range])
                     .map_err(|_| bad_request_response("watermark_opacity must be valid UTF-8"))?;
-                watermark_opacity =
-                    Some(text.trim().parse::<u8>().map_err(|_| {
-                        bad_request_response("watermark_opacity must be an integer")
-                    })?);
+                #[expect(
+                    clippy::map_err_ignore,
+                    reason = "the sentence names the field and the rule it breaks, and the parser's own wording in a `ParseIntError` says nothing more a caller can act on"
+                )]
+                let parsed = text
+                    .trim()
+                    .parse::<u8>()
+                    .map_err(|_| bad_request_response("watermark_opacity must be an integer"))?;
+                watermark_opacity = Some(parsed);
             }
             "watermark_margin" => {
                 if watermark_margin.is_some() {
@@ -117,12 +130,21 @@ pub(super) fn parse_upload_request(
                         "multipart upload must not include multiple `watermark_margin` fields",
                     ));
                 }
+                #[expect(
+                    clippy::map_err_ignore,
+                    reason = "the sentence states the rule the bytes break; the byte offset a `Utf8Error` carries is not something the client that sent them can act on"
+                )]
                 let text = std::str::from_utf8(&body[part.body_range])
                     .map_err(|_| bad_request_response("watermark_margin must be valid UTF-8"))?;
-                watermark_margin =
-                    Some(text.trim().parse::<u32>().map_err(|_| {
-                        bad_request_response("watermark_margin must be an integer")
-                    })?);
+                #[expect(
+                    clippy::map_err_ignore,
+                    reason = "the sentence names the field and the rule it breaks, and the parser's own wording in a `ParseIntError` says nothing more a caller can act on"
+                )]
+                let parsed = text
+                    .trim()
+                    .parse::<u32>()
+                    .map_err(|_| bad_request_response("watermark_margin must be an integer"))?;
+                watermark_margin = Some(parsed);
             }
             field_name => {
                 return Err(bad_request_response(&format!(
@@ -268,6 +290,10 @@ pub(super) fn parse_multipart_form_data(
 pub(super) fn parse_part_headers(
     header_bytes: &[u8],
 ) -> Result<Vec<(String, String)>, HttpResponse> {
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "the sentence states the rule the bytes break; the byte offset a `Utf8Error` carries is not something the client that sent them can act on"
+    )]
     let header_text = std::str::from_utf8(header_bytes)
         .map_err(|_| bad_request_response("multipart part headers must be valid UTF-8"))?;
     parse_headers(header_text.split("\r\n"))

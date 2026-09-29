@@ -159,6 +159,10 @@ pub(crate) fn transform_svg(request: TransformRequest) -> Result<TransformResult
     }
 
     // Parse the SVG tree once for both size determination and rasterization.
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "the parser's wording is replaced on purpose, as `svg_parse_failure` explains"
+    )]
     let tree = resvg::usvg::Tree::from_str(&sanitized, &resvg::usvg::Options::default())
         .map_err(|_| TransformError::DecodeFailed(svg_parse_failure()))?;
 
@@ -969,7 +973,11 @@ fn pre_rotation_render_size(
                 f64::from(target.1) / f64::from(rotated.1.max(1)),
             );
             let scaled = |value: u32| {
-                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                #[allow(
+                    clippy::cast_possible_truncation,
+                    clippy::cast_sign_loss,
+                    reason = "float-to-integer casts saturate in Rust, and the result is raised to at least 1 below"
+                )]
                 let scaled = (f64::from(value) * scale).round() as u32;
                 scaled.max(1)
             };
@@ -980,9 +988,17 @@ fn pre_rotation_render_size(
 
 fn intrinsic_render_size(tree: &resvg::usvg::Tree) -> (u32, u32) {
     let size = tree.size();
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "usvg keeps a size positive and finite, a float-to-integer cast saturates, and truncating the fraction is what usvg does for the same size"
+    )]
     let width = size.width() as u32;
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "usvg keeps a size positive and finite, a float-to-integer cast saturates, and truncating the fraction is what usvg does for the same size"
+    )]
     let height = size.height() as u32;
 
     // A document that resolves to no size still has to be drawn somewhere. 300x150 is the
@@ -1081,7 +1097,7 @@ fn encode_raster_output(
                 }
                 #[cfg(not(feature = "webp-lossy"))]
                 {
-                    let _ = q;
+                    let _: u8 = q;
                     return Err(TransformError::CapabilityMissing(
                         "lossy WebP encoding is not enabled in this build".into(),
                     ));

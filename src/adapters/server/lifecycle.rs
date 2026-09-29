@@ -1,8 +1,8 @@
 /// Server startup, shutdown, signal handling, and connection management.
 use std::io;
 use std::net::{TcpListener, TcpStream};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, Ordering};
+use std::sync::{Arc, PoisonError};
 use std::time::{Duration, Instant};
 
 #[cfg(unix)]
@@ -84,7 +84,11 @@ pub fn serve_with_config(listener: TcpListener, config: ServerConfig) -> io::Res
             .spawn(move || {
                 loop {
                     let (stream, accepted_at) = {
-                        let guard = rx.lock().expect("worker lock poisoned");
+                        // Nothing panics while holding this guard, since `recv` does not, and
+                        // the receiver has no state a panic could leave half-written. A
+                        // poisoned lock is therefore taken as it is rather than turned into a
+                        // panic in every worker that reaches it after the first.
+                        let guard = rx.lock().unwrap_or_else(PoisonError::into_inner);
                         match guard.recv() {
                             Ok(accepted) => accepted,
                             Err(_) => break,
@@ -92,8 +96,7 @@ pub fn serve_with_config(listener: TcpListener, config: ServerConfig) -> io::Res
                     }; // MutexGuard dropped here — before handle_stream runs.
                     handle_one_connection(stream, accepted_at, &cfg);
                 }
-            })
-            .expect("failed to start a connection worker");
+            })?;
         workers.push(worker);
     }
 
@@ -115,8 +118,7 @@ pub fn serve_with_config(listener: TcpListener, config: ServerConfig) -> io::Res
         let path = path.clone();
         std::thread::Builder::new()
             .name("preset-watcher".into())
-            .spawn(move || preset_watcher(presets, path, draining, cfg))
-            .expect("failed to spawn preset watcher thread");
+            .spawn(move || preset_watcher(presets, path, draining, cfg))?;
     }
 
     // Set the listener to non-blocking so we can multiplex between incoming
@@ -160,8 +162,17 @@ pub fn serve_with_config(listener: TcpListener, config: ServerConfig) -> io::Res
 
         match listener.accept() {
             Ok((stream, _addr)) => {
-                // Accepted connections are always blocking for the workers.
-                let _ = stream.set_nonblocking(false);
+                // Accepted connections are always blocking for the workers. On the platforms
+                // where an accepted socket inherits the listener's non-blocking mode, one that
+                // stays non-blocking would have its first read fail with `WouldBlock` and be
+                // answered 408 for a request it had not had the chance to send, so it is
+                // closed and the failure logged rather than handed to a worker.
+                if let Err(err) = stream.set_nonblocking(false) {
+                    config.log_warn(&format!(
+                        "failed to make an accepted connection blocking: {err}"
+                    ));
+                    continue;
+                }
                 if sender.send((stream, Instant::now())).is_err() {
                     break;
                 }
@@ -199,17 +210,24 @@ pub fn serve_with_config(listener: TcpListener, config: ServerConfig) -> io::Res
             std::sync::Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
         let wd = std::sync::Arc::clone(&worker_done);
         std::thread::spawn(move || {
-            let _ = worker.join();
+            // A worker contains the panics of the connections it handles, so one that ended
+            // by panicking failed outside that containment, and the shutdown log is the
+            // last place that can say so.
+            if worker.join().is_err() {
+                stderr_write("shutdown: a worker thread ended with a panic");
+            }
             let (lock, cvar) = &*wd;
-            *lock.lock().expect("shutdown notify lock") = true;
+            *lock.lock().unwrap_or_else(PoisonError::into_inner) = true;
             cvar.notify_one();
         });
+        // The flag behind this lock is a single `bool` set in one assignment, so a poisoned
+        // lock still holds a value that can be trusted, and the drain goes on with it.
         let (lock, cvar) = &*worker_done;
-        let mut done = lock.lock().expect("shutdown wait lock");
+        let mut done = lock.lock().unwrap_or_else(PoisonError::into_inner);
         while !*done {
             let (guard, timeout) = cvar
                 .wait_timeout(done, remaining)
-                .expect("shutdown condvar wait");
+                .unwrap_or_else(PoisonError::into_inner);
             done = guard;
             if timeout.timed_out() {
                 stderr_write("shutdown: timed out waiting for a worker thread");
@@ -632,7 +650,10 @@ pub(super) fn preset_watcher(
         match parse_presets_file(&path) {
             Ok(new_presets) => {
                 let count = new_presets.len();
-                *presets.write().expect("presets lock poisoned") = new_presets;
+                // The table is replaced in one assignment, so a poisoned lock still guards a
+                // whole table; refusing to reload would keep the server on the old presets
+                // for the rest of its life.
+                *presets.write().unwrap_or_else(PoisonError::into_inner) = new_presets;
                 last_modified = current_modified;
                 config.log(&format!(
                     "[presets] reloaded {count} presets from `{}`",

@@ -270,7 +270,14 @@ impl TransformCache {
             "truss: removing corrupted cache entry ({reason}): {}",
             path.display()
         ));
-        let _ = fs::remove_file(path);
+        // An entry that cannot be removed is read and rejected again on every request for
+        // its key, so the operator is told why it keeps coming back.
+        if let Err(err) = remove_if_present(path) {
+            self.log(&format!(
+                "truss: failed to remove corrupted cache entry {}: {err}",
+                path.display()
+            ));
+        }
     }
 
     /// Writes a transform result to the cache.
@@ -317,8 +324,14 @@ impl TransformCache {
 
         if let Err(err) = result {
             self.log(&format!("truss: cache write failed: {err}"));
-            // Clean up the temp file if it exists.
-            let _ = fs::remove_file(&tmp_path);
+            // A temp file left behind holds disk space that eviction never counts, since
+            // the scan skips temp files, so a failure to remove it is worth a line too.
+            if let Err(err) = remove_if_present(&tmp_path) {
+                self.log(&format!(
+                    "truss: failed to remove cache temp file {}: {err}",
+                    tmp_path.display()
+                ));
+            }
         } else {
             self.maybe_evict();
         }
@@ -561,7 +574,12 @@ impl OriginCache {
 
         if let Err(err) = result {
             self.log(&format!("truss: origin cache write failed: {err}"));
-            let _ = fs::remove_file(&tmp_path);
+            if let Err(err) = remove_if_present(&tmp_path) {
+                self.log(&format!(
+                    "truss: failed to remove origin cache temp file {}: {err}",
+                    tmp_path.display()
+                ));
+            }
         }
     }
 }
@@ -571,6 +589,17 @@ impl OriginCache {
 /// The suffix combines the process ID with a monotonically increasing counter
 /// so that concurrent writers within the same process never collide on the
 /// same temp path (the previous PID-only scheme could).
+/// Removes a file, treating one that is already gone as removed.
+///
+/// A write can fail before its temp file was created, and two readers can reject the same
+/// corrupted entry at once, so `NotFound` is the outcome wanted rather than a failure.
+fn remove_if_present(path: &Path) -> io::Result<()> {
+    match fs::remove_file(path) {
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+        other => other,
+    }
+}
+
 pub(super) fn unique_tmp_suffix() -> String {
     let seq = CACHE_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
     format!("tmp.{}.{seq}", std::process::id())
@@ -595,8 +624,6 @@ pub(super) fn compute_cache_key(
     options: &TransformOptions,
     watermark_identity: Option<&str>,
 ) -> String {
-    use std::fmt::Write;
-
     let mut canonical = String::new();
     canonical.push_str(source_identifier);
     canonical.push('\n');
@@ -624,14 +651,14 @@ pub(super) fn compute_cache_key(
         push_param(&mut canonical, "autoOrient", "true");
     }
     if let Some(bg) = &options.background {
-        let mut buf = String::new();
-        let _ = write!(buf, "{:02x}{:02x}{:02x}{:02x}", bg.r, bg.g, bg.b, bg.a);
-        push_param(&mut canonical, "background", &buf);
+        push_param(
+            &mut canonical,
+            "background",
+            &format!("{:02x}{:02x}{:02x}{:02x}", bg.r, bg.g, bg.b, bg.a),
+        );
     }
     if let Some(blur) = options.blur {
-        let mut buf = String::new();
-        let _ = write!(buf, "{blur}");
-        push_param(&mut canonical, "blur", &buf);
+        push_param(&mut canonical, "blur", &format!("{blur}"));
     }
     if let Some(crop) = options.crop {
         let buf = crop.to_string();
@@ -686,9 +713,7 @@ pub(super) fn compute_cache_key(
         push_param(&mut canonical, "rotate", &buf);
     }
     if let Some(sharpen) = options.sharpen {
-        let mut buf = String::new();
-        let _ = write!(buf, "{sharpen}");
-        push_param(&mut canonical, "sharpen", &buf);
+        push_param(&mut canonical, "sharpen", &format!("{sharpen}"));
     }
     if options.strip_metadata {
         push_param(&mut canonical, "stripMetadata", "true");
@@ -1162,5 +1187,42 @@ mod tests {
 
         let entries = scan_entries(dir.path());
         assert_eq!(entries.len(), 1, "temp files should be excluded from scan");
+    }
+
+    /// A corrupted entry that cannot be removed says so, rather than being rejected on every
+    /// later request for its key with only the first half of the story in the log.
+    #[cfg(unix)]
+    #[test]
+    fn corrupted_entry_that_cannot_be_removed_is_logged() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::{Arc, Mutex};
+
+        // Root ignores directory permissions, so the removal would succeed there.
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let messages = Arc::new(Mutex::new(Vec::<String>::new()));
+        let sink = Arc::clone(&messages);
+        let cache = TransformCache::new(dir.path().to_path_buf()).with_log_handler(Some(Arc::new(
+            move |msg: &str| sink.lock().unwrap().push(msg.to_string()),
+        )));
+        let path = cache.entry_path(&test_key(0));
+        let parent = path.parent().unwrap().to_path_buf();
+        fs::create_dir_all(&parent).unwrap();
+        fs::write(&path, b"no header newline").unwrap();
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o555)).unwrap();
+
+        let lookup = cache.get(&test_key(0));
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert!(matches!(lookup, CacheLookup::Miss));
+        let logged = messages.lock().unwrap();
+        assert!(
+            logged
+                .iter()
+                .any(|m| m.starts_with("truss: failed to remove corrupted cache entry")),
+            "{logged:?}"
+        );
     }
 }

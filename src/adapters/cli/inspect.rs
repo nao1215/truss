@@ -114,7 +114,12 @@ fn render_inspection_json(artifact: &crate::Artifact) -> String {
         has_alpha: artifact.metadata.has_alpha,
         is_animated: artifact.metadata.frame_count > 1 || artifact.metadata.duration.is_some(),
     };
-    let mut json = serde_json::to_string_pretty(&output).expect("serialization cannot fail");
+    #[expect(
+        clippy::expect_used,
+        reason = "the struct holds only strings, integers, and booleans under derived `Serialize`, and serde_json fails only on a map key that is not a string or a `Serialize` impl that reports an error, neither of which it has"
+    )]
+    let mut json = serde_json::to_string_pretty(&output)
+        .expect("InspectionOutput holds only strings, integers, and booleans");
     json.push('\n');
     json
 }

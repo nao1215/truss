@@ -7,17 +7,32 @@
 //!
 //! Adding an export is a minor version and adding a line here; removing one is a major
 //! version and removing a line. Neither can happen by accident.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::let_underscore_must_use,
+    clippy::let_underscore_untyped,
+    clippy::unused_result_ok,
+    reason = "the error-handling lints in Cargo.toml are for the code that ships; a test or benchmark stops at the first thing it cannot set up, and discards what it does not assert on"
+)]
 
 #[test]
 fn every_exported_symbol_is_reachable_from_the_crate_root() {
     // Types and values that describe an image.
-    #[allow(unused_imports)]
+    #[allow(
+        unused_imports,
+        reason = "the import is the assertion: it compiles only while the symbol is exported"
+    )]
     use truss::{
         Artifact, ArtifactMetadata, CropRegion, Dimensions, MAX_OUTPUT_PIXELS, MediaType,
         MetadataKind, RawArtifact, Rgba8, sniff_artifact,
     };
     // The transform vocabulary.
-    #[allow(unused_imports)]
+    #[allow(
+        unused_imports,
+        reason = "the import is the assertion: it compiles only while the symbol is exported"
+    )]
     use truss::{
         Fit, OptimizeMode, Position, QualityMetric, Rotation, TargetQuality, TransformError,
         TransformOptions, TransformRequest, TransformResult, TransformWarning, WatermarkInput,
@@ -37,14 +52,20 @@ fn every_exported_symbol_is_reachable_from_the_crate_root() {
 fn the_cli_entry_point_is_reachable_from_the_crate_root() {
     // `src/main.rs` is a separate target and therefore an external consumer of the library,
     // so the entry point needs a path that survives the module tree being private.
-    #[allow(unused_imports)]
+    #[allow(
+        unused_imports,
+        reason = "the import is the assertion: it compiles only while the symbol is exported"
+    )]
     use truss::run_cli;
 }
 
 #[cfg(feature = "server")]
 #[test]
 fn every_exported_server_symbol_is_reachable_from_the_crate_root() {
-    #[allow(unused_imports)]
+    #[allow(
+        unused_imports,
+        reason = "the import is the assertion: it compiles only while the symbol is exported"
+    )]
     use truss::{
         LogHandler, LogLevel, ServerConfig, SignedUrlSource, SignedWatermarkParams,
         TransformOptionsPayload, TrustedProxy, bind_addr, serve_once_with_config,
@@ -64,16 +85,28 @@ fn every_exported_server_symbol_is_reachable_from_the_crate_root() {
 #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
 #[test]
 fn every_exported_storage_symbol_is_reachable_from_the_crate_root() {
-    #[allow(unused_imports)]
+    #[allow(
+        unused_imports,
+        reason = "the import is the assertion: it compiles only while the symbol is exported"
+    )]
     use truss::StorageBackend;
     #[cfg(feature = "azure")]
-    #[allow(unused_imports)]
+    #[allow(
+        unused_imports,
+        reason = "the import is the assertion: it compiles only while the symbol is exported"
+    )]
     use truss::{AzureContext, build_azure_context};
     #[cfg(feature = "gcs")]
-    #[allow(unused_imports)]
+    #[allow(
+        unused_imports,
+        reason = "the import is the assertion: it compiles only while the symbol is exported"
+    )]
     use truss::{GcsContext, build_gcs_context};
     #[cfg(feature = "s3")]
-    #[allow(unused_imports)]
+    #[allow(
+        unused_imports,
+        reason = "the import is the assertion: it compiles only while the symbol is exported"
+    )]
     use truss::{S3Context, build_s3_context};
 }
 

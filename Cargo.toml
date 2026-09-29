@@ -65,6 +65,21 @@ futures = { version = "0.3", optional = true }
 flate2 = { version = "1", optional = true }
 libc = { version = "0.2", optional = true }
 
+# Error handling in the code that ships: an error is returned, reported, or dropped with a
+# reason written next to it, and a panic is an invariant stated in an `expect` message.
+# `clippy.toml` lets tests unwrap, expect and panic, since there a failure is the test failing.
+[lints.clippy]
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+todo = "warn"
+unimplemented = "warn"
+let_underscore_must_use = "warn"
+let_underscore_untyped = "warn"
+unused_result_ok = "warn"
+map_err_ignore = "warn"
+allow_attributes_without_reason = "warn"
+
 [profile.release]
 lto = "thin"
 codegen-units = 1

@@ -606,6 +606,10 @@ pub struct CropRegion {
 impl FromStr for CropRegion {
     type Err = String;
 
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "each sentence names the field, the rule, and the value given, and `@nao1215/truss-url-signer` repeats them word for word, so the parser's own wording would split the two"
+    )]
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let parts: Vec<&str> = s.split(',').collect();
         if parts.len() != 4 {
@@ -772,6 +776,10 @@ impl FromStr for TargetQuality {
         // `format`, and the optimize mode all match what the caller wrote, so a metric that
         // accepted any case was the one flag whose lesson did not carry to the next.
         let metric = QualityMetric::from_str(metric)?;
+        #[expect(
+            clippy::map_err_ignore,
+            reason = "the sentence names the rule and the value given, and `@nao1215/truss-url-signer` repeats it word for word, so the parser's own wording would split the two"
+        )]
         let value = raw_value
             .parse::<f32>()
             .map_err(|_| format!("target quality value must be a number, got `{raw_value}`"))?;
@@ -1349,7 +1357,11 @@ impl Rotation {
     pub const fn from_degrees(degrees: i32) -> Self {
         let wrapped = degrees % 360;
         let normalized = if wrapped < 0 { wrapped + 360 } else { wrapped };
-        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+        #[allow(
+            clippy::cast_sign_loss,
+            clippy::cast_possible_truncation,
+            reason = "`normalized` is in 0..360, which is neither negative nor too large for u16"
+        )]
         Self(normalized as u16)
     }
 
@@ -1372,7 +1384,10 @@ impl Rotation {
     #[must_use]
     pub const fn quarter_turns(self) -> Option<u8> {
         if self.0.is_multiple_of(90) {
-            #[allow(clippy::cast_possible_truncation)]
+            #[allow(
+                clippy::cast_possible_truncation,
+                reason = "the angle is below 360, so the quotient is at most 3"
+            )]
             Some((self.0 / 90) as u8)
         } else {
             None
@@ -1440,6 +1455,10 @@ impl Rgba8 {
     /// than repeating the value back. `#ffffff` is the spelling a caller reaches for first,
     /// since CSS, HTML, and every colour picker use it, and `unsupported color \`#ffffff\``
     /// gave them nothing to correct. Naming the rule is what every other option here does.
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "every rejection reads the one sentence on purpose, as the paragraph above says, so the parser's own wording is not wanted"
+    )]
     pub fn from_hex(value: &str) -> Result<Self, String> {
         fn rule(value: &str) -> String {
             format!(
@@ -1904,6 +1923,10 @@ where
     // held is refused here, with the sentence that check would have given.
     deserialize_ranged(deserializer, |value| match u8::try_from(value) {
         Ok(quality) => Ok(quality),
+        #[expect(
+            clippy::expect_used,
+            reason = "`validate_quality_value` accepts only 1..=100, which lies inside u8, so a value that does not fit is one it refuses"
+        )]
         Err(_) => {
             Err(validate_quality_value(value).expect_err("a value outside u8 is outside 1..=100"))
         }
@@ -2442,7 +2465,11 @@ fn to_dimension(value: f64) -> Option<u32> {
     if !(value.is_finite() && value >= 1.0 && value < f64::from(u32::MAX)) {
         return None;
     }
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "the check above keeps the value finite, positive, and below u32::MAX, and truncating its fraction is the point"
+    )]
     Some(value as u32)
 }
 
@@ -3159,17 +3186,17 @@ fn is_jpeg_sof_marker(marker: u8) -> bool {
 }
 
 fn read_u16_be(bytes: &[u8]) -> Result<u16, TransformError> {
-    let array: [u8; 2] = bytes
-        .try_into()
-        .map_err(|_| TransformError::DecodeFailed("expected 2 bytes".to_string()))?;
-    Ok(u16::from_be_bytes(array))
+    match *bytes {
+        [a, b] => Ok(u16::from_be_bytes([a, b])),
+        _ => Err(TransformError::DecodeFailed("expected 2 bytes".to_string())),
+    }
 }
 
 fn read_u16_le(bytes: &[u8]) -> Result<u16, TransformError> {
-    let array: [u8; 2] = bytes
-        .try_into()
-        .map_err(|_| TransformError::DecodeFailed("expected 2 bytes".to_string()))?;
-    Ok(u16::from_le_bytes(array))
+    match *bytes {
+        [a, b] => Ok(u16::from_le_bytes([a, b])),
+        _ => Err(TransformError::DecodeFailed("expected 2 bytes".to_string())),
+    }
 }
 
 fn read_u24_le(bytes: &[u8]) -> Result<u32, TransformError> {
@@ -3181,17 +3208,17 @@ fn read_u24_le(bytes: &[u8]) -> Result<u32, TransformError> {
 }
 
 fn read_u32_be(bytes: &[u8]) -> Result<u32, TransformError> {
-    let array: [u8; 4] = bytes
-        .try_into()
-        .map_err(|_| TransformError::DecodeFailed("expected 4 bytes".to_string()))?;
-    Ok(u32::from_be_bytes(array))
+    match *bytes {
+        [a, b, c, d] => Ok(u32::from_be_bytes([a, b, c, d])),
+        _ => Err(TransformError::DecodeFailed("expected 4 bytes".to_string())),
+    }
 }
 
 fn read_u32_le(bytes: &[u8]) -> Result<u32, TransformError> {
-    let array: [u8; 4] = bytes
-        .try_into()
-        .map_err(|_| TransformError::DecodeFailed("expected 4 bytes".to_string()))?;
-    Ok(u32::from_le_bytes(array))
+    match *bytes {
+        [a, b, c, d] => Ok(u32::from_le_bytes([a, b, c, d])),
+        _ => Err(TransformError::DecodeFailed("expected 4 bytes".to_string())),
+    }
 }
 
 #[cfg(test)]

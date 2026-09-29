@@ -217,7 +217,10 @@ pub(super) fn is_trusted_proxy(trusted: &[TrustedProxy], ip: IpAddr) -> bool {
 ///
 /// Some variants are only constructed when optional storage backends are enabled.
 #[derive(Debug, Clone, Copy)]
-#[allow(dead_code)]
+#[allow(
+    dead_code,
+    reason = "the S3, GCS, and Azure labels are constructed only when their storage feature is enabled"
+)]
 pub(super) enum StorageBackendLabel {
     Filesystem,
     S3,
@@ -265,7 +268,10 @@ impl StorageBackend {
                 #[cfg(feature = "azure")]
                 expected.push("azure");
 
-                #[allow(unused_mut)]
+                #[allow(
+                    unused_mut,
+                    reason = "the hint is appended to only for the backends this build leaves out, so a build with all of them never mutates it"
+                )]
                 let mut hint = String::new();
                 #[cfg(not(feature = "s3"))]
                 if value.eq_ignore_ascii_case("s3") {
@@ -705,8 +711,10 @@ impl fmt::Debug for ServerConfig {
                 &self
                     .presets
                     .read()
-                    .map(|p| p.keys().cloned().collect::<Vec<_>>())
-                    .unwrap_or_default(),
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .keys()
+                    .cloned()
+                    .collect::<Vec<_>>(),
             )
             .field("presets_file_path", &self.presets_file_path)
             .field("rate_limiter", &self.rate_limiter.is_some())
@@ -766,7 +774,14 @@ impl PartialEq for ServerConfig {
             && self.max_remote_redirects == other.max_remote_redirects
             && self.enable_compression == other.enable_compression
             && self.compression_level == other.compression_level
-            && *self.presets.read().unwrap() == *other.presets.read().unwrap()
+            && *self
+                .presets
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                == *other
+                    .presets
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
             && self.presets_file_path == other.presets_file_path
             && self.rate_limiter.is_some() == other.rate_limiter.is_some()
             && self.trusted_proxies == other.trusted_proxies
@@ -1544,6 +1559,10 @@ impl ServerConfig {
 pub(super) fn parse_env_u64_ranged(name: &str, min: u64, max: u64) -> io::Result<Option<u64>> {
     match env::var(name).ok().filter(|v| !v.is_empty()) {
         Some(value) => {
+            #[expect(
+                clippy::map_err_ignore,
+                reason = "the sentence names the variable and the rule its value breaks, and the parser's own wording in a `ParseIntError` says nothing more an operator can act on"
+            )]
             let n: u64 = value.parse().map_err(|_| {
                 io::Error::new(
                     io::ErrorKind::InvalidInput,
@@ -1569,6 +1588,10 @@ pub(super) fn parse_env_u64_ranged(name: &str, min: u64, max: u64) -> io::Result
 fn parse_env_f64_ranged(name: &str, min: f64, max: f64) -> io::Result<Option<f64>> {
     match env::var(name).ok().filter(|v| !v.is_empty()) {
         Some(value) => {
+            #[expect(
+                clippy::map_err_ignore,
+                reason = "the sentence names the variable and the rule its value breaks, and the parser's own wording in a `ParseFloatError` says nothing more an operator can act on"
+            )]
             let n: f64 = value.parse().map_err(|_| {
                 io::Error::new(
                     io::ErrorKind::InvalidInput,
@@ -1664,6 +1687,10 @@ pub(super) fn env_flag(name: &str) -> io::Result<bool> {
 
 pub(super) fn parse_optional_env_u32(name: &str) -> io::Result<Option<u32>> {
     match env::var(name) {
+        #[expect(
+            clippy::map_err_ignore,
+            reason = "the sentence names the variable and the rule its value breaks, and the parser's own wording in a `ParseIntError` says nothing more an operator can act on"
+        )]
         Ok(value) if !value.is_empty() => value.parse::<u32>().map(Some).map_err(|_| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,

@@ -174,7 +174,7 @@ pub fn transform(request: TransformRequest) -> Result<TransformResult, Transform
         }
         #[cfg(not(feature = "svg"))]
         {
-            let _ = request;
+            drop(request);
             return Err(TransformError::CapabilityMissing(
                 "SVG processing is not enabled in this build".to_string(),
             ));
