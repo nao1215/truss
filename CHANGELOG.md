@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- The minimum supported Rust version is 1.94.1, up from 1.92, because the AWS SDK releases that fix an unsound dependency require it. With the MSRV at 1.92 the resolver kept aws-config at 1.8 and aws-sdk-s3 at 1.137, whose client pulls in lru 0.16, and lru before 0.18.2 is unsound (RUSTSEC-2026-0253: `LruCache::pop()` is not panic-safe, so a key whose `Drop` panics leaves a freed node linked in the list, and a later eviction writes to freed memory). aws-config 1.12 and aws-sdk-s3 1.150 use lru 0.18.5 and require Rust 1.94.1. The release binaries were already built with a newer compiler, so only people who build truss-image themselves with a toolchain older than 1.94.1 are affected, and the crate root's promise holds: the MSRV moves only in a minor release.
+
 ## v0.26.1
 
 ### Fixed

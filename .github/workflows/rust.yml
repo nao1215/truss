@@ -259,7 +259,7 @@ jobs:
   # toolchain is read from the manifest so that raising the MSRV stays one edit.
   msrv:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 40
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -278,8 +278,10 @@ jobs:
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
 
-      - name: Check with the declared minimum toolchain
-        run: cargo check --locked --all-features --all-targets
+      # Tests, not only a check: a build that compiles on the MSRV can still
+      # still fail its tests there, and only a test run would show it.
+      - name: Test with the declared minimum toolchain
+        run: cargo test --locked --all-features --all-targets
 
   # ── OpenAPI spec validation ─────────────────────────────────────────
   openapi-validate:
