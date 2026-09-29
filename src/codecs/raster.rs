@@ -352,7 +352,11 @@ fn fit_scale(source: (u32, u32), target: (u32, u32), fit: Fit) -> f64 {
 fn scale_both(source: (u32, u32), scale: f64) -> (u32, u32) {
     let scaled_w = (f64::from(source.0) * scale).round().max(1.0);
     let scaled_h = (f64::from(source.1) * scale).round().max(1.0);
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "float-to-integer casts saturate in Rust, so the value is at least 1 from `max(1.0)` and at most u32::MAX, and the fraction was already rounded away"
+    )]
     (scaled_w as u32, scaled_h as u32)
 }
 
@@ -624,7 +628,11 @@ pub(crate) fn rotated_bounding_box(width: u32, height: u32, degrees: u16) -> (u3
     let (w, h) = (f64::from(width), f64::from(height));
     let out_w = (w * cos.abs() + h * sin.abs()).ceil().max(1.0);
     let out_h = (w * sin.abs() + h * cos.abs()).ceil().max(1.0);
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "float-to-integer casts saturate in Rust, so the value is at least 1 from `max(1.0)` and at most u32::MAX, and the fraction was already taken up by `ceil`"
+    )]
     (out_w as u32, out_h as u32)
 }
 
@@ -718,14 +726,20 @@ fn sample_bilinear(source: &RgbaImage, x: f64, y: f64, outside: [f64; 4]) -> Rgb
     let fx = x - x0;
     let fy = y - y0;
 
-    #[allow(clippy::cast_possible_truncation)]
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "the values were floored already, and a float-to-integer cast saturates, so a coordinate beyond i64 still lands outside the image"
+    )]
     let (x0, y0) = (x0 as i64, y0 as i64);
 
     let at = |px: i64, py: i64| -> [f64; 4] {
         if px < 0 || py < 0 {
             return outside;
         }
-        #[allow(clippy::cast_sign_loss)]
+        #[allow(
+            clippy::cast_sign_loss,
+            reason = "the check above returned for a negative coordinate, so both are non-negative here"
+        )]
         let (px, py) = (px as u32, py as u32);
         if px >= source.width() || py >= source.height() {
             return outside;
@@ -746,7 +760,11 @@ fn sample_bilinear(source: &RgbaImage, x: f64, y: f64, outside: [f64; 4]) -> Rgb
     }
 
     let alpha = blended[3];
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "the value is rounded and clamped to 0..=255 before the cast"
+    )]
     let to_u8 = |value: f64| value.round().clamp(0.0, 255.0) as u8;
 
     if alpha <= 0.0 {
@@ -781,7 +799,10 @@ fn apply_crop(image: DynamicImage, crop: CropRegion) -> Result<DynamicImage, Tra
 /// The argument list is long because a resize genuinely depends on all of it, and bundling
 /// the parameters into a struct would only move the same fields somewhere else while adding
 /// a type that nothing outside this function would use.
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "a resize depends on every argument, as the paragraph above says"
+)]
 fn apply_resize(
     image: DynamicImage,
     width: Option<u32>,
@@ -1027,7 +1048,10 @@ fn pad_to_box(
 /// on both axes and the clamp is a no-op; it only bites when `without_enlargement` stopped
 /// the scale from reaching the box, in which case the output is legitimately smaller than
 /// requested rather than padded out to it.
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the scaled size, the box, the anchor, the background, and the output format are each needed, and they come from different stages of the resize"
+)]
 fn cover_to_box(
     image: DynamicImage,
     resized_width: u32,
@@ -1759,6 +1783,10 @@ fn search_quality_for_target<T, E>(
     if let Some((quality, output)) = met {
         return Ok(QualitySearch::Met { quality, output });
     }
+    #[expect(
+        clippy::expect_used,
+        reason = "the range 1..=max(1) is never empty, so the loop probed at least once, and a probe that did not meet the target recorded a shortfall"
+    )]
     let (quality, output, score) =
         shortfall.expect("a search that met nothing probed at least once and every probe failed");
     Ok(QualitySearch::Shortfall {
@@ -2219,7 +2247,7 @@ fn encode_webp_lossy_bytes(image: &DynamicImage, quality: u8) -> Result<Vec<u8>,
     }
     #[cfg(not(feature = "webp-lossy"))]
     {
-        let _ = (image, quality);
+        let _: (&DynamicImage, u8) = (image, quality);
         Err(TransformError::CapabilityMissing(
             "lossy WebP encoding is not enabled in this build".to_string(),
         ))
@@ -2459,6 +2487,10 @@ fn inject_webp_metadata(
         None => push_existing(&mut body, b"XMP "),
     }
 
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "a `TryFromIntError` says only that the value is out of range, and the message says which limit it broke"
+    )]
     let riff_size = u32::try_from(body.len() + 4).map_err(|_| {
         TransformError::EncodeFailed("cannot inject metadata: WebP output exceeds 4GB".into())
     })?;
@@ -2570,6 +2602,10 @@ fn inject_jpeg_xmp(encoded: &[u8], xmp: &[u8]) -> Result<Vec<u8>, TransformError
     }
 
     let data_len = XMP_NAMESPACE.len() + xmp.len();
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "a `TryFromIntError` says only that the value is out of range, and the message says which limit it broke"
+    )]
     let segment_len = u16::try_from(data_len + 2).map_err(|_| {
         TransformError::EncodeFailed(
             "XMP payload exceeds the JPEG APP1 segment size limit (64KB)".into(),
@@ -2614,6 +2650,10 @@ fn inject_jpeg_iptc(encoded: &[u8], iptc: &[u8]) -> Result<Vec<u8>, TransformErr
     let resource_block_len = resource_header_len + iptc_padded_len;
 
     let data_len = PHOTOSHOP_NAMESPACE.len() + resource_block_len;
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "a `TryFromIntError` says only that the value is out of range, and the message says which limit it broke"
+    )]
     let segment_len = u16::try_from(data_len + 2).map_err(|_| {
         TransformError::EncodeFailed(
             "IPTC payload exceeds the JPEG APP13 segment size limit (64KB)".into(),
@@ -2808,7 +2848,11 @@ fn extract_retained_metadata(
     if let Some(exif_chunk) = metadata.exif_metadata.as_mut()
         && auto_orient
     {
-        let _ = Orientation::remove_from_exif_chunk(exif_chunk);
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "the call is made for its side effect of resetting the tag; the orientation it returns is the one the pixels were already turned by, and `None` means there was no valid tag to reset"
+        )]
+        let _: Option<Orientation> = Orientation::remove_from_exif_chunk(exif_chunk);
     }
 
     // The policy narrows the metadata to what the caller asked to keep; the format then

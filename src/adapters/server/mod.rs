@@ -49,8 +49,12 @@ mod signing;
 pub use config::StorageBackend;
 pub use config::{LogHandler, LogLevel, ServerConfig, TrustedProxy};
 pub use handler::TransformOptionsPayload;
+// The CLI's storage check before `serve` and `validate`, and its `sign`, are the only
+// callers outside this module, so a server-only build has no use for them.
+#[cfg(feature = "cli")]
 pub(crate) use handler::storage_health_check;
 pub use lifecycle::{serve_once_with_config, serve_with_config};
+#[cfg(feature = "cli")]
 pub(crate) use signing::signing_input_error;
 pub use signing::{
     SignedUrlSource, SignedWatermarkParams, bind_addr, sign_public_url, sign_public_url_with_method,
@@ -73,7 +77,11 @@ pub(crate) fn stderr_write(msg: &str) {
         use std::os::fd::FromRawFd;
         // SAFETY: fd 2 (stderr) is always valid for the lifetime of the process.
         let mut f = unsafe { std::fs::File::from_raw_fd(2) };
-        let _ = f.write_all(&buf);
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "stderr is where the server reports what went wrong, so a failure to write there has no channel left to be reported on"
+        )]
+        let _: std::io::Result<()> = f.write_all(&buf);
         // Do not drop `f` — that would close fd 2 (stderr).
         std::mem::forget(f);
     }
@@ -91,14 +99,21 @@ pub(crate) fn stderr_write(msg: &str) {
         // which is always valid for the lifetime of the process.
         let handle = unsafe { GetStdHandle(STD_ERROR_HANDLE) };
         let mut f = unsafe { std::fs::File::from_raw_handle(handle) };
-        let _ = f.write_all(&buf);
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "stderr is where the server reports what went wrong, so a failure to write there has no channel left to be reported on"
+        )]
+        let _: std::io::Result<()> = f.write_all(&buf);
         // Do not drop `f` — that would close the stderr handle.
         std::mem::forget(f);
     }
 }
 
 #[cfg(test)]
-#[allow(unused_imports)] // Some imports are only used by feature-gated tests (e.g. s3).
+#[allow(
+    unused_imports,
+    reason = "some imports are used only by the tests of a storage feature, such as s3"
+)]
 mod tests {
     use super::config::default_max_concurrent_transforms;
     use super::config::{
@@ -1035,6 +1050,42 @@ mod tests {
 
         assert_eq!(response.status, "400 Bad Request");
         assert!(response_body(&response).contains("unknown preset"));
+    }
+
+    /// A preset table whose lock was poisoned still answers, instead of every request that
+    /// names a preset panicking for the rest of the process's life.
+    #[test]
+    fn parse_public_get_request_reads_presets_behind_a_poisoned_lock() {
+        let mut presets = HashMap::new();
+        presets.insert(
+            "thumbnail".to_string(),
+            TransformOptionsPayload {
+                width: Some(150),
+                ..TransformOptionsPayload::default()
+            },
+        );
+        let config = ServerConfig::new(temp_dir("preset-poisoned"), None).with_presets(presets);
+        std::thread::scope(|scope| {
+            let poisoner = scope.spawn(|| {
+                let _guard = config.presets.write().unwrap();
+                panic!("poison the preset lock on purpose");
+            });
+            assert!(poisoner.join().is_err());
+        });
+        assert!(config.presets.is_poisoned());
+
+        let query = BTreeMap::from([
+            ("path".to_string(), "/image.png".to_string()),
+            ("preset".to_string(), "thumbnail".to_string()),
+        ]);
+        let (_, options, _) =
+            parse_public_get_request(&query, PublicSourceKind::Path, &config).unwrap();
+        assert_eq!(options.width, Some(150));
+        assert_eq!(
+            config,
+            config.clone(),
+            "comparing configs does not panic either"
+        );
     }
 
     #[test]

@@ -1,3 +1,13 @@
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::let_underscore_must_use,
+    clippy::let_underscore_untyped,
+    clippy::unused_result_ok,
+    reason = "the error-handling lints in Cargo.toml are for the code that ships; a test or benchmark stops at the first thing it cannot set up, and discards what it does not assert on"
+)]
+
 // Tests ported from imgproxy and imagor security test patterns.
 //
 // imgproxy: security/source_test.go (network address filtering, source validation)

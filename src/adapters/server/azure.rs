@@ -107,10 +107,7 @@ pub fn build_azure_context(
         .enable_all()
         .build()?;
 
-    let endpoint_url = match std::env::var("TRUSS_AZURE_ENDPOINT")
-        .ok()
-        .filter(|v| !v.is_empty())
-    {
+    let endpoint_url = match super::config::env_nonempty("TRUSS_AZURE_ENDPOINT")? {
         Some(url) => {
             super::remote::validate_backend_endpoint_url(
                 &url,
@@ -120,9 +117,7 @@ pub fn build_azure_context(
             url
         }
         None => {
-            let account_name = std::env::var("AZURE_STORAGE_ACCOUNT_NAME")
-                .ok()
-                .filter(|v| !v.is_empty())
+            let account_name = super::config::env_nonempty("AZURE_STORAGE_ACCOUNT_NAME")?
                 .ok_or_else(|| {
                     std::io::Error::new(
                         std::io::ErrorKind::InvalidInput,
@@ -246,7 +241,9 @@ fn build_blob_client(
     })?;
     container_url
         .path_segments_mut()
-        .map_err(|_| {
+        // `path_segments_mut` fails with `()`, and the only reason it has is the one the
+        // message gives: the URL cannot be a base, such as `mailto:` or `data:`.
+        .map_err(|()| {
             azure_core::Error::with_message(
                 azure_core::error::ErrorKind::Other,
                 format!("{endpoint_url} is not a valid base URL"),
@@ -522,5 +519,27 @@ mod tests {
         let result = build_azure_context("test-container".to_string(), true);
         assert!(result.is_err());
         unsafe { std::env::remove_var("AZURE_STORAGE_ACCOUNT_NAME") };
+    }
+
+    /// An endpoint or account name that is not UTF-8 is named as such, rather than read as
+    /// unset and reported as a missing account name.
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    fn test_build_azure_context_refuses_a_setting_that_is_not_utf8() {
+        use std::os::unix::ffi::OsStringExt;
+        for name in ["TRUSS_AZURE_ENDPOINT", "AZURE_STORAGE_ACCOUNT_NAME"] {
+            unsafe {
+                std::env::remove_var("TRUSS_AZURE_ENDPOINT");
+                std::env::remove_var("AZURE_STORAGE_ACCOUNT_NAME");
+                std::env::set_var(name, std::ffi::OsString::from_vec(vec![b'a', 0xFF]));
+            }
+            let result = build_azure_context("test-container".to_string(), true);
+            unsafe { std::env::remove_var(name) };
+            let Err(error) = result else {
+                panic!("{name} that is not UTF-8 must be refused");
+            };
+            assert_eq!(error.to_string(), format!("{name} must be valid UTF-8"));
+        }
     }
 }

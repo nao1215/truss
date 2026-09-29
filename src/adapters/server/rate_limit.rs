@@ -77,9 +77,13 @@ impl RateLimiter {
     pub fn check(&self, ip: IpAddr) -> bool {
         let now = Instant::now();
         let idx = shard_index(ip);
+        // A shard is a map of token buckets, each updated with plain arithmetic, so a panic
+        // while it was held cannot leave it in a state worse than a bucket off by a token.
+        // Panicking instead would take every client whose address hashes to this shard
+        // off the server for the rest of the process's life.
         let mut shard = self.shards[idx]
             .lock()
-            .expect("rate limiter shard lock poisoned");
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
 
         // Lazy cleanup when this shard grows large.
         if shard.len() > CLEANUP_THRESHOLD_PER_SHARD {
@@ -204,6 +208,26 @@ mod tests {
             tokens <= burst - 1.0,
             "the idle period banked {tokens} tokens over a burst of {burst}"
         );
+    }
+
+    /// A shard whose lock was poisoned keeps limiting, rather than panicking every request
+    /// from an address that hashes to it for the rest of the process's life.
+    #[test]
+    fn a_poisoned_shard_keeps_answering() {
+        let limiter = RateLimiter::new(0.001, 1.0);
+        let ip = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
+        let shard = shard_index(ip);
+        thread::scope(|scope| {
+            let poisoner = scope.spawn(|| {
+                let _guard = limiter.shards[shard].lock().unwrap();
+                panic!("poison the shard on purpose");
+            });
+            assert!(poisoner.join().is_err());
+        });
+        assert!(limiter.shards[shard].is_poisoned());
+
+        assert!(limiter.check(ip), "the burst of one is still available");
+        assert!(!limiter.check(ip), "and the bucket is still counted");
     }
 
     #[test]

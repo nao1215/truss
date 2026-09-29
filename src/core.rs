@@ -613,24 +613,10 @@ impl FromStr for CropRegion {
                 "crop must be x,y,w,h (four comma-separated integers), got '{s}'"
             ));
         }
-        let x = parts[0]
-            .parse::<u32>()
-            .map_err(|_| format!("crop x must be a non-negative integer, got '{}'", parts[0]))?;
-        let y = parts[1]
-            .parse::<u32>()
-            .map_err(|_| format!("crop y must be a non-negative integer, got '{}'", parts[1]))?;
-        let width = parts[2].parse::<u32>().map_err(|_| {
-            format!(
-                "crop width must be a non-negative integer, got '{}'",
-                parts[2]
-            )
-        })?;
-        let height = parts[3].parse::<u32>().map_err(|_| {
-            format!(
-                "crop height must be a non-negative integer, got '{}'",
-                parts[3]
-            )
-        })?;
+        let x = crop_field("x", parts[0])?;
+        let y = crop_field("y", parts[1])?;
+        let width = crop_field("width", parts[2])?;
+        let height = crop_field("height", parts[3])?;
         if width == 0 || height == 0 {
             return Err("crop width and height must be greater than zero".to_string());
         }
@@ -640,6 +626,33 @@ impl FromStr for CropRegion {
             width,
             height,
         })
+    }
+}
+
+/// Reads one field of a crop region.
+///
+/// Each sentence names the field, the rule, and the value given, and
+/// `@nao1215/truss-url-signer` repeats them word for word, so the parser's own wording is
+/// not used. A field past `u32` is a whole number that does not fit, so it names the limit
+/// instead of calling itself not an integer, which is what parsing straight into `u32` said.
+fn crop_field(name: &str, text: &str) -> Result<u32, String> {
+    let too_large = || format!("crop {name} must be at most {}, got '{text}'", u32::MAX);
+    // Digits only, the rule the signer checks: the integer parser would also take a
+    // leading `+`, and a crop the signer refuses must not be one the server accepts.
+    if !text.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(format!(
+            "crop {name} must be a non-negative integer, got '{text}'"
+        ));
+    }
+    match WideInteger::parse(text) {
+        Some(WideInteger::Fits(value)) if value >= 0 => match u32::try_from(value) {
+            Ok(value) => Ok(value),
+            Err(_) => Err(too_large()),
+        },
+        Some(WideInteger::Above) => Err(too_large()),
+        _ => Err(format!(
+            "crop {name} must be a non-negative integer, got '{text}'"
+        )),
     }
 }
 
@@ -772,6 +785,10 @@ impl FromStr for TargetQuality {
         // `format`, and the optimize mode all match what the caller wrote, so a metric that
         // accepted any case was the one flag whose lesson did not carry to the next.
         let metric = QualityMetric::from_str(metric)?;
+        #[expect(
+            clippy::map_err_ignore,
+            reason = "the sentence names the rule and the value given, and `@nao1215/truss-url-signer` repeats it word for word, so the parser's own wording would split the two"
+        )]
         let value = raw_value
             .parse::<f32>()
             .map_err(|_| format!("target quality value must be a number, got `{raw_value}`"))?;
@@ -1349,7 +1366,11 @@ impl Rotation {
     pub const fn from_degrees(degrees: i32) -> Self {
         let wrapped = degrees % 360;
         let normalized = if wrapped < 0 { wrapped + 360 } else { wrapped };
-        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+        #[allow(
+            clippy::cast_sign_loss,
+            clippy::cast_possible_truncation,
+            reason = "`normalized` is in 0..360, which is neither negative nor too large for u16"
+        )]
         Self(normalized as u16)
     }
 
@@ -1372,7 +1393,10 @@ impl Rotation {
     #[must_use]
     pub const fn quarter_turns(self) -> Option<u8> {
         if self.0.is_multiple_of(90) {
-            #[allow(clippy::cast_possible_truncation)]
+            #[allow(
+                clippy::cast_possible_truncation,
+                reason = "the angle is below 360, so the quotient is at most 3"
+            )]
             Some((self.0 / 90) as u8)
         } else {
             None
@@ -1394,9 +1418,12 @@ impl FromStr for Rotation {
         // which is what this type documents, so how many turns it is past does not change
         // the answer; parsing straight into `i32` made a large multiple of 360 report that
         // it was not a whole number, which it is.
-        match value.parse::<i64>() {
-            Ok(degrees) => Ok(Self::from_degrees((degrees % 360) as i32)),
-            Err(_) => Err(format!(
+        match WideInteger::parse(value) {
+            Some(WideInteger::Fits(degrees)) => Ok(Self::from_degrees((degrees % 360) as i32)),
+            Some(WideInteger::Above | WideInteger::Below) => Err(format!(
+                "unsupported rotation `{value}`: out of range, {ROTATION_RANGE}"
+            )),
+            None => Err(format!(
                 "unsupported rotation `{value}`: expected a whole number of degrees"
             )),
         }
@@ -1440,6 +1467,10 @@ impl Rgba8 {
     /// than repeating the value back. `#ffffff` is the spelling a caller reaches for first,
     /// since CSS, HTML, and every colour picker use it, and `unsupported color \`#ffffff\``
     /// gave them nothing to correct. Naming the rule is what every other option here does.
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "every rejection reads the one sentence on purpose, as the paragraph above says, so the parser's own wording is not wanted"
+    )]
     pub fn from_hex(value: &str) -> Result<Self, String> {
         fn rule(value: &str) -> String {
             format!(
@@ -1447,7 +1478,11 @@ impl Rgba8 {
             )
         }
 
-        if !value.is_ascii() || (value.len() != 6 && value.len() != 8) {
+        // Every byte is checked here rather than left to `from_str_radix`, which takes a
+        // leading `+` on each pair it reads and would make `+1ffff` the colour `01ffff`.
+        if !value.bytes().all(|byte| byte.is_ascii_hexdigit())
+            || (value.len() != 6 && value.len() != 8)
+        {
             return Err(rule(value));
         }
 
@@ -1904,6 +1939,10 @@ where
     // held is refused here, with the sentence that check would have given.
     deserialize_ranged(deserializer, |value| match u8::try_from(value) {
         Ok(quality) => Ok(quality),
+        #[expect(
+            clippy::expect_used,
+            reason = "`validate_quality_value` accepts only 1..=100, which lies inside u8, so a value that does not fit is one it refuses"
+        )]
         Err(_) => {
             Err(validate_quality_value(value).expect_err("a value outside u8 is outside 1..=100"))
         }
@@ -1926,6 +1965,34 @@ where
     deserialize_ranged(deserializer, validate_height_value)
 }
 
+/// Reads a watermark opacity of any width, the way [`deserialize_quality`] reads a quality.
+///
+/// The field is a `u8`, and deserializing straight into it answered `300` with
+/// `invalid value: integer 300, expected u8` while the query and the multipart form named
+/// the range. A value the field can hold is handed on for the watermark check to judge.
+pub(crate) fn deserialize_watermark_opacity<'de, D>(deserializer: D) -> Result<Option<u8>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_ranged(deserializer, |value| match u8::try_from(value) {
+        Ok(opacity) => Ok(opacity),
+        #[expect(
+            clippy::expect_used,
+            reason = "`validate_watermark_opacity_value` accepts only 1..=100, which lies inside u8, so a value that does not fit is one it refuses"
+        )]
+        Err(_) => Err(validate_watermark_opacity_value(value)
+            .expect_err("a value outside u8 is outside 1..=100")),
+    })
+}
+
+/// Reads a watermark margin of any width and judges it by [`validate_watermark_margin_value`].
+pub(crate) fn deserialize_watermark_margin<'de, D>(deserializer: D) -> Result<Option<u32>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_ranged(deserializer, validate_watermark_margin_value)
+}
+
 fn deserialize_ranged<'de, D, T>(
     deserializer: D,
     validate: impl FnOnce(i64) -> Result<T, &'static str>,
@@ -1935,9 +2002,11 @@ where
 {
     use serde::Deserialize as _;
     use serde::de::Error as _;
-    match Option::<i64>::deserialize(deserializer)? {
+    match Option::<WideInteger>::deserialize(deserializer)? {
         None => Ok(None),
-        Some(value) => validate(value).map(Some).map_err(D::Error::custom),
+        Some(value) => validate(value.saturated())
+            .map(Some)
+            .map_err(D::Error::custom),
     }
 }
 
@@ -1945,13 +2014,115 @@ where
 ///
 /// The option documents that an angle past a full turn wraps, and the CLI takes any whole
 /// number of degrees; deserializing into `i32` made the two adapters that do it refuse what
-/// the CLI accepts.
+/// the CLI accepts. An angle past `i64` is refused with the range, as the CLI and the query
+/// refuse it.
 pub(crate) fn deserialize_rotation_degrees<'de, D>(deserializer: D) -> Result<Option<i32>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
     use serde::Deserialize as _;
-    Ok(Option::<i64>::deserialize(deserializer)?.map(|degrees| (degrees % 360) as i32))
+    use serde::de::Error as _;
+    match Option::<WideInteger>::deserialize(deserializer)? {
+        None => Ok(None),
+        Some(WideInteger::Fits(degrees)) => Ok(Some((degrees % 360) as i32)),
+        Some(WideInteger::Above | WideInteger::Below) => Err(D::Error::custom(format!(
+            "rotate is out of range: {ROTATION_RANGE}"
+        ))),
+    }
+}
+
+/// The span of angles truss reads, named where one past it is refused.
+const ROTATION_RANGE: &str =
+    "the angle must be between -9223372036854775808 and 9223372036854775807 degrees";
+
+/// An integer read at any length, with one past either end of `i64` told apart from one
+/// that fits.
+///
+/// Every range truss publishes for an integer option lies inside `i64`, so a number past
+/// it is past the option's range too. Parsing straight into `i64` made such a number read
+/// `must be an integer` or `expected i64`, which says the caller sent something that is not
+/// a number, when what they sent is a number that is too large.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WideInteger {
+    /// The value fits in an `i64`.
+    Fits(i64),
+    /// The value is greater than `i64::MAX`.
+    Above,
+    /// The value is less than `i64::MIN`.
+    Below,
+}
+
+impl WideInteger {
+    /// Parses decimal text the way `i64`'s `FromStr` does, without refusing a value for its
+    /// length. `None` is text that is not an integer at all.
+    pub(crate) fn parse(text: &str) -> Option<Self> {
+        use std::num::IntErrorKind;
+        match text.parse::<i64>() {
+            Ok(value) => Some(Self::Fits(value)),
+            Err(error) => match error.kind() {
+                IntErrorKind::PosOverflow => Some(Self::Above),
+                IntErrorKind::NegOverflow => Some(Self::Below),
+                _ => None,
+            },
+        }
+    }
+
+    /// The value, with one past either end of `i64` held at that end.
+    ///
+    /// A range check asked of the held value answers what it would answer for the value
+    /// itself, because every range it checks lies inside `i64`.
+    pub(crate) fn saturated(self) -> i64 {
+        match self {
+            Self::Fits(value) => value,
+            Self::Above => i64::MAX,
+            Self::Below => i64::MIN,
+        }
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for WideInteger {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct Visitor;
+
+        impl serde::de::Visitor<'_> for Visitor {
+            type Value = WideInteger;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("an integer")
+            }
+
+            fn visit_i64<E>(self, value: i64) -> Result<WideInteger, E> {
+                Ok(WideInteger::Fits(value))
+            }
+
+            fn visit_u64<E>(self, value: u64) -> Result<WideInteger, E> {
+                Ok(i64::try_from(value).map_or(WideInteger::Above, WideInteger::Fits))
+            }
+
+            // serde_json hands over an integer past `u64` or below `i64::MIN` as a float,
+            // so a whole float outside `i64` is read as the integer it was written as.
+            // Any other float, `1.5` or one inside `i64` such as `100.0`, is refused as it
+            // was before.
+            fn visit_f64<E>(self, value: f64) -> Result<WideInteger, E>
+            where
+                E: serde::de::Error,
+            {
+                const I64_END: f64 = 9_223_372_036_854_775_808.0;
+                if value.fract() == 0.0 && value >= I64_END {
+                    Ok(WideInteger::Above)
+                } else if value.fract() == 0.0 && value < -I64_END {
+                    Ok(WideInteger::Below)
+                } else {
+                    Err(E::invalid_type(serde::de::Unexpected::Float(value), &self))
+                }
+            }
+        }
+
+        deserializer.deserialize_i64(Visitor)
+    }
 }
 
 /// The rules a width has to satisfy before any image has been read.
@@ -1984,7 +2155,6 @@ pub(crate) fn validate_height_value(value: i64) -> Result<u32, &'static str> {
 /// Zero is a margin, so only a negative number and one too large to be a count of pixels are
 /// refused here; a margin that leaves the watermark no room is reported by the pipeline,
 /// which names the sizes involved.
-#[cfg(any(feature = "cli", feature = "server"))]
 pub(crate) fn validate_watermark_margin_value(value: i64) -> Result<u32, &'static str> {
     dimension_value(
         value,
@@ -2008,9 +2178,8 @@ fn dimension_value(
 /// The range a watermark opacity has to be in, checked against a number of any width.
 ///
 /// The sibling of [`validate_quality_value`], and there for the same reason: 256 is not a
-/// `u8`, and saying so names an integer type rather than the range truss publishes. Only
-/// the two adapters that parse a caller's text need it, so it is gated the way they are.
-#[cfg(any(feature = "cli", feature = "server"))]
+/// `u8`, and saying so names an integer type rather than the range truss publishes. Every
+/// adapter that reads a caller's number asks it, the Wasm options object included.
 pub(crate) fn validate_watermark_opacity_value(value: i64) -> Result<u8, &'static str> {
     match value {
         1..=100 => Ok(value as u8),
@@ -2173,7 +2342,7 @@ fn is_avif(bytes: &[u8]) -> bool {
 /// on either side of the doctype and in any number. Walking a fixed sequence
 /// instead rejects documents real editors produce: Adobe Illustrator writes the
 /// declaration, a generator comment, and then a doctype with an internal subset.
-fn is_svg(bytes: &[u8]) -> bool {
+pub(crate) fn is_svg(bytes: &[u8]) -> bool {
     svg_root_element(bytes).is_some()
 }
 
@@ -2216,43 +2385,87 @@ fn svg_root_element(bytes: &[u8]) -> Option<&str> {
         break;
     }
 
-    let is_root = remaining.starts_with("<svg")
-        && remaining
-            .as_bytes()
-            .get(4)
-            .is_some_and(|&b| b == b' ' || b == b'\t' || b == b'\n' || b == b'\r' || b == b'>');
+    // The name ends where the start tag's whitespace, its `>`, or the `/>` of an empty
+    // element begins. `<svg/>` is the sanitizer's own output for a root whose attributes it
+    // all removed, so refusing it made truss refuse what it had just served.
+    let is_root = remaining.strip_prefix("<svg").is_some_and(|after| {
+        after.starts_with([' ', '\t', '\n', '\r', '>']) || after.starts_with("/>")
+    });
     is_root.then_some(remaining)
 }
 
 /// Returns the text after a doctype declaration, or `None` when it is unterminated.
 ///
-/// The terminating `>` is not simply the first one: an internal subset is
-/// delimited by `[` and `]` and declares entities whose replacement text may
-/// contain `>`, and a system identifier is a quoted string that may contain one
-/// too.
+/// The terminating `>` is not simply the first one, and the doctype is read the way XML
+/// defines it rather than by counting quotes throughout. Before the internal subset, the
+/// external identifier's quoted literals may hold `[` and `>`. Inside the subset, which runs
+/// from `[` to `]`, a processing instruction runs to its `?>` and a comment to its `-->`,
+/// whatever quotes they hold, and an entity, attribute-list, or notation declaration to the
+/// first `>` outside its quoted literals, which may hold `>`; any other markup ends at its
+/// first `>`. After the subset, the next `>` ends the doctype.
+///
+/// Counting quotes everywhere read a `"` inside a processing instruction in the subset as
+/// the start of a literal and ended the doctype somewhere the XML parser did not, so the
+/// sniffer and the sanitizer disagreed about where the root element was, and a document
+/// truss served as SVG was refused when it came back.
 fn skip_doctype(rest: &str) -> Option<&str> {
     let bytes = rest.as_bytes();
-    let mut quote: Option<u8> = None;
-    let mut in_subset = false;
+    let find = |from: usize, needle: &[u8]| -> Option<usize> {
+        bytes[from..]
+            .windows(needle.len())
+            .position(|window| window == needle)
+            .map(|offset| from + offset)
+    };
+    // The index just past the quoted literal that opens at `index`.
+    let skip_literal = |index: usize| -> Option<usize> {
+        find(index + 1, &bytes[index..=index]).map(|close| close + 1)
+    };
 
-    for (index, &byte) in bytes.iter().enumerate() {
-        match quote {
-            Some(open) => {
-                if byte == open {
-                    quote = None;
-                }
+    let mut index = 0;
+    loop {
+        match *bytes.get(index)? {
+            b'"' | b'\'' => index = skip_literal(index)?,
+            b'[' => {
+                index += 1;
+                break;
             }
-            None => match byte {
-                b'"' | b'\'' => quote = Some(byte),
-                b'[' => in_subset = true,
-                b']' => in_subset = false,
-                b'>' if !in_subset => return Some(&rest[index + 1..]),
-                _ => {}
-            },
+            b'>' => return Some(&rest[index + 1..]),
+            _ => index += 1,
         }
     }
 
-    None
+    loop {
+        let subset = &bytes[index..];
+        match *subset.first()? {
+            b']' => {
+                index += 1;
+                break;
+            }
+            b'<' if subset.starts_with(b"<?") => index = find(index + 2, b"?>")? + 2,
+            b'<' if subset.starts_with(b"<!--") => index = find(index + 4, b"-->")? + 3,
+            b'<' if [&b"<!ENTITY"[..], b"<!ATTLIST", b"<!NOTATION"]
+                .iter()
+                .any(|keyword| subset.starts_with(keyword)) =>
+            {
+                index += 2;
+                loop {
+                    match *bytes.get(index)? {
+                        b'"' | b'\'' => index = skip_literal(index)?,
+                        b'>' => {
+                            index += 1;
+                            break;
+                        }
+                        _ => index += 1,
+                    }
+                }
+            }
+            b'<' => index = find(index, b">")? + 1,
+            _ => index += 1,
+        }
+    }
+
+    let end = find(index, b">")?;
+    Some(&rest[end + 1..])
 }
 
 /// Extracts SVG metadata. SVGs inherently support transparency.
@@ -2442,7 +2655,11 @@ fn to_dimension(value: f64) -> Option<u32> {
     if !(value.is_finite() && value >= 1.0 && value < f64::from(u32::MAX)) {
         return None;
     }
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "the check above keeps the value finite, positive, and below u32::MAX, and truncating its fraction is the point"
+    )]
     Some(value as u32)
 }
 
@@ -3159,17 +3376,17 @@ fn is_jpeg_sof_marker(marker: u8) -> bool {
 }
 
 fn read_u16_be(bytes: &[u8]) -> Result<u16, TransformError> {
-    let array: [u8; 2] = bytes
-        .try_into()
-        .map_err(|_| TransformError::DecodeFailed("expected 2 bytes".to_string()))?;
-    Ok(u16::from_be_bytes(array))
+    match *bytes {
+        [a, b] => Ok(u16::from_be_bytes([a, b])),
+        _ => Err(TransformError::DecodeFailed("expected 2 bytes".to_string())),
+    }
 }
 
 fn read_u16_le(bytes: &[u8]) -> Result<u16, TransformError> {
-    let array: [u8; 2] = bytes
-        .try_into()
-        .map_err(|_| TransformError::DecodeFailed("expected 2 bytes".to_string()))?;
-    Ok(u16::from_le_bytes(array))
+    match *bytes {
+        [a, b] => Ok(u16::from_le_bytes([a, b])),
+        _ => Err(TransformError::DecodeFailed("expected 2 bytes".to_string())),
+    }
 }
 
 fn read_u24_le(bytes: &[u8]) -> Result<u32, TransformError> {
@@ -3181,17 +3398,17 @@ fn read_u24_le(bytes: &[u8]) -> Result<u32, TransformError> {
 }
 
 fn read_u32_be(bytes: &[u8]) -> Result<u32, TransformError> {
-    let array: [u8; 4] = bytes
-        .try_into()
-        .map_err(|_| TransformError::DecodeFailed("expected 4 bytes".to_string()))?;
-    Ok(u32::from_be_bytes(array))
+    match *bytes {
+        [a, b, c, d] => Ok(u32::from_be_bytes([a, b, c, d])),
+        _ => Err(TransformError::DecodeFailed("expected 4 bytes".to_string())),
+    }
 }
 
 fn read_u32_le(bytes: &[u8]) -> Result<u32, TransformError> {
-    let array: [u8; 4] = bytes
-        .try_into()
-        .map_err(|_| TransformError::DecodeFailed("expected 4 bytes".to_string()))?;
-    Ok(u32::from_le_bytes(array))
+    match *bytes {
+        [a, b, c, d] => Ok(u32::from_le_bytes([a, b, c, d])),
+        _ => Err(TransformError::DecodeFailed("expected 4 bytes".to_string())),
+    }
 }
 
 #[cfg(test)]
@@ -4233,6 +4450,20 @@ mod tests {
         }
     }
 
+    /// A sign is not a hexadecimal digit. `from_str_radix` takes a leading `+` on each pair
+    /// it reads, so `+1ffff` was the colour `01ffff` and `+1+1+1` was `010101`, while the
+    /// URL signer refused both.
+    #[test]
+    fn a_color_with_a_sign_in_it_is_refused() {
+        for value in ["+1ffff", "+1+1+1", "ff+1ff", "ffffff+1", "+fffff", "-1ffff"] {
+            let message = Rgba8::from_hex(value).expect_err("a sign is not a hex digit");
+            assert!(
+                message.contains("hexadecimal digits"),
+                "{value:?}: {message}"
+            );
+        }
+    }
+
     #[test]
     fn sniff_artifact_counts_the_frames_of_an_animated_png() {
         // An APNG announces its frame count in an `acTL` chunk before the image data. The
@@ -4636,6 +4867,17 @@ mod tests {
     #[case::bom_then_declaration(
         "\u{FEFF}<?xml version=\"1.0\"?>\n<svg xmlns=\"http://www.w3.org/2000/svg\"><rect/></svg>"
     )]
+    #[case::self_closing_root("<svg/>")]
+    #[case::declaration_then_self_closing_root("<?xml version=\"1.0\"?>\n<svg/>")]
+    #[case::quote_inside_a_processing_instruction_in_the_subset(
+        "<!DOCTYPE svg [<?pi \"?>]><svg xmlns=\"http://www.w3.org/2000/svg\"/>"
+    )]
+    #[case::quote_inside_a_comment_in_the_subset(
+        "<!DOCTYPE svg [<!-- it's -->]><svg xmlns=\"http://www.w3.org/2000/svg\"/>"
+    )]
+    #[case::angle_bracket_in_an_attribute_list_default(
+        "<!DOCTYPE svg [<!ATTLIST svg a CDATA \"x > y\">]><svg xmlns=\"http://www.w3.org/2000/svg\"/>"
+    )]
     fn sniff_artifact_accepts_every_legal_svg_prolog(#[case] document: &str) {
         let artifact = sniff_artifact(RawArtifact::new(document.as_bytes().to_vec(), None))
             .unwrap_or_else(|err| panic!("prolog should be recognized as SVG, got: {err}"));
@@ -4716,6 +4958,10 @@ mod tests {
     #[case::unterminated_declaration("<?xml version=\"1.0\"\n<svg/>")]
     #[case::unterminated_comment("<!-- never closed\n<svg/>")]
     #[case::unterminated_internal_subset("<!DOCTYPE svg [<!ENTITY a \"b\">\n<svg/>")]
+    #[case::slash_not_closing_the_tag("<svg/x>")]
+    #[case::root_found_only_by_counting_quotes_across_a_processing_instruction(
+        "<!DOCTYPE svg [<?pi \"?>]><html a=\"]><svg \"/>"
+    )]
     fn sniff_artifact_does_not_claim_non_svg_documents(#[case] document: &str) {
         let result = sniff_artifact(RawArtifact::new(document.as_bytes().to_vec(), None));
         assert!(
@@ -4984,6 +5230,73 @@ mod tests {
             .parse::<CropRegion>()
             .expect_err("zero width should fail");
         assert!(err.contains("greater than zero"), "unexpected error: {err}");
+    }
+
+    /// A field past `u32` is a whole number that does not fit, so it says so and names the
+    /// limit, the way the signer does, instead of calling itself not an integer.
+    #[test]
+    fn crop_region_from_str_field_past_u32_names_the_limit() {
+        use super::CropRegion;
+        let cases = [
+            (
+                "4294967296,0,1,1",
+                "crop x must be at most 4294967295, got '4294967296'",
+            ),
+            (
+                "0,99999999999999999999,1,1",
+                "crop y must be at most 4294967295, got '99999999999999999999'",
+            ),
+            (
+                "0,0,4294967296,1",
+                "crop width must be at most 4294967295, got '4294967296'",
+            ),
+            (
+                "0,0,1,4294967296",
+                "crop height must be at most 4294967295, got '4294967296'",
+            ),
+        ];
+        for (value, expected) in cases {
+            let err = value
+                .parse::<CropRegion>()
+                .expect_err("a field past u32 is refused");
+            assert_eq!(err, expected, "{value}");
+        }
+        let fits: CropRegion = "4294967295,0,1,1".parse().expect("u32::MAX fits");
+        assert_eq!(fits.x, u32::MAX);
+    }
+
+    /// A field is digits only, which is the rule `@nao1215/truss-url-signer` checks. The
+    /// integer parser also takes a leading `+`, so `+10,0,5,5` was a crop here and a
+    /// refusal there.
+    #[test]
+    fn crop_region_from_str_refuses_a_sign() {
+        use super::CropRegion;
+        assert_eq!(
+            "+10,0,5,5".parse::<CropRegion>().unwrap_err(),
+            "crop x must be a non-negative integer, got '+10'"
+        );
+        assert_eq!(
+            "0,0,5,+5".parse::<CropRegion>().unwrap_err(),
+            "crop height must be a non-negative integer, got '+5'"
+        );
+    }
+
+    /// An angle too long for `i64` is still a whole number of degrees; it is refused as out
+    /// of range rather than as not being one.
+    #[test]
+    fn rotation_past_i64_is_out_of_range() {
+        for value in [
+            "9223372036854775808",
+            "-9223372036854775809",
+            "99999999999999999999",
+        ] {
+            let err = value
+                .parse::<super::Rotation>()
+                .expect_err("an angle past i64 is refused");
+            assert!(err.contains("out of range"), "{value}: {err}");
+            assert!(!err.contains("expected a whole number"), "{value}: {err}");
+        }
+        assert!("9223372036854775807".parse::<super::Rotation>().is_ok());
     }
 
     #[test]

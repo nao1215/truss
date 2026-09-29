@@ -174,6 +174,10 @@ where
         }
     };
 
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "the sentence states the rule the bytes break; the byte offset a `Utf8Error` carries is not something the client that sent them can act on"
+    )]
     let header_text = std::str::from_utf8(&buffer[..header_end]).map_err(|_| {
         RequestReadError::from(bad_request_response("request headers must be valid UTF-8"))
     })?;
@@ -373,9 +377,12 @@ pub(super) fn parse_content_length(headers: &[(String, String)]) -> Result<usize
         ));
     }
 
+    // Only digits reach this point, so the parse can fail only because the number does not
+    // fit, and the sentence above would call a valid integer something else. The parser's
+    // own reason is what the client needs here.
     value
         .parse::<usize>()
-        .map_err(|_| bad_request_response("content-length must be a non-negative integer"))
+        .map_err(|error| bad_request_response(&format!("content-length is out of range: {error}")))
 }
 
 pub(super) fn request_has_json_content_type(request: &HttpRequest) -> bool {
@@ -451,6 +458,13 @@ pub(super) fn resolve_storage_path(
         if segment.contains('\\') {
             return Err(bad_request_response(
                 "source path must not contain a backslash; the separator is `/`",
+            ));
+        }
+        // No file system holds a name with a NUL in it, and the object stores refuse one in
+        // a key the same way, so it is the caller's path that is wrong.
+        if segment.contains('\0') {
+            return Err(bad_request_response(
+                "source path must not contain a NUL byte",
             ));
         }
         relative_path.push(segment);
@@ -784,6 +798,23 @@ mod tests {
         }
     }
 
+    /// A run of digits that does not fit is refused for its size. Calling it something other
+    /// than a non-negative integer, which it is, was all the answer used to say.
+    #[test]
+    fn content_length_that_does_not_fit_says_so() {
+        let headers = vec![(
+            "content-length".to_string(),
+            "99999999999999999999999999".to_string(),
+        )];
+        let err = parse_content_length(&headers).unwrap_err();
+        assert_eq!(err.status, "400 Bad Request");
+        let body = String::from_utf8(err.body).unwrap();
+        assert!(
+            body.contains("content-length is out of range: number too large to fit in target type"),
+            "{body}"
+        );
+    }
+
     // ── Host ───────────────────────────────────────────────────────
 
     #[test]
@@ -1032,27 +1063,35 @@ mod tests {
         assert!(result.is_ok(), "unicode filename should be accepted");
     }
 
-    #[test]
-    fn test_resolve_storage_path_very_long_component() {
-        // A path with a very long single component should be rejected at the
-        // filesystem level (file not found), not cause a panic.
+    /// A NUL cannot be in a file name on any platform, so a path holding one is the caller's
+    /// mistake. It reached `canonicalize`, whose `InvalidInput` error was answered with 500
+    /// and the operating system's wording, the answer for a server that cannot read its own
+    /// storage.
+    #[rstest]
+    #[case::whole_path("\x00")]
+    #[case::inside_a_name("/image\x00.png")]
+    #[case::inside_a_directory("/a\x00b/image.png")]
+    fn resolve_storage_path_refuses_a_nul_byte_as_a_bad_request(#[case] value: &str) {
         let dir = tempfile::tempdir().unwrap();
-        let long_name = "a".repeat(300);
-        let result = resolve_storage_path(dir.path(), &format!("/{long_name}.png"));
-        assert!(result.is_err(), "very long filename should fail");
+        let err = resolve_storage_path(dir.path(), value).unwrap_err();
+        assert_eq!(err.status, "400 Bad Request", "{value:?}");
+        let body = String::from_utf8_lossy(&err.body);
+        assert!(
+            body.contains("NUL") && body.contains("invalid-request"),
+            "the refusal names what is wrong with it: {body}"
+        );
     }
 
+    /// A name longer than the file system allows cannot exist either, and is refused the
+    /// same way rather than as a failure of the server. Unix only: the error Windows gives
+    /// for the same name depends on how the path reaches its file system.
+    #[cfg(unix)]
     #[test]
-    fn test_resolve_storage_path_null_byte_in_path() {
-        // Null byte injection attempt
+    fn resolve_storage_path_refuses_a_name_the_file_system_cannot_hold() {
         let dir = tempfile::tempdir().unwrap();
-        let err = resolve_storage_path(dir.path(), "/image\x00.png").unwrap_err();
-        // Should fail during canonicalize or component parsing
-        assert!(
-            err.status.starts_with('4') || err.status.starts_with('5'),
-            "null byte in path should be rejected, got: {}",
-            err.status
-        );
+        let long_name = "a".repeat(300);
+        let err = resolve_storage_path(dir.path(), &format!("/{long_name}.png")).unwrap_err();
+        assert_eq!(err.status, "400 Bad Request");
     }
 
     #[test]

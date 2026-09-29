@@ -1,3 +1,13 @@
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::let_underscore_must_use,
+    clippy::let_underscore_untyped,
+    clippy::unused_result_ok,
+    reason = "the error-handling lints in Cargo.toml are for the code that ships; a test or benchmark stops at the first thing it cannot set up, and discards what it does not assert on"
+)]
+
 mod common;
 
 use std::fs;
@@ -324,6 +334,30 @@ fn validate_refuses_a_boolean_that_is_neither_true_nor_false() {
     assert!(!output.status.success(), "{output:?}");
     let stderr = String::from_utf8(output.stderr).expect("utf8 stderr");
     assert!(stderr.contains("TRUSS_DISABLE_METRICS"), "{stderr}");
+}
+
+/// A setting the operator gave in bytes that are not UTF-8 is a configuration fault, exit 1
+/// with the variable named, not a setting that quietly is not there: a bearer token given
+/// that way used to be dropped, leaving the private API switched off while `validate` said
+/// all was well.
+#[cfg(unix)]
+#[test]
+fn validate_refuses_a_setting_that_is_not_utf8() {
+    use std::os::unix::ffi::OsStringExt;
+    for name in ["TRUSS_BEARER_TOKEN", "TRUSS_LOG_LEVEL", "TRUSS_BIND_ADDR"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_truss"))
+            .arg("validate")
+            .env(name, std::ffi::OsString::from_vec(vec![b'a', 0xFF]))
+            .output()
+            .expect("run truss validate");
+
+        assert_eq!(output.status.code(), Some(1), "{name}: {output:?}");
+        let stderr = String::from_utf8(output.stderr).expect("utf8 stderr");
+        assert!(
+            stderr.contains(&format!("{name} must be valid UTF-8")),
+            "{stderr}"
+        );
+    }
 }
 
 /// The spellings the reference documents are accepted whatever their case, which `True` was

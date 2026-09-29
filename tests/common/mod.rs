@@ -1,5 +1,7 @@
-#![allow(dead_code)]
-// Shared across multiple integration-test crates; each crate uses only a subset.
+#![allow(
+    dead_code,
+    reason = "shared across the integration-test crates, each of which uses only a subset"
+)]
 
 use hmac::{Hmac, KeyInit, Mac};
 use image::codecs::png::PngEncoder;

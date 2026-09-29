@@ -4,6 +4,8 @@ truss is configured through environment variables and CLI flags. This page docum
 
 A setting described as a boolean takes `1`, `true`, `yes`, or `on` for true and `0`, `false`, `no`, or `off` for false, in any mix of case. Any other value, surrounding whitespace included, is refused when the server starts and by `truss validate`, so a typo is reported rather than read as false.
 
+Every setting is read as UTF-8 text. A variable that is set to bytes that are not valid UTF-8 is refused the same way, naming the variable, rather than read as unset.
+
 ## Core Settings
 
 | Variable | Description |

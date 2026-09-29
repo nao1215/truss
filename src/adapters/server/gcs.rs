@@ -133,9 +133,7 @@ pub fn build_gcs_context(
         .enable_all()
         .build()?;
 
-    let endpoint_url = std::env::var("TRUSS_GCS_ENDPOINT")
-        .ok()
-        .filter(|v| !v.is_empty());
+    let endpoint_url = super::config::env_nonempty("TRUSS_GCS_ENDPOINT")?;
 
     if let Some(ref url) = endpoint_url {
         super::remote::validate_backend_endpoint_url(url, "TRUSS_GCS_ENDPOINT", allow_insecure)?;
@@ -431,5 +429,26 @@ mod tests {
         assert!(validate_gcs_key("path/to/file name.jpg").is_ok());
         assert!(validate_gcs_key("a+b=c.jpg").is_ok());
         assert!(validate_gcs_key("foo\tbar").is_ok());
+    }
+
+    /// An emulator endpoint that is not UTF-8 is refused by name. Read as unset, it sent
+    /// the server to the real Google Cloud Storage with default credentials.
+    #[cfg(unix)]
+    #[test]
+    #[serial_test::serial]
+    fn test_build_gcs_context_refuses_an_endpoint_that_is_not_utf8() {
+        use std::os::unix::ffi::OsStringExt;
+        unsafe {
+            std::env::set_var(
+                "TRUSS_GCS_ENDPOINT",
+                std::ffi::OsString::from_vec(vec![b'a', 0xFF]),
+            );
+        }
+        let result = build_gcs_context("test-bucket".to_string(), true);
+        unsafe { std::env::remove_var("TRUSS_GCS_ENDPOINT") };
+        let Err(error) = result else {
+            panic!("an endpoint that is not UTF-8 must be refused");
+        };
+        assert_eq!(error.to_string(), "TRUSS_GCS_ENDPOINT must be valid UTF-8");
     }
 }

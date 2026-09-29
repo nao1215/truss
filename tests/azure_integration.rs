@@ -14,7 +14,15 @@
 //! ```bash
 //! cargo test --features azure --test azure_integration -- --ignored
 //! ```
-
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::let_underscore_must_use,
+    clippy::let_underscore_untyped,
+    clippy::unused_result_ok,
+    reason = "the error-handling lints in Cargo.toml are for the code that ships; a test or benchmark stops at the first thing it cannot set up, and discards what it does not assert on"
+)]
 #![cfg(feature = "azure")]
 
 mod common;
