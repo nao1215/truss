@@ -28,9 +28,8 @@ const WORKER_THREADS: usize = 8;
 
 /// How much stack a connection worker runs on.
 ///
-/// A worker decodes, and decoding an AVIF wants close to a megabyte and a half in a build
-/// without optimizations, against the two megabytes a thread gets by default. That is not the
-/// margin to leave a decoder on, and the size is a reservation of address space rather than
+/// A worker decodes and renders SVG, against the two megabytes a thread gets by default. That
+/// is not the margin to leave a decoder on, and the size is a reservation of address space rather than
 /// memory that is committed, so the pool costs no more for having it.
 const WORKER_STACK_SIZE: usize = 8 * 1024 * 1024;
 

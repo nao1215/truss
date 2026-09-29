@@ -63,7 +63,7 @@ const inspected = JSON.parse(inspectImageJson(inputBytes, undefined));
 if (
   typeof capabilities.svg !== "boolean" ||
   typeof capabilities.webpLossy !== "boolean" ||
-  typeof capabilities.avif !== "boolean"
+  "avif" in capabilities
 ) {
   throw new Error(\`unexpected capabilities payload: \${JSON.stringify(capabilities)}\`);
 }

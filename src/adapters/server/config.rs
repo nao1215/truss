@@ -19,7 +19,7 @@ pub(super) const FALLBACK_MAX_CONCURRENT_TRANSFORMS: u64 = 4;
 ///
 /// This used to be a flat 64 on every machine. A transform is CPU work from end to end, so
 /// admitting more of them than the machine can run does not make the server faster: measured
-/// on a 32-core machine with AVIF output, throughput was the same at 32 in flight and at 64,
+/// on a 32-core machine with the slowest encoder truss then had, throughput was the same at 32 in flight and at 64,
 /// while the median latency went from 19 to 30 seconds and the 95th percentile from 25 to
 /// 79. With the default 30 second deadline that is not merely slower, it is a failure: half
 /// of a 128 request run was answered `413` after its encode had already finished, so the
@@ -411,10 +411,10 @@ pub struct ServerConfig {
     ///
     /// When the client's Accept header allows multiple formats with equal quality
     /// values, the server picks the first format from this list that the client
-    /// accepts. An empty list uses the built-in default order (AVIF, WebP, JPEG/PNG).
+    /// accepts. An empty list uses the built-in default order (WebP, JPEG/PNG).
     ///
     /// Configurable via `TRUSS_FORMAT_PREFERENCE` (comma-separated list of format
-    /// names, e.g. `"avif,webp,png,jpeg"`).
+    /// names, e.g. `"webp,png,jpeg"`).
     pub format_preference: Vec<crate::MediaType>,
     /// Optional logging callback for diagnostic messages.
     ///
@@ -1590,7 +1590,7 @@ fn parse_env_f64_ranged(name: &str, min: f64, max: f64) -> io::Result<Option<f64
 /// Parses `TRUSS_FORMAT_PREFERENCE` into an ordered list of [`MediaType`] values.
 ///
 /// The environment variable is a comma-separated list of format short names
-/// (e.g. `"avif,webp,png,jpeg"`). Unrecognised names cause a startup error.
+/// (e.g. `"webp,png,jpeg"`). Unrecognised names cause a startup error.
 /// Returns an empty `Vec` when the variable is unset or empty, which tells the
 /// negotiation layer to use its built-in default order.
 pub(super) fn parse_format_preference_from_env() -> io::Result<Vec<crate::MediaType>> {
@@ -2327,17 +2327,26 @@ mod tests {
     #[test]
     #[serial]
     fn parse_format_preference_multiple_formats() {
-        let _env = ScopedEnv::set("TRUSS_FORMAT_PREFERENCE", "avif,webp,png,jpeg");
+        let _env = ScopedEnv::set("TRUSS_FORMAT_PREFERENCE", "webp,png,jpeg");
         let result = parse_format_preference_from_env().unwrap();
         assert_eq!(
             result,
             vec![
-                crate::MediaType::Avif,
                 crate::MediaType::Webp,
                 crate::MediaType::Png,
                 crate::MediaType::Jpeg,
             ]
         );
+    }
+
+    /// AVIF output was removed, so a preference list that still names it is refused at
+    /// startup like any other name truss does not know, rather than skipped in silence.
+    #[test]
+    #[serial]
+    fn parse_format_preference_rejects_avif() {
+        let _env = ScopedEnv::set("TRUSS_FORMAT_PREFERENCE", "avif,webp");
+        let msg = parse_format_preference_from_env().unwrap_err().to_string();
+        assert!(msg.contains("unsupported media type `avif`"), "{msg}");
     }
 
     #[test]
@@ -2392,9 +2401,9 @@ mod tests {
     #[test]
     #[serial]
     fn parse_format_preference_trailing_comma_ok() {
-        let _env = ScopedEnv::set("TRUSS_FORMAT_PREFERENCE", "avif,webp,");
+        let _env = ScopedEnv::set("TRUSS_FORMAT_PREFERENCE", "png,webp,");
         let result = parse_format_preference_from_env().unwrap();
-        assert_eq!(result, vec![crate::MediaType::Avif, crate::MediaType::Webp]);
+        assert_eq!(result, vec![crate::MediaType::Png, crate::MediaType::Webp]);
     }
 
     // --- TrustedProxy tests ---

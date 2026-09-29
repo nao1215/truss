@@ -134,7 +134,7 @@ scenarios:
           stderr:
             contains:
               - "svg output requires an svg input"
-              - "png, jpeg, webp, or avif"
+              - "png, jpeg, or webp"
       - run:
           command: truss convert "${fixtures}/sample.png" -o out.png --format svg
       - assert:

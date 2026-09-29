@@ -6,8 +6,6 @@ use crate::core::{
     default_lossy_target_quality,
 };
 use crate::{RawArtifact, Rgba8, sniff_artifact};
-#[cfg(feature = "avif")]
-use image::codecs::avif::AvifEncoder;
 use image::codecs::gif::GifDecoder;
 use image::codecs::jpeg::JpegDecoder;
 use image::codecs::jpeg::JpegEncoder;
@@ -23,14 +21,8 @@ use image::{
     ColorType, DynamicImage, GenericImageView, ImageDecoder, ImageEncoder, ImageFormat, Pixel,
     Rgba, RgbaImage,
 };
-#[cfg(feature = "avif")]
-use mp4parse::ParseStrictness;
-#[cfg(feature = "avif")]
-use rav1d_safe::{Decoder, Planes};
 use std::io::Cursor;
 use std::time::{Duration, Instant};
-#[cfg(feature = "avif")]
-use yuvutils_rs::{YuvGrayImage, YuvPlanarImage, YuvRange, YuvStandardMatrix};
 
 /// Transforms a raster artifact using the current backend implementation.
 ///
@@ -48,7 +40,7 @@ use yuvutils_rs::{YuvGrayImage, YuvPlanarImage, YuvRange, YuvStandardMatrix};
 /// Returns [`TransformError::InvalidOptions`] when the request fails Core validation,
 /// [`TransformError::DecodeFailed`] or [`TransformError::EncodeFailed`] when image processing
 /// fails, and [`TransformError::CapabilityMissing`] for features that are intentionally not
-/// implemented yet, such as metadata retention on AVIF output.
+/// implemented, such as a lossless JPEG optimization that would have to re-encode the pixels.
 pub(crate) fn transform_raster(
     request: TransformRequest,
 ) -> Result<TransformResult, TransformError> {
@@ -242,18 +234,6 @@ fn decode_input(input: &Artifact) -> Result<DynamicImage, TransformError> {
         MediaType::Jpeg => ImageFormat::Jpeg,
         MediaType::Png => ImageFormat::Png,
         MediaType::Webp => ImageFormat::WebP,
-        MediaType::Avif => {
-            #[cfg(feature = "avif")]
-            {
-                return decode_avif(&input.bytes);
-            }
-            #[cfg(not(feature = "avif"))]
-            {
-                return Err(TransformError::CapabilityMissing(
-                    "AVIF decoding is not enabled in this build".to_string(),
-                ));
-            }
-        }
         MediaType::Bmp => ImageFormat::Bmp,
         MediaType::Tiff => ImageFormat::Tiff,
         MediaType::Gif => ImageFormat::Gif,
@@ -291,125 +271,6 @@ fn decode_failure(media_type: MediaType, error: &image::ImageError) -> Transform
     })
 }
 
-/// Decodes an AVIF image using `rav1d` (pure Rust AV1 decoder) and `mp4parse` (ISOBMFF parser).
-///
-/// The pipeline extracts AV1 OBU data from the AVIF container, decodes it into YUV planes,
-/// and converts to RGBA using the color matrix and range signaled in the bitstream.
-/// Alpha planes are decoded separately when present in the container.
-///
-/// Supports 8-bit YUV 4:2:0, 4:2:2, 4:4:4, and 4:0:0 (grayscale) layouts.
-/// 10/12-bit images are downscaled to 8-bit with rounding.
-#[cfg(feature = "avif")]
-fn decode_avif(bytes: &[u8]) -> Result<DynamicImage, TransformError> {
-    let aperture = crate::core::avif_clean_aperture(bytes)?;
-    let mut cursor = Cursor::new(bytes);
-    let parse = |cursor: &mut Cursor<&[u8]>, strictness| {
-        cursor.set_position(0);
-        mp4parse::read_avif(cursor, strictness)
-            .map_err(|e| TransformError::DecodeFailed(format!("AVIF container parse failed: {e}")))
-    };
-    let mut context = parse(&mut cursor, ParseStrictness::Normal)?;
-    // mp4parse does not read `clap` and, since MIAF marks it essential, forbids the item
-    // that carries one. The aperture is read and applied here, so for such a file the parse
-    // is repeated without that check; every other file keeps the stricter parse.
-    if aperture.is_some() && !context.primary_item_is_present() {
-        context = parse(&mut cursor, ParseStrictness::Permissive)?;
-    }
-
-    let primary_data = context
-        .primary_item_coded_data()
-        .ok_or_else(|| TransformError::DecodeFailed("AVIF has no primary item data".into()))?;
-
-    let frame = decode_av1_frame(primary_data)?;
-    let width = frame.width();
-    let height = frame.height();
-
-    let color = frame.color_info();
-    let matrix = map_yuv_matrix(color.matrix_coefficients)?;
-    let range = map_yuv_range(color.color_range);
-
-    let mut rgba = yuv_frame_to_rgba(&frame, width, height, range, matrix)?;
-
-    // Decode alpha plane if present and merge into RGBA.
-    if let Some(alpha_data) = context.alpha_item_coded_data() {
-        let alpha_frame = decode_av1_frame(alpha_data)
-            .map_err(|e| TransformError::DecodeFailed(format!("AVIF alpha decode failed: {e}")))?;
-        merge_alpha_plane(&alpha_frame, &mut rgba, width, height);
-    }
-
-    let image = RgbaImage::from_raw(width, height, rgba)
-        .ok_or_else(|| TransformError::DecodeFailed("AVIF decoded buffer size mismatch".into()))?;
-
-    // The clean aperture comes first among the transformative properties, so it is cut
-    // here, before the orientation the pipeline applies to what this returns.
-    let image = match aperture {
-        Some(aperture) => {
-            let (x, y, aperture_width, aperture_height) = aperture.rectangle(width, height)?;
-            if (x, y, aperture_width, aperture_height) == (0, 0, width, height) {
-                image
-            } else {
-                image::imageops::crop_imm(&image, x, y, aperture_width, aperture_height).to_image()
-            }
-        }
-        None => image,
-    };
-
-    Ok(DynamicImage::ImageRgba8(image))
-}
-
-/// Feeds AV1 OBU data to a `rav1d` decoder and returns the first decoded frame.
-#[cfg(feature = "avif")]
-fn decode_av1_frame(obu_data: &[u8]) -> Result<rav1d_safe::Frame, TransformError> {
-    contain_codec_panic(
-        || TransformError::DecodeFailed("AV1 decoder failed while decoding this image".into()),
-        || {
-            let mut decoder = Decoder::with_settings(avif_decoder_settings()).map_err(|e| {
-                TransformError::DecodeFailed(format!("AV1 decoder init failed: {e}"))
-            })?;
-
-            if let Some(frame) = decoder
-                .decode(obu_data)
-                .map_err(|e| TransformError::DecodeFailed(format!("AV1 decode failed: {e}")))?
-            {
-                return Ok(frame);
-            }
-
-            // Flush any buffered frames.
-            let frames = decoder
-                .flush()
-                .map_err(|e| TransformError::DecodeFailed(format!("AV1 flush failed: {e}")))?;
-
-            frames.into_iter().next().ok_or_else(|| {
-                TransformError::DecodeFailed("AV1 decoder produced no frames".into())
-            })
-        },
-    )
-}
-
-/// The settings truss decodes AV1 with.
-///
-/// `rav1d-safe`'s default `frame_size_limit` is 8192x4320, an 8K video frame, which is the
-/// right default for a video decoder and below what a still-image pipeline writes: truss's own
-/// output ceiling is [`MAX_OUTPUT_PIXELS`], nearly twice that, so an AVIF truss encoded at the
-/// top of its own budget came back `ERANGE` from the decoder in the next line of the same
-/// program. The limit is truss's input budget instead, which is the number
-/// [`check_input_pixel_limit`] already refuses an oversized input by, from the dimensions the
-/// sniffer read and before any frame reaches the decoder.
-///
-/// `max_frame_delay` is 1 because this is a still image: `rav1d-safe` documents that value as
-/// tile parallelism without the frame threading a single picture has no use for.
-#[cfg(feature = "avif")]
-fn avif_decoder_settings() -> rav1d_safe::Settings {
-    #[allow(clippy::cast_possible_truncation)]
-    let frame_size_limit = MAX_DECODED_PIXELS as u32;
-    // `Settings` is `#[non_exhaustive]`, so the fields are set on the default rather than
-    // written as a struct expression with `..Default::default()`.
-    let mut settings = rav1d_safe::Settings::default();
-    settings.frame_size_limit = frame_size_limit;
-    settings.max_frame_delay = 1;
-    settings
-}
-
 /// Runs a codec and reports a panic inside it as the error that codec's failures produce.
 ///
 /// truss handles bytes and sizes it did not choose, on a server, from a caller it does not
@@ -418,393 +279,19 @@ fn avif_decoder_settings() -> rav1d_safe::Settings {
 /// down. The panic is contained at each call that leaves truss's own code, and becomes the
 /// error that call's other failures already produce, which is what `on_panic` supplies.
 ///
-/// This is not a claim that the operation was correct. Two cases are known. `rav1d`'s ARM loop
-/// restoration overflows an arithmetic width, which panics where overflow checks are on and
-/// wraps where they are off, and containing it makes the first behave like the second rather
-/// than making either right. The `webp` crate's `encode` returns no `Result`, so it unwraps
-/// libwebp's status; the dimensions that reach it are checked before the pipeline runs, and
+/// This is not a claim that the operation was correct. The `webp` crate's `encode` returns no
+/// `Result`, so it unwraps libwebp's status; the dimensions that reach it are checked before the pipeline runs, and
 /// this covers whatever else that call unwraps on. The panic message the default hook printed
 /// on the way is the record that something inside went wrong.
 ///
 /// The closure takes nothing by mutable reference and writes nothing outside itself, so there
 /// is no state a panic could leave half-written; that is what [`AssertUnwindSafe`] asserts.
-#[cfg(any(feature = "avif", feature = "webp-lossy"))]
+#[cfg(feature = "webp-lossy")]
 fn contain_codec_panic<T>(
     on_panic: impl FnOnce() -> TransformError,
     run: impl FnOnce() -> Result<T, TransformError>,
 ) -> Result<T, TransformError> {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(run)).unwrap_or_else(|_| Err(on_panic()))
-}
-
-/// How an AVIF's declared matrix coefficients are turned back into RGB.
-///
-/// Almost every value is a pair of luma coefficients and a matrix multiply, which is what
-/// [`YuvStandardMatrix`] describes. `matrix_coefficients = 0` is not: it says the encoder did
-/// not convert to a luma and two chroma differences at all, so the three planes are already
-/// green, blue and red, and reading them through any matrix produces a different picture.
-#[cfg(feature = "avif")]
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum AvifMatrix {
-    /// The planes are G, B and R at full resolution. Nothing is converted; they are copied.
-    Identity,
-    /// A luma and chroma matrix, applied by `yuvutils_rs`.
-    Standard(YuvStandardMatrix),
-}
-
-/// Maps rav1d `MatrixCoefficients` to how truss converts the planes back to RGB.
-///
-/// Every variant is named. The catch-all this replaced answered BT.709 for seven values it
-/// does not describe, including the identity matrix, which is what `avifenc --lossless` and
-/// `cavif --color rgb` write: those files decoded with the red and green planes swapped
-/// through a matrix, off by half the range, and nothing said so. A value truss cannot convert
-/// is refused here rather than approximated, since a decode error is something a caller can
-/// act on and a wrong picture is not.
-///
-/// # Errors
-///
-/// Returns [`TransformError::DecodeFailed`] naming the coefficients truss cannot apply.
-#[cfg(feature = "avif")]
-fn map_yuv_matrix(mc: rav1d_safe::MatrixCoefficients) -> Result<AvifMatrix, TransformError> {
-    use rav1d_safe::MatrixCoefficients as Mc;
-
-    let unsupported = |name: &str| {
-        Err(TransformError::DecodeFailed(format!(
-            "AVIF declares {name} matrix coefficients, which truss cannot convert"
-        )))
-    };
-
-    match mc {
-        Mc::Identity => Ok(AvifMatrix::Identity),
-        Mc::BT709 => Ok(AvifMatrix::Standard(YuvStandardMatrix::Bt709)),
-        // "Unspecified" asks the reader to choose, and the readers have chosen: libavif
-        // substitutes BT.601 when it prepares its reformat state, which is what libheif and
-        // therefore ImageMagick answer, and FFmpeg's swscale defaults to the same. Reading
-        // it as BT.709 put truss 33 of 255 away from every other decoder of the same file.
-        Mc::Unspecified => Ok(AvifMatrix::Standard(YuvStandardMatrix::Bt601)),
-        // FCC is 0.30 red and 0.11 blue, which is neither BT.601 nor the `Bt470_6` member,
-        // whose coefficients are the ones BT.470 System M primaries derive.
-        Mc::FCC => Ok(AvifMatrix::Standard(YuvStandardMatrix::Custom(0.30, 0.11))),
-        Mc::BT470BG | Mc::BT601 => Ok(AvifMatrix::Standard(YuvStandardMatrix::Bt601)),
-        // SMPTE 240M is 0.212 red and 0.087 blue. `yuvutils_rs` 0.8.3 defines its own
-        // `Smpte240` member with the two exchanged, so the member that names the matrix
-        // applies a different one; the coefficients are given here instead. This arm goes
-        // back to `YuvStandardMatrix::Smpte240` when a release reports `kr` as 0.212.
-        Mc::SMPTE240 => Ok(AvifMatrix::Standard(YuvStandardMatrix::Custom(
-            0.212, 0.087,
-        ))),
-        Mc::BT2020NCL => Ok(AvifMatrix::Standard(YuvStandardMatrix::Bt2020)),
-        // Constant luminance is not the same transform as the non-constant one that shares
-        // its coefficients, and the rest are not luma and chroma at all.
-        Mc::BT2020CL => unsupported("BT.2020 constant luminance"),
-        Mc::YCgCo => unsupported("YCgCo"),
-        Mc::SMPTE2085 => unsupported("SMPTE 2085"),
-        Mc::ChromaDerivedNCL => unsupported("chromaticity-derived non-constant luminance"),
-        Mc::ChromaDerivedCL => unsupported("chromaticity-derived constant luminance"),
-        Mc::ICtCp => unsupported("ICtCp"),
-        Mc::Reserved => unsupported("reserved"),
-    }
-}
-
-/// Maps rav1d `ColorRange` to `yuvutils_rs` range.
-#[cfg(feature = "avif")]
-fn map_yuv_range(cr: rav1d_safe::ColorRange) -> YuvRange {
-    match cr {
-        rav1d_safe::ColorRange::Full => YuvRange::Full,
-        rav1d_safe::ColorRange::Limited => YuvRange::Limited,
-    }
-}
-
-/// Converts a decoded AV1 frame's YUV planes to RGBA bytes.
-///
-/// Handles 8-bit and 10/12-bit depth by downscaling higher bit depths to 8-bit.
-/// Supports I420, I422, I444, and I400 (grayscale) pixel layouts.
-#[cfg(feature = "avif")]
-fn yuv_frame_to_rgba(
-    frame: &rav1d_safe::Frame,
-    width: u32,
-    height: u32,
-    range: YuvRange,
-    matrix: AvifMatrix,
-) -> Result<Vec<u8>, TransformError> {
-    let rgba_stride = width.checked_mul(4).ok_or_else(|| {
-        TransformError::DecodeFailed("AVIF frame dimensions overflow address space".into())
-    })?;
-    let total_bytes = (width as usize)
-        .checked_mul(height as usize)
-        .and_then(|n| n.checked_mul(4))
-        .ok_or_else(|| {
-            TransformError::DecodeFailed("AVIF frame dimensions overflow address space".into())
-        })?;
-    let mut rgba = vec![255u8; total_bytes];
-    let layout = frame.pixel_layout();
-
-    match frame.planes() {
-        Planes::Depth8(planes) => {
-            let y = planes.y();
-            convert_8bit_yuv_to_rgba(
-                layout,
-                y.as_slice(),
-                y.stride(),
-                planes.u().as_ref().map(|p| (p.as_slice(), p.stride())),
-                planes.v().as_ref().map(|p| (p.as_slice(), p.stride())),
-                width,
-                height,
-                &mut rgba,
-                rgba_stride,
-                range,
-                matrix,
-            )?;
-        }
-        Planes::Depth16(planes) => {
-            let shift = frame.bit_depth() - 8;
-            let y8: Vec<u8> = planes
-                .y()
-                .as_slice()
-                .iter()
-                .map(|&v| narrow_sample(v, shift))
-                .collect();
-            let y_stride = planes.y().stride();
-            let u8s: Option<(Vec<u8>, usize)> = planes.u().as_ref().map(|p| {
-                let data: Vec<u8> = p
-                    .as_slice()
-                    .iter()
-                    .map(|&v| narrow_sample(v, shift))
-                    .collect();
-                (data, p.stride())
-            });
-            let v8s: Option<(Vec<u8>, usize)> = planes.v().as_ref().map(|p| {
-                let data: Vec<u8> = p
-                    .as_slice()
-                    .iter()
-                    .map(|&v| narrow_sample(v, shift))
-                    .collect();
-                (data, p.stride())
-            });
-            convert_8bit_yuv_to_rgba(
-                layout,
-                &y8,
-                y_stride,
-                u8s.as_ref().map(|(d, s)| (d.as_slice(), *s)),
-                v8s.as_ref().map(|(d, s)| (d.as_slice(), *s)),
-                width,
-                height,
-                &mut rgba,
-                rgba_stride,
-                range,
-                matrix,
-            )?;
-        }
-    }
-
-    Ok(rgba)
-}
-
-/// Narrows a 10- or 12-bit sample to 8 bits, rounding to nearest.
-///
-/// `shift` is the depth minus eight. The rounding is clamped: a sample at the top of its
-/// range rounds past 255 otherwise, and a cast would wrap it to 0, which turned white into
-/// black and a saturated primary into green in every deep AVIF.
-#[cfg(feature = "avif")]
-fn narrow_sample(value: u16, shift: u8) -> u8 {
-    let round = 1u16 << shift.saturating_sub(1);
-    u8::try_from((u32::from(value) + u32::from(round)) >> shift).unwrap_or(u8::MAX)
-}
-
-/// Converts 8-bit YUV plane data to RGBA, dispatching by pixel layout.
-///
-/// U and V planes are `None` for I400 (grayscale). For I420/I422/I444, both must be present.
-#[cfg(feature = "avif")]
-#[allow(clippy::too_many_arguments)]
-fn convert_8bit_yuv_to_rgba(
-    layout: rav1d_safe::PixelLayout,
-    y_data: &[u8],
-    y_stride: usize,
-    u_data: Option<(&[u8], usize)>,
-    v_data: Option<(&[u8], usize)>,
-    width: u32,
-    height: u32,
-    rgba: &mut [u8],
-    rgba_stride: u32,
-    range: YuvRange,
-    matrix: AvifMatrix,
-) -> Result<(), TransformError> {
-    if matrix == AvifMatrix::Identity {
-        return copy_identity_planes_to_rgba(
-            layout,
-            y_data,
-            y_stride,
-            u_data,
-            v_data,
-            width,
-            height,
-            rgba,
-            rgba_stride,
-            range,
-        );
-    }
-    let matrix = match matrix {
-        AvifMatrix::Standard(matrix) => matrix,
-        AvifMatrix::Identity => unreachable!("handled above"),
-    };
-
-    match layout {
-        rav1d_safe::PixelLayout::I400 => {
-            let gray = YuvGrayImage {
-                y_plane: y_data,
-                y_stride: y_stride as u32,
-                width,
-                height,
-            };
-            yuvutils_rs::yuv400_to_rgba(&gray, rgba, rgba_stride, range, matrix)
-                .map_err(|e| TransformError::DecodeFailed(format!("YUV400→RGBA failed: {e}")))?;
-        }
-        _ => {
-            let (u_plane, u_stride) = u_data.ok_or_else(|| {
-                TransformError::DecodeFailed("missing U plane for non-grayscale AVIF".into())
-            })?;
-            let (v_plane, v_stride) = v_data.ok_or_else(|| {
-                TransformError::DecodeFailed("missing V plane for non-grayscale AVIF".into())
-            })?;
-            let planar = YuvPlanarImage {
-                y_plane: y_data,
-                y_stride: y_stride as u32,
-                u_plane,
-                u_stride: u_stride as u32,
-                v_plane,
-                v_stride: v_stride as u32,
-                width,
-                height,
-            };
-            let convert_fn = match layout {
-                rav1d_safe::PixelLayout::I420 => yuvutils_rs::yuv420_to_rgba,
-                rav1d_safe::PixelLayout::I422 => yuvutils_rs::yuv422_to_rgba,
-                rav1d_safe::PixelLayout::I444 => yuvutils_rs::yuv444_to_rgba,
-                rav1d_safe::PixelLayout::I400 => unreachable!(),
-            };
-            convert_fn(&planar, rgba, rgba_stride, range, matrix)
-                .map_err(|e| TransformError::DecodeFailed(format!("YUV→RGBA failed: {e}")))?;
-        }
-    }
-    Ok(())
-}
-
-/// Copies the three planes of an identity-matrix AVIF straight into the RGBA buffer.
-///
-/// With `matrix_coefficients = 0` the AV1 frame does not hold a luma and two chroma
-/// differences: it holds green in the Y plane, blue in U and red in V, at full resolution and
-/// over the full range. There is nothing to convert, so the planes are copied, and the two
-/// things the format requires alongside are checked rather than assumed. A file that claims
-/// the identity matrix with subsampled chroma or a limited range is contradicting itself, and
-/// guessing which half of the contradiction to believe would put the wrong picture out under
-/// a successful decode, which is the failure this whole path exists to stop.
-#[cfg(feature = "avif")]
-#[allow(clippy::too_many_arguments)]
-fn copy_identity_planes_to_rgba(
-    layout: rav1d_safe::PixelLayout,
-    y_data: &[u8],
-    y_stride: usize,
-    u_data: Option<(&[u8], usize)>,
-    v_data: Option<(&[u8], usize)>,
-    width: u32,
-    height: u32,
-    rgba: &mut [u8],
-    rgba_stride: u32,
-    range: YuvRange,
-) -> Result<(), TransformError> {
-    if layout != rav1d_safe::PixelLayout::I444 {
-        return Err(TransformError::DecodeFailed(
-            "AVIF declares identity matrix coefficients, which require 4:4:4 chroma".into(),
-        ));
-    }
-    if range != YuvRange::Full {
-        return Err(TransformError::DecodeFailed(
-            "AVIF declares identity matrix coefficients, which require full range".into(),
-        ));
-    }
-
-    let (u_data, u_stride) = u_data.ok_or_else(|| {
-        TransformError::DecodeFailed("missing G/B/R planes for an identity-matrix AVIF".into())
-    })?;
-    let (v_data, v_stride) = v_data.ok_or_else(|| {
-        TransformError::DecodeFailed("missing G/B/R planes for an identity-matrix AVIF".into())
-    })?;
-
-    let width = width as usize;
-    let rgba_stride = rgba_stride as usize;
-    for row in 0..height as usize {
-        let green = plane_row(y_data, y_stride, row, width)?;
-        let blue = plane_row(u_data, u_stride, row, width)?;
-        let red = plane_row(v_data, v_stride, row, width)?;
-        let out = rgba
-            .get_mut(row * rgba_stride..row * rgba_stride + width * 4)
-            .ok_or_else(|| {
-                TransformError::DecodeFailed("AVIF decoded buffer size mismatch".into())
-            })?;
-        for column in 0..width {
-            out[column * 4] = red[column];
-            out[column * 4 + 1] = green[column];
-            out[column * 4 + 2] = blue[column];
-        }
-    }
-
-    Ok(())
-}
-
-/// One row of a plane, of exactly `width` samples.
-#[cfg(feature = "avif")]
-fn plane_row(
-    plane: &[u8],
-    stride: usize,
-    row: usize,
-    width: usize,
-) -> Result<&[u8], TransformError> {
-    plane
-        .get(row * stride..row * stride + width)
-        .ok_or_else(|| TransformError::DecodeFailed("AVIF plane is shorter than its size".into()))
-}
-
-/// Merges a separately decoded alpha plane into an existing RGBA buffer.
-///
-/// The alpha frame's Y plane is used as the alpha channel. If the alpha frame dimensions
-/// do not match the primary frame, the merge is silently skipped.
-#[cfg(feature = "avif")]
-fn merge_alpha_plane(alpha_frame: &rav1d_safe::Frame, rgba: &mut [u8], width: u32, height: u32) {
-    if alpha_frame.width() != width || alpha_frame.height() != height {
-        return;
-    }
-
-    let w = width as usize;
-    let row_stride = w.saturating_mul(4);
-
-    match alpha_frame.planes() {
-        Planes::Depth8(planes) => {
-            let y = planes.y();
-            for row_idx in 0..height as usize {
-                let row = y.row(row_idx);
-                let row_start = row_idx.saturating_mul(row_stride);
-                for (col, &alpha) in row.iter().enumerate().take(w) {
-                    let idx = row_start + col * 4 + 3;
-                    if idx < rgba.len() {
-                        rgba[idx] = alpha;
-                    }
-                }
-            }
-        }
-        Planes::Depth16(planes) => {
-            let shift = alpha_frame.bit_depth() - 8;
-            let y = planes.y();
-            for row_idx in 0..height as usize {
-                let row = y.row(row_idx);
-                let row_start = row_idx.saturating_mul(row_stride);
-                for (col, &alpha) in row.iter().enumerate().take(w) {
-                    let idx = row_start + col * 4 + 3;
-                    if idx < rgba.len() {
-                        rgba[idx] = narrow_sample(alpha, shift);
-                    }
-                }
-            }
-        }
-    }
 }
 
 /// Checks whether the elapsed time exceeds the given deadline.
@@ -1605,11 +1092,7 @@ fn position_offset(
 fn background_pixel(background: Option<Rgba8>, output_format: MediaType) -> Rgba<u8> {
     match background {
         Some(color) => Rgba([color.r, color.g, color.b, color.a]),
-        None if matches!(
-            output_format,
-            MediaType::Jpeg | MediaType::Avif | MediaType::Bmp
-        ) =>
-        {
+        None if matches!(output_format, MediaType::Jpeg | MediaType::Bmp) => {
             Rgba([255, 255, 255, 255])
         }
         None => Rgba([0, 0, 0, 0]),
@@ -1660,9 +1143,6 @@ fn try_passthrough_lossless_optimization(
                 warnings,
             }))
         }
-        MediaType::Avif => Err(TransformError::CapabilityMissing(
-            AVIF_LOSSLESS_REFUSAL.to_string(),
-        )),
         _ => Ok(None),
     }
 }
@@ -1737,10 +1217,6 @@ fn smaller_passthrough(normalized: &NormalizedTransformRequest, encoded: &[u8]) 
             &normalized.input.bytes,
             normalized.options.metadata_policy,
         )?,
-        MediaType::Avif => avif_bytes_satisfying_metadata_policy(
-            &normalized.input.bytes,
-            normalized.options.metadata_policy,
-        )?,
         _ => return None,
     };
 
@@ -1792,26 +1268,6 @@ fn png_bytes_satisfying_metadata_policy(
             return Some(kept_bytes);
         }
         offset = end;
-    }
-
-    None
-}
-
-/// Returns the AVIF unchanged when it carries no metadata the policy would remove.
-///
-/// This is the passthrough that keeps an optimize from returning more bytes than it was given,
-/// so what it answers is whether the input already satisfies the policy. A policy that keeps
-/// everything is satisfied by any file; one that strips is satisfied only by a file with
-/// nothing to strip. Unlike the PNG and WebP arms beside it, this does not produce a stripped
-/// candidate: removing an item means rewriting the item list, the item locations, and every
-/// offset that moves, and the re-encode the caller falls back to is the smaller change for
-/// what is a rare request.
-fn avif_bytes_satisfying_metadata_policy(
-    bytes: &[u8],
-    metadata_policy: MetadataPolicy,
-) -> Option<Vec<u8>> {
-    if metadata_policy == MetadataPolicy::KeepAll || !crate::core::avif_carries_metadata(bytes) {
-        return Some(bytes.to_vec());
     }
 
     None
@@ -2142,7 +1598,7 @@ fn encode_auto_output(
     let mut attempt_warnings = Vec::new();
     let optimized = match media_type {
         MediaType::Png => encode_png_optimized(image, retained_metadata, deadline)?,
-        MediaType::Jpeg | MediaType::Webp | MediaType::Avif => {
+        MediaType::Jpeg | MediaType::Webp => {
             match encode_lossy_optimized_output(
                 image,
                 media_type,
@@ -2190,9 +1646,6 @@ fn encode_lossless_optimized_output(
             "lossless JPEG optimization is only supported when no pixel transforms are applied"
                 .to_string(),
         )),
-        MediaType::Avif => Err(TransformError::CapabilityMissing(
-            AVIF_LOSSLESS_REFUSAL.to_string(),
-        )),
         _ => Err(TransformError::InvalidOptions(format!(
             "optimization is not supported for {} output",
             media_type.as_name()
@@ -2238,14 +1691,7 @@ fn encode_lossy_optimized_output(
         let quality = options
             .quality
             .unwrap_or_else(|| default_lossy_quality(media_type));
-        encode_lossy_with_quality(
-            image,
-            media_type,
-            quality,
-            retained_metadata,
-            true,
-            deadline,
-        )
+        encode_lossy_with_quality(image, media_type, quality, retained_metadata, deadline)
     }
 }
 
@@ -2253,7 +1699,6 @@ fn default_lossy_quality(media_type: MediaType) -> u8 {
     match media_type {
         MediaType::Jpeg => 76,
         MediaType::Webp => 75,
-        MediaType::Avif => 68,
         _ => 80,
     }
 }
@@ -2333,14 +1778,8 @@ fn encode_lossy_with_target(
     warnings: &mut Vec<TransformWarning>,
 ) -> Result<EncodedOutput, TransformError> {
     let search = search_quality_for_target(target, max_quality, |quality| {
-        let candidate = encode_lossy_with_quality(
-            image,
-            media_type,
-            quality,
-            retained_metadata,
-            true,
-            deadline,
-        )?;
+        let candidate =
+            encode_lossy_with_quality(image, media_type, quality, retained_metadata, deadline)?;
         deadline.check("encode lossy optimization candidate")?;
         let score =
             measure_quality_metric(image, &candidate.bytes, media_type, target.metric, deadline)?;
@@ -2519,15 +1958,6 @@ fn encode_baseline_output(
                 encode_webp_lossless(image, retained_metadata)
             }
         }
-        MediaType::Avif => Ok(EncodedOutput {
-            bytes: encode_avif(
-                image,
-                quality.unwrap_or(80),
-                avif_speed(output_pixels(image), false),
-                retained_metadata,
-            )?,
-            used_lossy_webp: false,
-        }),
         MediaType::Bmp => Ok(EncodedOutput {
             bytes: encode_bmp(image)?,
             used_lossy_webp: false,
@@ -2584,7 +2014,6 @@ fn encode_lossy_with_quality(
     media_type: MediaType,
     quality: u8,
     retained_metadata: Option<&RetainedMetadata>,
-    optimized: bool,
     deadline: EncodeDeadline,
 ) -> Result<EncodedOutput, TransformError> {
     match media_type {
@@ -2602,19 +2031,6 @@ fn encode_lossy_with_quality(
             Ok(EncodedOutput {
                 bytes,
                 used_lossy_webp: true,
-            })
-        }
-        MediaType::Avif => {
-            let bytes = encode_avif(
-                image,
-                quality,
-                avif_speed(output_pixels(image), optimized),
-                retained_metadata,
-            )?;
-            deadline.check("encode lossy avif")?;
-            Ok(EncodedOutput {
-                bytes,
-                used_lossy_webp: false,
             })
         }
         _ => Err(TransformError::InvalidOptions(format!(
@@ -2806,101 +2222,6 @@ fn encode_webp_lossy_bytes(image: &DynamicImage, quality: u8) -> Result<Vec<u8>,
         let _ = (image, quality);
         Err(TransformError::CapabilityMissing(
             "lossy WebP encoding is not enabled in this build".to_string(),
-        ))
-    }
-}
-
-/// The number of pixels an encoder is about to be handed.
-fn output_pixels(image: &DynamicImage) -> u64 {
-    let (width, height) = image.dimensions();
-    u64::from(width) * u64::from(height)
-}
-
-/// The rav1e speed setting to encode an AVIF of this many pixels with.
-///
-/// rav1e's scale runs from 1, the slowest and smallest, to 10. truss asked for 4 at every
-/// size, which is a fine setting for an image small enough that the time does not matter,
-/// and [`MAX_OUTPUT_PIXELS`] allows outputs where it matters a great deal: 8192x8192 is
-/// exactly that ceiling, and speed 4 takes 55 seconds on two cores against a 30 second
-/// default deadline, or 218 seconds for a source the encoder finds hard.
-///
-/// Below the first step nothing changes. A small output is quick at speed 4 and a faster
-/// setting does not reliably make it smaller: measured on two cores, speed 6 came out 1.3
-/// percent larger than speed 4 on a 1.7MP gradient and 10 percent larger on a 0.3MP image
-/// of noise. There is no deadline to save there, so there is no reason to spend the bytes.
-///
-/// Above it the trade turns over, because the alternative is a request that does not finish.
-/// On two cores, with the source the encoder finds hardest:
-///
-/// | output | speed 4 | this ladder |
-/// |--------|---------|-------------|
-/// | 12MP | 58.4s | 15.5s at speed 8, 3.5 percent more bytes |
-/// | 67MP | 218.2s | 19.2s at speed 10 |
-///
-/// The steps are placed so that the worst of those finishes inside the default deadline on
-/// two cores, which neither did before. On ordinary content the larger sizes come out
-/// smaller as well as faster: a 12MP gradient is 23,925 bytes at speed 8 against 25,885 at
-/// speed 4.
-///
-/// `optimize` asks for the smallest file the encoder can produce and accepts the time, so it
-/// runs two steps slower than the same size would otherwise. Below the first step that is
-/// speed 2, which is what the optimizing path already used.
-/// Why `optimize=lossless` is refused for AVIF output.
-///
-/// The AV1 encoder truss reaches through the `image` crate takes a quality setting and has no
-/// bit-exact mode: at the top setting a decode of its output still differs from the input by a
-/// channel or two, measured on a 32x32 gradient, so calling it lossless would be a claim about
-/// the pixels that is not true. The mode stays refused rather than approximated, which is the
-/// same choice `docs/api-reference.md` records for the caller.
-const AVIF_LOSSLESS_REFUSAL: &str =
-    "lossless optimization is not available for avif output: the AV1 encoder has no bit-exact mode";
-
-fn avif_speed(pixels: u64, optimized: bool) -> u8 {
-    let speed = match pixels {
-        0..=2_000_000 => 4,
-        2_000_001..=16_000_000 => 8,
-        _ => 10,
-    };
-    if optimized { speed - 2 } else { speed }
-}
-
-fn encode_avif(
-    image: &DynamicImage,
-    quality: u8,
-    speed: u8,
-    retained_metadata: Option<&RetainedMetadata>,
-) -> Result<Vec<u8>, TransformError> {
-    #[cfg(feature = "avif")]
-    {
-        let mut bytes = Vec::new();
-        let samples = EncodeSamples::from_image(image);
-        let (width, height) = samples.dimensions();
-        let encoder = AvifEncoder::new_with_speed_quality(&mut bytes, speed, quality);
-        encoder
-            .write_image(
-                samples.as_bytes(),
-                width,
-                height,
-                samples.color_type().into(),
-            )
-            .map_err(|error| TransformError::EncodeFailed(error.to_string()))?;
-
-        // The encoder writes pixels and colour information and nothing else, so the metadata
-        // goes into the container afterwards, the way the WebP path rewrites its own.
-        match retained_metadata {
-            Some(metadata) if !metadata.is_empty() => crate::core::avif_with_metadata(
-                &bytes,
-                metadata.exif_metadata.as_deref(),
-                metadata.icc_profile.as_deref(),
-            ),
-            _ => Ok(bytes),
-        }
-    }
-    #[cfg(not(feature = "avif"))]
-    {
-        let _ = (image, quality, speed, retained_metadata);
-        Err(TransformError::CapabilityMissing(
-            "AVIF encoding is not enabled in this build".to_string(),
         ))
     }
 }
@@ -3226,7 +2547,8 @@ fn inject_metadata(
             // IPTC has no standard embedding in WebP; warning remains.
         }
         _ => {
-            // AVIF: no post-encode injection supported.
+            // Nothing is injected after the encode for the other formats: TIFF writes its
+            // profile in the encoder, and BMP carries no metadata.
         }
     }
 
@@ -3435,8 +2757,6 @@ impl RetainedMetadata {
     /// - JPEG: EXIF, ICC, XMP (APP1 injection), IPTC (APP13 injection)
     /// - PNG: EXIF, ICC, XMP (iTXt injection). IPTC has no standard PNG embedding.
     /// - WebP: EXIF, ICC, XMP in RIFF chunks. IPTC has no WebP container chunk.
-    /// - AVIF: EXIF as an item of its own and ICC as a `colr` property, both written into the
-    ///   container after the encode. XMP would be a `mime` item and is not written.
     /// - TIFF: ICC as the directory entry the format defines for it. Its EXIF is its own
     ///   directory rather than a block that travels, so nothing carries that.
     /// - BMP: no path for any of the four.
@@ -3448,7 +2768,6 @@ impl RetainedMetadata {
         let (exif, icc, xmp, iptc) = match output_format {
             MediaType::Jpeg => (true, true, true, true),
             MediaType::Png | MediaType::Webp => (true, true, true, false),
-            MediaType::Avif => (true, true, false, false),
             // TIFF defines a directory entry for a profile and the encoder writes one; its
             // metadata is otherwise its own directory rather than a block that travels.
             MediaType::Tiff => (false, true, false, false),
@@ -3534,9 +2853,7 @@ fn retained_metadata<D: ImageDecoder>(
 ///
 /// Every format with something to read goes through a decoder, which answers for the four
 /// kinds and reports `None` for the ones it has no place for: JPEG, PNG and WebP carry all
-/// four between them, TIFF and GIF carry a profile and XMP, and AVIF's two items are read by
-/// truss's own container walk because the decoder is not one the `image` crate provides. SVG
-/// is text and BMP exposes nothing, which is why those two read nothing rather than being
+/// four between them, and TIFF and GIF carry a profile and XMP. SVG is text and BMP exposes nothing, which is why those two read nothing rather than being
 /// unfinished.
 fn read_input_metadata(input: &Artifact) -> Result<RetainedMetadata, TransformError> {
     let bytes = Cursor::new(&input.bytes);
@@ -3552,21 +2869,6 @@ fn read_input_metadata(input: &Artifact) -> Result<RetainedMetadata, TransformEr
         MediaType::Webp => {
             retained_metadata(WebPDecoder::new(bytes).map_err(open_failed)?, media_type)
         }
-        // AVIF keeps EXIF as an item of its own and an ICC profile as a property, neither of
-        // which the decoder this file opens the others with reaches; the container walk reads
-        // both. The rest have no metadata truss carries: SVG is text, and the three raster
-        // formats left have no path into or out of them.
-        #[cfg(feature = "avif")]
-        MediaType::Avif => {
-            let metadata = crate::core::avif_metadata(&input.bytes);
-            Ok(RetainedMetadata {
-                exif_metadata: metadata.exif,
-                icc_profile: metadata.icc,
-                ..RetainedMetadata::default()
-            })
-        }
-        #[cfg(not(feature = "avif"))]
-        MediaType::Avif => Ok(RetainedMetadata::default()),
         // Neither decoder offers EXIF, XMP or IPTC, and the trait's defaults answer `None`
         // for those, so what these two arms carry over is the ICC profile: the `IccProfile`
         // tag of a TIFF's directory and the colour profile extension of a GIF. Reading
@@ -4806,26 +4108,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "avif")]
-    #[test]
-    fn transform_raster_lossy_avif_succeeds_for_icc_input_with_strip_metadata() {
-        // AVIF cannot carry a profile truss writes, so a strip request must stay StripAll
-        // instead of being upgraded into a state the encoder rejects.
-        let artifact = jpeg_artifact_with_metadata(4, 2, None, Some(b"demo-icc-profile"));
-        let result = transform_raster(TransformRequest::new(
-            artifact,
-            TransformOptions {
-                format: Some(MediaType::Avif),
-                optimize: OptimizeMode::Lossy,
-                strip_metadata: true,
-                ..TransformOptions::default()
-            },
-        ))
-        .expect("--strip-metadata must never be the reason a command fails");
-
-        assert_eq!(result.artifact.media_type, MediaType::Avif);
-    }
-
     #[test]
     fn transform_raster_lossless_webp_gains_an_xmp_chunk() {
         let artifact = jpeg_with_xmp_iptc();
@@ -5115,93 +4397,6 @@ mod tests {
         assert_eq!(result.artifact.metadata.height, Some(3));
     }
 
-    /// Bit-flipped AVIF containers reach the metadata walk without panicking.
-    ///
-    /// The walk reads an item list, an item location table and a property list out of bytes
-    /// truss did not produce: on the server they arrive as a request body or from storage, and
-    /// on the CLI as a file. Every read is bounds-checked and every arithmetic step is
-    /// saturating or checked, and this is what says so rather than a comment claiming it. The
-    /// generator is a fixed-seed xorshift so a failure is reproducible from the seed alone, and
-    /// the corpus is the container truss itself writes, since that is the shape whose fields a
-    /// flip can make inconsistent rather than merely unparseable.
-    #[cfg(feature = "avif")]
-    #[test]
-    fn a_damaged_avif_container_is_read_without_panicking() {
-        let mut state: u64 = 0x2026_0902_A71F_0001;
-        let mut next = move || {
-            state ^= state << 13;
-            state ^= state >> 7;
-            state ^= state << 17;
-            state
-        };
-
-        let source = jpeg_artifact_with_metadata(8, 8, Some(6), Some(b"demo-icc-profile"));
-        let seed = transform_raster(TransformRequest::new(
-            source,
-            TransformOptions {
-                format: Some(MediaType::Avif),
-                strip_metadata: false,
-                auto_orient: false,
-                ..TransformOptions::default()
-            },
-        ))
-        .expect("encode an avif carrying metadata")
-        .artifact
-        .bytes;
-
-        for _ in 0..200_000 {
-            let mut damaged = seed.clone();
-            // One to four flips: one keeps the container walkable and reaches the deeper
-            // fields, and several take it apart.
-            for _ in 0..=(next() % 4) {
-                let at = (next() as usize) % damaged.len();
-                damaged[at] ^= 1u8 << (next() % 8);
-            }
-
-            // Neither of these may panic, and neither may be trusted to succeed: a damaged
-            // container is a decode error, and that is the answer this asserts is reachable.
-            let _ = crate::core::avif_metadata(&damaged);
-            let _ = sniff_artifact(RawArtifact::new(damaged, None));
-        }
-    }
-
-    /// The same, with the length fields damaged on purpose rather than by chance.
-    ///
-    /// A random flip almost never turns a box size into one that is enormous or zero, and those
-    /// are the two shapes a walk over sizes gets wrong: a size of zero that does not advance,
-    /// and a size that reaches past the end. Writing them in directly is what makes the loop's
-    /// termination the thing under test.
-    #[cfg(feature = "avif")]
-    #[test]
-    fn an_avif_with_impossible_box_sizes_is_read_without_hanging() {
-        let source = png_artifact(4, 3, Rgba([10, 20, 30, 255]));
-        let seed = transform_raster(TransformRequest::new(
-            source,
-            TransformOptions {
-                format: Some(MediaType::Avif),
-                ..TransformOptions::default()
-            },
-        ))
-        .expect("encode an avif")
-        .artifact
-        .bytes;
-
-        const SIZES: [u32; 6] = [0, 1, 7, 8, u32::MAX, 0x7FFF_FFFF];
-        // Every four-byte aligned position in the first part of the file, which is where the
-        // box headers are; the payload past that is coded pixels and has no sizes in it.
-        for at in (0..seed.len().min(256)).step_by(4) {
-            for size in SIZES {
-                let mut damaged = seed.clone();
-                if at + 4 > damaged.len() {
-                    break;
-                }
-                damaged[at..at + 4].copy_from_slice(&size.to_be_bytes());
-                let _ = crate::core::avif_metadata(&damaged);
-                let _ = sniff_artifact(RawArtifact::new(damaged, None));
-            }
-        }
-    }
-
     /// A TIFF input's ICC profile is read, so it can travel to a format that carries one.
     #[test]
     fn transform_raster_carries_a_tiff_inputs_icc_profile_to_a_jpeg() {
@@ -5350,16 +4545,14 @@ mod tests {
     ///
     /// The stages and the formats are chosen independently by a caller, so the pipeline is a
     /// grid rather than a list and a hole in it is a stage that does nothing for one format
-    /// while working for the rest. That is not hypothetical: metadata retention was refused for
-    /// AVIF while the other three carried it, and a TIFF's profile was dropped while every
-    /// other format's travelled. Those two cells are on the metadata axis, which the retention
+    /// while working for the rest. That is not hypothetical: a TIFF's profile was dropped while
+    /// every other format's travelled. That cell is on the metadata axis, which the retention
     /// tests cover; this covers the geometry and the effects, where a silent no-op would show
     /// as output that matches the untouched one byte for byte.
     #[rstest]
     #[case::jpeg(MediaType::Jpeg)]
     #[case::png(MediaType::Png)]
     #[case::webp(MediaType::Webp)]
-    #[cfg_attr(feature = "avif", case::avif(MediaType::Avif))]
     #[case::bmp(MediaType::Bmp)]
     #[case::tiff(MediaType::Tiff)]
     fn every_stage_changes_the_picture_for_every_output_format(#[case] format: MediaType) {
@@ -5468,8 +4661,8 @@ mod tests {
 
     /// The README's metadata table says what `retain_supported` does.
     ///
-    /// The two have drifted once already: AVIF gained EXIF and a profile and the table went on
-    /// saying it carried neither, in the document a reader looks at first. The rule is one
+    /// The two have drifted once already: a format gained EXIF and a profile and the table went
+    /// on saying it carried neither, in the document a reader looks at first. The rule is one
     /// `match` and the table is one row per format, so the check is a comparison rather than a
     /// parse, and a format that gains or loses a kind fails here until the row follows.
     #[test]
@@ -5480,7 +4673,6 @@ mod tests {
             MediaType::Jpeg,
             MediaType::Png,
             MediaType::Webp,
-            MediaType::Avif,
             MediaType::Bmp,
             MediaType::Tiff,
         ]
@@ -5502,7 +4694,6 @@ mod tests {
                     MediaType::Jpeg => "JPEG",
                     MediaType::Png => "PNG",
                     MediaType::Webp => "WebP",
-                    MediaType::Avif => "AVIF",
                     MediaType::Bmp => "BMP",
                     MediaType::Tiff => "TIFF",
                     other => panic!("{other:?} has no row in the table"),
@@ -5522,158 +4713,6 @@ mod tests {
                 "README.md has no row `{row}`; the table and `retain_supported` have drifted"
             );
         }
-    }
-
-    /// AVIF is the last of the four raster outputs to carry metadata, and it carries the two
-    /// kinds the container has a place for.
-    #[cfg(feature = "avif")]
-    #[test]
-    fn transform_raster_avif_output_keeps_exif_and_icc_with_keep_metadata() {
-        let artifact = jpeg_artifact_with_metadata(8, 8, Some(6), Some(b"demo-icc-profile"));
-        let result = transform_raster(TransformRequest::new(
-            artifact,
-            TransformOptions {
-                format: Some(MediaType::Avif),
-                strip_metadata: false,
-                auto_orient: false,
-                ..TransformOptions::default()
-            },
-        ))
-        .expect("keep-metadata avif should succeed");
-
-        let written = crate::core::avif_metadata(&result.artifact.bytes);
-        assert_eq!(written.icc.as_deref(), Some(b"demo-icc-profile".as_slice()));
-        let exif = written.exif.expect("the exif item rides in the container");
-        assert_eq!(&exif[0..2], b"II", "the item holds the TIFF block itself");
-        assert!(
-            result.warnings.iter().all(|warning| !matches!(
-                warning,
-                TransformWarning::MetadataDropped(MetadataKind::Exif | MetadataKind::Icc)
-            )),
-            "nothing the container can hold was dropped, got: {:?}",
-            result.warnings
-        );
-    }
-
-    /// The rewritten container is still one a decoder reads, which is the half of the surgery
-    /// that a metadata assertion alone would not notice.
-    #[cfg(feature = "avif")]
-    #[test]
-    fn transform_raster_avif_output_is_decodable_after_metadata_is_written() {
-        let artifact = jpeg_artifact_with_metadata(16, 8, Some(6), Some(b"demo-icc-profile"));
-        let result = transform_raster(TransformRequest::new(
-            artifact,
-            TransformOptions {
-                format: Some(MediaType::Avif),
-                strip_metadata: false,
-                auto_orient: false,
-                ..TransformOptions::default()
-            },
-        ))
-        .expect("keep-metadata avif should succeed");
-
-        let sniffed =
-            sniff_artifact(RawArtifact::new(result.artifact.bytes.clone(), None)).expect("sniff");
-        assert_eq!(sniffed.media_type, MediaType::Avif);
-        assert_eq!(sniffed.metadata.width, Some(16));
-        assert_eq!(sniffed.metadata.height, Some(8));
-
-        let decoded = transform_raster(TransformRequest::new(
-            Artifact::new(result.artifact.bytes, MediaType::Avif, sniffed.metadata),
-            TransformOptions {
-                format: Some(MediaType::Png),
-                ..TransformOptions::default()
-            },
-        ))
-        .expect("the rewritten avif still decodes");
-        assert_eq!(decoded.artifact.metadata.width, Some(16));
-    }
-
-    /// An AVIF input is read for metadata like every other input, so what the container holds
-    /// travels to the next format instead of disappearing without a warning.
-    #[cfg(feature = "avif")]
-    #[test]
-    fn transform_raster_reads_the_metadata_an_avif_input_carries() {
-        let source = jpeg_artifact_with_metadata(8, 8, Some(6), Some(b"demo-icc-profile"));
-        let avif = transform_raster(TransformRequest::new(
-            source,
-            TransformOptions {
-                format: Some(MediaType::Avif),
-                strip_metadata: false,
-                auto_orient: false,
-                ..TransformOptions::default()
-            },
-        ))
-        .expect("encode an avif carrying metadata")
-        .artifact;
-
-        let sniffed =
-            sniff_artifact(RawArtifact::new(avif.bytes.clone(), None)).expect("sniff avif");
-        let jpeg = transform_raster(TransformRequest::new(
-            Artifact::new(avif.bytes, MediaType::Avif, sniffed.metadata),
-            TransformOptions {
-                format: Some(MediaType::Jpeg),
-                strip_metadata: false,
-                auto_orient: false,
-                ..TransformOptions::default()
-            },
-        ))
-        .expect("avif to jpeg with keep-metadata")
-        .artifact;
-
-        let decoder = JpegDecoder::new(Cursor::new(&jpeg.bytes)).expect("open the jpeg");
-        let metadata = super::retained_metadata(decoder, MediaType::Jpeg).expect("read the jpeg");
-        assert!(
-            metadata.exif_metadata.is_some(),
-            "the exif the avif carried reached the jpeg"
-        );
-        assert_eq!(
-            metadata.icc_profile.as_deref(),
-            Some(b"demo-icc-profile".as_slice())
-        );
-    }
-
-    /// An AVIF with no metadata items reads as no metadata rather than as an error, which is
-    /// what every AVIF truss wrote before this looked like.
-    #[cfg(feature = "avif")]
-    #[test]
-    fn avif_metadata_reads_nothing_from_a_container_that_carries_none() {
-        let artifact = png_artifact(4, 3, Rgba([10, 20, 30, 255]));
-        let result = transform_raster(TransformRequest::new(
-            artifact,
-            TransformOptions {
-                format: Some(MediaType::Avif),
-                ..TransformOptions::default()
-            },
-        ))
-        .expect("encode an avif");
-
-        let metadata = crate::core::avif_metadata(&result.artifact.bytes);
-        assert_eq!(metadata.exif, None);
-        assert_eq!(metadata.icc, None);
-    }
-
-    #[cfg(feature = "avif")]
-    #[test]
-    fn transform_raster_carries_only_exif_into_avif_with_preserve_exif() {
-        let artifact = jpeg_artifact_with_metadata(4, 2, Some(6), Some(b"demo-icc-profile"));
-        let result = transform_raster(TransformRequest::new(
-            artifact,
-            TransformOptions {
-                format: Some(MediaType::Avif),
-                strip_metadata: false,
-                preserve_exif: true,
-                auto_orient: false,
-                ..TransformOptions::default()
-            },
-        ))
-        .expect("preserve-exif avif should succeed");
-
-        // `preserve_exif` narrows the policy to one kind, so the profile the input carried is
-        // not written even though the container has a place for it.
-        let written = crate::core::avif_metadata(&result.artifact.bytes);
-        assert!(written.exif.is_some());
-        assert_eq!(written.icc, None);
     }
 
     #[cfg(feature = "webp-lossy")]
@@ -5756,71 +4795,31 @@ mod tests {
         );
     }
 
-    /// The colour of the four quadrants of the matrix fixtures, at the centre of each.
-    ///
-    /// The fixtures are flat 8x8 blocks, so a correct decode reproduces them to within the
-    /// rounding of one YUV round trip whatever the matrix says; a wrong matrix moves the
-    /// channels a colour does not contribute to, which is what these assert against.
-    #[cfg(feature = "avif")]
-    const QUADRANTS: [((u32, u32), [u8; 3]); 4] = [
-        ((4, 4), [255, 0, 0]),
-        ((12, 4), [0, 255, 0]),
-        ((4, 12), [0, 0, 255]),
-        ((12, 12), [128, 128, 128]),
-    ];
-
-    #[cfg(feature = "avif")]
-    fn assert_quadrants_decode(bytes: &[u8], tolerance: u8, name: &str) {
-        let artifact = sniff_artifact(RawArtifact::new(bytes.to_vec(), None)).expect("sniff avif");
-        let result = transform_raster(TransformRequest::new(
-            artifact,
-            TransformOptions {
-                format: Some(MediaType::Png),
-                ..TransformOptions::default()
-            },
-        ))
-        .expect("decode avif");
-        let decoded = image::load_from_memory(&result.artifact.bytes)
-            .expect("load decoded png")
-            .to_rgb8();
-
-        for ((x, y), expected) in QUADRANTS {
-            let actual = decoded.get_pixel(x, y).0;
-            for channel in 0..3 {
-                let delta = actual[channel].abs_diff(expected[channel]);
-                assert!(
-                    delta <= tolerance,
-                    "{name}: pixel ({x}, {y}) is {actual:?}, expected {expected:?} within {tolerance}"
-                );
-            }
-        }
-    }
-
-    /// A decoder that panics is a decode failure rather than a dead worker.
-    #[cfg(feature = "avif")]
+    /// A codec that panics is reported as its own failure rather than as a dead worker.
+    #[cfg(feature = "webp-lossy")]
     #[test]
-    fn a_panicking_decoder_is_reported_as_a_decode_failure() {
+    fn a_panicking_codec_is_reported_as_its_failure() {
         // The default hook would print the panic message and its backtrace note, which is
         // noise in the test output and nothing this asserts on.
         let previous = std::panic::take_hook();
         std::panic::set_hook(Box::new(|_| {}));
         let contained = super::contain_codec_panic::<()>(
-            || TransformError::DecodeFailed("AV1 decoder failed while decoding this image".into()),
+            || TransformError::EncodeFailed("the WebP encoder failed on this image".into()),
             || panic!("attempt to multiply with overflow"),
         );
         std::panic::set_hook(previous);
 
         assert_eq!(
             contained,
-            Err(TransformError::DecodeFailed(
-                "AV1 decoder failed while decoding this image".to_string()
+            Err(TransformError::EncodeFailed(
+                "the WebP encoder failed on this image".to_string()
             ))
         );
     }
 
-    /// Containment does not change what a decode that works, or that fails for a reason the
-    /// decoder reports, comes back as.
-    #[cfg(feature = "avif")]
+    /// Containment does not change what a codec call that works, or that fails for a reason
+    /// the codec reports, comes back as.
+    #[cfg(feature = "webp-lossy")]
     #[test]
     fn containment_passes_a_result_through_unchanged() {
         assert_eq!(
@@ -5829,304 +4828,14 @@ mod tests {
         );
         assert_eq!(
             super::contain_codec_panic::<u8>(
-                || TransformError::DecodeFailed("unused".into()),
-                || Err(TransformError::DecodeFailed(
-                    "AV1 decode failed: truncated".to_string()
+                || TransformError::EncodeFailed("unused".into()),
+                || Err(TransformError::EncodeFailed(
+                    "the WebP encoder refused this image".to_string()
                 ))
             ),
-            Err(TransformError::DecodeFailed(
-                "AV1 decode failed: truncated".to_string()
+            Err(TransformError::EncodeFailed(
+                "the WebP encoder refused this image".to_string()
             ))
-        );
-    }
-
-    /// Every matrix the AV1 sequence header can declare, and what truss does with it.
-    ///
-    /// The table is exhaustive on purpose: `MatrixCoefficients` is a plain enum, so a
-    /// variant added by a later `rav1d-safe` fails to compile in `map_yuv_matrix` rather
-    /// than silently joining a catch-all. The coefficients are asserted rather than the
-    /// member names, because #508 was a member whose name said one matrix and whose
-    /// contents were another.
-    #[cfg(feature = "avif")]
-    #[rstest]
-    #[case::identity(rav1d_safe::MatrixCoefficients::Identity, Some(None))]
-    #[case::bt709(rav1d_safe::MatrixCoefficients::BT709, Some(Some((0.2126, 0.0722))))]
-    #[case::unspecified(rav1d_safe::MatrixCoefficients::Unspecified, Some(Some((0.299, 0.114))))]
-    #[case::fcc(rav1d_safe::MatrixCoefficients::FCC, Some(Some((0.30, 0.11))))]
-    #[case::bt470bg(rav1d_safe::MatrixCoefficients::BT470BG, Some(Some((0.299, 0.114))))]
-    #[case::bt601(rav1d_safe::MatrixCoefficients::BT601, Some(Some((0.299, 0.114))))]
-    #[case::smpte240(rav1d_safe::MatrixCoefficients::SMPTE240, Some(Some((0.212, 0.087))))]
-    #[case::bt2020ncl(rav1d_safe::MatrixCoefficients::BT2020NCL, Some(Some((0.2627, 0.0593))))]
-    #[case::reserved(rav1d_safe::MatrixCoefficients::Reserved, None)]
-    #[case::ycgco(rav1d_safe::MatrixCoefficients::YCgCo, None)]
-    #[case::bt2020cl(rav1d_safe::MatrixCoefficients::BT2020CL, None)]
-    #[case::smpte2085(rav1d_safe::MatrixCoefficients::SMPTE2085, None)]
-    #[case::chroma_ncl(rav1d_safe::MatrixCoefficients::ChromaDerivedNCL, None)]
-    #[case::chroma_cl(rav1d_safe::MatrixCoefficients::ChromaDerivedCL, None)]
-    #[case::ictcp(rav1d_safe::MatrixCoefficients::ICtCp, None)]
-    fn every_avif_matrix_is_converted_or_refused(
-        #[case] coefficients: rav1d_safe::MatrixCoefficients,
-        #[case] expected: Option<Option<(f32, f32)>>,
-    ) {
-        match (super::map_yuv_matrix(coefficients), expected) {
-            (Ok(super::AvifMatrix::Identity), Some(None)) => {}
-            (Ok(super::AvifMatrix::Standard(matrix)), Some(Some((kr, kb)))) => {
-                let bias = matrix.get_kr_kb();
-                assert!(
-                    (bias.kr - kr).abs() < 1e-4 && (bias.kb - kb).abs() < 1e-4,
-                    "{coefficients:?} converts with kr {} kb {}, expected {kr} and {kb}",
-                    bias.kr,
-                    bias.kb
-                );
-            }
-            (Err(TransformError::DecodeFailed(message)), None) => {
-                assert!(
-                    message.contains("truss cannot convert"),
-                    "{coefficients:?} is refused with {message}"
-                );
-            }
-            (actual, expected) => {
-                panic!("{coefficients:?} resolved to {actual:?}, expected {expected:?}")
-            }
-        }
-    }
-
-    /// An AVIF that does not say which matrix it used is read as BT.601, which is what
-    /// libavif substitutes and therefore what libheif and FFmpeg answer for the same file.
-    #[cfg(feature = "avif")]
-    #[test]
-    fn transform_raster_decodes_an_unspecified_matrix_as_bt601() {
-        assert_quadrants_decode(
-            include_bytes!("../../integration/fixtures/matrix-unspecified.avif"),
-            4,
-            "unspecified",
-        );
-    }
-
-    /// SMPTE 240M names its own luma coefficients, and they are not BT.709's.
-    #[cfg(feature = "avif")]
-    #[test]
-    fn transform_raster_decodes_a_smpte240_matrix_with_its_own_coefficients() {
-        assert_quadrants_decode(
-            include_bytes!("../../integration/fixtures/matrix-smpte240.avif"),
-            4,
-            "smpte240",
-        );
-    }
-
-    /// The identity matrix is not a matrix: the three planes are already G, B and R, which
-    /// is what an encoder writes when it is told not to convert to YCbCr, and what
-    /// `avifenc --lossless` has to write because a YCbCr round trip is not reversible.
-    #[cfg(feature = "avif")]
-    #[test]
-    fn transform_raster_decodes_an_identity_matrix_avif_as_the_planes_it_holds() {
-        use super::{AvifEncoder, EncodeSamples};
-        use image::ImageEncoder;
-        use image::codecs::avif::ColorSpace;
-
-        let mut source = image::RgbaImage::new(32, 32);
-        for (x, y, pixel) in source.enumerate_pixels_mut() {
-            *pixel = Rgba([(x * 8) as u8, (y * 8) as u8, ((x * y) % 256) as u8, 255]);
-        }
-        let source = DynamicImage::ImageRgba8(source);
-
-        let mut bytes = Vec::new();
-        let samples = EncodeSamples::from_image(&source);
-        let (width, height) = samples.dimensions();
-        AvifEncoder::new_with_speed_quality(&mut bytes, 1, 100)
-            .with_colorspace(ColorSpace::Srgb)
-            .write_image(
-                samples.as_bytes(),
-                width,
-                height,
-                samples.color_type().into(),
-            )
-            .expect("encode an identity-matrix avif");
-
-        let artifact = sniff_artifact(RawArtifact::new(bytes, None)).expect("sniff avif");
-        let result = transform_raster(TransformRequest::new(
-            artifact,
-            TransformOptions {
-                format: Some(MediaType::Png),
-                ..TransformOptions::default()
-            },
-        ))
-        .expect("decode an identity-matrix avif");
-        let decoded = image::load_from_memory(&result.artifact.bytes)
-            .expect("load decoded png")
-            .to_rgba8();
-        let expected = source.to_rgba8();
-
-        let worst = decoded
-            .as_raw()
-            .iter()
-            .zip(expected.as_raw())
-            .map(|(actual, expected)| actual.abs_diff(*expected))
-            .max()
-            .expect("a non-empty image");
-        assert!(
-            worst <= 4,
-            "identity matrix decode is off by {worst}, which is a colour conversion rather than a plane copy"
-        );
-    }
-
-    #[cfg(feature = "avif")]
-    #[test]
-    fn transform_raster_can_convert_png_to_avif() {
-        let artifact = png_artifact(4, 3, Rgba([10, 20, 30, 255]));
-        let result = transform_raster(TransformRequest::new(
-            artifact,
-            TransformOptions {
-                format: Some(MediaType::Avif),
-                quality: Some(72),
-                ..TransformOptions::default()
-            },
-        ))
-        .expect("avif encode should succeed");
-        let sniffed = sniff_artifact(RawArtifact::new(result.artifact.bytes.clone(), None))
-            .expect("sniff avif output");
-
-        assert_eq!(result.artifact.media_type, MediaType::Avif);
-        assert_eq!(result.artifact.metadata.width, Some(4));
-        assert_eq!(result.artifact.metadata.height, Some(3));
-        assert_eq!(sniffed.media_type, MediaType::Avif);
-    }
-
-    #[cfg(feature = "avif")]
-    #[test]
-    fn transform_raster_round_trips_avif_decode() {
-        // Encode a known PNG to AVIF, then decode the AVIF back to PNG.
-        let source = png_artifact(4, 3, Rgba([10, 20, 30, 255]));
-        let avif_result = transform_raster(TransformRequest::new(
-            source,
-            TransformOptions {
-                format: Some(MediaType::Avif),
-                ..TransformOptions::default()
-            },
-        ))
-        .expect("avif encode should succeed");
-
-        let avif_artifact = avif_result.artifact;
-        assert_eq!(avif_artifact.media_type, MediaType::Avif);
-
-        // Now decode the AVIF back to PNG.
-        let png_result = transform_raster(TransformRequest::new(
-            avif_artifact,
-            TransformOptions {
-                format: Some(MediaType::Png),
-                ..TransformOptions::default()
-            },
-        ))
-        .expect("avif decode should succeed");
-
-        assert_eq!(png_result.artifact.media_type, MediaType::Png);
-        assert_eq!(png_result.artifact.metadata.width, Some(4));
-        assert_eq!(png_result.artifact.metadata.height, Some(3));
-    }
-
-    /// A sample at the top of its range must round to 255, not past it.
-    #[cfg(feature = "avif")]
-    #[rstest]
-    #[case::ten_bit_max(1023, 2, 255)]
-    #[case::twelve_bit_max(4095, 4, 255)]
-    #[case::ten_bit_rounds_down(117, 2, 29)]
-    #[case::ten_bit_rounds_up(118, 2, 30)]
-    #[case::twelve_bit_zero(0, 4, 0)]
-    fn narrow_sample_rounds_to_nearest_within_eight_bits(
-        #[case] value: u16,
-        #[case] shift: u8,
-        #[case] expected: u8,
-    ) {
-        assert_eq!(super::narrow_sample(value, shift), expected);
-    }
-
-    /// The `image` crate writes 8-bit AVIF only, so the deep path is exercised by two files
-    /// ImageMagick wrote: a blue left half, a red right half, and a white bar along the top,
-    /// which are the three saturated samples that used to wrap to zero.
-    #[cfg(feature = "avif")]
-    #[rstest]
-    #[case::ten_bit(include_bytes!("../../integration/fixtures/deep-10bit.avif"))]
-    #[case::twelve_bit(include_bytes!("../../integration/fixtures/deep-12bit.avif"))]
-    fn transform_raster_decodes_deep_avif_without_wrapping_saturated_samples(#[case] bytes: &[u8]) {
-        let artifact = sniff_artifact(RawArtifact::new(bytes.to_vec(), None)).expect("sniff avif");
-
-        let result = transform_raster(TransformRequest::new(
-            artifact,
-            TransformOptions {
-                format: Some(MediaType::Png),
-                ..TransformOptions::default()
-            },
-        ))
-        .expect("decode deep avif");
-
-        let image = image::load_from_memory(&result.artifact.bytes)
-            .expect("decode png")
-            .to_rgb8();
-        for ((x, y), expected) in [
-            ((2, 10), [0, 0, 255]),
-            ((30, 10), [255, 0, 0]),
-            ((20, 1), [255, 255, 255]),
-        ] {
-            let pixel = image.get_pixel(x, y).0;
-            assert!(
-                pixel
-                    .iter()
-                    .zip(expected)
-                    .all(|(got, want)| got.abs_diff(want) < 16),
-                "pixel ({x}, {y}) should be near {expected:?}, got {pixel:?}"
-            );
-        }
-    }
-
-    #[cfg(feature = "avif")]
-    #[test]
-    fn transform_raster_decodes_avif_with_resize() {
-        let source = png_artifact(8, 6, Rgba([100, 150, 200, 255]));
-        let avif_result = transform_raster(TransformRequest::new(
-            source,
-            TransformOptions {
-                format: Some(MediaType::Avif),
-                ..TransformOptions::default()
-            },
-        ))
-        .expect("avif encode should succeed");
-
-        let result = transform_raster(TransformRequest::new(
-            avif_result.artifact,
-            TransformOptions {
-                format: Some(MediaType::Png),
-                width: Some(4),
-                height: Some(3),
-                ..TransformOptions::default()
-            },
-        ))
-        .expect("avif decode with resize should succeed");
-
-        assert_eq!(result.artifact.metadata.width, Some(4));
-        assert_eq!(result.artifact.metadata.height, Some(3));
-    }
-
-    #[cfg(feature = "avif")]
-    #[test]
-    fn transform_raster_rejects_invalid_avif_data() {
-        let artifact = Artifact::new(
-            vec![0, 1, 2, 3],
-            MediaType::Avif,
-            ArtifactMetadata {
-                width: Some(1),
-                height: Some(1),
-                frame_count: 1,
-                duration: None,
-                has_alpha: Some(false),
-                orientation: None,
-            },
-        );
-        let err = transform_raster(TransformRequest::new(artifact, TransformOptions::default()))
-            .expect_err("invalid avif should fail");
-
-        assert!(
-            matches!(err, TransformError::DecodeFailed(_)),
-            "expected DecodeFailed, got {err:?}"
         );
     }
 
@@ -6199,8 +4908,8 @@ mod tests {
 
     /// The output size a format cannot hold is refused from the dimensions, not by the encoder.
     ///
-    /// JPEG and AVIF stop at 65535 on an axis and WebP at 16383, while `MAX_OUTPUT_PIXELS`
-    /// allows all three as long as the other axis is small enough, so the request is legal by
+    /// JPEG stops at 65535 on an axis and WebP at 16383, while `MAX_OUTPUT_PIXELS`
+    /// allows both as long as the other axis is small enough, so the request is legal by
     /// every limit truss states and impossible for the encoder that would run.
     #[rstest]
     #[case::jpeg_last_legal(MediaType::Jpeg, 65535, 1, true)]
@@ -6209,8 +4918,6 @@ mod tests {
     #[case::webp_last_legal(MediaType::Webp, 16383, 1, true)]
     #[case::webp_first_illegal(MediaType::Webp, 16384, 1, false)]
     #[case::webp_first_illegal_on_height(MediaType::Webp, 1, 16384, false)]
-    #[case::avif_last_legal(MediaType::Avif, 65535, 1, true)]
-    #[case::avif_first_illegal(MediaType::Avif, 65536, 1, false)]
     #[case::png_has_no_ceiling(MediaType::Png, 65536, 1, true)]
     #[case::bmp_has_no_ceiling(MediaType::Bmp, 65536, 1, true)]
     #[case::tiff_has_no_ceiling(MediaType::Tiff, 65536, 1, true)]
@@ -6320,24 +5027,6 @@ mod tests {
             matches!(err, TransformError::EncodeFailed(_)),
             "expected EncodeFailed, got {err:?}"
         );
-    }
-
-    /// The AVIF decoder accepts every frame truss will write.
-    ///
-    /// `rav1d-safe`'s default `frame_size_limit` is 8192x4320, an 8K video frame, which is
-    /// below `MAX_OUTPUT_PIXELS`: truss wrote AVIFs it then refused to read, with an ERANGE
-    /// that named the input.
-    #[cfg(feature = "avif")]
-    #[test]
-    fn the_avif_decoder_accepts_every_frame_truss_can_write() {
-        let limit = u64::from(super::avif_decoder_settings().frame_size_limit);
-
-        assert!(
-            limit >= crate::MAX_OUTPUT_PIXELS,
-            "the decoder stops at {limit} pixels, below the {} truss will encode",
-            crate::MAX_OUTPUT_PIXELS
-        );
-        assert_eq!(limit, crate::core::MAX_DECODED_PIXELS);
     }
 
     #[test]
@@ -6678,64 +5367,6 @@ mod tests {
 
         assert!(retained.is_none());
         assert!(warnings.is_empty());
-    }
-
-    #[rstest]
-    #[case::a_thumbnail_is_unchanged(200 * 200, false, 4)]
-    #[case::at_the_first_step(2_000_000, false, 4)]
-    #[case::just_past_it(2_000_001, false, 8)]
-    #[case::at_the_second_step(16_000_000, false, 8)]
-    #[case::just_past_that(16_000_001, false, 10)]
-    #[case::the_output_ceiling(crate::MAX_OUTPUT_PIXELS, false, 10)]
-    #[case::optimize_below_the_first_step_is_unchanged(200 * 200, true, 2)]
-    #[case::optimize_at_the_ceiling(crate::MAX_OUTPUT_PIXELS, true, 8)]
-    fn avif_speed_climbs_with_the_output_size(
-        #[case] pixels: u64,
-        #[case] optimized: bool,
-        #[case] expected: u8,
-    ) {
-        assert_eq!(super::avif_speed(pixels, optimized), expected);
-    }
-
-    #[test]
-    fn avif_speed_never_leaves_the_encoder_range() {
-        // rav1e takes 1 through 10. The optimizing path subtracts from the step it lands on,
-        // so the lowest step and the subtraction have to be read together.
-        for pixels in [
-            0,
-            1,
-            2_000_000,
-            2_000_001,
-            16_000_000,
-            crate::MAX_OUTPUT_PIXELS,
-        ] {
-            for optimized in [false, true] {
-                let speed = super::avif_speed(pixels, optimized);
-                assert!(
-                    (1..=10).contains(&speed),
-                    "speed {speed} for {pixels} pixels is outside what rav1e takes"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn the_avif_feature_turns_on_the_encoder_thread_pool() {
-        // `image`'s AVIF encoder reaches rav1e through `maybe-rayon`, which is a set of
-        // no-op shims until `ravif/threading` is on, and `image/rayon` is what turns that
-        // on. Without it the encoder runs on one core: a 4000x3000 photo took 112 seconds
-        // rather than 10, for byte-identical output, which is long enough to run past the
-        // server's transform deadline and hold a worker while it does. Nothing in the
-        // encode path can assert this at run time, so the feature list is what is checked.
-        let manifest = include_str!("../../Cargo.toml");
-        let avif_feature = manifest
-            .lines()
-            .find(|line| line.starts_with("avif = "))
-            .expect("the manifest declares an avif feature");
-        assert!(
-            avif_feature.contains("\"image/rayon\""),
-            "the avif feature must keep image/rayon: {avif_feature}"
-        );
     }
 
     #[test]
@@ -8424,38 +7055,6 @@ mod tests {
         }
     }
 
-    /// An AVIF had no arm in the passthrough at all, so its re-encode was never compared
-    /// against the input and could come back larger.
-    #[cfg(feature = "avif")]
-    #[test]
-    fn optimizing_an_avif_does_not_grow_it() {
-        // Encoded at a low quality so the file is small, which is the shape that made the
-        // missing arm visible: a small AVIF re-encodes larger than it arrived.
-        let mut state = 0x2545_F491_4F6C_DD1D_u64;
-        let source = image::RgbaImage::from_fn(64, 48, |_, _| {
-            state = state
-                .wrapping_mul(6_364_136_223_846_793_005)
-                .wrapping_add(1);
-            let value = (state >> 33) as u8;
-            image::Rgba([value, value.wrapping_mul(3), value.wrapping_add(97), 255])
-        });
-        let mut bytes = Vec::new();
-        image::codecs::avif::AvifEncoder::new_with_speed_quality(&mut bytes, 10, 5)
-            .write_image(source.as_raw(), 64, 48, image::ExtendedColorType::Rgba8)
-            .expect("encode avif");
-        let input_length = bytes.len();
-        let artifact = sniff_artifact(RawArtifact::new(bytes, None)).expect("sniff avif");
-
-        for mode in [OptimizeMode::Auto, OptimizeMode::Lossy] {
-            let optimized = optimize_bytes(artifact.clone(), mode);
-            assert!(
-                optimized.len() <= input_length,
-                "{mode}: {input_length} became {}",
-                optimized.len()
-            );
-        }
-    }
-
     /// An indexed PNG has no encoder here, so it comes back as truecolour and grows.
     /// Handing back the input keeps both the size and the colour model.
     #[test]
@@ -9553,116 +8152,5 @@ mod tests {
             "expected an OrientationDropped warning, got {:?}",
             result.warnings
         );
-    }
-
-    /// A clean aperture is cut at decode, before the orientation: the cropped fixture is a
-    /// 40x20 picture whose aperture keeps the middle 30 columns, so 5 of the 10 blue columns
-    /// survive, and the rotated one turns that cut by a quarter turn afterwards.
-    #[cfg(feature = "avif")]
-    #[rstest]
-    #[case::cropped(
-        include_bytes!("../../integration/fixtures/clap-cropped.avif"),
-        (30, 20),
-        [((2, 10), [0, 0, 255]), ((27, 10), [255, 0, 0])]
-    )]
-    #[case::rotated(
-        include_bytes!("../../integration/fixtures/clap-rotated.avif"),
-        (20, 30),
-        [((10, 2), [0, 0, 255]), ((10, 27), [255, 0, 0])]
-    )]
-    fn transform_raster_cuts_an_avif_to_its_clean_aperture_before_orienting_it(
-        #[case] bytes: &[u8],
-        #[case] expected: (u32, u32),
-        #[case] markers: [((u32, u32), [u8; 3]); 2],
-    ) {
-        let artifact = sniff_artifact(RawArtifact::new(bytes.to_vec(), None)).expect("sniff avif");
-
-        let result = transform_raster(TransformRequest::new(
-            artifact,
-            TransformOptions {
-                format: Some(MediaType::Png),
-                ..TransformOptions::default()
-            },
-        ))
-        .expect("decode a clean-aperture avif");
-
-        assert_eq!(
-            (
-                result.artifact.metadata.width,
-                result.artifact.metadata.height
-            ),
-            (Some(expected.0), Some(expected.1))
-        );
-
-        let image = image::load_from_memory(&result.artifact.bytes)
-            .expect("decode png")
-            .to_rgb8();
-        for ((x, y), expected) in markers {
-            let pixel = image.get_pixel(x, y).0;
-            assert!(
-                pixel
-                    .iter()
-                    .zip(expected)
-                    .all(|(got, want)| got.abs_diff(want) < 40),
-                "pixel ({x}, {y}) should be near {expected:?}, got {pixel:?}"
-            );
-        }
-    }
-
-    /// The two fixtures are what libheif writes for a phone photo: the transform as `irot`
-    /// and `imir` item properties, with no Exif block. The transposed one is the pair a
-    /// mirror in the wrong order gets backwards, so the marker bars are checked and not
-    /// only the dimensions, which are 20x40 for every orientation from 5 to 8.
-    #[cfg(feature = "avif")]
-    #[rstest]
-    #[case::rotated(
-        include_bytes!("../../integration/fixtures/irot-rotated.avif"),
-        6,
-        [((10, 2), [0, 0, 255]), ((10, 30), [255, 0, 0])]
-    )]
-    #[case::transposed(
-        include_bytes!("../../integration/fixtures/imir-transposed-5.avif"),
-        5,
-        [((8, 1), [0, 0, 255]), ((1, 8), [255, 0, 0])]
-    )]
-    fn transform_raster_auto_orients_an_avif_by_its_item_properties(
-        #[case] bytes: &[u8],
-        #[case] orientation: u16,
-        #[case] markers: [((u32, u32), [u8; 3]); 2],
-    ) {
-        let artifact = sniff_artifact(RawArtifact::new(bytes.to_vec(), None)).expect("sniff avif");
-        assert_eq!(artifact.metadata.orientation, Some(orientation));
-
-        let result = transform_raster(TransformRequest::new(
-            artifact,
-            TransformOptions {
-                format: Some(MediaType::Png),
-                ..TransformOptions::default()
-            },
-        ))
-        .expect("transform avif");
-
-        assert_eq!(
-            (
-                result.artifact.metadata.width,
-                result.artifact.metadata.height
-            ),
-            (Some(20), Some(40))
-        );
-        assert!(result.warnings.is_empty(), "{:?}", result.warnings);
-
-        let image = image::load_from_memory(&result.artifact.bytes)
-            .expect("decode png")
-            .to_rgb8();
-        for ((x, y), expected) in markers {
-            let pixel = image.get_pixel(x, y).0;
-            assert!(
-                pixel
-                    .iter()
-                    .zip(expected)
-                    .all(|(got, want)| got.abs_diff(want) < 40),
-                "pixel ({x}, {y}) should be near {expected:?}, got {pixel:?}"
-            );
-        }
     }
 }

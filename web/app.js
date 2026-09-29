@@ -304,11 +304,6 @@ async function loadFile(file) {
     return;
   }
 
-  if (response.artifact.mediaType === "avif" && !state.capabilities.avif) {
-    setStatus("AVIF input was loaded, but this build cannot decode or encode AVIF.");
-    return;
-  }
-
   setStatus("");
 }
 
@@ -430,16 +425,6 @@ function refreshFormatState() {
     elements.format.value = state.inputArtifact?.mediaType === "png" ? "png" : "jpeg";
   }
 
-  const avifOption = elements.format.querySelector('option[value="avif"]');
-  if (avifOption) {
-    avifOption.disabled = !state.capabilities?.avif;
-    avifOption.textContent = state.capabilities?.avif ? "AVIF" : "AVIF (not in this build)";
-  }
-
-  if (elements.format.value === "avif" && !state.capabilities?.avif) {
-    elements.format.value = "jpeg";
-  }
-
   refreshOptimizeState();
   refreshQualityState();
 }
@@ -460,7 +445,7 @@ function refreshQualityState() {
   if (lossyWebpUnavailable) {
     elements.qualityField.hidden = false;
     elements.qualityNote.textContent =
-      "This build keeps WebP output lossless. JPEG and AVIF still support lossy optimization.";
+      "This build keeps WebP output lossless. JPEG still supports lossy optimization.";
   } else if (optimizeMode === "lossless") {
     elements.qualityNote.textContent =
       "Lossless optimization ignores quality and keeps decoded pixels unchanged.";
@@ -469,7 +454,7 @@ function refreshQualityState() {
       "Quality acts as a cap while optimize searches for a smaller file that still meets the target.";
   } else {
     elements.qualityNote.textContent =
-      "Quality applies to JPEG, AVIF, and WebP when lossy WebP is enabled.";
+      "Quality applies to JPEG, and to WebP when lossy WebP is enabled.";
   }
 }
 
@@ -501,7 +486,7 @@ function refreshMetadataState() {
   const format = elements.format.value;
   const keepOption = elements.metadataMode.querySelector('option[value="keep"]');
   const exifOption = elements.metadataMode.querySelector('option[value="exif"]');
-  // AVIF carries EXIF and a profile since v0.23.0; BMP and SVG carry neither, and asking for
+  // BMP and SVG carry neither EXIF nor a profile, and asking for
   // retention on those is a request whose answer is a warning rather than a file.
   const allowMetadataRetention = format !== "bmp" && format !== "svg";
 
@@ -676,7 +661,6 @@ function inferDeclaredMediaType(file) {
     "image/jpeg": "jpeg",
     "image/png": "png",
     "image/webp": "webp",
-    "image/avif": "avif",
     "image/bmp": "bmp",
     "image/x-ms-bmp": "bmp",
     "image/x-windows-bmp": "bmp",
@@ -693,7 +677,6 @@ function inferDeclaredMediaType(file) {
     jpeg: "jpeg",
     png: "png",
     webp: "webp",
-    avif: "avif",
     bmp: "bmp",
     tiff: "tiff",
     tif: "tiff",
@@ -746,13 +729,12 @@ function renderResultSummary(inputBytes, outputBytes, durationMs) {
 }
 
 function formatSupportsOptimization(format) {
-  return format === "jpeg" || format === "png" || format === "webp" || format === "avif";
+  return format === "jpeg" || format === "png" || format === "webp";
 }
 
 function supportsLossyOptimization(format) {
   return (
     format === "jpeg" ||
-    (format === "avif" && state.capabilities?.avif) ||
     (format === "webp" && state.capabilities?.webpLossy)
   );
 }
@@ -834,7 +816,6 @@ function qualityEnabled() {
     optimizeMode !== "lossless" &&
     (
       format === "jpeg" ||
-      (format === "avif" && state.capabilities?.avif) ||
       (format === "webp" && state.capabilities?.webpLossy)
     )
   );
@@ -849,7 +830,7 @@ function wantsLossyOptimization() {
     return false;
   }
   const format = elements.format.value;
-  return format === "jpeg" || format === "webp" || format === "avif";
+  return format === "jpeg" || format === "webp";
 }
 
 function targetQualityEnabled() {

@@ -37,7 +37,7 @@ test("signs remote URL requests with optional transform and watermark fields", (
       width: 640,
       height: 480,
       fit: "cover",
-      format: "avif",
+      format: "webp",
       optimize: "lossy",
       targetQuality: "ssim:0.98",
       rotate: 270,
@@ -335,7 +335,13 @@ test("rejects transform combinations that truss would reject", () => {
           targetQuality: "ssim:0.98",
         },
       },
-      pattern: /targetQuality requires jpeg, webp, or avif output/,
+      pattern: /targetQuality requires jpeg or webp output/,
+    },
+    {
+      // AVIF output was removed from truss, so the signer refuses to sign a URL the server
+      // would refuse, with the sentence the server gives an unknown format.
+      options: { transforms: { format: "avif" } },
+      pattern: /unsupported media type `avif`/,
     },
     {
       options: {

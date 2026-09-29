@@ -1,11 +1,10 @@
 /// How much stack the CLI runs on.
 ///
 /// The thread a process starts on has whatever stack the platform gave it, and on Windows that
-/// is the one megabyte the linker reserves by default. Decoding an AVIF needs more than that in
-/// a build without optimizations and clears it by about a quarter of a megabyte in a release
-/// one, because an AV1 decoder's working set is large and close to constant in the size of the
-/// picture. Running on a thread truss creates takes the platform out of the question, and the
-/// size is a reservation of address space rather than memory that is committed.
+/// is the one megabyte the linker reserves by default, so how deep a decoder or the SVG renderer
+/// may go would depend on the platform rather than on truss. Running on a thread truss creates
+/// takes the platform out of the question, and the size is a reservation of address space
+/// rather than memory that is committed.
 const CLI_STACK_SIZE: usize = 16 * 1024 * 1024;
 
 /// The exit code a panic reports: `internal-error` after the input was read, which is what the

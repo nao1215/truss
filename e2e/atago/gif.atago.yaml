@@ -165,7 +165,7 @@ scenarios:
           stderr:
             contains:
               - "input-only format"
-              - "png, jpeg, webp, or avif"
+              - "png, jpeg, or webp"
 
   - name: a .gif output extension is rejected the same way the flag is
     steps:
@@ -179,7 +179,7 @@ scenarios:
           stderr:
             contains:
               - "input-only format"
-              - "png, jpeg, webp, or avif"
+              - "png, jpeg, or webp"
 
   - name: an explicit --format overrides a .gif output extension
     steps:

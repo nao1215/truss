@@ -324,7 +324,7 @@ scenarios:
           stderr:
             contains:
               - "lossy optimization requires"
-              - "jpeg, webp, or avif"
+              - "jpeg or webp"
 
   - name: a perceptual target is accepted in both documented spellings
     steps:

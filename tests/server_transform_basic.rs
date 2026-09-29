@@ -191,6 +191,89 @@ fn serve_once_rejects_gif_as_an_output_format() {
     );
 }
 
+/// An AVIF source is an unsupported input, answered with the status and problem type every
+/// other unsupported format gets and a detail that names AVIF, rather than a decode failure
+/// or an unknown signature.
+#[test]
+fn serve_once_rejects_an_avif_source_as_an_unsupported_input() {
+    let storage_root = temp_dir("avif-input");
+    fs::write(
+        storage_root.join("image.avif"),
+        include_bytes!("../integration/fixtures/sample.avif"),
+    )
+    .expect("write source fixture");
+    let (addr, handle) = spawn_server(ServerConfig::new(storage_root, Some("secret".to_string())));
+    let response = send_transform_request(
+        addr,
+        r#"{"source":{"kind":"path","path":"/image.avif"},"options":{"format":"png"}}"#,
+        Some("secret"),
+    );
+
+    handle
+        .join()
+        .expect("join server thread")
+        .expect("serve one request");
+
+    let (header, _content_type, body) = split_response(&response);
+    assert!(
+        header.starts_with("HTTP/1.1 415"),
+        "an AVIF source should be an unsupported-media-type error, got: {header}"
+    );
+    let problem: serde_json::Value = serde_json::from_slice(&body).expect("problem json");
+    assert!(
+        problem["type"]
+            .as_str()
+            .is_some_and(|value| value.ends_with("#unsupported-input-media-type")),
+        "{problem}"
+    );
+    assert!(
+        problem["detail"]
+            .as_str()
+            .is_some_and(|value| value.contains("AVIF is not supported")),
+        "{problem}"
+    );
+}
+
+/// `format: "avif"` names a format truss no longer writes, and is refused the way any other
+/// unknown format name is.
+#[test]
+fn serve_once_rejects_avif_as_an_output_format_like_an_unknown_one() {
+    let answer = |format: &str| {
+        let storage_root = temp_dir(&format!("{format}-output"));
+        fs::write(storage_root.join("image.png"), png_bytes()).expect("write source fixture");
+        let (addr, handle) =
+            spawn_server(ServerConfig::new(storage_root, Some("secret".to_string())));
+        let response = send_transform_request(
+            addr,
+            &format!(
+                r#"{{"source":{{"kind":"path","path":"/image.png"}},"options":{{"format":"{format}"}}}}"#
+            ),
+            Some("secret"),
+        );
+        handle
+            .join()
+            .expect("join server thread")
+            .expect("serve one request");
+        let (header, _content_type, body) = split_response(&response);
+        let status = header.lines().next().unwrap_or_default().to_string();
+        let problem: serde_json::Value = serde_json::from_slice(&body).expect("problem json");
+        (status, problem)
+    };
+
+    let (avif_status, avif) = answer("avif");
+    let (heic_status, heic) = answer("heic");
+
+    assert_eq!(avif_status, heic_status);
+    assert!(avif_status.starts_with("HTTP/1.1 400"), "{avif_status}");
+    assert_eq!(avif["type"], heic["type"]);
+    assert!(
+        avif["detail"]
+            .as_str()
+            .is_some_and(|value| value.contains("unsupported media type `avif`")),
+        "{avif}"
+    );
+}
+
 #[test]
 fn serve_once_honours_fit_inside_and_without_enlargement() {
     // png_bytes() is 4x3. Bounded by 8x8, inside scales it to 8x6 with no padding; adding

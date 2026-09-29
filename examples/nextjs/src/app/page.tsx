@@ -21,14 +21,14 @@ export default function Home() {
       </section>
 
       <section>
-        <h2>AVIF, 200x200 cover crop</h2>
+        <h2>JPEG, 200x200 cover crop</h2>
         <TrussImage
           src="sample.jpg"
-          alt="Sample image cropped to 200x200 square in AVIF format"
+          alt="Sample image cropped to 200x200 square in JPEG format"
           width={200}
           height={200}
           fit="cover"
-          format="avif"
+          format="jpeg"
           quality={60}
         />
       </section>

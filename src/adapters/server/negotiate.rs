@@ -63,7 +63,8 @@ pub(super) fn negotiate_output_format(
     // 12.5.1 makes that the same request as one with no `Accept` at all, which returns
     // `Ok(None)` above, so it answers the same way: the input's format is kept and nothing
     // is transcoded. A browser fetching an `<img>` sends `image/avif,image/webp,image/apng,
-    // */*;q=0.8`, whose winner is matched by an exact range, and still negotiates.
+    // */*;q=0.8`, whose winner is `image/webp` matched by an exact range, and still
+    // negotiates: truss does not write AVIF, so that range matches nothing here.
     if best_specificity == 0 {
         return Ok(None);
     }
@@ -135,7 +136,6 @@ pub(super) fn parse_accept_range(value: &str) -> Option<(AcceptRange, u8)> {
         "image/jpeg" => Some((AcceptRange::Exact("image/jpeg"), 2)),
         "image/png" => Some((AcceptRange::Exact("image/png"), 2)),
         "image/webp" => Some((AcceptRange::Exact("image/webp"), 2)),
-        "image/avif" => Some((AcceptRange::Exact("image/avif"), 2)),
         "image/bmp" => Some((AcceptRange::Exact("image/bmp"), 2)),
         "image/svg+xml" => Some((AcceptRange::Exact("image/svg+xml"), 2)),
         _ => None,
@@ -166,19 +166,9 @@ pub(super) fn preferred_output_media_types(
     format_preference: &[MediaType],
 ) -> Vec<MediaType> {
     let default_base: &[MediaType] = if artifact.metadata.has_alpha == Some(true) {
-        &[
-            MediaType::Avif,
-            MediaType::Webp,
-            MediaType::Png,
-            MediaType::Jpeg,
-        ]
+        &[MediaType::Webp, MediaType::Png, MediaType::Jpeg]
     } else {
-        &[
-            MediaType::Avif,
-            MediaType::Webp,
-            MediaType::Jpeg,
-            MediaType::Png,
-        ]
+        &[MediaType::Webp, MediaType::Jpeg, MediaType::Png]
     };
 
     let base: Vec<MediaType> = if format_preference.is_empty() {
@@ -543,10 +533,10 @@ mod tests {
 
     #[test]
     fn test_parse_accept_header_mixed_known_unknown() {
-        let (prefs, had_any) = parse_accept_header("text/html, image/avif;q=0.8, application/xml");
+        let (prefs, had_any) = parse_accept_header("text/html, image/webp;q=0.8, application/xml");
         assert!(had_any);
         assert_eq!(prefs.len(), 1);
-        assert_eq!(prefs[0].range, AcceptRange::Exact("image/avif"));
+        assert_eq!(prefs[0].range, AcceptRange::Exact("image/webp"));
         assert_eq!(prefs[0].q_millis, 800);
     }
 
@@ -581,7 +571,7 @@ mod tests {
         assert!(accept_range_matches(AcceptRange::Any, MediaType::Jpeg));
         assert!(accept_range_matches(AcceptRange::Any, MediaType::Svg));
         assert!(accept_range_matches(AcceptRange::Any, MediaType::Bmp));
-        assert!(accept_range_matches(AcceptRange::Any, MediaType::Avif));
+        assert!(accept_range_matches(AcceptRange::Any, MediaType::Webp));
     }
 
     #[test]
@@ -838,7 +828,7 @@ mod tests {
     #[test]
     fn test_build_image_response_headers_content_disposition() {
         let headers = build_image_response_headers(
-            MediaType::Avif,
+            MediaType::Webp,
             "\"etag\"",
             ImageResponsePolicy::PublicGet,
             false,
@@ -853,7 +843,7 @@ mod tests {
             .iter()
             .find(|(k, _)| *k == "Content-Disposition")
             .unwrap();
-        assert_eq!(cd.1, "inline; filename=\"truss.avif\"");
+        assert_eq!(cd.1, "inline; filename=\"truss.webp\"");
     }
 
     #[test]
@@ -994,18 +984,40 @@ mod tests {
     }
 
     #[test]
-    fn test_negotiate_output_format_prefers_avif_over_jpeg() {
+    fn test_negotiate_output_format_prefers_webp_over_jpeg() {
         let artifact = make_artifact(MediaType::Jpeg, None);
-        let result = negotiate_output_format(Some("image/avif, image/jpeg"), &artifact, &[]);
-        // Both have q=1.0, but avif is server-preferred (first in the candidate list)
-        assert_eq!(result.unwrap(), Some(MediaType::Avif));
+        let result = negotiate_output_format(Some("image/webp, image/jpeg"), &artifact, &[]);
+        // Both have q=1.0, but webp is server-preferred (first in the candidate list)
+        assert_eq!(result.unwrap(), Some(MediaType::Webp));
+    }
+
+    /// AVIF output was removed, so a range naming it is a range for a format truss does not
+    /// write: the browser's own `Accept` negotiates WebP, and one that names AVIF alone is
+    /// refused the way `image/heic` is, rather than answered with AVIF.
+    #[test]
+    fn test_negotiate_output_format_never_selects_avif() {
+        let artifact = make_artifact(MediaType::Jpeg, None);
+        let browser = negotiate_output_format(
+            Some("image/avif,image/webp,image/apng,*/*;q=0.8"),
+            &artifact,
+            &[],
+        );
+        assert_eq!(browser.unwrap(), Some(MediaType::Webp));
+
+        let preferred =
+            negotiate_output_format(Some("image/avif;q=1.0, image/jpeg;q=0.5"), &artifact, &[]);
+        assert_eq!(preferred.unwrap(), Some(MediaType::Jpeg));
+
+        let only_avif = negotiate_output_format(Some("image/avif"), &artifact, &[]);
+        assert!(only_avif.is_err());
+        assert!(parse_accept_range("image/avif").is_none());
     }
 
     #[test]
     fn test_negotiate_output_format_respects_client_q_preference() {
         let artifact = make_artifact(MediaType::Jpeg, None);
         let result =
-            negotiate_output_format(Some("image/avif;q=0.5, image/jpeg;q=1.0"), &artifact, &[]);
+            negotiate_output_format(Some("image/webp;q=0.5, image/jpeg;q=1.0"), &artifact, &[]);
         // jpeg has higher q, so it should win
         assert_eq!(result.unwrap(), Some(MediaType::Jpeg));
     }
@@ -1047,7 +1059,7 @@ mod tests {
         let artifact = make_artifact(MediaType::Jpeg, None);
         // All image types explicitly excluded with q=0
         let result = negotiate_output_format(
-            Some("image/avif;q=0, image/webp;q=0, image/jpeg;q=0, image/png;q=0"),
+            Some("image/webp;q=0, image/jpeg;q=0, image/png;q=0"),
             &artifact,
             &[],
         );
@@ -1086,7 +1098,7 @@ mod tests {
     #[test]
     fn test_negotiate_output_format_alpha_prefers_png_over_jpeg() {
         let artifact = make_artifact(MediaType::Png, Some(true));
-        // When has_alpha, server order is avif, webp, png, jpeg
+        // When has_alpha, server order is webp, png, jpeg
         // If only png and jpeg are accepted, png should win
         let result = negotiate_output_format(Some("image/png, image/jpeg"), &artifact, &[]);
         assert_eq!(result.unwrap(), Some(MediaType::Png));
@@ -1100,12 +1112,7 @@ mod tests {
         let types = preferred_output_media_types(&artifact, &[]);
         assert_eq!(
             types,
-            vec![
-                MediaType::Avif,
-                MediaType::Webp,
-                MediaType::Jpeg,
-                MediaType::Png
-            ]
+            vec![MediaType::Webp, MediaType::Jpeg, MediaType::Png]
         );
     }
 
@@ -1115,12 +1122,7 @@ mod tests {
         let types = preferred_output_media_types(&artifact, &[]);
         assert_eq!(
             types,
-            vec![
-                MediaType::Avif,
-                MediaType::Webp,
-                MediaType::Png,
-                MediaType::Jpeg
-            ]
+            vec![MediaType::Webp, MediaType::Png, MediaType::Jpeg]
         );
     }
 
@@ -1129,7 +1131,7 @@ mod tests {
         let artifact = make_artifact(MediaType::Svg, None);
         let types = preferred_output_media_types(&artifact, &[]);
         assert_eq!(types[0], MediaType::Svg);
-        assert!(types.len() == 5);
+        assert!(types.len() == 4);
     }
 
     #[test]
@@ -1207,7 +1209,6 @@ mod tests {
             ("image/jpeg", AcceptRange::Exact("image/jpeg"), 2),
             ("image/png", AcceptRange::Exact("image/png"), 2),
             ("image/webp", AcceptRange::Exact("image/webp"), 2),
-            ("image/avif", AcceptRange::Exact("image/avif"), 2),
             ("image/bmp", AcceptRange::Exact("image/bmp"), 2),
             ("image/svg+xml", AcceptRange::Exact("image/svg+xml"), 2),
         ];
@@ -1225,6 +1226,7 @@ mod tests {
         assert!(parse_accept_range("video/mp4").is_none());
         assert!(parse_accept_range("image/gif").is_none());
         assert!(parse_accept_range("image/tiff").is_none());
+        assert!(parse_accept_range("image/avif").is_none());
     }
 
     // ── format_preference ──────────────────────────────────────────────
@@ -1232,21 +1234,11 @@ mod tests {
     #[test]
     fn test_preferred_output_media_types_custom_preference_reorders() {
         let artifact = make_artifact(MediaType::Jpeg, Some(false));
-        let pref = &[
-            MediaType::Webp,
-            MediaType::Jpeg,
-            MediaType::Png,
-            MediaType::Avif,
-        ];
+        let pref = &[MediaType::Png, MediaType::Jpeg, MediaType::Webp];
         let types = preferred_output_media_types(&artifact, pref);
         assert_eq!(
             types,
-            vec![
-                MediaType::Webp,
-                MediaType::Jpeg,
-                MediaType::Png,
-                MediaType::Avif
-            ]
+            vec![MediaType::Png, MediaType::Jpeg, MediaType::Webp]
         );
     }
 
@@ -1257,9 +1249,8 @@ mod tests {
         let pref = &[MediaType::Webp];
         let types = preferred_output_media_types(&artifact, pref);
         assert_eq!(types[0], MediaType::Webp);
-        // Remaining default formats (avif, jpeg, png) follow.
-        assert_eq!(types.len(), 4);
-        assert!(types.contains(&MediaType::Avif));
+        // Remaining default formats (jpeg, png) follow.
+        assert_eq!(types.len(), 3);
         assert!(types.contains(&MediaType::Jpeg));
         assert!(types.contains(&MediaType::Png));
     }
@@ -1272,20 +1263,15 @@ mod tests {
         // Png should come first per preference, then webp, then remaining defaults.
         assert_eq!(types[0], MediaType::Png);
         assert_eq!(types[1], MediaType::Webp);
-        assert_eq!(types.len(), 4);
+        assert_eq!(types.len(), 3);
     }
 
     #[test]
     fn test_negotiate_with_custom_preference_webp_first() {
         let artifact = make_artifact(MediaType::Jpeg, None);
-        let pref = &[
-            MediaType::Webp,
-            MediaType::Avif,
-            MediaType::Jpeg,
-            MediaType::Png,
-        ];
-        // Both webp and avif have q=1.0, but webp is preferred by config.
-        let result = negotiate_output_format(Some("image/avif, image/webp"), &artifact, pref);
+        let pref = &[MediaType::Webp, MediaType::Jpeg, MediaType::Png];
+        // Both webp and png have q=1.0, but webp is preferred by config.
+        let result = negotiate_output_format(Some("image/png, image/webp"), &artifact, pref);
         assert_eq!(result.unwrap(), Some(MediaType::Webp));
     }
 
@@ -1301,11 +1287,11 @@ mod tests {
     #[test]
     fn test_negotiate_with_custom_preference_client_q_still_wins() {
         let artifact = make_artifact(MediaType::Jpeg, None);
-        let pref = &[MediaType::Webp, MediaType::Avif];
-        // Server prefers webp, but client explicitly gives avif higher q.
+        let pref = &[MediaType::Webp, MediaType::Png];
+        // Server prefers webp, but client explicitly gives png higher q.
         let result =
-            negotiate_output_format(Some("image/webp;q=0.5, image/avif;q=1.0"), &artifact, pref);
-        assert_eq!(result.unwrap(), Some(MediaType::Avif));
+            negotiate_output_format(Some("image/webp;q=0.5, image/png;q=1.0"), &artifact, pref);
+        assert_eq!(result.unwrap(), Some(MediaType::Png));
     }
 
     #[test]
@@ -1328,6 +1314,6 @@ mod tests {
         let types = preferred_output_media_types(&artifact, pref);
         // Svg is not in default_base, so it's ignored from preference.
         assert_eq!(types[0], MediaType::Webp);
-        assert_eq!(types.len(), 4);
+        assert_eq!(types.len(), 3);
     }
 }

@@ -39,7 +39,6 @@ export type OutputFormat =
   | "jpeg"
   | "png"
   | "webp"
-  | "avif"
   | "bmp"
   | "tiff"
   | "svg";
@@ -86,7 +85,7 @@ export interface TransformQuery {
   position?: Position | undefined;
   /** Output image format. */
   format?: OutputFormat | undefined;
-  /** Encoding quality (1–100). Only applies to lossy formats (jpeg, webp, avif). */
+  /** Encoding quality (1–100). Only applies to lossy formats (jpeg, webp). */
   quality?: number | undefined;
   /** Post-encoding optimization strategy. */
   optimize?: OptimizeMode | undefined;

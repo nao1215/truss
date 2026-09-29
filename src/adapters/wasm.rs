@@ -32,7 +32,7 @@ pub struct WasmTransformOptions {
     pub fit: Option<String>,
     /// The crop anchor (`center`, `top-left`, and so on).
     pub position: Option<String>,
-    /// The requested output format (`jpeg`, `png`, `webp`, `avif`, `bmp`, `tiff`, or `svg`).
+    /// The requested output format (`jpeg`, `png`, `webp`, `bmp`, `tiff`, or `svg`).
     pub format: Option<String>,
     /// The requested lossy quality from 1 to 100.
     #[serde(default, deserialize_with = "crate::core::deserialize_quality")]
@@ -85,8 +85,6 @@ pub struct WasmCapabilities {
     pub svg: bool,
     /// Whether quality-controlled lossy WebP encoding is available in this build.
     pub webp_lossy: bool,
-    /// Whether AVIF decoding and encoding are available in this build.
-    pub avif: bool,
 }
 
 /// Serializable metadata about an inspected or transformed artifact.
@@ -154,7 +152,6 @@ pub fn browser_capabilities() -> WasmCapabilities {
     WasmCapabilities {
         svg: cfg!(feature = "svg"),
         webp_lossy: cfg!(feature = "webp-lossy"),
-        avif: cfg!(feature = "avif"),
     }
 }
 
@@ -356,7 +353,6 @@ fn output_extension(media_type: MediaType) -> &'static str {
         MediaType::Jpeg => "jpg",
         MediaType::Png => "png",
         MediaType::Webp => "webp",
-        MediaType::Avif => "avif",
         MediaType::Svg => "svg",
         MediaType::Bmp => "bmp",
         MediaType::Tiff => "tiff",
@@ -931,7 +927,6 @@ mod tests {
 
         assert_eq!(capabilities.svg, cfg!(feature = "svg"));
         assert_eq!(capabilities.webp_lossy, cfg!(feature = "webp-lossy"));
-        assert_eq!(capabilities.avif, cfg!(feature = "avif"));
     }
 
     #[test]
@@ -1268,7 +1263,6 @@ mod tests {
         assert_eq!(output_extension(MediaType::Jpeg), "jpg");
         assert_eq!(output_extension(MediaType::Png), "png");
         assert_eq!(output_extension(MediaType::Webp), "webp");
-        assert_eq!(output_extension(MediaType::Avif), "avif");
         assert_eq!(output_extension(MediaType::Svg), "svg");
         assert_eq!(output_extension(MediaType::Bmp), "bmp");
         assert_eq!(output_extension(MediaType::Tiff), "tiff");
@@ -1488,50 +1482,64 @@ mod tests {
         assert!(response.artifact.height.is_some());
     }
 
-    #[cfg(feature = "avif")]
+    /// AVIF was removed, and an AVIF from the browser is refused as an unsupported input with
+    /// a sentence that names it, the class and wording the CLI and the server give the same
+    /// file, whether it is inspected or transformed and whether or not the caller declared it.
     #[test]
-    fn transform_png_to_avif() {
-        let response = transform_browser_artifact(
-            png_bytes(4, 3),
-            Some("png"),
-            WasmTransformOptions {
-                format: Some("avif".to_string()),
-                quality: Some(72),
-                ..WasmTransformOptions::default()
-            },
-        )
-        .expect("transform png to avif");
+    fn an_avif_input_is_refused_as_an_unsupported_input() {
+        let avif = include_bytes!("../../integration/fixtures/sample.avif").to_vec();
 
-        assert_eq!(response.artifact.media_type, "avif");
-        assert_eq!(response.suggested_extension, "avif");
-        assert!(!response.bytes.is_empty());
-    }
-
-    #[cfg(feature = "avif")]
-    #[test]
-    fn transform_avif_round_trip() {
-        let avif = transform_browser_artifact(
-            png_bytes(4, 3),
-            Some("png"),
-            WasmTransformOptions {
-                format: Some("avif".to_string()),
-                ..WasmTransformOptions::default()
-            },
-        )
-        .expect("png to avif");
-
-        let png = transform_browser_artifact(
-            avif.bytes,
-            Some("avif"),
+        let inspected = inspect_browser_artifact(avif.clone(), None).expect_err("avif is refused");
+        let transformed = transform_browser_artifact(
+            avif.clone(),
+            None,
             WasmTransformOptions {
                 format: Some("png".to_string()),
                 ..WasmTransformOptions::default()
             },
         )
-        .expect("avif to png");
+        .expect_err("avif is refused");
 
-        assert_eq!(png.artifact.media_type, "png");
-        assert!(png.artifact.width.is_some());
+        for error in [inspected, transformed] {
+            assert_eq!(error.class().slug(), "unsupported-input-media-type");
+            assert!(
+                error.to_string().contains("AVIF is not supported"),
+                "{error}"
+            );
+        }
+
+        // Declaring it does not help: `avif` is no longer a media type name.
+        let declared =
+            inspect_browser_artifact(avif, Some("avif")).expect_err("avif is not a name");
+        assert!(
+            declared
+                .to_string()
+                .contains("unsupported media type `avif`"),
+            "{declared}"
+        );
+    }
+
+    /// An AVIF output is refused the way any other format name truss does not know is.
+    #[test]
+    fn an_avif_output_is_refused_like_an_unknown_format() {
+        let avif = parse_wasm_options(WasmTransformOptions {
+            format: Some("avif".to_string()),
+            ..WasmTransformOptions::default()
+        })
+        .expect_err("avif output is refused");
+        let unknown = parse_wasm_options(WasmTransformOptions {
+            format: Some("heic".to_string()),
+            ..WasmTransformOptions::default()
+        })
+        .expect_err("heic output is refused");
+
+        assert_eq!(avif.class(), unknown.class());
+        assert_eq!(
+            avif,
+            TransformError::InvalidOptions(
+                "format is invalid: unsupported media type `avif`".to_string()
+            )
+        );
     }
 
     #[test]

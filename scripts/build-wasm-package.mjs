@@ -98,7 +98,7 @@ run("cargo", [
   "--lib",
   "--no-default-features",
   "--features",
-  "wasm,svg,avif",
+  "wasm,svg",
   "--manifest-path",
   cargoManifestPath,
 ]);
