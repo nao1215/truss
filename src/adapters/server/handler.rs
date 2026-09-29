@@ -364,7 +364,13 @@ impl TransformOptionsPayload {
         let Some(name) = self.preset.clone() else {
             return Ok(self);
         };
-        let presets = config.presets.read().expect("presets lock poisoned");
+        // The table is only ever replaced whole, so a lock poisoned by a panicking writer
+        // still guards a complete table, and a request naming a preset is answered from it
+        // rather than panicking for the rest of the process's life.
+        let presets = config
+            .presets
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let preset = presets
             .get(&name)
             .ok_or_else(|| bad_request_response(&format!("unknown preset `{name}`")))?
@@ -818,12 +824,13 @@ pub(super) fn process_rss_bytes() -> Option<u64> {
 
 /// Returns a minimal liveness response confirming the process is running.
 pub(super) fn handle_health_live() -> HttpResponse {
-    let body = serde_json::to_vec(&json!({
+    let body = json!({
         "status": "ok",
         "service": "truss",
         "version": env!("CARGO_PKG_VERSION"),
-    }))
-    .expect("serialize liveness");
+    })
+    .to_string()
+    .into_bytes();
     let mut body = body;
     body.push(b'\n');
     HttpResponse::json("200 OK", body)
@@ -838,11 +845,12 @@ pub(super) fn handle_health_ready(config: &ServerConfig) -> HttpResponse {
     // Skip expensive probes (storage, disk, memory) — they are irrelevant
     // once the process is shutting down.
     if config.draining.load(Ordering::Relaxed) {
-        let mut body = serde_json::to_vec(&json!({
+        let mut body = json!({
             "status": "fail",
             "checks": [{ "name": "draining", "status": "fail" }],
-        }))
-        .expect("serialize readiness");
+        })
+        .to_string()
+        .into_bytes();
         body.push(b'\n');
         let mut response = HttpResponse::json("503 Service Unavailable", body);
         // The process is going away, not momentarily busy, so tell the client
@@ -856,11 +864,12 @@ pub(super) fn handle_health_ready(config: &ServerConfig) -> HttpResponse {
     let (checks, all_ok) = collect_resource_checks(config);
 
     let status_str = if all_ok { "ok" } else { "fail" };
-    let mut body = serde_json::to_vec(&json!({
+    let mut body = json!({
         "status": status_str,
         "checks": checks,
-    }))
-    .expect("serialize readiness");
+    })
+    .to_string()
+    .into_bytes();
     body.push(b'\n');
 
     // Resource check results use application/json (health-check format),
@@ -984,7 +993,10 @@ fn collect_resource_checks(config: &ServerConfig) -> (Vec<serde_json::Value>, bo
 /// Returns storage backend health checks (storage root existence and cloud
 /// backend reachability).
 pub(crate) fn storage_health_check(config: &ServerConfig) -> Vec<(bool, &'static str)> {
-    #[allow(unused_mut)]
+    #[allow(
+        unused_mut,
+        reason = "the storage backends push their own check only when their feature is enabled"
+    )]
     let mut checks = vec![(config.storage_root.is_dir(), "storageRoot")];
     #[cfg(feature = "s3")]
     if config.storage_backend == StorageBackend::S3 {
@@ -1017,15 +1029,16 @@ pub(super) fn handle_health(config: &ServerConfig) -> HttpResponse {
     let (checks, all_ok) = collect_resource_checks(config);
 
     let status_str = if all_ok { "ok" } else { "fail" };
-    let mut body = serde_json::to_vec(&json!({
+    let mut body = json!({
         "status": status_str,
         "service": "truss",
         "version": env!("CARGO_PKG_VERSION"),
         "uptimeSeconds": uptime_seconds(),
         "checks": checks,
         "maxInputPixels": config.max_input_pixels,
-    }))
-    .expect("serialize health");
+    })
+    .to_string()
+    .into_bytes();
     body.push(b'\n');
 
     HttpResponse::json("200 OK", body)
@@ -1416,7 +1429,10 @@ pub(super) fn parse_public_get_request(
 // Transform pipeline
 // ---------------------------------------------------------------------------
 
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the arguments are the request's source, options, and per-request context, which the routes assemble from different places"
+)]
 pub(super) fn transform_source_bytes(
     source_bytes: Vec<u8>,
     options: TransformOptions,
@@ -1473,7 +1489,10 @@ pub(super) fn transform_source_bytes(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "it takes the same arguments as `transform_source_bytes`, which it is the body of"
+)]
 fn transform_source_bytes_inner(
     source_bytes: Vec<u8>,
     mut options: TransformOptions,

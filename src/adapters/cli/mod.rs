@@ -287,9 +287,11 @@ ENVIRONMENT VARIABLES:
     // The backends this build can resolve a public by-path source from, which is the one
     // row whose accepted values depend on the features it was compiled with.
     {
-        use std::fmt::Write as FmtWrite;
-
-        #[allow(unused_mut, clippy::useless_vec)]
+        #[allow(
+            unused_mut,
+            clippy::useless_vec,
+            reason = "the list grows only in builds with a storage feature enabled, and without one it is never pushed to"
+        )]
         let mut backends = vec!["filesystem (default)"];
         #[cfg(feature = "s3")]
         backends.push("s3");
@@ -297,11 +299,10 @@ ENVIRONMENT VARIABLES:
         backends.push("gcs");
         #[cfg(feature = "azure")]
         backends.push("azure");
-        let _ = writeln!(
-            s,
-            "  TRUSS_STORAGE_BACKEND               Source for public by-path resolution: {}",
+        s.push_str(&format!(
+            "  TRUSS_STORAGE_BACKEND               Source for public by-path resolution: {}\n",
             backends.join(", ")
-        );
+        ));
     }
 
     s.push_str(
@@ -956,6 +957,10 @@ fn parse_sharpen(s: &str) -> Result<f32, String> {
     parse_sigma(s, "sharpen")
 }
 
+#[expect(
+    clippy::map_err_ignore,
+    reason = "the sentence names the option, the rule, and the value given, which is everything a `ParseFloatError` would add"
+)]
 fn parse_sigma(s: &str, name: &str) -> Result<f32, String> {
     s.parse::<f32>()
         .map_err(|_| format!("{name} sigma must be a number, got '{s}'"))
@@ -995,6 +1000,10 @@ fn parse_dimension(
     axis: &str,
     validate: fn(i64) -> Result<u32, &'static str>,
 ) -> Result<u32, String> {
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "the sentence names the option, the rule, and the value given, which is everything a `ParseIntError` would add"
+    )]
     let value: i64 = s
         .parse()
         .map_err(|_| format!("{axis} must be a whole number of pixels, got '{s}'"))?;
@@ -1004,6 +1013,10 @@ fn parse_dimension(
 }
 
 fn parse_quality(s: &str) -> Result<u8, String> {
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "the sentence names the option, the rule, and the value given, which is everything a `ParseIntError` would add"
+    )]
     let value: i64 = s
         .parse()
         .map_err(|_| format!("quality must be a whole number, got '{s}'"))?;
@@ -1011,14 +1024,27 @@ fn parse_quality(s: &str) -> Result<u8, String> {
     // which keeps the failure class the CLI reported before and the one the server reports
     // for the same number. One that cannot be held is refused here, with the sentence that
     // check would have given rather than with the range of the integer holding it.
-    u8::try_from(value).map_err(|_| {
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "a `TryFromIntError` says only that the value is out of range, and the sentence it is replaced with says which range"
+    )]
+    #[expect(
+        clippy::expect_used,
+        reason = "`validate_quality_value` accepts only 1..=100, which lies inside u8, so a value that does not fit is one it refuses"
+    )]
+    let quality = u8::try_from(value).map_err(|_| {
         crate::core::validate_quality_value(value)
             .expect_err("a value outside u8 is outside 1..=100")
             .to_string()
-    })
+    })?;
+    Ok(quality)
 }
 
 fn parse_watermark_opacity(s: &str) -> Result<u8, String> {
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "the sentence names the option, the rule, and the value given, which is everything a `ParseIntError` would add"
+    )]
     let value: i64 = s
         .parse()
         .map_err(|_| format!("watermark opacity must be a whole number, got '{s}'"))?;
@@ -1945,18 +1971,22 @@ fn write_error<E>(stderr: &mut E, error: CliError) -> u8
 where
     E: Write,
 {
-    let _ = writeln!(
-        stderr,
-        "error: {} ({})",
+    let mut report = format!(
+        "error: {} ({})\n",
         crate::core::single_line(&error.message),
         error.class.slug()
     );
     if let Some(usage) = &error.usage {
-        let _ = writeln!(stderr, "{usage}");
+        report.push_str(&format!("{usage}\n"));
     }
     if let Some(hint) = &error.hint {
-        let _ = writeln!(stderr, "hint: {hint}");
+        report.push_str(&format!("hint: {hint}\n"));
     }
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "stderr is the channel an error is reported on, so there is none left to report its own failure on, and the exit code returned below still tells the caller the command failed"
+    )]
+    let _: io::Result<()> = stderr.write_all(report.as_bytes());
     error.exit_code
 }
 

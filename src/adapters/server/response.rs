@@ -43,7 +43,9 @@ impl HttpResponse {
                 "requestId".to_string(),
                 serde_json::Value::String(request_id.to_string()),
             );
-            let mut body = serde_json::to_vec(&problem).expect("serialize problem body");
+            // A `Value` is text all the way down, so writing it out cannot fail, and
+            // `to_string` says so in its type where `to_vec` would need an `expect`.
+            let mut body = serde_json::Value::Object(problem).to_string().into_bytes();
             body.push(b'\n');
             self.body = body;
         }
@@ -144,8 +146,6 @@ pub(super) fn write_response(
     response: HttpResponse,
     options: ResponseWriteOptions,
 ) -> io::Result<()> {
-    use std::fmt::Write as FmtWrite;
-
     let ResponseWriteOptions {
         close,
         is_head,
@@ -181,7 +181,7 @@ pub(super) fn write_response(
     );
 
     if let Some(content_type) = response.content_type {
-        let _ = write!(header, "Content-Type: {content_type}\r\n");
+        header.push_str(&format!("Content-Type: {content_type}\r\n"));
     }
 
     if is_compressed {
@@ -211,12 +211,12 @@ pub(super) fn write_response(
         }
     }
     if !vary_parts.is_empty() {
-        let _ = write!(header, "Vary: {}\r\n", vary_parts.join(", "));
+        header.push_str(&format!("Vary: {}\r\n", vary_parts.join(", ")));
     }
 
     for (name, value) in response.headers {
         if !name.eq_ignore_ascii_case("Vary") {
-            let _ = write!(header, "{name}: {value}\r\n");
+            header.push_str(&format!("{name}: {value}\r\n"));
         }
     }
 
@@ -474,13 +474,14 @@ pub(super) fn problem_response(class: ErrorClass, detail: &str) -> HttpResponse 
 /// Serializes an RFC 9457 Problem Details JSON body.
 pub(super) fn problem_detail_body(class: ErrorClass, detail: &str) -> Vec<u8> {
     let (_, status) = class.status();
-    let mut body = serde_json::to_vec(&json!({
+    let mut body = json!({
         "type": class.uri(),
         "title": class.title(),
         "status": status,
         "detail": crate::core::single_line(detail),
-    }))
-    .expect("serialize problem detail body");
+    })
+    .to_string()
+    .into_bytes();
     body.push(b'\n');
     body
 }

@@ -24,7 +24,10 @@ use super::TransformError;
 /// constructs none of the server's classes, and a server-only build never asks for a
 /// camelCase name. Gating the variants on features would split the single table this module
 /// exists to be.
-#[allow(dead_code)]
+#[allow(
+    dead_code,
+    reason = "the table is the whole vocabulary, and each build constructs only the classes its adapters reach, as the paragraph above says"
+)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ErrorClass {
     /// The transform options are not a request the pipeline can carry out.
@@ -81,7 +84,10 @@ pub(crate) enum ErrorClass {
 impl ErrorClass {
     /// The class's name: the anchor of its section in `docs/problems.md`, and what the HTTP
     /// server's `type` URI ends with and the CLI prints in parentheses.
-    #[allow(dead_code)]
+    #[allow(
+        dead_code,
+        reason = "only the CLI and the HTTP server read the slug, and a Wasm-only build has neither"
+    )]
     pub(crate) const fn slug(self) -> &'static str {
         match self {
             Self::InvalidOptions => "invalid-options",

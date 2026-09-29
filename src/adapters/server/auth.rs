@@ -77,6 +77,10 @@ pub(super) fn authorize_signed_request(
         .get(key_id)
         .ok_or_else(|| signed_url_unauthorized_response("signed URL is invalid or expired"))?;
 
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "the sentence names the parameter and the rule it breaks, and the parser's own wording in a `ParseIntError` says nothing more a caller can act on"
+    )]
     let expires = expires.parse::<u64>().map_err(|_| {
         bad_request_response("query parameter `expires` must be a positive integer")
     })?;
@@ -107,6 +111,10 @@ pub(super) fn authorize_signed_request(
             "signed URL is invalid or expired",
         ));
     }
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "every way a signature can fail gets the same answer, so a caller cannot learn from the response which part of a forged signature was wrong"
+    )]
     let provided_signature = hex::decode(signature)
         .map_err(|_| signed_url_unauthorized_response("signed URL is invalid or expired"))?;
     let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).map_err(|error| {
@@ -115,8 +123,13 @@ pub(super) fn authorize_signed_request(
         ))
     })?;
     mac.update(canonical.as_bytes());
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "every way a signature can fail gets the same answer, so a caller cannot learn from the response which part of a forged signature was wrong"
+    )]
     mac.verify_slice(&provided_signature)
-        .map_err(|_| signed_url_unauthorized_response("signed URL is invalid or expired"))
+        .map_err(|_| signed_url_unauthorized_response("signed URL is invalid or expired"))?;
+    Ok(())
 }
 
 /// Reports whether `signature` is exactly the encoding the signers emit.
@@ -374,11 +387,19 @@ pub(super) fn parse_optional_integer_query(
     let Some(value) = query.get(name) else {
         return Ok(None);
     };
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "the sentence names the parameter and the rule it breaks, and the parser's own wording in a `ParseIntError` says nothing more a caller can act on"
+    )]
     let parsed: i64 = value.parse().map_err(|_| {
         bad_request_response(&format!("query parameter `{name}` must be an integer"))
     })?;
     match u32::try_from(parsed) {
         Ok(value) => Ok(Some(value)),
+        #[expect(
+            clippy::expect_used,
+            reason = "every range `validate` accepts lies inside u32, so a value that does not fit is one it refuses"
+        )]
         Err(_) => Err(bad_request_response(
             validate(parsed).expect_err("a value outside u32 is outside the documented range"),
         )),
@@ -399,11 +420,19 @@ pub(super) fn parse_optional_u8_query(
     let Some(value) = query.get(name) else {
         return Ok(None);
     };
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "the sentence names the parameter and the rule it breaks, and the parser's own wording in a `ParseIntError` says nothing more a caller can act on"
+    )]
     let parsed: i64 = value.parse().map_err(|_| {
         bad_request_response(&format!("query parameter `{name}` must be an integer"))
     })?;
     match u8::try_from(parsed) {
         Ok(value) => Ok(Some(value)),
+        #[expect(
+            clippy::expect_used,
+            reason = "every range `validate` accepts lies inside u8, so a value that does not fit is one it refuses"
+        )]
         Err(_) => Err(bad_request_response(
             validate(parsed).expect_err("a value outside u8 is outside the documented range"),
         )),
@@ -415,6 +444,10 @@ pub(super) fn parse_optional_float_query(
     name: &str,
 ) -> Result<Option<f32>, HttpResponse> {
     match query.get(name) {
+        #[expect(
+            clippy::map_err_ignore,
+            reason = "the sentence names the parameter and the rule it breaks, and the parser's own wording in a `ParseFloatError` says nothing more a caller can act on"
+        )]
         Some(value) => value.parse::<f32>().map(Some).map_err(|_| {
             bad_request_response(&format!("query parameter `{name}` must be a number"))
         }),

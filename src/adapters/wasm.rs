@@ -726,7 +726,10 @@ mod tests {
         )
     }
 
-    #[allow(clippy::type_complexity)]
+    #[allow(
+        clippy::type_complexity,
+        reason = "a case is a label and the two option types it compares, and naming the tuple would hide that"
+    )]
     fn parity_cases() -> Vec<(&'static str, TransformOptions, WasmTransformOptions)> {
         let m = |f: fn(&mut TransformOptions, &mut WasmTransformOptions)| {
             let (mut a, mut b) = parity_base();

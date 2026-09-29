@@ -1,4 +1,3 @@
-use std::fmt::Write;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
@@ -127,7 +126,10 @@ pub(super) struct AtomicHistogram {
 }
 
 impl AtomicHistogram {
-    #[allow(clippy::declare_interior_mutable_const)]
+    #[allow(
+        clippy::declare_interior_mutable_const,
+        reason = "the constant is only an array initializer, copied into each bucket, and never read as a shared value"
+    )]
     const ZERO: AtomicU64 = AtomicU64::new(0);
 
     const fn new() -> Self {
@@ -186,27 +188,23 @@ struct HistogramSnapshot {
 impl HistogramSnapshot {
     fn render(&self, name: &str, label_key: &str, label_value: &str, buf: &mut String) {
         for (i, &bound) in BUCKET_BOUNDS.iter().enumerate() {
-            let _ = writeln!(
-                buf,
-                "{name}_bucket{{{label_key}=\"{label_value}\",le=\"{bound}\"}} {}",
+            buf.push_str(&format!(
+                "{name}_bucket{{{label_key}=\"{label_value}\",le=\"{bound}\"}} {}\n",
                 self.buckets[i]
-            );
+            ));
         }
-        let _ = writeln!(
-            buf,
-            "{name}_bucket{{{label_key}=\"{label_value}\",le=\"+Inf\"}} {}",
+        buf.push_str(&format!(
+            "{name}_bucket{{{label_key}=\"{label_value}\",le=\"+Inf\"}} {}\n",
             self.count
-        );
-        let _ = writeln!(
-            buf,
-            "{name}_sum{{{label_key}=\"{label_value}\"}} {}",
+        ));
+        buf.push_str(&format!(
+            "{name}_sum{{{label_key}=\"{label_value}\"}} {}\n",
             self.sum
-        );
-        let _ = writeln!(
-            buf,
-            "{name}_count{{{label_key}=\"{label_value}\"}} {}",
+        ));
+        buf.push_str(&format!(
+            "{name}_count{{{label_key}=\"{label_value}\"}} {}\n",
             self.count
-        );
+        ));
     }
 }
 
@@ -274,7 +272,10 @@ pub(super) fn storage_backend_index_from_config(
 
 // ── Static histogram/counter instances ───────────────────────────────
 
-#[allow(clippy::declare_interior_mutable_const)]
+#[allow(
+    clippy::declare_interior_mutable_const,
+    reason = "the constant is only an array initializer, copied into each static histogram, and never read as a shared value"
+)]
 const HISTOGRAM_INIT: AtomicHistogram = AtomicHistogram::new();
 
 static HTTP_REQUEST_DURATION: [AtomicHistogram; ROUTE_COUNT] = [HISTOGRAM_INIT; ROUTE_COUNT];
@@ -282,7 +283,10 @@ static TRANSFORM_DURATION: [AtomicHistogram; MEDIA_TYPE_COUNT] = [HISTOGRAM_INIT
 static STORAGE_DURATION: [AtomicHistogram; STORAGE_BACKEND_COUNT] =
     [HISTOGRAM_INIT; STORAGE_BACKEND_COUNT];
 
-#[allow(clippy::declare_interior_mutable_const)]
+#[allow(
+    clippy::declare_interior_mutable_const,
+    reason = "the constant is only an array initializer, copied into each static counter, and never read as a shared value"
+)]
 const ZERO_COUNTER: AtomicU64 = AtomicU64::new(0);
 static TRANSFORM_ERRORS: [AtomicU64; TRANSFORM_ERROR_COUNT] = [ZERO_COUNTER; TRANSFORM_ERROR_COUNT];
 
@@ -329,92 +333,85 @@ pub(super) fn render_metrics_text(max_concurrent: u64, transforms_in_flight: &At
         "# HELP truss_connection_panics_total Panics caught while handling a connection.\n",
     );
     body.push_str("# TYPE truss_connection_panics_total counter\n");
-    let _ = writeln!(
-        body,
-        "truss_connection_panics_total {}",
+    body.push_str(&format!(
+        "truss_connection_panics_total {}\n",
         CONNECTION_PANICS_TOTAL.load(Ordering::Relaxed)
-    );
+    ));
 
     body.push_str(
         "# HELP truss_transforms_in_flight Number of image transforms currently executing.\n",
     );
     body.push_str("# TYPE truss_transforms_in_flight gauge\n");
-    let _ = writeln!(
-        body,
-        "truss_transforms_in_flight {}",
+    body.push_str(&format!(
+        "truss_transforms_in_flight {}\n",
         transforms_in_flight.load(Ordering::Relaxed)
-    );
+    ));
 
     body.push_str(
         "# HELP truss_transforms_max_concurrent Maximum allowed concurrent transforms.\n",
     );
     body.push_str("# TYPE truss_transforms_max_concurrent gauge\n");
-    let _ = writeln!(body, "truss_transforms_max_concurrent {max_concurrent}");
+    body.push_str(&format!(
+        "truss_transforms_max_concurrent {max_concurrent}\n"
+    ));
 
     body.push_str(
         "# HELP truss_http_requests_total Total parsed HTTP requests handled by the server adapter.\n",
     );
     body.push_str("# TYPE truss_http_requests_total counter\n");
-    let _ = writeln!(
-        body,
-        "truss_http_requests_total {}",
+    body.push_str(&format!(
+        "truss_http_requests_total {}\n",
         HTTP_REQUESTS_TOTAL.load(Ordering::Relaxed)
-    );
+    ));
 
     body.push_str(
         "# HELP truss_http_requests_by_route_total Total parsed HTTP requests handled by route.\n",
     );
     body.push_str("# TYPE truss_http_requests_by_route_total counter\n");
     for route in RouteMetric::ALL {
-        let _ = writeln!(
-            body,
-            "truss_http_requests_by_route_total{{route=\"{}\"}} {}",
+        body.push_str(&format!(
+            "truss_http_requests_by_route_total{{route=\"{}\"}} {}\n",
             route.as_label(),
             route_counter(route).load(Ordering::Relaxed)
-        );
+        ));
     }
 
     body.push_str("# HELP truss_cache_hits_total Total transform cache hits.\n");
     body.push_str("# TYPE truss_cache_hits_total counter\n");
-    let _ = writeln!(
-        body,
-        "truss_cache_hits_total {}",
+    body.push_str(&format!(
+        "truss_cache_hits_total {}\n",
         CACHE_HITS_TOTAL.load(Ordering::Relaxed)
-    );
+    ));
 
     body.push_str("# HELP truss_cache_misses_total Total transform cache misses.\n");
     body.push_str("# TYPE truss_cache_misses_total counter\n");
-    let _ = writeln!(
-        body,
-        "truss_cache_misses_total {}",
+    body.push_str(&format!(
+        "truss_cache_misses_total {}\n",
         CACHE_MISSES_TOTAL.load(Ordering::Relaxed)
-    );
+    ));
 
     body.push_str("# HELP truss_origin_cache_hits_total Total origin response cache hits.\n");
     body.push_str("# TYPE truss_origin_cache_hits_total counter\n");
-    let _ = writeln!(
-        body,
-        "truss_origin_cache_hits_total {}",
+    body.push_str(&format!(
+        "truss_origin_cache_hits_total {}\n",
         ORIGIN_CACHE_HITS_TOTAL.load(Ordering::Relaxed)
-    );
+    ));
 
     body.push_str("# HELP truss_origin_cache_misses_total Total origin response cache misses.\n");
     body.push_str("# TYPE truss_origin_cache_misses_total counter\n");
-    let _ = writeln!(
-        body,
-        "truss_origin_cache_misses_total {}",
+    body.push_str(&format!(
+        "truss_origin_cache_misses_total {}\n",
         ORIGIN_CACHE_MISSES_TOTAL.load(Ordering::Relaxed)
-    );
+    ));
 
     body.push_str(
         "# HELP truss_watermark_transforms_total Total transforms that included a watermark.\n",
     );
     body.push_str("# TYPE truss_watermark_transforms_total counter\n");
-    let _ = writeln!(
-        body,
-        "truss_watermark_transforms_total {}",
+    body.push_str(&format!(
+        "truss_watermark_transforms_total {}\n",
         WATERMARK_TRANSFORMS_TOTAL.load(Ordering::Relaxed)
-    );
+    ));
 
     body.push_str(
         "# HELP truss_http_responses_total Total HTTP responses emitted by status code.\n",
@@ -424,11 +421,10 @@ pub(super) fn render_metrics_text(max_concurrent: u64, transforms_in_flight: &At
         "200", "304", "400", "401", "403", "404", "406", "413", "415", "500", "501", "502", "503",
         "508", "other",
     ] {
-        let _ = writeln!(
-            body,
-            "truss_http_responses_total{{status=\"{status}\"}} {}",
+        body.push_str(&format!(
+            "truss_http_responses_total{{status=\"{status}\"}} {}\n",
             status_counter_value(status)
-        );
+        ));
     }
 
     // ── Histograms ───────────────────────────────────────────────────
@@ -473,11 +469,10 @@ pub(super) fn render_metrics_text(max_concurrent: u64, transforms_in_flight: &At
     body.push_str("# HELP truss_transform_errors_total Total transform errors by error type.\n");
     body.push_str("# TYPE truss_transform_errors_total counter\n");
     for (i, &label) in TRANSFORM_ERROR_LABELS.iter().enumerate() {
-        let _ = writeln!(
-            body,
-            "truss_transform_errors_total{{error_type=\"{label}\"}} {}",
+        body.push_str(&format!(
+            "truss_transform_errors_total{{error_type=\"{label}\"}} {}\n",
             TRANSFORM_ERRORS[i].load(Ordering::Relaxed)
-        );
+        ));
     }
 
     body

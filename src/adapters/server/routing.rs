@@ -200,12 +200,13 @@ pub(super) fn handle_stream(
                     return Ok(());
                 }
                 let is_head = error.method.as_deref() == Some("HEAD");
-                let _ = write_response(
+                // A failed write is returned like the one on the main path below, so the
+                // worker logs it rather than the refusal disappearing without a trace.
+                return write_response(
                     &mut stream,
                     error.response,
                     ResponseWriteOptions::closing(is_head),
                 );
-                return Ok(());
             }
         };
 
@@ -257,7 +258,10 @@ pub(super) fn handle_stream(
             let sc = status_code(response.status).unwrap_or("unknown");
             let method_log = partial.method.clone();
             let path_log = partial.path().to_string();
-            let _ = write_response(
+            // The metrics and the access log describe the answer the server chose, so they
+            // are recorded whether or not the client was still there to receive it; the
+            // write's outcome is then returned for the worker to log, as on the main path.
+            let written = write_response(
                 &mut stream,
                 response,
                 ResponseWriteOptions::closing(is_head),
@@ -276,7 +280,7 @@ pub(super) fn handle_stream(
                     watermark: false,
                 },
             );
-            return Ok(());
+            return written;
         }
 
         // A body is read under the longer inactivity timeout: a legitimate upload can be
@@ -305,7 +309,7 @@ pub(super) fn handle_stream(
             let sc = status_code(response.status).unwrap_or("unknown");
             let method_log = partial.method.clone();
             let path_log = partial.path().to_string();
-            let _ = write_response(
+            let written = write_response(
                 &mut stream,
                 response,
                 ResponseWriteOptions {
@@ -329,7 +333,7 @@ pub(super) fn handle_stream(
                     watermark: false,
                 },
             );
-            return Ok(());
+            return written;
         }
 
         // Early-reject /metrics requests before draining the body so that
@@ -362,7 +366,7 @@ pub(super) fn handle_stream(
                 let sc = status_code(response.status).unwrap_or("unknown");
                 let method_log = partial.method.clone();
                 let path_log = partial.path().to_string();
-                let _ = write_response(
+                let written = write_response(
                     &mut stream,
                     response,
                     ResponseWriteOptions {
@@ -386,7 +390,7 @@ pub(super) fn handle_stream(
                         watermark: false,
                     },
                 );
-                return Ok(());
+                return written;
             }
         }
 
@@ -411,7 +415,7 @@ pub(super) fn handle_stream(
                 let sc = status_code(response.status).unwrap_or("unknown");
                 let method_log = partial.method.clone();
                 let path_log = partial.path().to_string();
-                let _ = write_response(
+                let written = write_response(
                     &mut stream,
                     response,
                     ResponseWriteOptions {
@@ -435,7 +439,7 @@ pub(super) fn handle_stream(
                         watermark: false,
                     },
                 );
-                return Ok(());
+                return written;
             }
         }
 
@@ -449,7 +453,7 @@ pub(super) fn handle_stream(
                 response.attach_request_id(&request_id);
                 record_http_metrics(RouteMetric::Unknown, response.status);
                 let sc = status_code(response.status).unwrap_or("unknown");
-                let _ = write_response(
+                let written = write_response(
                     &mut stream,
                     response,
                     ResponseWriteOptions {
@@ -473,7 +477,7 @@ pub(super) fn handle_stream(
                         watermark: false,
                     },
                 );
-                return Ok(());
+                return written;
             }
         };
         let route = classify_route(&request);
@@ -695,6 +699,48 @@ fn classify_route_from_path(path: &str) -> RouteMetric {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A refusal the client never received is reported, as a failed write on the main path
+    /// is, rather than the connection counting as handled.
+    ///
+    /// The client resets the connection before the server reads, so the server's answer to
+    /// the broken request goes to a socket that is gone. The write used to be thrown away and
+    /// the handler returned `Ok(())`, which is what the worker then logged: nothing.
+    #[cfg(unix)]
+    #[test]
+    fn a_refusal_that_cannot_be_written_is_an_error() {
+        use std::io::Write;
+        use std::os::fd::AsRawFd;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        client.write_all(b"GET /health HTTP/1.1\r\n").unwrap();
+        // A linger of zero turns the close into a reset, which is what makes the server's
+        // later write fail instead of landing in a buffer nobody reads.
+        let linger = libc::linger {
+            l_onoff: 1,
+            l_linger: 0,
+        };
+        let status = unsafe {
+            libc::setsockopt(
+                client.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_LINGER,
+                (&raw const linger).cast(),
+                std::mem::size_of::<libc::linger>() as libc::socklen_t,
+            )
+        };
+        assert_eq!(status, 0, "{}", io::Error::last_os_error());
+        drop(client);
+
+        let (stream, _) = listener.accept().unwrap();
+        let config = ServerConfig::new(std::env::temp_dir(), None);
+        let outcome = handle_stream(stream, Instant::now(), &config);
+        assert!(
+            outcome.is_err(),
+            "the answer to a reset connection was reported as written"
+        );
+    }
 
     /// Which routes the rate limiter is asked about, written out so a route added later has
     /// to choose a side.

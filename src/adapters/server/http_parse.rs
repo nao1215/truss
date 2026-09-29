@@ -174,6 +174,10 @@ where
         }
     };
 
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "the sentence states the rule the bytes break; the byte offset a `Utf8Error` carries is not something the client that sent them can act on"
+    )]
     let header_text = std::str::from_utf8(&buffer[..header_end]).map_err(|_| {
         RequestReadError::from(bad_request_response("request headers must be valid UTF-8"))
     })?;
@@ -373,9 +377,12 @@ pub(super) fn parse_content_length(headers: &[(String, String)]) -> Result<usize
         ));
     }
 
+    // Only digits reach this point, so the parse can fail only because the number does not
+    // fit, and the sentence above would call a valid integer something else. The parser's
+    // own reason is what the client needs here.
     value
         .parse::<usize>()
-        .map_err(|_| bad_request_response("content-length must be a non-negative integer"))
+        .map_err(|error| bad_request_response(&format!("content-length is out of range: {error}")))
 }
 
 pub(super) fn request_has_json_content_type(request: &HttpRequest) -> bool {
@@ -789,6 +796,23 @@ mod tests {
             let err = parse_content_length(&headers).expect_err(value);
             assert_eq!(err.status, "400 Bad Request", "content-length: {value}");
         }
+    }
+
+    /// A run of digits that does not fit is refused for its size. Calling it something other
+    /// than a non-negative integer, which it is, was all the answer used to say.
+    #[test]
+    fn content_length_that_does_not_fit_says_so() {
+        let headers = vec![(
+            "content-length".to_string(),
+            "99999999999999999999999999".to_string(),
+        )];
+        let err = parse_content_length(&headers).unwrap_err();
+        assert_eq!(err.status, "400 Bad Request");
+        let body = String::from_utf8(err.body).unwrap();
+        assert!(
+            body.contains("content-length is out of range: number too large to fit in target type"),
+            "{body}"
+        );
     }
 
     // ── Host ───────────────────────────────────────────────────────
