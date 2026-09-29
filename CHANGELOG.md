@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Changed
+
+- The minimum supported Rust version is 1.94.1, up from 1.92, because the AWS SDK releases that fix an unsound dependency require it. With the MSRV at 1.92 the resolver kept aws-config at 1.8 and aws-sdk-s3 at 1.137, whose client pulls in lru 0.16, and lru before 0.18.2 is unsound (RUSTSEC-2026-0253: `LruCache::pop()` is not panic-safe, so a key whose `Drop` panics leaves a freed node linked in the list, and a later eviction writes to freed memory). aws-config 1.12 and aws-sdk-s3 1.150 use lru 0.18.5 and require Rust 1.94.1. The release binaries were already built with a newer compiler, so only people who build truss-image themselves with a toolchain older than 1.94.1 are affected, and the crate root's promise holds: the MSRV moves only in a minor release.
+
 ### Fixed
 
 - The server no longer loses track of an error answer it could not deliver. When a request was refused before it reached a route, whether for malformed or oversized headers, a rate limit, a missing bearer token on a private route, a `/metrics` or `/health` token, or a body that could not be read, the answer was written and the outcome of that write thrown away, so a client that had already gone left no trace, while the same failure on a routed answer was logged as `failed to handle connection: ...`. Any client that disconnects while its request is being refused could hit this, which is ordinary for load balancer probes and impatient scanners. The refusals now return the write's result the way the routed path does, so the worker logs the failure at warn level; the metrics and the access log line are still recorded first, since they describe the answer the server chose. A `serve_once_with_config` caller sees the same thing as an `Err`. Nothing changes for a client that reads its answer.
