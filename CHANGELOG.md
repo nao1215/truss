@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- An SVG whose root element is written `<svg/>` is recognized as SVG, and so is one whose doctype holds a quote inside a processing instruction or a comment. The sniffer accepted `<svg` only when whitespace or `>` followed it, so the self-closing form was refused as an unknown file signature: `truss convert` and `truss inspect` exited 3, the server answered `415`, and `@nao1215/truss-wasm` threw `unsupportedInputMediaType`. This is not only a hand-written edge case, because the SVG sanitizer writes `<svg/>` for a root element left with no attributes, such as `<svg onload="..."/>`, so a document truss had just served as SVG output was refused when it was passed back. The sniffer also counted quotes across the whole doctype, so a `"` inside a processing instruction or an apostrophe inside a comment in the internal subset made it end the doctype somewhere the XML parser did not: such a document was refused, or its root was looked for in the wrong place, which could take a non-SVG root for an SVG one. The doctype is now read the way XML defines it, with processing instructions and comments in the subset skipped whole and quotes counted only in the external identifier and in the declarations whose literals may hold `>`, and `<svg` may be followed by `/>`. `<svg/x>`, names that merely start with `svg`, and every other prolog rule are unchanged.
+
 ## v0.26.1
 
 ### Fixed

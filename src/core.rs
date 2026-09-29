@@ -2173,7 +2173,7 @@ fn is_avif(bytes: &[u8]) -> bool {
 /// on either side of the doctype and in any number. Walking a fixed sequence
 /// instead rejects documents real editors produce: Adobe Illustrator writes the
 /// declaration, a generator comment, and then a doctype with an internal subset.
-fn is_svg(bytes: &[u8]) -> bool {
+pub(crate) fn is_svg(bytes: &[u8]) -> bool {
     svg_root_element(bytes).is_some()
 }
 
@@ -2216,43 +2216,87 @@ fn svg_root_element(bytes: &[u8]) -> Option<&str> {
         break;
     }
 
-    let is_root = remaining.starts_with("<svg")
-        && remaining
-            .as_bytes()
-            .get(4)
-            .is_some_and(|&b| b == b' ' || b == b'\t' || b == b'\n' || b == b'\r' || b == b'>');
+    // The name ends where the start tag's whitespace, its `>`, or the `/>` of an empty
+    // element begins. `<svg/>` is the sanitizer's own output for a root whose attributes it
+    // all removed, so refusing it made truss refuse what it had just served.
+    let is_root = remaining.strip_prefix("<svg").is_some_and(|after| {
+        after.starts_with([' ', '\t', '\n', '\r', '>']) || after.starts_with("/>")
+    });
     is_root.then_some(remaining)
 }
 
 /// Returns the text after a doctype declaration, or `None` when it is unterminated.
 ///
-/// The terminating `>` is not simply the first one: an internal subset is
-/// delimited by `[` and `]` and declares entities whose replacement text may
-/// contain `>`, and a system identifier is a quoted string that may contain one
-/// too.
+/// The terminating `>` is not simply the first one, and the doctype is read the way XML
+/// defines it rather than by counting quotes throughout. Before the internal subset, the
+/// external identifier's quoted literals may hold `[` and `>`. Inside the subset, which runs
+/// from `[` to `]`, a processing instruction runs to its `?>` and a comment to its `-->`,
+/// whatever quotes they hold, and an entity, attribute-list, or notation declaration to the
+/// first `>` outside its quoted literals, which may hold `>`; any other markup ends at its
+/// first `>`. After the subset, the next `>` ends the doctype.
+///
+/// Counting quotes everywhere read a `"` inside a processing instruction in the subset as
+/// the start of a literal and ended the doctype somewhere the XML parser did not, so the
+/// sniffer and the sanitizer disagreed about where the root element was, and a document
+/// truss served as SVG was refused when it came back.
 fn skip_doctype(rest: &str) -> Option<&str> {
     let bytes = rest.as_bytes();
-    let mut quote: Option<u8> = None;
-    let mut in_subset = false;
+    let find = |from: usize, needle: &[u8]| -> Option<usize> {
+        bytes[from..]
+            .windows(needle.len())
+            .position(|window| window == needle)
+            .map(|offset| from + offset)
+    };
+    // The index just past the quoted literal that opens at `index`.
+    let skip_literal = |index: usize| -> Option<usize> {
+        find(index + 1, &bytes[index..=index]).map(|close| close + 1)
+    };
 
-    for (index, &byte) in bytes.iter().enumerate() {
-        match quote {
-            Some(open) => {
-                if byte == open {
-                    quote = None;
-                }
+    let mut index = 0;
+    loop {
+        match *bytes.get(index)? {
+            b'"' | b'\'' => index = skip_literal(index)?,
+            b'[' => {
+                index += 1;
+                break;
             }
-            None => match byte {
-                b'"' | b'\'' => quote = Some(byte),
-                b'[' => in_subset = true,
-                b']' => in_subset = false,
-                b'>' if !in_subset => return Some(&rest[index + 1..]),
-                _ => {}
-            },
+            b'>' => return Some(&rest[index + 1..]),
+            _ => index += 1,
         }
     }
 
-    None
+    loop {
+        let subset = &bytes[index..];
+        match *subset.first()? {
+            b']' => {
+                index += 1;
+                break;
+            }
+            b'<' if subset.starts_with(b"<?") => index = find(index + 2, b"?>")? + 2,
+            b'<' if subset.starts_with(b"<!--") => index = find(index + 4, b"-->")? + 3,
+            b'<' if [&b"<!ENTITY"[..], b"<!ATTLIST", b"<!NOTATION"]
+                .iter()
+                .any(|keyword| subset.starts_with(keyword)) =>
+            {
+                index += 2;
+                loop {
+                    match *bytes.get(index)? {
+                        b'"' | b'\'' => index = skip_literal(index)?,
+                        b'>' => {
+                            index += 1;
+                            break;
+                        }
+                        _ => index += 1,
+                    }
+                }
+            }
+            b'<' => index = find(index, b">")? + 1,
+            _ => index += 1,
+        }
+    }
+
+    let end = find(index, b">")?;
+    Some(&rest[end + 1..])
 }
 
 /// Extracts SVG metadata. SVGs inherently support transparency.
@@ -4636,6 +4680,17 @@ mod tests {
     #[case::bom_then_declaration(
         "\u{FEFF}<?xml version=\"1.0\"?>\n<svg xmlns=\"http://www.w3.org/2000/svg\"><rect/></svg>"
     )]
+    #[case::self_closing_root("<svg/>")]
+    #[case::declaration_then_self_closing_root("<?xml version=\"1.0\"?>\n<svg/>")]
+    #[case::quote_inside_a_processing_instruction_in_the_subset(
+        "<!DOCTYPE svg [<?pi \"?>]><svg xmlns=\"http://www.w3.org/2000/svg\"/>"
+    )]
+    #[case::quote_inside_a_comment_in_the_subset(
+        "<!DOCTYPE svg [<!-- it's -->]><svg xmlns=\"http://www.w3.org/2000/svg\"/>"
+    )]
+    #[case::angle_bracket_in_an_attribute_list_default(
+        "<!DOCTYPE svg [<!ATTLIST svg a CDATA \"x > y\">]><svg xmlns=\"http://www.w3.org/2000/svg\"/>"
+    )]
     fn sniff_artifact_accepts_every_legal_svg_prolog(#[case] document: &str) {
         let artifact = sniff_artifact(RawArtifact::new(document.as_bytes().to_vec(), None))
             .unwrap_or_else(|err| panic!("prolog should be recognized as SVG, got: {err}"));
@@ -4716,6 +4771,10 @@ mod tests {
     #[case::unterminated_declaration("<?xml version=\"1.0\"\n<svg/>")]
     #[case::unterminated_comment("<!-- never closed\n<svg/>")]
     #[case::unterminated_internal_subset("<!DOCTYPE svg [<!ENTITY a \"b\">\n<svg/>")]
+    #[case::slash_not_closing_the_tag("<svg/x>")]
+    #[case::root_found_only_by_counting_quotes_across_a_processing_instruction(
+        "<!DOCTYPE svg [<?pi \"?>]><html a=\"]><svg \"/>"
+    )]
     fn sniff_artifact_does_not_claim_non_svg_documents(#[case] document: &str) {
         let result = sniff_artifact(RawArtifact::new(document.as_bytes().to_vec(), None));
         assert!(
