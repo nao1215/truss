@@ -1097,7 +1097,7 @@ fn encode_raster_output(
                 }
                 #[cfg(not(feature = "webp-lossy"))]
                 {
-                    let _ = q;
+                    let _: u8 = q;
                     return Err(TransformError::CapabilityMissing(
                         "lossy WebP encoding is not enabled in this build".into(),
                     ));

@@ -16,5 +16,11 @@ pub mod server;
 /// feature, so without the feature nothing calls them by construction. That is what the
 /// allow says; it is not a licence for dead code inside the module, which the `wasm` build
 /// still reports.
-#[cfg_attr(not(feature = "wasm"), allow(dead_code))]
+#[cfg_attr(
+    not(feature = "wasm"),
+    allow(
+        dead_code,
+        reason = "the entry points are called only by the wasm_bindgen glue, which exists only under the feature"
+    )
+)]
 pub mod wasm;

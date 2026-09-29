@@ -7,6 +7,15 @@
 //! - The `draining` flag causes `/health/ready` to return 503.
 //! - In-flight requests complete before the server exits.
 //! - The `serve_with_config` function terminates when a signal is received.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::let_underscore_must_use,
+    clippy::let_underscore_untyped,
+    clippy::unused_result_ok,
+    reason = "the error-handling lints in Cargo.toml are for the code that ships; a test or benchmark stops at the first thing it cannot set up, and discards what it does not assert on"
+)]
 
 mod common;
 

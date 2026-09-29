@@ -106,7 +106,10 @@ pub(crate) fn stderr_write(msg: &str) {
 }
 
 #[cfg(test)]
-#[allow(unused_imports)] // Some imports are only used by feature-gated tests (e.g. s3).
+#[allow(
+    unused_imports,
+    reason = "some imports are used only by the tests of a storage feature, such as s3"
+)]
 mod tests {
     use super::config::default_max_concurrent_transforms;
     use super::config::{

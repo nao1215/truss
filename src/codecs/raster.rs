@@ -2247,7 +2247,7 @@ fn encode_webp_lossy_bytes(image: &DynamicImage, quality: u8) -> Result<Vec<u8>,
     }
     #[cfg(not(feature = "webp-lossy"))]
     {
-        let _ = (image, quality);
+        let _: (&DynamicImage, u8) = (image, quality);
         Err(TransformError::CapabilityMissing(
             "lossy WebP encoding is not enabled in this build".to_string(),
         ))

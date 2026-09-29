@@ -59,6 +59,18 @@
 //! assert_eq!((region.width, colour.a, size.height), (10, 255, 10));
 //! ```
 
+// The error-handling lints in Cargo.toml are for the code that ships, and `clippy.toml` already
+// lets a test unwrap, expect and panic.
+#![cfg_attr(
+    test,
+    allow(
+        clippy::let_underscore_must_use,
+        clippy::let_underscore_untyped,
+        clippy::unused_result_ok,
+        reason = "a test discards what it does not assert on, mostly the result of removing its own temporary files"
+    )
+)]
+
 // The module tree is private and the `pub use` block below is the API. Publishing the
 // modules made every `pub` item under them reachable, which was 124 items to advertise 55,
 // and a 1.0 freezes whatever is reachable rather than whatever was meant.
