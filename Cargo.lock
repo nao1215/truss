@@ -4412,7 +4412,7 @@ dependencies = [
 
 [[package]]
 name = "truss-image"
-version = "0.26.1"
+version = "0.27.0"
 dependencies = [
  "aws-config",
  "aws-sdk-s3",
