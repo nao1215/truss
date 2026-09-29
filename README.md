@@ -78,6 +78,24 @@ The `features` array tells you which optional features a given binary was built 
 
 Pin a tag rather than following the latest release. Archive names, URLs and digests are all specific to one tag.
 
+#### Verifying a release
+
+From v0.26.0 on, `checksums.txt` is signed with cosign, the release carries SLSA provenance, and the container image is signed by digest. The license texts of every crate in the binaries are attached as `truss-<tag>-THIRD_PARTY_LICENSES.html` and are in the image at `/usr/share/doc/truss/THIRD_PARTY_LICENSES.html`. With the files of one release (`<tag>` such as `v0.26.0`) in the current directory:
+
+```sh
+sha256sum --ignore-missing --check checksums.txt
+cosign verify-blob --bundle checksums.txt.sigstore.json \
+  --certificate-identity "https://github.com/nao1215/truss/.github/workflows/release.yml@refs/tags/<tag>" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  checksums.txt
+slsa-verifier verify-artifact <archive> --provenance-path truss-<tag>.intoto.jsonl \
+  --source-uri github.com/nao1215/truss --source-tag <tag>
+gh attestation verify <archive> --repo nao1215/truss
+cosign verify ghcr.io/nao1215/truss:<version> \
+  --certificate-identity "https://github.com/nao1215/truss/.github/workflows/release.yml@refs/tags/<tag>" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
 ### JavaScript Packages
 
 Install only the package you need:
