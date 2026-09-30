@@ -233,6 +233,13 @@ fn decode_input(input: &Artifact) -> Result<DynamicImage, TransformError> {
     if input.media_type == MediaType::Png {
         validate_png_palette(&input.bytes)?;
     }
+    if input.media_type == MediaType::Webp {
+        // The decoder may reserve memory from an EXIF chunk's declared size
+        // before checking whether that many bytes exist in the container.
+        parse_webp_chunks(&input.bytes).map_err(|_error| {
+            TransformError::DecodeFailed("webp image data is incomplete or corrupt".into())
+        })?;
+    }
     let image_format = match input.media_type {
         MediaType::Jpeg => ImageFormat::Jpeg,
         MediaType::Png => ImageFormat::Png,
@@ -3238,6 +3245,20 @@ mod tests {
             "{result:?}"
         );
         assert!(super::validate_png_palette(&crate::test_support::flat_png(2, 2)).is_ok());
+    }
+
+    #[test]
+    fn oversized_webp_exif_chunk_is_rejected_before_decode() {
+        let artifact = Artifact::new(
+            include_bytes!("testdata/webp_exif_oversize.webp").to_vec(),
+            MediaType::Webp,
+            ArtifactMetadata::default(),
+        );
+        let result = super::decode_input(&artifact);
+        assert!(
+            matches!(result, Err(TransformError::DecodeFailed(_))),
+            "{result:?}"
+        );
     }
 
     /// Reads a RIFF chunk payload straight out of a WebP container.
