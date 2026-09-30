@@ -121,9 +121,20 @@ fn check_at_rules(css: &str) {
     let mut quote = None;
     let mut index = 0;
     while index < bytes.len() {
+        if quote.is_none() && bytes[index..].starts_with(b"/*") {
+            index += bytes[index + 2..]
+                .windows(2)
+                .position(|pair| pair == b"*/")
+                .map_or(bytes.len() - index, |end| end + 4);
+            continue;
+        }
         let byte = bytes[index];
         match quote {
             Some(open) if byte == open => quote = None,
+            // CSS ends a malformed string at an unescaped newline. The next
+            // quote starts a new string; keeping the old one hid or exposed
+            // later @-rules incorrectly in fuzz-generated stylesheets.
+            Some(_) if matches!(byte, b'\n' | b'\r' | 0x0c) => quote = None,
             Some(_) => {}
             None if byte == b'"' || byte == b'\'' => quote = Some(byte),
             None if byte == b'@' => {
