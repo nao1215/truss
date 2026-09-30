@@ -230,6 +230,9 @@ pub(crate) fn apply_pixel_stages(
 }
 
 fn decode_input(input: &Artifact) -> Result<DynamicImage, TransformError> {
+    if input.media_type == MediaType::Png {
+        validate_png_palette(&input.bytes)?;
+    }
     let image_format = match input.media_type {
         MediaType::Jpeg => ImageFormat::Jpeg,
         MediaType::Png => ImageFormat::Png,
@@ -244,8 +247,49 @@ fn decode_input(input: &Artifact) -> Result<DynamicImage, TransformError> {
         }
     };
 
-    image::load_from_memory_with_format(&input.bytes, image_format)
-        .map_err(|error| decode_failure(input.media_type, &error))
+    contain_codec_panic(
+        || {
+            TransformError::DecodeFailed(format!(
+                "{} image data is incomplete or corrupt",
+                input.media_type.as_name()
+            ))
+        },
+        || {
+            image::load_from_memory_with_format(&input.bytes, image_format)
+                .map_err(|error| decode_failure(input.media_type, &error))
+        },
+    )
+}
+
+/// Reject malformed PLTE lengths before the png decoder expands palette entries.
+/// png 0.18.1 indexes the palette in triples and panics on a partial entry.
+fn validate_png_palette(bytes: &[u8]) -> Result<(), TransformError> {
+    let invalid = || TransformError::DecodeFailed("png image data is incomplete or corrupt".into());
+    let mut offset = 8;
+    while offset + 12 <= bytes.len() {
+        let length = u32::from_be_bytes([
+            bytes[offset],
+            bytes[offset + 1],
+            bytes[offset + 2],
+            bytes[offset + 3],
+        ]) as usize;
+        let end = offset
+            .checked_add(12)
+            .and_then(|start| start.checked_add(length))
+            .ok_or_else(invalid)?;
+        if end > bytes.len() {
+            return Err(invalid());
+        }
+        let kind = &bytes[offset + 4..offset + 8];
+        if kind == b"PLTE" && (length == 0 || length > 768 || !length.is_multiple_of(3)) {
+            return Err(invalid());
+        }
+        if kind == b"IEND" {
+            break;
+        }
+        offset = end;
+    }
+    Ok(())
 }
 
 /// The sentence truss gives a decode failure, in place of the decoder's own.
@@ -286,7 +330,6 @@ fn decode_failure(media_type: MediaType, error: &image::ImageError) -> Transform
 ///
 /// The closure takes nothing by mutable reference and writes nothing outside itself, so there
 /// is no state a panic could leave half-written; that is what [`AssertUnwindSafe`] asserts.
-#[cfg(feature = "webp-lossy")]
 fn contain_codec_panic<T>(
     on_panic: impl FnOnce() -> TransformError,
     run: impl FnOnce() -> Result<T, TransformError>,
@@ -3185,6 +3228,17 @@ mod tests {
     /// encoder the image crate offers.
     const LIBWEBP_LOSSLESS: &[u8] =
         include_bytes!("../../integration/fixtures/libwebp-lossless.webp");
+
+    #[test]
+    fn malformed_png_palette_is_rejected_before_decode() {
+        let malformed = include_bytes!("testdata/png_palette_crash.png");
+        let result = super::validate_png_palette(malformed);
+        assert!(
+            matches!(result, Err(TransformError::DecodeFailed(_))),
+            "{result:?}"
+        );
+        assert!(super::validate_png_palette(&crate::test_support::flat_png(2, 2)).is_ok());
+    }
 
     /// Reads a RIFF chunk payload straight out of a WebP container.
     fn webp_chunk_payload(bytes: &[u8], fourcc: &[u8; 4]) -> Option<Vec<u8>> {

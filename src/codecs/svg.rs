@@ -1218,6 +1218,12 @@ fn end_of_at_rule(s: &str) -> usize {
 ///   escaped parenthesis in a name — is emptied or separated, so that a reader who tokenizes
 ///   CSS differently cannot take it for one.
 fn sanitize_css(css: &str) -> String {
+    // A nested CDATA opener is ordinary text inside an XML CDATA section, but
+    // its malformed CSS can hide later tokens from this scanner. Discard the
+    // stylesheet rather than emit text a renderer may interpret differently.
+    if css.contains("<![CDATA[") {
+        return String::new();
+    }
     let mut out = String::with_capacity(css.len());
     // One entry per open parenthesis: `true` when a string inside it is a URL.
     let mut parens: Vec<bool> = Vec::new();
@@ -2477,6 +2483,13 @@ mod tests {
             result.contains("fill: red"),
             "legitimate CSS should be preserved"
         );
+    }
+
+    #[test]
+    fn sanitize_removes_import_from_malformed_cdata_style() {
+        let svg = include_bytes!("testdata/svg_import_cdata.svg");
+        let result = sanitize_svg(svg).unwrap();
+        assert!(!result.contains("@import"), "{result}");
     }
 
     #[test]
