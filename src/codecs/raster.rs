@@ -45,6 +45,13 @@ pub(crate) fn transform_raster(
     request: TransformRequest,
 ) -> Result<TransformResult, TransformError> {
     let normalized = request.normalize()?;
+    // Validate containers before passthrough optimization and metadata reads;
+    // both paths can open a decoder before decode_input is called.
+    match normalized.input.media_type {
+        MediaType::Png => validate_png_palette(&normalized.input.bytes)?,
+        MediaType::Webp => validate_webp_chunks(&normalized.input.bytes)?,
+        _ => {}
+    }
     if let Some(result) = try_passthrough_lossless_optimization(&normalized)? {
         return Ok(result);
     }
@@ -230,16 +237,6 @@ pub(crate) fn apply_pixel_stages(
 }
 
 fn decode_input(input: &Artifact) -> Result<DynamicImage, TransformError> {
-    if input.media_type == MediaType::Png {
-        validate_png_palette(&input.bytes)?;
-    }
-    if input.media_type == MediaType::Webp {
-        // The decoder may reserve memory from an EXIF chunk's declared size
-        // before checking whether that many bytes exist in the container.
-        parse_webp_chunks(&input.bytes).map_err(|_error| {
-            TransformError::DecodeFailed("webp image data is incomplete or corrupt".into())
-        })?;
-    }
     let image_format = match input.media_type {
         MediaType::Jpeg => ImageFormat::Jpeg,
         MediaType::Png => ImageFormat::Png,
@@ -266,6 +263,14 @@ fn decode_input(input: &Artifact) -> Result<DynamicImage, TransformError> {
                 .map_err(|error| decode_failure(input.media_type, &error))
         },
     )
+}
+
+/// The WebP decoder may reserve memory from a chunk's declared size before
+/// checking whether the payload exists. Walk the RIFF chunks before opening it.
+fn validate_webp_chunks(bytes: &[u8]) -> Result<(), TransformError> {
+    parse_webp_chunks(bytes).map(|_| ()).map_err(|_error| {
+        TransformError::DecodeFailed("webp image data is incomplete or corrupt".into())
+    })
 }
 
 /// Reject malformed PLTE lengths before the png decoder expands palette entries.
@@ -3249,12 +3254,12 @@ mod tests {
 
     #[test]
     fn oversized_webp_exif_chunk_is_rejected_before_decode() {
-        let artifact = Artifact::new(
+        let artifact = sniff_artifact(RawArtifact::new(
             include_bytes!("testdata/webp_exif_oversize.webp").to_vec(),
-            MediaType::Webp,
-            ArtifactMetadata::default(),
-        );
-        let result = super::decode_input(&artifact);
+            None,
+        ))
+        .expect("WebP header sniffs");
+        let result = transform_raster(TransformRequest::new(artifact, TransformOptions::default()));
         assert!(
             matches!(result, Err(TransformError::DecodeFailed(_))),
             "{result:?}"
