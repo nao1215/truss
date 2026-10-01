@@ -52,13 +52,6 @@ pub(super) fn check_at_rules(css: &str) {
             // `\A` inside a string represents a newline but does not end it.
             Some(_) if matches!(byte, b'\n' | b'\r' | 0x0c) => quote = None,
             Some(_) => {}
-            // Outside strings an escaped `@` is part of an identifier, not
-            // the start of an at-rule. An escaped quote must not open a string
-            // and hide a later real @import either.
-            None if byte == b'\\' => {
-                index += css_escape_len(bytes, index);
-                continue;
-            }
             None if bytes[index..].starts_with(b"/*") => {
                 index += bytes[index + 2..]
                     .windows(2)
@@ -69,28 +62,65 @@ pub(super) fn check_at_rules(css: &str) {
             None if byte == b'"' || byte == b'\'' => quote = Some(byte),
             None if byte == b'@' => {
                 let start = index + 1;
-                let mut end = start;
-                while end < bytes.len() {
-                    if bytes[end] == b'\\' {
-                        end += css_escape_len(bytes, end);
-                    } else if bytes[end].is_ascii_alphanumeric()
-                        || matches!(bytes[end], b'-' | b'_')
-                    {
-                        end += 1;
-                    } else {
-                        break;
-                    }
-                }
+                let end = css_name_end(bytes, start);
                 let raw_name = String::from_utf8_lossy(&bytes[start..end]);
                 let name = decode_css_escapes(&raw_name).to_ascii_lowercase();
                 assert_ne!(name, "import", "@import survived sanitization");
                 index = end;
                 continue;
             }
+            None if is_css_name_byte(byte) || byte == b'\\' => {
+                // Consume identifiers whole: escaped `@` and quotes have no
+                // syntactic meaning here. An unquoted url() is one token too,
+                // so @import in its fragment is not an at-rule.
+                let end = css_name_end(bytes, index);
+                let name = decode_css_escapes(&String::from_utf8_lossy(&bytes[index..end]));
+                index = end;
+                if name.eq_ignore_ascii_case("url") && bytes.get(index) == Some(&b'(') {
+                    index += 1;
+                    while bytes
+                        .get(index)
+                        .is_some_and(|b| matches!(b, b' ' | b'\t' | b'\n' | b'\r' | 0x0c))
+                    {
+                        index += 1;
+                    }
+                    if !matches!(bytes.get(index), Some(b'"' | b'\'')) {
+                        // Bad URL remnants also end at the next unescaped ')'.
+                        while index < bytes.len() {
+                            match bytes[index] {
+                                b')' => {
+                                    index += 1;
+                                    break;
+                                }
+                                b'\\' => index += css_escape_len(bytes, index),
+                                _ => index += 1,
+                            }
+                        }
+                    }
+                }
+                continue;
+            }
             None => {}
         }
         index += 1;
     }
+}
+
+fn is_css_name_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_') || !byte.is_ascii()
+}
+
+fn css_name_end(bytes: &[u8], mut end: usize) -> usize {
+    while end < bytes.len() {
+        if bytes[end] == b'\\' {
+            end += css_escape_len(bytes, end);
+        } else if is_css_name_byte(bytes[end]) {
+            end += 1;
+        } else {
+            break;
+        }
+    }
+    end
 }
 
 fn css_escape_len(bytes: &[u8], start: usize) -> usize {
