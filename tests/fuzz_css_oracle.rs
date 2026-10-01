@@ -1,6 +1,6 @@
 //! Regression tests for the independent CSS checks used by the SVG fuzz target.
 
-#[path = "../fuzz/fuzz_targets/css_oracle.rs"]
+#[path = "common/fuzz_css_oracle.rs"]
 mod css_oracle;
 
 use css_oracle::check_at_rules;

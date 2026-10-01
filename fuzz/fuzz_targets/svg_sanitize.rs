@@ -13,6 +13,7 @@
 //!   no processing instruction, and no external or nested entity in the doctype.
 #![no_main]
 
+#[path = "../../tests/common/fuzz_css_oracle.rs"]
 mod css_oracle;
 
 use css_oracle::{check_at_rules, decode_css_escapes};
