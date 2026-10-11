@@ -1302,8 +1302,11 @@ fn sanitize_css(css: &str) -> String {
                         } else {
                             consume_css_url_token(after)
                         };
+                    // A kept argument that spells `url(` is the trap a string or a comment
+                    // that spells it is, so it goes the same way.
+                    let argument = &after[..consumed];
                     match url {
-                        Some(url) if !is_dangerous_href(&url) => {
+                        Some(url) if !is_dangerous_href(&url) && !spells_url_function(argument) => {
                             out.push_str(&rest[..length + 1 + consumed]);
                         }
                         _ => out.push_str("url()"),
@@ -3001,10 +3004,34 @@ mod tests {
     #[case::in_a_comment("/* url(http://evil.example/a) */rect{fill:red}")]
     #[case::longer_function_name("rect{fill:xurl(http://evil.example/a)}")]
     #[case::escaped_parenthesis_in_a_name("rect{fill:url\\28 http://evil.example/a)}")]
+    #[case::in_an_unterminated_string_of_a_url(
+        "rect{fill:url('#a(x);stroke:url(http://evil.example/a);}"
+    )]
     fn sanitize_does_not_keep_the_spelling_of_url_anywhere(#[case] css: &str) {
         let svg = format!("<svg xmlns=\"http://www.w3.org/2000/svg\"><style>{css}</style></svg>");
         let once = sanitize_svg(svg.as_bytes()).unwrap();
         assert_no_external_url_in_stylesheets(&once);
+        let twice = sanitize_svg(once.as_bytes()).unwrap();
+        assert_eq!(once, twice, "sanitizing `{css}` is not a fixed point");
+    }
+
+    /// The string of a `url("#...")` is a fragment to a renderer however much follows the
+    /// `#`, but a string that also spells `url(` is the same trap as any other string that
+    /// does: a reader that ends the string early, or never starts it, finds a second `url(`
+    /// naming an external resource. A string that runs to the end of the stylesheet, because
+    /// its quote is never closed, swallows every declaration after it the same way.
+    #[rstest]
+    #[case::closed_string("rect{fill:url('#a;url(http://evil.example/a)')}")]
+    #[case::unterminated_string("rect{fill:url('#a(x);stroke:url(http://evil.example/a);}")]
+    #[case::escaped_spelling("rect{fill:url(\"#a u\\72 l(http://evil.example/a)\")}")]
+    #[case::upper_case_spelling("rect{fill:url('#a;URL(http://evil.example/a)')}")]
+    fn sanitize_empties_a_url_whose_string_spells_another_url(#[case] css: &str) {
+        let svg = format!("<svg xmlns=\"http://www.w3.org/2000/svg\"><style>{css}</style></svg>");
+        let once = sanitize_svg(svg.as_bytes()).unwrap();
+        assert!(
+            once.contains("url()") && !once.contains("evil.example"),
+            "`{css}` kept the inner url: {once}"
+        );
         let twice = sanitize_svg(once.as_bytes()).unwrap();
         assert_eq!(once, twice, "sanitizing `{css}` is not a fixed point");
     }

@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Security
+
+- The SVG sanitizer no longer keeps a `url("#...")` whose string also spells `url(`, such as `rect{fill:url('#a;url(http://evil.example/a)')}` or a `url('#a` whose quote is never closed and so runs over the declarations after it to the end of the stylesheet. A browser reads the whole string as one fragment and fetches nothing, but a reader that ends the string early, or does not treat it as a string, finds a second `url(` naming an external resource; the sanitizer already empties every other string and comment that spells `url(` for that reason, and now replaces such a `url()` with `url()` too. A `url()` holding a plain fragment or raster `data:image/` URL is kept as before. Every adapter that returns SVG output was affected: `truss convert` with SVG output, the server's SVG responses, and `@nao1215/truss-wasm`.
+
 ## v0.27.0
 
 ### Changed
