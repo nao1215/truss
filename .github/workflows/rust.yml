@@ -64,7 +64,7 @@ jobs:
         # A release tag plus the tool input, not the `nextest` branch: Dependabot
         # reads a branch name as a version and rewrote the pin to a commit
         # without nextest.
-        uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
+        uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe # v2.87.27
         with:
           tool: nextest@0.9.146
 
@@ -256,7 +256,7 @@ jobs:
         # A release tag plus the tool input, not the `nextest` branch: Dependabot
         # reads a branch name as a version and rewrote the pin to a commit
         # without nextest.
-        uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
+        uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe # v2.87.27
         with:
           tool: nextest@0.9.146
 
