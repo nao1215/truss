@@ -23,6 +23,10 @@ updates:
     schedule:
       interval: weekly
       day: monday
+    groups:
+      codeql:
+        patterns:
+          - "github/codeql-action/*"
   - package-ecosystem: npm
     directory: "/packages/truss-wasm"
     schedule:
