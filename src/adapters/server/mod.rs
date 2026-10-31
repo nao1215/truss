@@ -1158,6 +1158,7 @@ mod tests {
                 std::time::Duration::from_secs(30),
             ),
             reason: ureq::Timeout::Resolve,
+            ..Default::default()
         };
 
         let uri: ureq::http::Uri = "https://example.com/path".parse().unwrap();
@@ -1172,6 +1173,7 @@ mod tests {
                 std::time::Duration::from_secs(30),
             ),
             reason: ureq::Timeout::Resolve,
+            ..Default::default()
         };
         let error = resolver
             .resolve(&bad_uri, &config, timeout2)
