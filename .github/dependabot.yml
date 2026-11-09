@@ -1,53 +1,86 @@
 version: 2
+# Each entry opens at most one version-update PR a month: the group takes every
+# dependency of that ecosystem and directory. The groups cover version updates
+# only (applies-to: version-updates): security updates are not grouped and do
+# not follow the monthly schedule, so each opens its own PR when Dependabot
+# raises an alert.
 updates:
   - package-ecosystem: cargo
     directory: "/"
     schedule:
-      interval: weekly
-      day: monday
+      interval: monthly
     open-pull-requests-limit: 10
+    groups:
+      cargo:
+        applies-to: version-updates
+        patterns:
+          - "*"
   # The base images are pinned by digest; this keeps the digests current.
   - package-ecosystem: docker
     directory: "/"
     schedule:
-      interval: weekly
-      day: monday
+      interval: monthly
+    groups:
+      docker:
+        applies-to: version-updates
+        patterns:
+          - "*"
   - package-ecosystem: cargo
     directory: "/fuzz"
     schedule:
-      interval: weekly
-      day: monday
+      interval: monthly
     open-pull-requests-limit: 5
+    groups:
+      cargo-fuzz:
+        applies-to: version-updates
+        patterns:
+          - "*"
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
-      interval: weekly
-      day: monday
+      interval: monthly
     groups:
-      codeql:
+      github-actions:
+        applies-to: version-updates
         patterns:
-          - "github/codeql-action/*"
+          - "*"
   - package-ecosystem: npm
     directory: "/packages/truss-wasm"
     schedule:
-      interval: weekly
-      day: monday
+      interval: monthly
     open-pull-requests-limit: 5
+    groups:
+      npm-truss-wasm:
+        applies-to: version-updates
+        patterns:
+          - "*"
   - package-ecosystem: npm
     directory: "/packages/truss-url-signer"
     schedule:
-      interval: weekly
-      day: monday
+      interval: monthly
     open-pull-requests-limit: 5
+    groups:
+      npm-truss-url-signer:
+        applies-to: version-updates
+        patterns:
+          - "*"
   - package-ecosystem: npm
     directory: "/examples/vite-truss-wasm"
     schedule:
-      interval: weekly
-      day: monday
+      interval: monthly
     open-pull-requests-limit: 5
+    groups:
+      npm-vite-truss-wasm:
+        applies-to: version-updates
+        patterns:
+          - "*"
   - package-ecosystem: npm
     directory: "/examples/nextjs"
     schedule:
-      interval: weekly
-      day: monday
+      interval: monthly
     open-pull-requests-limit: 5
+    groups:
+      npm-nextjs:
+        applies-to: version-updates
+        patterns:
+          - "*"
