@@ -1,10 +1,16 @@
 # Changelog
 
-## Unreleased
+## v0.27.1
 
 ### Security
 
+- The release binaries, the container image and the npm packages are built with fixed versions of three dependencies that had advisories against the versions in v0.27.0. rustls-webpki 0.103.16 rejects certificate paths that contain the distrusted emSign intermediates whose private keys are publicly known (RUSTSEC-2026-0382), so an HTTPS fetch for `truss convert --url`, a remote source on the server, or a request to S3, GCS or Azure can no longer accept a certificate chained through them. rustls 0.23.46 fixes RUSTSEC-2026-0346, RUSTSEC-2026-0347, RUSTSEC-2026-0348 and RUSTSEC-2026-0349. ctutils 0.4.7, used under the HMAC and SHA-256 code that signs and verifies URLs, no longer branches on secret values in its mask generation and `u128` comparisons (RUSTSEC-2026-0385). People who depend on truss-image as a library pick up the fixed versions with `cargo update`.
+
 - The SVG sanitizer no longer keeps a `url("#...")` whose string also spells `url(`, such as `rect{fill:url('#a;url(http://evil.example/a)')}` or a `url('#a` whose quote is never closed and so runs over the declarations after it to the end of the stylesheet. A browser reads the whole string as one fragment and fetches nothing, but a reader that ends the string early, or does not treat it as a string, finds a second `url(` naming an external resource; the sanitizer already empties every other string and comment that spells `url(` for that reason, and now replaces such a `url()` with `url()` too. A `url()` holding a plain fragment or raster `data:image/` URL is kept as before. Every adapter that returns SVG output was affected: `truss convert` with SVG output, the server's SVG responses, and `@nao1215/truss-wasm`.
+
+### Fixed
+
+- A PNG whose `PLTE` chunk is empty, longer than 768 bytes or not a whole number of RGB entries, and a WebP whose chunk declares more bytes than the file holds, are refused as `png image data is incomplete or corrupt` and `webp image data is incomplete or corrupt` before a decoder opens them. The PNG decoder indexed the palette in triples and panicked on a partial entry, and the WebP decoder could reserve memory for the declared size before finding the data missing. The check runs ahead of the lossless passthrough and the metadata read as well, since both open a decoder. Well-formed PNG and WebP input is unaffected.
 
 ## v0.27.0
 
