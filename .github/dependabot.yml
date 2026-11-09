@@ -1,8 +1,9 @@
 version: 2
 # Each entry opens at most one version-update PR a month: the group takes every
-# dependency of that ecosystem and directory. Security updates are not grouped
-# (applies-to: version-updates), so they still arrive as soon as an advisory
-# is published.
+# dependency of that ecosystem and directory. The groups cover version updates
+# only (applies-to: version-updates): security updates are not grouped and do
+# not follow the monthly schedule, so each opens its own PR when Dependabot
+# raises an alert.
 updates:
   - package-ecosystem: cargo
     directory: "/"
