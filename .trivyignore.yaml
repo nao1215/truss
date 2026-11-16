@@ -1,0 +1,9 @@
+misconfigurations:
+  - id: DS-0026
+    paths:
+      - Dockerfile
+      - Dockerfile.release
+    statement: >-
+      The image ships no HTTP client to run a Docker HEALTHCHECK with;
+      orchestrators probe /health/live and /health/ready directly, as
+      docs/deployment.md describes.
