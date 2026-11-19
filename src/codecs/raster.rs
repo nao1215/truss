@@ -1093,7 +1093,7 @@ fn pad_to_box(
         position,
     );
 
-    imageops::overlay(&mut canvas, &resized, i64::from(x), i64::from(y));
+    place_on_canvas(&mut canvas, &resized, i64::from(x), i64::from(y), fill);
     DynamicImage::ImageRgba8(canvas)
 }
 
@@ -1139,7 +1139,7 @@ fn cover_to_box(
     );
     let cropped = imageops::crop_imm(&resized, crop_x, crop_y, crop_width, crop_height).to_image();
 
-    imageops::overlay(&mut canvas, &cropped, 0, 0);
+    place_on_canvas(&mut canvas, &cropped, 0, 0, fill);
     DynamicImage::ImageRgba8(canvas)
 }
 
@@ -1166,6 +1166,21 @@ fn position_offset(
     };
 
     (x, y)
+}
+
+/// Puts the image onto a canvas of `fill`, as the image would look laid over that fill.
+///
+/// Over a fill with any opacity the image is composited, so a partly transparent pixel shows
+/// the background through it. Over a fully transparent fill compositing changes nothing in
+/// exact arithmetic, but `imageops::overlay` blends in floating point and rounds, which moved
+/// a channel of a partly transparent pixel by one level. Copying the pixels is the exact
+/// answer there, so a `contain` or `cover` that only pads or crops returns them unchanged.
+fn place_on_canvas(canvas: &mut RgbaImage, image: &RgbaImage, x: i64, y: i64, fill: Rgba<u8>) {
+    if fill[3] == 0 {
+        imageops::replace(canvas, image, x, y);
+    } else {
+        imageops::overlay(canvas, image, x, y);
+    }
 }
 
 fn background_pixel(background: Option<Rgba8>, output_format: MediaType) -> Rgba<u8> {
@@ -5245,6 +5260,87 @@ mod tests {
 
         assert!(!encoded_png_has_alpha(&result.artifact.bytes));
         assert_eq!(result.artifact.metadata.has_alpha, Some(false));
+    }
+
+    /// A 4x4 image whose pixels are all partly transparent, each a different colour, so a
+    /// channel that moves by one level anywhere shows up.
+    fn translucent_image() -> RgbaImage {
+        RgbaImage::from_fn(4, 4, |x, y| {
+            let i = (y * 4 + x) as u8;
+            Rgba([63 + i * 11, 95 + i * 7, 10 + i * 13, 30 + i * 13])
+        })
+    }
+
+    fn translucent_artifact() -> Artifact {
+        let image = translucent_image();
+        let mut bytes = Vec::new();
+        PngEncoder::new(&mut bytes)
+            .write_image(&image, 4, 4, ColorType::Rgba8.into())
+            .expect("encode png");
+        sniff_artifact(RawArtifact::new(bytes, None)).expect("sniff png")
+    }
+
+    fn resize_translucent(
+        width: u32,
+        height: u32,
+        fit: Fit,
+        without_enlargement: bool,
+    ) -> RgbaImage {
+        let result = transform_raster(TransformRequest::new(
+            translucent_artifact(),
+            TransformOptions {
+                width: Some(width),
+                height: Some(height),
+                fit: Some(fit),
+                without_enlargement,
+                ..TransformOptions::default()
+            },
+        ))
+        .expect("transform");
+        image::load_from_memory(&result.artifact.bytes)
+            .expect("decode output")
+            .to_rgba8()
+    }
+
+    #[rstest]
+    // The box is the image: nothing is resized or padded.
+    #[case::same_size(4, 4, 0)]
+    // The box is wider: the image is centred with two columns of padding on each side.
+    #[case::padded(8, 4, 2)]
+    fn contain_keeps_translucent_pixels_over_a_transparent_fill(
+        #[case] width: u32,
+        #[case] height: u32,
+        #[case] offset: u32,
+    ) {
+        let output = resize_translucent(width, height, Fit::Contain, false);
+        let content = image::imageops::crop_imm(&output, offset, 0, 4, 4).to_image();
+        assert_eq!(content, translucent_image());
+        // The padding is the transparent fill the content was placed onto.
+        for x in (0..offset).chain(offset + 4..width) {
+            for y in 0..height {
+                assert_eq!(
+                    output.get_pixel(x, y),
+                    &Rgba([0, 0, 0, 0]),
+                    "padding at {x},{y}"
+                );
+            }
+        }
+    }
+
+    #[rstest]
+    // The box is narrower than the image at its own scale, so the middle two columns are cut.
+    #[case::cropped(2, 4, false)]
+    // The box is taller than the image, and --without-enlargement keeps the scale at one, so
+    // the output is the middle two columns at the image's own height.
+    #[case::clamped(2, 8, true)]
+    fn cover_keeps_translucent_pixels_when_it_crops(
+        #[case] width: u32,
+        #[case] height: u32,
+        #[case] without_enlargement: bool,
+    ) {
+        let output = resize_translucent(width, height, Fit::Cover, without_enlargement);
+        let expected = image::imageops::crop_imm(&translucent_image(), 1, 0, 2, 4).to_image();
+        assert_eq!(output, expected);
     }
 
     #[test]
