@@ -42,13 +42,15 @@ The `Mutation` workflow runs the whole set every Saturday in twelve shards and, 
 
 | Date | Mutants | Score |
 |---|---|---|
-| Not recorded yet | | The first weekly run sets it |
+| Not recorded yet | | |
 
-To run it locally (a full run takes hours; `--file` narrows it):
+A run only writes its score to the job summary. Recording it here and raising `MUTATION_MIN_SCORE` in `.github/workflows/mutation.yml` to match is a change of its own, made after the first full run and again whenever a test raises the score.
+
+To run it locally (a full run takes hours). `--file` adds to the files `.cargo/mutants.toml` names rather than narrowing them, so a run over one file skips the configuration and passes `--lib` itself:
 
 ```sh
 cargo install cargo-mutants --locked
-cargo mutants --file src/core.rs -j 4
+cargo mutants --no-config --file src/core.rs -j 4 -- --lib
 python3 scripts/mutation_score.py mutants.out
 ```
 
