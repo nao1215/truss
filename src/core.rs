@@ -3413,6 +3413,17 @@ fn read_u32_le(bytes: &[u8]) -> Result<u32, TransformError> {
 
 #[cfg(test)]
 mod tests {
+    /// The pixel count is a product in 64 bits, so the largest size does not wrap, and the
+    /// display form is the `WIDTHxHEIGHT` the CLI prints. The doctest says the same, but
+    /// doctests do not run under `cargo test --lib`, which is what the mutation run uses.
+    #[test]
+    fn dimensions_count_and_print_their_pixels() {
+        let size = super::Dimensions::new(u32::MAX, 3);
+        assert_eq!(size.pixel_count(), u64::from(u32::MAX) * 3);
+        assert_eq!(super::Dimensions::new(7, 5).pixel_count(), 35);
+        assert_eq!(super::Dimensions::new(7, 5).to_string(), "7x5");
+    }
+
     /// The two input caps are the numbers `docs/openapi.yaml` publishes, so a change to
     /// either is a change to the document. These were doctests on the constants before the
     /// pair stopped being public; the assertions are the same.
