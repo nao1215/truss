@@ -1,0 +1,20 @@
+# cargo-mutants configuration (https://mutants.rs).
+#
+# Mutation testing changes one operator, constant or return value at a time and
+# checks that some test fails. It is pointed at the code that computes and
+# decides: the transform vocabulary, the size and pixel arithmetic, sniffing, and
+# the SVG sanitizer. The adapters mostly wire those to a process, a socket or a
+# browser and are covered by the integration and end-to-end suites instead.
+examine_globs = [
+  "src/core.rs",
+  "src/core/*.rs",
+  "src/codecs/*.rs",
+]
+
+# The unit tests live beside this code and run in about ten seconds; the
+# integration tests start processes and servers and would multiply every
+# mutant's cost without reaching code the unit tests miss.
+additional_cargo_test_args = ["--lib"]
+
+# A mutant that turns a loop condition around can spin forever.
+timeout_multiplier = 3.0
