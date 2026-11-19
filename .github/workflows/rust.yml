@@ -45,6 +45,10 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
 
+# Every rust-cache step saves only on main. A pull request restores main's
+# cache and does not write its own: each PR copy is 170 to 640 MB, and with
+# eleven of them per run they pushed main's entries out of the repository's
+# 10 GB cache, so the next pull request built every dependency again.
 jobs:
   # ── Always: Ubuntu test + lint (PR and main) ────────────────────────
   test:
@@ -61,6 +65,8 @@ jobs:
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install nextest
         # A release tag plus the tool input, not the `nextest` branch: Dependabot
@@ -91,6 +97,8 @@ jobs:
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Run clippy
         run: cargo clippy --all-features --all-targets -- -D warnings
@@ -125,6 +133,8 @@ jobs:
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Build documentation
         run: cargo doc --no-deps
@@ -154,6 +164,8 @@ jobs:
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Read Wasm package config
         id: wasm-package-config
@@ -162,13 +174,18 @@ jobs:
           version="$(node -p "require('./packages/truss-wasm/package.json').trussWasmBuild.wasmBindgenVersion")"
           echo "wasm_bindgen_version=${version}" >> "$GITHUB_OUTPUT"
 
+      # A prebuilt binary of the version the package pins, instead of building
+      # wasm-bindgen-cli from source, which took about two minutes per runner.
       - name: Install wasm-bindgen CLI
+        uses: taiki-e/install-action@3a3daafd3b7f23b8f65d9f5ba2db203fb59b79e2 # v2.90.2
+        with:
+          tool: wasm-bindgen@${{ steps.wasm-package-config.outputs.wasm_bindgen_version }}
+
+      - name: Check the wasm-bindgen CLI version
         shell: bash
         run: |
           version="${{ steps.wasm-package-config.outputs.wasm_bindgen_version }}"
-          if [ "$(wasm-bindgen --version 2>/dev/null || true)" != "wasm-bindgen ${version}" ]; then
-            cargo install wasm-bindgen-cli --version "${version}"
-          fi
+          test "$(wasm-bindgen --version)" = "wasm-bindgen ${version}"
 
       - name: Verify TypeScript URL signer package version metadata
         run: cd packages/truss-url-signer && npm run check:version
@@ -260,6 +277,8 @@ jobs:
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install nextest
         # A release tag plus the tool input, not the `nextest` branch: Dependabot
@@ -300,6 +319,8 @@ jobs:
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # Tests, not only a check: a build that compiles on the MSRV can still
       # still fail its tests there, and only a test run would show it.
