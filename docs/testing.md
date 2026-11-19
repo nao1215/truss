@@ -42,7 +42,7 @@ The `Mutation` workflow runs the whole set every Saturday in twelve shards and, 
 
 | Date | Mutants | Score |
 |---|---|---|
-| Not recorded yet | | |
+| 2026-11-19 | 2,373 generated: 1,490 caught, 94 timed out, 692 missed, 97 unviable | 69.60% |
 
 A run only writes its score to the job summary. Recording it here and raising `MUTATION_MIN_SCORE` in `.github/workflows/mutation.yml` to match is a change of its own, made after the first full run and again whenever a test raises the score.
 

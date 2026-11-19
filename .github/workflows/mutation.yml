@@ -35,7 +35,7 @@ concurrency:
 env:
   CARGO_TERM_COLOR: never
   # The score recorded in docs/testing.md. Raise it with the document.
-  MUTATION_MIN_SCORE: "0"
+  MUTATION_MIN_SCORE: "69"
 
 jobs:
   diff:
