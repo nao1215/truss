@@ -30,6 +30,30 @@ PROPTEST_CASES=20000 cargo test --release --test transform_metamorphic
 
 A failure becomes a plain unit test with the input proptest printed, fixed on its own branch.
 
+## Differential tests
+
+The URL signer exists twice, in Rust (`sign_public_url_with_method`, used by `truss sign`) and in TypeScript (`@nao1215/truss-url-signer`), and the server verifies what both produce. [tests/ts_url_signer.rs](../tests/ts_url_signer.rs) runs the npm package under Node next to the Rust signer on the same inputs and checks that both produce the same URL byte for byte, including the HEAD canonicalization with a preset and a watermark and a base URL that carries a path, that both refuse the same option sets and credentials, and that the server answers what the TypeScript signer mints. A canonicalization rule changed in one implementation and not the other fails here before a URL signed by one is refused by the server. The tests skip when `node` is not on the path.
+
+## Mutation tests
+
+[cargo-mutants](https://mutants.rs) rewrites one operator, constant or return value at a time in the code that computes and decides, which [.cargo/mutants.toml](../.cargo/mutants.toml) lists as `src/core.rs`, `src/core/` and `src/codecs/`, and runs the unit tests against each rewrite. A rewrite no test notices, such as `*` turned into `+` in a pixel count, is a missed mutant: the line runs under the tests but nothing checks its answer. The adapters are left out because they mostly connect that code to a process, a socket or a browser, which the integration and end-to-end suites cover.
+
+The `Mutation` workflow runs the whole set every Saturday in twelve shards and, on a pull request that touches `src/`, only the mutants on the lines it changes (`cargo mutants --in-diff`). Both fail when the score, caught / (caught + missed) with timeouts counted as caught and mutants that do not compile left out, falls below the recorded score in `MUTATION_MIN_SCORE`. The missed mutants are listed in the job summary. Some are equivalent to the original and no test can catch them, so the recorded score is what the suite reaches today rather than 100%, and it is raised when a test closes a gap.
+
+| Date | Mutants | Score |
+|---|---|---|
+| Not recorded yet | | |
+
+A run only writes its score to the job summary. Recording it here and raising `MUTATION_MIN_SCORE` in `.github/workflows/mutation.yml` to match is a change of its own, made after the first full run and again whenever a test raises the score.
+
+To run it locally (a full run takes hours). `--file` adds to the files `.cargo/mutants.toml` names rather than narrowing them, so a run over one file skips the configuration and passes `--lib` itself:
+
+```sh
+cargo install cargo-mutants --locked
+cargo mutants --no-config --file src/core.rs -j 4 -- --lib
+python3 scripts/mutation_score.py mutants.out
+```
+
 ## Fuzzing
 
 `fuzz/` holds cargo-fuzz targets for the code that reads untrusted input: the sniffer, the transform pipeline, SVG sanitization, signed URLs, raw HTTP requests and multipart uploads. The `Fuzz` workflow runs each target for five minutes every night; [CONTRIBUTING.md](../CONTRIBUTING.md#fuzzing) has the local commands.

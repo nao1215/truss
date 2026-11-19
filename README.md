@@ -732,6 +732,8 @@ See the [public roadmap](https://github.com/nao1215/truss/issues?q=is%3Aissue+la
 | [CLI end-to-end tests](docs/testing.md#cli-end-to-end-tests) | Changed CLI behaviour and output on Linux, macOS and Windows |
 | [Property-based tests](docs/testing.md#property-based-tests) | Off-by-one sizes and print/parse mismatches for inputs nobody listed |
 | [Metamorphic tests](docs/testing.md#metamorphic-tests) | Pixels moved or changed by transforms that should cancel or keep them |
+| [Differential tests](docs/testing.md#differential-tests) | The Rust and TypeScript URL signers drifting apart |
+| [Mutation tests](docs/testing.md#mutation-tests) | Lines the tests run but whose answer no test checks |
 | [Fuzzing](docs/testing.md#fuzzing) | Panics and hangs on malformed images, SVG, URLs and HTTP requests |
 | [Benchmarks](docs/testing.md#benchmarks) | Slower conversions slipping in unnoticed |
 
