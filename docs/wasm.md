@@ -63,7 +63,7 @@ If your product needs lossy WebP support, build your own artifact with the match
 ```sh
 rustup target add wasm32-unknown-unknown
 # Keep this version aligned with Cargo.toml.
-cargo install wasm-bindgen-cli --version 0.2.129
+cargo install wasm-bindgen-cli --version 0.2.130
 
 cargo build \
   --release \

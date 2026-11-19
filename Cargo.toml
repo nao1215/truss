@@ -49,7 +49,7 @@ subtle = { version = "2", optional = true }
 ureq = { version = "3.3.0", optional = true }
 url = { version = "2.5.8", optional = true }
 uuid = { version = "1", features = ["v4"], optional = true }
-wasm-bindgen = { version = "0.2.129", optional = true }
+wasm-bindgen = { version = "0.2.130", optional = true }
 webp = { version = "0.3", optional = true }
 quick-xml = { version = "0.42", optional = true }
 resvg = { version = "0.49", optional = true }

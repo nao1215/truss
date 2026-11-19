@@ -223,5 +223,5 @@ setup:
     @echo "Optional: cargo install cargo-deny"
     @echo "Optional: cargo install git-cliff"
     @echo "Optional: go install github.com/nao1215/himorime@latest"
-    @echo "Optional: cargo install wasm-bindgen-cli --version 0.2.129"
+    @echo "Optional: cargo install wasm-bindgen-cli --version 0.2.130"
     @echo "Optional: rustup target add wasm32-unknown-unknown"
