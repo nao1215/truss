@@ -8278,3 +8278,146 @@ mod tests {
         );
     }
 }
+
+/// Properties of the size arithmetic, checked over generated sizes rather than a table.
+///
+/// The table tests above pin the cases someone thought of. These state what every answer has
+/// to satisfy, whatever the source and the box, because a resize that is one pixel off for one
+/// aspect ratio in a thousand never shows up in a table. The arithmetic runs on dimensions
+/// alone, so a case costs nothing and proptest can try hundreds of them; the nightly workflow
+/// raises `PROPTEST_CASES` to run many more.
+#[cfg(test)]
+mod properties {
+    use super::{resize_content_size, resolved_output_dimensions, rotated_bounding_box};
+    use crate::core::Fit;
+    use proptest::prelude::*;
+
+    /// A side length. Up to 10,000 keeps the products exact in `f64` and still covers the
+    /// extreme aspect ratios (10,000 x 1) where rounding goes wrong.
+    fn side() -> impl Strategy<Value = u32> {
+        1u32..=10_000
+    }
+
+    fn size() -> impl Strategy<Value = (u32, u32)> {
+        (side(), side())
+    }
+
+    fn fit() -> impl Strategy<Value = Fit> {
+        prop_oneof![
+            Just(Fit::Contain),
+            Just(Fit::Cover),
+            Just(Fit::Fill),
+            Just(Fit::Inside)
+        ]
+    }
+
+    proptest! {
+        /// `contain`, `cover` and `fill` promise the requested box exactly when enlarging is
+        /// allowed; only `inside` returns something smaller.
+        #[test]
+        fn a_box_fit_returns_the_box(
+            source in size(),
+            target in size(),
+            fit in prop_oneof![Just(Fit::Contain), Just(Fit::Cover), Just(Fit::Fill)],
+        ) {
+            let output = resolved_output_dimensions(source, Some(target.0), Some(target.1), Some(fit), false);
+            prop_assert_eq!(output, target);
+        }
+
+        /// `inside` stays within the box and touches it on at least one axis, which is what
+        /// separates it from a smaller arbitrary size.
+        #[test]
+        fn inside_fits_the_box_and_touches_it(source in size(), target in size()) {
+            let (width, height) = resolved_output_dimensions(source, Some(target.0), Some(target.1), Some(Fit::Inside), false);
+            prop_assert!(width <= target.0 && height <= target.1, "{width}x{height} leaves the {target:?} box");
+            prop_assert!(width == target.0 || height == target.1, "{width}x{height} touches neither side of {target:?}");
+        }
+
+        /// `inside` keeps the aspect ratio: the scaled sides differ from an exact scale by no
+        /// more than the half pixel each one is rounded by.
+        #[test]
+        fn inside_keeps_the_aspect_ratio(source in size(), target in size()) {
+            let (width, height) = resolved_output_dimensions(source, Some(target.0), Some(target.1), Some(Fit::Inside), false);
+            let scale = f64::min(f64::from(target.0) / f64::from(source.0), f64::from(target.1) / f64::from(source.1));
+            for (got, side) in [(width, source.0), (height, source.1)] {
+                let exact = (f64::from(side) * scale).max(1.0);
+                prop_assert!((f64::from(got) - exact).abs() <= 0.5 + 1e-9, "side {side} scaled by {scale} is {exact}, got {got}");
+            }
+        }
+
+        /// `cover` has to overflow the box to fill it, so the content it scales to is at least
+        /// the box on both axes, and the output it crops back to is the box.
+        #[test]
+        fn cover_content_covers_the_box(source in size(), target in size()) {
+            let content = resize_content_size(source, Some(target.0), Some(target.1), Some(Fit::Cover), false);
+            prop_assert!(content.0 >= target.0 && content.1 >= target.1, "{content:?} does not cover {target:?}");
+        }
+
+        /// `contain` pads, so the content inside the box is never larger than the box.
+        #[test]
+        fn contain_content_fits_the_box(source in size(), target in size()) {
+            let content = resize_content_size(source, Some(target.0), Some(target.1), Some(Fit::Contain), false);
+            prop_assert!(content.0 <= target.0 && content.1 <= target.1, "{content:?} overflows {target:?}");
+        }
+
+        /// `--without-enlargement` never makes the content larger than the source on either
+        /// axis, whatever the fit mode and box.
+        #[test]
+        fn without_enlargement_never_grows_the_content(source in size(), target in size(), fit in fit()) {
+            let content = resize_content_size(source, Some(target.0), Some(target.1), Some(fit), true);
+            prop_assert!(content.0 <= source.0 && content.1 <= source.1, "{content:?} grew past {source:?}");
+        }
+
+        /// `--without-enlargement` changes nothing when the request only shrinks.
+        #[test]
+        fn without_enlargement_is_inert_for_a_shrink(source in size(), fit in fit(), numerator in 1u32..=100) {
+            let target = ((source.0 * numerator / 100).max(1), (source.1 * numerator / 100).max(1));
+            let free = resolved_output_dimensions(source, Some(target.0), Some(target.1), Some(fit), false);
+            let clamped = resolved_output_dimensions(source, Some(target.0), Some(target.1), Some(fit), true);
+            prop_assert_eq!(free, clamped);
+        }
+
+        /// A single axis is a scale request: the named side is exactly what was asked for and
+        /// the other follows the aspect ratio to the nearest pixel.
+        #[test]
+        fn one_axis_keeps_the_aspect_ratio(source in size(), width in side()) {
+            let (got_width, got_height) = resolved_output_dimensions(source, Some(width), None, None, false);
+            prop_assert_eq!(got_width, width);
+            let exact = f64::from(source.1) * f64::from(width) / f64::from(source.0);
+            prop_assert!((f64::from(got_height) - exact.max(1.0)).abs() <= 0.5 + 1e-9, "{source:?} at width {width} gives height {got_height}, exact {exact}");
+        }
+
+        /// Asking for the size the image already has, in any fit mode, is the identity.
+        #[test]
+        fn the_source_size_is_a_fixed_point(source in size(), fit in fit(), without_enlargement in any::<bool>()) {
+            let output = resolved_output_dimensions(source, Some(source.0), Some(source.1), Some(fit), without_enlargement);
+            prop_assert_eq!(output, source);
+        }
+
+        /// The rotated canvas holds the whole image: it is never smaller than either side
+        /// projected onto it, and turning the other way needs the same canvas.
+        #[test]
+        fn a_rotated_canvas_holds_the_image(source in size(), degrees in 0u16..360) {
+            let (width, height) = rotated_bounding_box(source.0, source.1, degrees);
+            let opposite = rotated_bounding_box(source.0, source.1, (360 - degrees) % 360);
+            prop_assert_eq!((width, height), opposite);
+            let radians = f64::from(degrees).to_radians();
+            let (sin, cos) = radians.sin_cos();
+            let need_w = f64::from(source.0) * cos.abs() + f64::from(source.1) * sin.abs();
+            let need_h = f64::from(source.0) * sin.abs() + f64::from(source.1) * cos.abs();
+            prop_assert!(f64::from(width) + 1e-6 >= need_w && f64::from(height) + 1e-6 >= need_h);
+            prop_assert!(f64::from(width) < need_w + 1.0 + 1e-6 && f64::from(height) < need_h + 1.0 + 1e-6, "{width}x{height} is larger than {need_w}x{need_h} needs");
+        }
+
+        /// A half turn and a quarter turn relate the canvas the obvious way: adding 90
+        /// degrees swaps the sides, adding 180 keeps them.
+        #[test]
+        fn a_quarter_turn_swaps_the_canvas(source in size(), degrees in 0u16..360) {
+            let base = rotated_bounding_box(source.0, source.1, degrees);
+            let half = rotated_bounding_box(source.0, source.1, (degrees + 180) % 360);
+            let quarter = rotated_bounding_box(source.0, source.1, (degrees + 90) % 360);
+            prop_assert_eq!(base, half);
+            prop_assert_eq!((base.1, base.0), quarter);
+        }
+    }
+}

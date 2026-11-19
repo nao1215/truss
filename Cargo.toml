@@ -97,6 +97,7 @@ rustls = { version = "0.23", features = ["ring"] }
 rstest = "0.28.0"
 serial_test = "4"
 tempfile = "3"
+proptest = "1.12.0"
 
 [[bench]]
 name = "transform"

@@ -5344,3 +5344,69 @@ mod tests {
         );
     }
 }
+
+/// Properties of the vocabulary's value types, checked over generated values.
+///
+/// Each type has one spelling the adapters print and parse (the CLI flag, the query string,
+/// the signed URL, the cache key), so printing and parsing have to agree for every value,
+/// and two spellings of the same rotation have to land on the same value.
+#[cfg(test)]
+mod properties {
+    use super::{CropRegion, Rgba8, Rotation};
+    use proptest::prelude::*;
+    use std::str::FromStr;
+
+    proptest! {
+        /// Whole turns do not change a rotation, in either direction.
+        #[test]
+        fn a_whole_turn_is_the_same_rotation(degrees in -100_000i32..100_000, turns in -50i32..50) {
+            prop_assert_eq!(Rotation::from_degrees(degrees), Rotation::from_degrees(degrees + 360 * turns));
+        }
+
+        /// A normalized rotation is always in `0..360`, and a quarter turn is reported as one
+        /// exactly when the angle is a multiple of 90.
+        #[test]
+        fn a_rotation_is_normalized(degrees in any::<i32>()) {
+            let rotation = Rotation::from_degrees(degrees);
+            prop_assert!(rotation.as_degrees() < 360);
+            prop_assert_eq!(rotation.quarter_turns().is_some(), rotation.as_degrees().is_multiple_of(90));
+            prop_assert_eq!(rotation.is_identity(), degrees.rem_euclid(360) == 0);
+        }
+
+        /// The string form of any integer, however far past a turn, parses to the same
+        /// rotation as the integer, and the printed rotation parses back to itself.
+        #[test]
+        fn a_rotation_parses_what_it_prints(degrees in any::<i64>()) {
+            let parsed = Rotation::from_str(&degrees.to_string()).expect("a whole number of degrees parses");
+            #[allow(clippy::cast_possible_truncation, reason = "the remainder is in -359..=359")]
+            let expected = Rotation::from_degrees((degrees % 360) as i32);
+            prop_assert_eq!(parsed, expected);
+            prop_assert_eq!(Rotation::from_str(&parsed.to_string()), Ok(parsed));
+        }
+
+        /// A crop region prints as `x,y,w,h` and parses back to itself.
+        #[test]
+        fn a_crop_region_parses_what_it_prints(x in any::<u32>(), y in any::<u32>(), width in 1u32.., height in 1u32..) {
+            let region = CropRegion { x, y, width, height };
+            prop_assert_eq!(CropRegion::from_str(&region.to_string()), Ok(region));
+        }
+
+        /// Six and eight hex digits in either case read back the channels they spell, and a
+        /// colour with no alpha digits is opaque.
+        #[test]
+        fn a_color_parses_its_hex_spelling(r in any::<u8>(), g in any::<u8>(), b in any::<u8>(), a in any::<u8>(), upper in any::<bool>()) {
+            let rgb = format!("{r:02x}{g:02x}{b:02x}");
+            let rgba = format!("{rgb}{a:02x}");
+            let (rgb, rgba) = if upper { (rgb.to_uppercase(), rgba.to_uppercase()) } else { (rgb, rgba) };
+            prop_assert_eq!(Rgba8::from_hex(&rgb), Ok(Rgba8 { r, g, b, a: u8::MAX }));
+            prop_assert_eq!(Rgba8::from_hex(&rgba), Ok(Rgba8 { r, g, b, a }));
+        }
+
+        /// Anything other than six or eight hex digits is refused, whatever it contains.
+        #[test]
+        fn a_color_of_any_other_shape_is_refused(text in "\\PC{0,12}") {
+            let shaped = (text.len() == 6 || text.len() == 8) && text.bytes().all(|byte| byte.is_ascii_hexdigit());
+            prop_assert_eq!(Rgba8::from_hex(&text).is_ok(), shaped);
+        }
+    }
+}
