@@ -43,7 +43,11 @@ jobs:
           load: true
           tags: truss:local
           cache-from: type=gha,scope=integration-build
-          cache-to: type=gha,mode=max,scope=integration-build
+          # Only main writes the layer cache. Exporting it took a pull request
+          # about a hundred seconds, and every pull request's copy pushed main's
+          # out of the repository's 10 GB cache, so the next run rebuilt
+          # cargo-chef and every dependency from nothing.
+          cache-to: ${{ github.event_name == 'push' && 'type=gha,mode=max,scope=integration-build' || '' }}
           outputs: type=docker,dest=/tmp/truss.tar
 
       - name: Upload image artifact
