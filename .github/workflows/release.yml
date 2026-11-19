@@ -20,7 +20,7 @@ env:
   # Release binaries are built with an explicit compiler rather than whatever
   # `stable` happens to be on the day of the tag. The `verify` job checks this
   # against the crate's rust-version.
-  RUST_TOOLCHAIN: "1.98.1"
+  RUST_TOOLCHAIN: "1.100.0"
   # Cargo features every published binary is built with. The release manifest
   # records the transitive closure of these plus the default features.
   RELEASE_FEATURES: "s3,gcs,azure"
