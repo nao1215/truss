@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- `--fit contain` and `--fit cover` no longer change the colour of partly transparent pixels when the output keeps the default transparent background. Placing the image on its canvas blended it in floating point, which moved a channel of a partly transparent pixel by one level, so a PNG resized to the size it already had, padded into a larger box, or cropped by `cover` did not keep the pixels it was given. The pixels are now copied onto a transparent canvas and composited only over a background that has some opacity, which is unchanged. Every adapter was affected: the CLI, the server and `@nao1215/truss-wasm`.
+
 ## v0.27.1
 
 ### Security

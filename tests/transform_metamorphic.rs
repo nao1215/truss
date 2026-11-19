@@ -187,7 +187,12 @@ proptest! {
     #[test]
     fn a_resize_that_changes_no_size_keeps_the_pixels(
         image in image(false),
-        fit in prop_oneof![Just(truss::Fit::Cover), Just(truss::Fit::Fill), Just(truss::Fit::Inside)],
+        fit in prop_oneof![
+            Just(truss::Fit::Contain),
+            Just(truss::Fit::Cover),
+            Just(truss::Fit::Fill),
+            Just(truss::Fit::Inside),
+        ],
         extra in (0u32..8, 0u32..8),
     ) {
         let (width, height) = image.dimensions();
