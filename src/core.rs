@@ -350,11 +350,14 @@ impl MediaType {
         }
     }
 
-    /// Returns `true` if the encoded format can carry an embedded ICC profile.
+    /// Returns `true` for the formats whose optimization keeps an ICC profile that a strip
+    /// request would otherwise drop.
     ///
-    /// BMP/TIFF/SVG output has no profile path in this pipeline.
+    /// These are the formats the optimizer accepts. It is not the question of which outputs
+    /// can carry a profile at all: a TIFF output carries one too, but it is never optimized,
+    /// so the upgrade in `normalize_metadata_policy` never applies to it.
     #[must_use]
-    pub const fn supports_icc_profile(self) -> bool {
+    pub(crate) const fn supports_icc_profile(self) -> bool {
         matches!(self, Self::Jpeg | Self::Png | Self::Webp)
     }
 
