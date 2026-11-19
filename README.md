@@ -640,6 +640,7 @@ Which of these names a version number covers is stated under [Compatibility](doc
 | [Signed URL Specification](docs/signed-url-spec.md) | Canonicalization rules, compatibility policy, and SDK guidance for public signed URLs |
 | [Deployment Guide](docs/deployment.md) | Docker, prebuilt binaries, cloud storage (S3/GCS/Azure), production setup |
 | [Development Guide](docs/development.md) | Building from source, testing, benchmarks, WASM demo, contributing |
+| [Testing](docs/testing.md) | The test techniques, what each catches, and where CI runs it |
 | [WASM Integration](docs/wasm.md) | Browser build flags, JS API contract, runtime capabilities, limits, and caveats |
 | [Prometheus Metrics](docs/prometheus.md) | Metrics reference, bucket boundaries, example PromQL queries |
 | [Pipeline Order](docs/pipeline.md) | Transform stage order and SVG-specific constraints |
@@ -722,6 +723,19 @@ Feature comparison with [imgproxy](https://github.com/imgproxy/imgproxy) and [im
 ## Roadmap
 
 See the [public roadmap](https://github.com/nao1215/truss/issues?q=is%3Aissue+label%3Aroadmap) for planned features and milestones.
+
+## Testing
+
+| Technique | Bug class caught here |
+|---|---|
+| [Unit and integration tests](docs/testing.md#unit-and-integration-tests) | Wrong answers for the cases someone wrote down |
+| [CLI end-to-end tests](docs/testing.md#cli-end-to-end-tests) | Changed CLI behaviour and output on Linux, macOS and Windows |
+| [Property-based tests](docs/testing.md#property-based-tests) | Off-by-one sizes and print/parse mismatches for inputs nobody listed |
+| [Metamorphic tests](docs/testing.md#metamorphic-tests) | Pixels moved or changed by transforms that should cancel or keep them |
+| [Fuzzing](docs/testing.md#fuzzing) | Panics and hangs on malformed images, SVG, URLs and HTTP requests |
+| [Benchmarks](docs/testing.md#benchmarks) | Slower conversions slipping in unnoticed |
+
+[Where each technique runs and how to run it](docs/testing.md).
 
 ## Contributing
 
