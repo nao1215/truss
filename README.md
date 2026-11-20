@@ -63,7 +63,7 @@ cargo install truss-image
 
 For S3, GCS, or Azure storage backends, see [installing with storage backend support](docs/deployment.md#installing-with-storage-backend-support).
 
-Prebuilt binaries are on the [GitHub Releases](https://github.com/nao1215/truss/releases) page, each with a `release-manifest.json` for download scripts. The [Deployment Guide](docs/deployment.md) lists all targets, the Docker images, and the [manifest fields](docs/deployment.md#downloading-release-binaries-from-a-program).
+Prebuilt binaries are on the [GitHub Releases](https://github.com/nao1215/truss/releases) page, with a `release-manifest.json` for download scripts from v0.16.0 on. The [Deployment Guide](docs/deployment.md) lists all targets, the Docker images, and the [manifest fields](docs/deployment.md#downloading-release-binaries-from-a-program).
 
 #### Verifying a release
 

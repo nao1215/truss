@@ -31,7 +31,7 @@ sudo mv truss /usr/local/bin/
 
 ### Downloading release binaries from a program
 
-Every release attaches `release-manifest.json` next to the archives. For each target it records the Rust target triple, OS, architecture, archive name, download URL, archive SHA-256 and byte size, the SHA-256 and byte size of the `truss` executable inside the archive, and the Cargo features the binary was built with (the `features` array, such as `s3` or `svg`). The document carries a `schemaVersion`; fields may be added within a version, so ignore keys you do not recognise.
+Every release from v0.16.0 on attaches `release-manifest.json` next to the archives. For each target it records the Rust target triple, OS, architecture, archive name, download URL, archive SHA-256 and byte size, the SHA-256 and byte size of the `truss` executable inside the archive, and the Cargo features the binary was built with (the `features` array, such as `s3` or `svg`). The document carries a `schemaVersion`; fields may be added within a version, so ignore keys you do not recognise.
 
 Check a downloaded archive against the manifest before extracting it, and the extracted executable against `binary.sha256`. `checksums.txt` lists the same archive digests and is generated from the manifest. Pin a tag instead of following the latest release, since archive names, URLs, and digests are specific to one tag.
 
