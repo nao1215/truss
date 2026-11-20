@@ -4,7 +4,7 @@ This page covers Docker setup, prebuilt binaries, cloud storage backends, and pr
 
 ## Prebuilt Binaries
 
-Download a prebuilt binary from the [GitHub Releases](https://github.com/nao1215/truss/releases) page. Archives and SHA256 checksums are published for each release, along with `release-manifest.json`; see [Downloading release binaries from a program](../README.md#downloading-release-binaries-from-a-program) for reading it from code.
+Download a prebuilt binary from the [GitHub Releases](https://github.com/nao1215/truss/releases) page. Archives and SHA256 checksums are published for each release, along with `release-manifest.json`; see [Downloading release binaries from a program](#downloading-release-binaries-from-a-program) for reading it from code.
 
 ### Homebrew
 
@@ -28,6 +28,12 @@ Example (Linux x86_64):
 tar xzf truss-v*.tar.gz
 sudo mv truss /usr/local/bin/
 ```
+
+### Downloading release binaries from a program
+
+Every release attaches `release-manifest.json` next to the archives. For each target it records the Rust target triple, OS, architecture, archive name, download URL, archive SHA-256 and byte size, the SHA-256 and byte size of the `truss` executable inside the archive, and the Cargo features the binary was built with (the `features` array, such as `s3` or `svg`). The document carries a `schemaVersion`; fields may be added within a version, so ignore keys you do not recognise.
+
+Check a downloaded archive against the manifest before extracting it, and the extracted executable against `binary.sha256`. `checksums.txt` lists the same archive digests and is generated from the manifest. Pin a tag instead of following the latest release, since archive names, URLs, and digests are specific to one tag.
 
 ## Docker
 

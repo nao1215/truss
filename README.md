@@ -22,28 +22,20 @@
 
 truss is an image transformation tool with a shared Rust core for a CLI, an HTTP server, and a browser/WASM build.
 
-Use the CLI for local files and shell pipelines, run the server behind a CDN or reverse proxy, process files in the browser with [`@nao1215/truss-wasm`](https://www.npmjs.com/package/@nao1215/truss-wasm), or sign public URLs from Node.js with [`@nao1215/truss-url-signer`](./packages/truss-url-signer).
-
-[Try the WASM demo in your browser](https://nao1215.github.io/truss/) - no install, no upload, runs 100 % client-side.
+[Try the WASM demo in your browser](https://nao1215.github.io/truss/). It runs entirely client-side, so nothing is uploaded.
 
 ![WASM demo screenshot](./docs/img/wasm-github-pages.png)
 
-## Start Here
+## Start here
 
 | If you want to... | Start with | Read next |
 |-------------------|------------|-----------|
 | Convert local files from the shell | `brew install nao1215/tap/truss` or `cargo install truss-image`, then `truss photo.png -o photo.jpg` | [CLI](#cli), [Commands](#commands) |
-| Run an HTTP image server | `TRUSS_BEARER_TOKEN=changeme truss serve --bind 0.0.0.0:8080 --storage-root ./images` | [HTTP Server](#http-server), [API Reference](docs/api-reference.md), [Deployment Guide](docs/deployment.md) |
+| Run an HTTP image server | `TRUSS_BEARER_TOKEN=changeme truss serve --bind 0.0.0.0:8080 --storage-root ./images` | [HTTP server](#http-server), [API Reference](docs/api-reference.md), [Deployment Guide](docs/deployment.md) |
 | Process files in a browser app | `npm install @nao1215/truss-wasm` | [WASM](#wasm), [WASM Integration](docs/wasm.md) |
-| Generate signed public URLs from Node.js | `npm install @nao1215/truss-url-signer` | [TypeScript URL Signing](#typescript-url-signing), [Signed URL Specification](docs/signed-url-spec.md) |
+| Generate signed public URLs from Node.js | `npm install @nao1215/truss-url-signer` | [TypeScript URL signing](#typescript-url-signing), [Signed URL Specification](docs/signed-url-spec.md) |
 
-## Why truss?
-
-- One Rust core across the CLI, the HTTP server, and the browser/WASM build.
-- Signed URLs, SSRF protections, and SVG sanitization are built in.
-- Supports JPEG, PNG, WebP, BMP, TIFF, and SVG, plus GIF as a decode-only input. AVIF is not supported.
-- Runs on Linux, macOS, and Windows.
-- CLI behavior is covered by [atago](https://github.com/nao1215/atago), and the HTTP API by [runn](https://github.com/k1LoW/runn).
+truss reads and writes JPEG, PNG, WebP, BMP, TIFF, and SVG, and reads GIF. It does not support AVIF. Signed URLs, SSRF protections, and SVG sanitization are built in. It runs on Linux, macOS, and Windows; [atago](https://github.com/nao1215/atago) tests the CLI and [runn](https://github.com/k1LoW/runn) tests the HTTP API.
 
 ## Installation
 
@@ -69,19 +61,9 @@ yay -S truss-bin   # or: paru -S truss-bin
 cargo install truss-image
 ```
 
-Need S3, GCS, or Azure storage backend support at install time? See the [Deployment Guide](docs/deployment.md#installing-with-storage-backend-support).
+For S3, GCS, or Azure storage backends, see [installing with storage backend support](docs/deployment.md#installing-with-storage-backend-support).
 
-Prebuilt binaries are available on the [GitHub Releases](https://github.com/nao1215/truss/releases) page. See [Deployment Guide](docs/deployment.md) for all targets and Docker images.
-
-#### Downloading release binaries from a program
-
-Every release attaches `release-manifest.json` next to the archives. For each published target it records the Rust target triple, OS, architecture, archive name, download URL, archive SHA-256 and byte size, the SHA-256 and byte size of the `truss` executable inside the archive, and the Cargo features that binary was built with. The document carries a `schemaVersion`; fields may be added within a version, so ignore keys you do not recognise.
-
-Check the SHA-256 of a downloaded archive against the manifest before extracting it, and check the extracted executable against `binary.sha256`. `checksums.txt` lists the same archive digests and is generated from the manifest.
-
-The `features` array tells you which optional features a given binary was built with, such as `s3` or `svg`.
-
-Pin a tag rather than following the latest release. Archive names, URLs and digests are all specific to one tag.
+Prebuilt binaries are on the [GitHub Releases](https://github.com/nao1215/truss/releases) page, each with a `release-manifest.json` for download scripts. The [Deployment Guide](docs/deployment.md) lists all targets, the Docker images, and the [manifest fields](docs/deployment.md#downloading-release-binaries-from-a-program).
 
 #### Verifying a release
 
@@ -101,9 +83,7 @@ cosign verify ghcr.io/nao1215/truss:<version> \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
 
-### JavaScript Packages
-
-Install only the package you need:
+### JavaScript packages
 
 ```sh
 # Browser/WASM package
@@ -113,19 +93,19 @@ npm install @nao1215/truss-wasm
 npm install @nao1215/truss-url-signer
 ```
 
-Package source and package-specific READMEs live in [`packages/truss-wasm`](./packages/truss-wasm) and [`packages/truss-url-signer`](./packages/truss-url-signer).
+The sources and READMEs are in [`packages/truss-wasm`](./packages/truss-wasm) and [`packages/truss-url-signer`](./packages/truss-url-signer).
 
-### Container Image
+### Container image
 
 ```sh
 docker pull ghcr.io/nao1215/truss:latest
 ```
 
-## Quick Start
+## Quick start
 
 ### CLI
 
-The `convert` subcommand can be omitted: `truss photo.png -o photo.jpg` is equivalent to `truss convert photo.png -o photo.jpg`. Run `truss convert --help` to see the full set of options.
+`truss photo.png -o photo.jpg` is short for `truss convert photo.png -o photo.jpg`. Run `truss convert --help` for every option.
 
 ```sh
 # Convert format
@@ -147,10 +127,7 @@ truss diagram.svg -o safe.svg
 truss inspect photo.jpg
 ```
 
-`inspect` reports both the dimensions stored in the file (`width`, `height`) and the ones
-`convert` produces (`orientedWidth`, `orientedHeight`). They differ when the file carries an
-EXIF orientation that transposes the axes, which is the normal case for a phone photo taken
-in portrait:
+`inspect` reports the stored size (`width`, `height`) and the size `convert` produces (`orientedWidth`, `orientedHeight`). They differ when an EXIF orientation swaps the axes, as in a portrait phone photo:
 
 ```console
 $ truss inspect portrait.jpg
@@ -167,14 +144,11 @@ $ truss inspect portrait.jpg
 }
 ```
 
-#### Format conversion & quality
+#### Format conversion and quality
 
-truss supports **JPEG, PNG, WebP, BMP, TIFF, and SVG**. The output format is inferred from the file extension, or you can specify it explicitly with `--format`.
+The output format comes from the file extension, or from `--format`.
 
-AVIF is not supported, as input or as output. The AVIF decoder truss used is licensed AGPL-3.0 or commercially, which an MIT tool cannot ship, so truss refuses an AVIF input as an unsupported format and `--format avif` as an unknown one. Convert AVIF images with another tool before passing them to truss, and use WebP when you want a modern compressed output.
-
-GIF is read but never written. `--format gif` is rejected, and a GIF input with no other
-format hint converts to PNG rather than back to GIF.
+AVIF is rejected as input and as `--format avif`, because the AVIF decoder truss used is licensed AGPL-3.0 or commercially, which an MIT tool cannot ship. Convert AVIF with another tool first, and use WebP for compressed output.
 
 | Format | File size (640 x 427) | Notes |
 |--------|----------------------:|-------|
@@ -190,9 +164,7 @@ truss photo.jpg -o photo.webp --quality 80
 truss photo.jpg -o output.bin --format png
 ```
 
-Use `--quality <1-100>` to control lossy encoding. Lower values produce smaller files at the cost of visual quality.
-
-Use `--optimize auto|lossless|lossy` on `truss convert`, or the dedicated `truss optimize` subcommand, to reduce output size with format-aware encoding choices. Add `--target-quality ssim:0.98` or `--target-quality psnr:42` when you want lossy optimization to aim for a specific perceptual threshold.
+`--quality <1-100>` sets lossy encoding quality. `--optimize auto|lossless|lossy` on `convert`, or `truss optimize`, picks format-aware encoder settings to shrink the output; `--target-quality ssim:0.98` or `--target-quality psnr:42` makes lossy optimization aim for that threshold.
 
 | Quality 90 (95 KB) | Original (80 KB) | Quality 30 (27 KB) |
 |---|---|---|
@@ -200,7 +172,7 @@ Use `--optimize auto|lossless|lossy` on `truss convert`, or the dedicated `truss
 
 #### GIF input
 
-GIF is a decode-only format: truss reads it and writes one of the formats it can encode.
+truss reads GIF but never writes it. `--format gif` is rejected, and a GIF input with no other format hint becomes PNG.
 
 ```sh
 # Convert a GIF to PNG, keeping the palette colors and any transparent index
@@ -213,8 +185,7 @@ truss photo.gif -o thumb.webp --width 320 --format webp
 truss inspect upload.gif
 ```
 
-An animation is refused rather than reduced to its first frame, whether it arrived as a
-GIF, an animated WebP, or an APNG:
+An animated GIF, WebP, or APNG is refused instead of being cut to its first frame:
 
 ```sh
 $ truss convert animated.gif -o out.png
@@ -223,11 +194,9 @@ $ echo $?
 3
 ```
 
-Silently returning frame one with exit code 0 would give a caller no way to notice the
-animation was discarded. `truss inspect` still reads all four and reports
-`"isAnimated": true`, so a pipeline can branch on that before converting.
+`truss inspect` reads them and reports `"isAnimated": true`, so a pipeline can check before converting.
 
-#### Resize & fit modes
+#### Resize and fit modes
 
 Specify `--width` and/or `--height` to resize. When both are given, `--fit` controls how the image fits the target box:
 
@@ -238,9 +207,7 @@ Specify `--width` and/or `--height` to resize. When both are given, `--fit` cont
 | `fill` | exactly the box | Stretch each axis to the box, ignoring aspect ratio. |
 | `inside` | at most the box | Scale to fit inside the box, preserving aspect ratio, and add no padding. Usually smaller than the box on one axis. |
 
-`contain` and `inside` scale the image identically. The difference is what happens next:
-a 640 x 427 photo bounded by 300 x 300 becomes 300 x 200 either way, and `contain` then pads
-that out to 300 x 300 while `inside` returns it as is.
+`contain` and `inside` scale the same way: a 640 x 427 photo bounded by 300 x 300 becomes 300 x 200, then `contain` pads it to 300 x 300 and `inside` stops there.
 
 | Original (640 x 427) | contain 300 x 300 | cover 300 x 300 | fill 300 x 300 | inside 300 x 300 |
 |---|---|---|---|---|
@@ -265,9 +232,7 @@ truss photo.jpg -o out.jpg --width 800
 
 #### Never enlarging a small image
 
-Whether a resize may scale an image up is a separate question from how it fits the box, so
-it is a separate flag rather than part of a fit mode. `--without-enlargement` works with any
-`--fit`, and with a single-axis resize:
+Without `--without-enlargement`, a source smaller than the requested size is scaled up. The flag works with any `--fit` and with a single-axis resize:
 
 ```sh
 # The everyday "max 800x600, leave small images alone" resize
@@ -279,8 +244,6 @@ truss photo.jpg -o out.jpg --width 800 --height 600 --fit contain --without-enla
 # Works on a single axis too
 truss photo.jpg -o out.jpg --width 800 --without-enlargement
 ```
-
-Without it, a source smaller than the requested size is scaled up to reach it.
 
 #### Cover position
 
@@ -296,7 +259,7 @@ Available positions: `center`, `top`, `right`, `bottom`, `left`, `top-left`, `to
 truss photo.jpg -o thumb.jpg --width 300 --height 300 --fit cover --position top-left
 ```
 
-#### Crop, rotate & background
+#### Crop, rotate, and background
 
 ```sh
 # Crop a region (x, y, width, height) -- applied before resize
@@ -323,12 +286,9 @@ truss photo.jpg -o out.png --width 300 --height 300 --fit contain --background F
 |---|---|---|---|---|
 | ![original](./docs/img/sample-bee.jpg) | ![cropped](./docs/img/sample-bee-cropped.jpg) | ![rotated](./docs/img/sample-bee-rotated.jpg) | ![rotated 45](./docs/img/sample-bee-rotated-45.jpg) | ![background](./docs/img/sample-bee-bg.png) |
 
-A multiple of 90 only permutes pixels, so it stays exact. Any other angle resamples with
-bilinear interpolation and expands the output to the rotated bounding box, so no corner is
-cropped away. The exposed area takes `--background`; without it, transparent for formats
-with an alpha channel and white for those without.
+Multiples of 90 are lossless. Other angles resample bilinearly into the rotated bounding box, and the exposed corners take `--background` (default: transparent with alpha, white without).
 
-#### Blur, sharpen & watermark
+#### Blur, sharpen, and watermark
 
 | Original | Gaussian Blur (`--blur 5.0`) | Sharpen (`--sharpen 3.0`) | Watermark |
 |---|---|---|---|
@@ -349,10 +309,7 @@ truss photo.jpg -o watermarked.jpg \
   --watermark-margin 10
 ```
 
-Watermark positions are the same as cover positions: `center`, `top`, `right`, `bottom`, `left`, `top-left`, `top-right`, `bottom-left`, `bottom-right`.
-
-> **Note:** the watermark overlay itself must be a raster image. The picture it goes
-> onto may be an SVG, which is rasterized first; see [the pipeline](docs/pipeline.md#svg-path).
+Watermark positions are the same as cover positions. The overlay must be a raster image; the picture under it may be an SVG, which is rasterized first (see [the pipeline](docs/pipeline.md#svg-path)).
 
 #### Grayscale
 
@@ -368,17 +325,11 @@ truss photo.jpg -o gray.jpg --grayscale
 truss photo.jpg -o thumb.jpg --width 320 --grayscale
 ```
 
-Luminance uses the Rec. 601 weights, and the alpha channel is preserved. Desaturation runs
-after resize, blur, and sharpen, and before the watermark, so a watermark keeps its own colors.
-Anything `--background` filled in by then is part of the image and is desaturated with it, so
-`--fit contain --background ff0000 --grayscale` produces gray padding, not red.
-Unlike `--blur` and `--sharpen`, `--grayscale` also works for SVG input when the output is a
-raster format; with `svg` output it is rejected, along with the other options that ask
-for a different picture.
+Luminance uses the Rec. 601 weights and alpha is kept. Desaturation runs after resize, blur, and sharpen and before the watermark, so the watermark keeps its colors and `--fit contain --background ff0000 --grayscale` gives gray padding. With SVG input it works when the output is raster, and is rejected with `svg` output.
 
 #### Metadata control
 
-By default, truss strips all metadata for smaller and safer output.
+truss strips all metadata by default.
 
 | Flag | Behavior |
 |------|----------|
@@ -388,13 +339,7 @@ By default, truss strips all metadata for smaller and safer output.
 | `--auto-orient` (default) | Apply EXIF orientation tag and reset it |
 | `--no-auto-orient` | Skip EXIF orientation correction |
 
-An optimization — `truss optimize` in any mode, or `--optimize auto`, `lossless`, or `lossy`
-on `convert` — keeps the ICC profile even under `--strip-metadata`: dropping it would make the
-re-encoded image render with shifted colors. A plain `truss convert` with no optimization
-strips it as asked, and `--preserve-exif` drops it under every mode. Formats that cannot carry
-a profile (BMP) strip it as asked.
-
-Metadata support per output format:
+`truss optimize` and `--optimize` keep the ICC profile even under `--strip-metadata`, since dropping it would shift the re-encoded colors. A plain `truss convert` strips it, and `--preserve-exif` always drops it. BMP cannot carry one.
 
 | Format | ICC | EXIF | XMP | IPTC |
 |--------|-----|------|-----|------|
@@ -404,9 +349,7 @@ Metadata support per output format:
 | BMP | no | no | no | no |
 | TIFF | yes | no | no | no |
 
-Asking to keep metadata an output format cannot carry is not silent: the request succeeds and
-each kind that did not survive is reported as a `warning:` line on stderr, as a `Truss-Warning`
-response header from the server, and in `warnings` from the Wasm package.
+If you ask to keep metadata the output format cannot carry, the request still succeeds and reports each dropped kind as a `warning:` line on stderr, a `Truss-Warning` header from the server, or an entry in `warnings` from the Wasm package.
 
 ```sh
 # Keep all metadata (useful for archival)
@@ -419,9 +362,9 @@ truss photo.jpg -o out.jpg --preserve-exif
 truss photo.jpg -o out.jpg --no-auto-orient
 ```
 
-#### Stdin / stdout piping
+#### Stdin and stdout
 
-Use `-` for input and/or output to integrate truss into shell pipelines. When reading from stdin, `--format` is required for output.
+Use `-` for input or output. Reading from stdin requires `--format`.
 
 ```sh
 # Pipe from stdin to stdout
@@ -437,7 +380,7 @@ truss photo.jpg -o - --format webp --optimize auto | cat > optimized.webp
 
 #### SVG handling
 
-truss sanitizes SVG files by removing scripts and external references, making them safe for user-generated content.
+truss removes scripts and external references from SVG files.
 
 ```sh
 # Sanitize SVG (remove scripts, external refs)
@@ -449,7 +392,7 @@ truss diagram.svg -o diagram.png --width 1024
 
 #### Filenames starting with `-`
 
-Use `--output=` (or `--output`) to avoid ambiguity with filenames that start with a dash:
+Use `--output=` (or `--output`) for an output name that starts with a dash:
 
 ```sh
 # Dash-prefixed output: use --output= to assign the value unambiguously
@@ -459,9 +402,7 @@ truss convert input.png --output=-output.jpg
 truss convert ./-input.png -o out.jpg
 ```
 
-### HTTP Server
-
-Start the server from an installed binary or a local build:
+### HTTP server
 
 ```sh
 TRUSS_BEARER_TOKEN=changeme truss serve --bind 0.0.0.0:8080 --storage-root ./images
@@ -488,7 +429,7 @@ curl -X POST http://localhost:8080/images \
   -o thumb.webp
 ```
 
-If you also want public signed URLs, start the server with signing keys and generate URLs with `truss sign`:
+For public signed URLs, start the server with signing keys and generate URLs with `truss sign`:
 
 ```sh
 TRUSS_BEARER_TOKEN=changeme \
@@ -504,11 +445,11 @@ truss sign --base-url http://localhost:8080 \
   --format webp
 ```
 
-Use `truss validate` to check server configuration without starting the process. See the [API Reference](docs/api-reference.md) for endpoint details and the [Deployment Guide](docs/deployment.md) for Docker, storage backends, and production setup.
+`truss validate` checks the server configuration without starting it. See the [API Reference](docs/api-reference.md) for endpoints and the [Deployment Guide](docs/deployment.md) for Docker, storage backends, and production setup.
 
-### TypeScript URL Signing
+### TypeScript URL signing
 
-Node.js only. The signer uses `node:crypto` and should stay on the server side; do not ship the signing secret to browsers or Edge/browser runtimes.
+The signer is Node.js only (it uses `node:crypto`). Keep it and the signing secret on the server, out of browsers and Edge runtimes.
 
 ```sh
 npm install @nao1215/truss-url-signer
@@ -537,15 +478,13 @@ See [`packages/truss-url-signer`](./packages/truss-url-signer) for the full API 
 
 ### WASM
 
-truss also ships a browser-oriented WASM adapter for local, client-side image processing. The generated package exposes a small JS-facing API over the same Rust core used by the CLI and HTTP server.
-
-For bundler-based browser apps, the repository includes the source for the official npm package in [`packages/truss-wasm`](./packages/truss-wasm). It uses the fixed feature set `wasm,svg`, so WebP stays lossless in the package build.
+The npm package, built from [`packages/truss-wasm`](./packages/truss-wasm), runs the same Rust core in the browser. It uses the fixed feature set `wasm,svg`, so WebP output is lossless.
 
 ```sh
 npm install @nao1215/truss-wasm
 ```
 
-If you want a minimal consumer you can run immediately, see [`examples/vite-truss-wasm`](./examples/vite-truss-wasm).
+[`examples/vite-truss-wasm`](./examples/vite-truss-wasm) is a minimal consumer you can run.
 
 ```js
 import {
@@ -569,46 +508,9 @@ const result = transformImage(
 );
 ```
 
-The official npm package wraps the raw browser bindings and initializes the Wasm module at import time, so consumer code does not call `init()` explicitly.
+The package initializes the Wasm module at import time, so you do not call `init()`.
 
-For maintainers:
-
-- `node ./scripts/run-wasm-consumer-smoke.mjs` packs the local npm artifact, installs it into a throwaway consumer, and runs one real transform through the published JS surface.
-- `node ./scripts/run-wasm-vite-example-smoke.mjs` rewires the Vite example to the local tarball and verifies that a real bundler build still succeeds.
-- `node ./scripts/run-wasm-vite-example-runtime-smoke.mjs` verifies the checked-in Vite example and confirms the browser runtime path in headless Chrome.
-
-The example below assumes your page is served from a directory that also contains `pkg/truss.js`. When using `./scripts/build-wasm-demo.sh`, that means `web/dist/index.html` importing `./pkg/truss.js`.
-
-```js
-import init, {
-  getCapabilitiesJson,
-  inspectImageJson,
-  transformImage,
-} from "./pkg/truss.js";
-
-await init();
-
-const inputBytes = new Uint8Array(await file.arrayBuffer());
-const capabilities = JSON.parse(getCapabilitiesJson());
-const inspected = JSON.parse(inspectImageJson(inputBytes, undefined));
-
-const result = transformImage(
-  inputBytes,
-  undefined,
-  JSON.stringify({
-    format: "jpeg",
-    width: 1200,
-    quality: 80,
-  }),
-);
-
-const response = JSON.parse(result.responseJson);
-const outputBlob = new Blob([result.bytes], {
-  type: response.artifact.mimeType,
-});
-```
-
-The GitHub Pages demo and the official npm package are both built with `wasm,svg`. Check capabilities at runtime and see [WASM Integration](docs/wasm.md) for package and raw-build usage, feature differences, import-path assumptions, API shapes, constraints, limits, and error handling.
+The GitHub Pages demo is built with `wasm,svg` too. [WASM Integration](docs/wasm.md) covers the raw build without the package, feature differences, API shapes, limits, and errors.
 
 ## Commands
 
@@ -629,7 +531,7 @@ Top-level shortcuts:
 - `truss --bind <ADDR> [OPTIONS]` is implicit `serve`
 - `truss --version` prints version information
 
-Which of these names a version number covers is stated under [Compatibility](docs/problems.md#compatibility), beside the exit code table it shares the promise with.
+[Compatibility](docs/problems.md#compatibility) says which of these a version number covers, next to the exit code table.
 
 ## Documentation
 
@@ -671,11 +573,11 @@ flowchart TB
     end
 ```
 
-CLI reads local files or fetches remote URLs directly. The HTTP server resolves images from storage backends or client uploads. The WASM build processes files selected in the browser.
+The CLI reads local files or fetches URLs, the server reads storage backends or uploads, and the WASM build reads files picked in the browser.
 
 ## Performance
 
-Benchmarks are defined in [`benches/transform.rs`](./benches/transform.rs). The numbers below were measured with [criterion](https://github.com/bheisler/criterion.rs) on a single core using the sample image in this repository. Use them as a local reference and run `just bench` on your hardware to compare.
+[criterion](https://github.com/bheisler/criterion.rs) numbers from [`benches/transform.rs`](./benches/transform.rs), on a single core with the sample image in this repository. Run `just bench` to measure on your hardware.
 
 | Operation | Time |
 |-----------|-----:|
@@ -690,11 +592,11 @@ Benchmarks are defined in [`benches/transform.rs`](./benches/transform.rs). The 
 | SVG -> PNG 1024 w rasterize | 649 us |
 | Format detection (`sniff`) | 18 ns |
 
-The `truss` command itself, from start to exit, is measured with [himorime](https://github.com/nao1215/himorime) by the suite in [`bench/`](./bench/README.md): `just bench-cli` measures the working tree and `just bench-cli-compare` compares it with `main`. Every pull request compares its base and head on the same runner.
+[himorime](https://github.com/nao1215/himorime) times the whole `truss` command with the suite in [`bench/`](./bench/README.md): `just bench-cli` measures the working tree and `just bench-cli-compare` compares it with `main`. Every pull request compares base and head on the same runner.
 
 ## Comparison
 
-Feature comparison with [imgproxy](https://github.com/imgproxy/imgproxy) and [imagor](https://github.com/cshum/imagor) as of March 2026. Check upstream documentation if you need to confirm a specific feature before migrating or standardizing on a tool.
+Compared with [imgproxy](https://github.com/imgproxy/imgproxy) and [imagor](https://github.com/cshum/imagor) as of March 2026; check their documentation before relying on a row.
 
 | Feature | truss | imgproxy | imagor |
 |---------|:-----:|:--------:|:------:|
@@ -726,32 +628,15 @@ See the [public roadmap](https://github.com/nao1215/truss/issues?q=is%3Aissue+la
 
 ## Testing
 
-| Technique | Bug class caught here |
-|---|---|
-| [Unit and integration tests](docs/testing.md#unit-and-integration-tests) | Wrong answers for the cases someone wrote down |
-| [CLI end-to-end tests](docs/testing.md#cli-end-to-end-tests) | Changed CLI behaviour and output on Linux, macOS and Windows |
-| [Property-based tests](docs/testing.md#property-based-tests) | Off-by-one sizes and print/parse mismatches for inputs nobody listed |
-| [Metamorphic tests](docs/testing.md#metamorphic-tests) | Pixels moved or changed by transforms that should cancel or keep them |
-| [Differential tests](docs/testing.md#differential-tests) | The Rust and TypeScript URL signers drifting apart |
-| [Mutation tests](docs/testing.md#mutation-tests) | Lines the tests run but whose answer no test checks |
-| [Fuzzing](docs/testing.md#fuzzing) | Panics and hangs on malformed images, SVG, URLs and HTTP requests |
-| [Benchmarks](docs/testing.md#benchmarks) | Slower conversions slipping in unnoticed |
-
-[Where each technique runs and how to run it](docs/testing.md).
+Unit, end-to-end, property-based, metamorphic, differential, and mutation tests, fuzzing, and benchmarks each cover a different kind of bug. [docs/testing.md](docs/testing.md) says which, where CI runs them, and how to run them locally.
 
 ## Contributing
 
-Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for details.
-
-- Look for [`good first issue`](https://github.com/nao1215/truss/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22) to get started.
-- Report bugs and request features via [Issues](https://github.com/nao1215/truss/issues).
-- If the project is useful, starring the repository helps.
-- Support via [GitHub Sponsors](https://github.com/sponsors/nao1215) is also welcome.
-- Sharing the project on social media or in blog posts is appreciated.
+See [CONTRIBUTING.md](CONTRIBUTING.md). [`good first issue`](https://github.com/nao1215/truss/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22) is a place to start, and bugs and feature requests go to [Issues](https://github.com/nao1215/truss/issues). You can also support the project through [GitHub Sponsors](https://github.com/sponsors/nao1215).
 
 ## Contributors
 
-Thanks goes to these wonderful people ([emoji key](https://allcontributors.org/docs/en/emoji-key)):
+Thanks to these people ([emoji key](https://allcontributors.org/docs/en/emoji-key)):
 
 <!-- ALL-CONTRIBUTORS-LIST:START - Do not remove or modify this section -->
 <!-- prettier-ignore-start -->
