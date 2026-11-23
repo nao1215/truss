@@ -9,6 +9,7 @@
 ### Fixed
 
 - Sniffing a PNG that ends inside an `acTL` chunk no longer panics. The chunk walk checked that the chunk header fit in the input but read the four-byte frame count after it without checking, so a truncated APNG made `sniff_artifact` and every adapter that inspects an upload panic instead of reporting a static image. Found by the nightly fuzzer.
+- A GIF whose logical screen is 0x0 is refused as undecodable instead of producing a 1x1 image. The decoder returns an empty canvas for such a file whatever its frames hold, so a resize into a box produced a 1x1 output while the request asked for the box, and a plain conversion failed with an encoder error. Found by the nightly fuzzer.
 
 ## v0.28.0
 

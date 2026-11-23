@@ -259,8 +259,18 @@ fn decode_input(input: &Artifact) -> Result<DynamicImage, TransformError> {
             ))
         },
         || {
-            image::load_from_memory_with_format(&input.bytes, image_format)
-                .map_err(|error| decode_failure(input.media_type, &error))
+            let image = image::load_from_memory_with_format(&input.bytes, image_format)
+                .map_err(|error| decode_failure(input.media_type, &error))?;
+            // A GIF whose logical screen is 0x0 decodes to an empty canvas whatever its
+            // frames hold. Nothing after this can make an image of it: a resize turned it
+            // into a 1x1 output and a plain conversion failed in the encoder.
+            if image.width() == 0 || image.height() == 0 {
+                return Err(TransformError::DecodeFailed(format!(
+                    "{} image has no pixels",
+                    input.media_type.as_name()
+                )));
+            }
+            Ok(image)
         },
     )
 }
@@ -3724,6 +3734,39 @@ mod tests {
             top_left_pixel(&result.artifact.bytes, ImageFormat::Png),
             [10, 20, 30, 255]
         );
+    }
+
+    #[test]
+    fn transform_raster_refuses_a_gif_whose_screen_has_no_pixels() {
+        // Found by the nightly transform fuzzer: a GIF whose logical screen is 0x0 holds a
+        // 4x3 frame. The decoder returns an empty canvas, and covering a 32x24 box with it
+        // produced a 1x1 PNG, while a plain conversion failed in the encoder.
+        let gif = vec![
+            0x47, 0x49, 0x46, 0x38, 0x37, 0x61, 0x00, 0x00, 0x00, 0x00, 0xf0, 0x00, 0x00, 0xff,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x2c, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x03, 0x00,
+            0x00, 0x02, 0x03, 0x84, 0x8f, 0x56, 0x00, 0x3b,
+        ];
+        for options in [
+            TransformOptions {
+                format: Some(MediaType::Png),
+                width: Some(32),
+                height: Some(24),
+                fit: Some(Fit::Cover),
+                ..TransformOptions::default()
+            },
+            TransformOptions {
+                format: Some(MediaType::Png),
+                ..TransformOptions::default()
+            },
+        ] {
+            let artifact = sniff_artifact(RawArtifact::new(gif.clone(), None)).expect("sniff gif");
+            let result = transform_raster(TransformRequest::new(artifact, options));
+            assert!(
+                matches!(result, Err(TransformError::DecodeFailed(_))),
+                "{:?}",
+                result.map(|result| result.artifact.metadata)
+            );
+        }
     }
 
     #[test]
