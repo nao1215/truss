@@ -1,5 +1,15 @@
 # Changelog
 
+## [Unreleased]
+
+### Security
+
+- url is raised to 2.5.9, which fixes RUSTSEC-2026-0592: `Url::origin()` called itself once per nested `blob:` URL, so a deep enough nesting overflowed the stack. truss does not call `Url::origin()`, but the release binaries, the container image and the npm packages are built with the fixed version, and people who depend on truss-image as a library pick it up with `cargo update`.
+
+### Fixed
+
+- Sniffing a PNG that ends inside an `acTL` chunk no longer panics. The chunk walk checked that the chunk header fit in the input but read the four-byte frame count after it without checking, so a truncated APNG made `sniff_artifact` and every adapter that inspects an upload panic instead of reporting a static image. Found by the nightly fuzzer.
+
 ## v0.28.0
 
 ### Removed

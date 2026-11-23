@@ -2929,7 +2929,12 @@ fn png_ancillary_facts(bytes: &[u8]) -> PngAncillaryFacts {
             b"tRNS" => facts.has_trns = true,
             // An APNG announces its frame count here, before the image data.
             b"acTL" if length >= 4 => {
-                if let Ok(frames) = read_u32_be(&bytes[offset + 8..offset + 12]) {
+                // The body may run off the end of a cut file, which ends the walk like any
+                // other chunk that does.
+                let Some(body) = bytes.get(offset + 8..offset + 12) else {
+                    break;
+                };
+                if let Ok(frames) = read_u32_be(body) {
                     facts.frame_count = frames.max(1);
                 }
             }
@@ -4492,6 +4497,20 @@ mod tests {
         .expect("sniff an animated png");
 
         assert_eq!(artifact.metadata.frame_count, 4);
+    }
+
+    #[test]
+    fn sniff_artifact_does_not_panic_on_an_actl_chunk_cut_short() {
+        // Found by the nightly sniff fuzzer: the file ends right after the `acTL` chunk type
+        // while its length claims a body, so reading the frame count ran off the end.
+        let bytes = vec![
+            0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0xfb, 0xff, 0x0c, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x28, 0x00, 0x00, 0x00, 0x1c, 0x08, 0x02, 0x00, 0x00,
+            0x00, 0x26, 0x00, 0x00, 0x00, 0xea, 0xff, 0xff, 0xff, 0x61, 0x63, 0x54, 0x4c, 0x82,
+        ];
+        let artifact = sniff_artifact(RawArtifact::new(bytes, None)).expect("sniff a cut png");
+
+        assert_eq!(artifact.metadata.frame_count, 1);
     }
 
     #[test]
