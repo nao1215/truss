@@ -49,7 +49,10 @@ def main() -> int:
             f"mutants: {total} generated, caught {caught}, timeout {timeout}, missed {missed}, "
             f"unviable {unviable}; score {score_text} (minimum {args.min:.2f}%)"
         )
-        ok = score + 1e-9 >= args.min
+        # The recorded score is the printed one, rounded to two places, so the gate compares
+        # at that precision: 1,584 of 2,276 is 69.596%, recorded as 69.60, and the unrounded
+        # score failed a rerun that caught exactly the same mutants.
+        ok = round(score, 2) + 1e-9 >= args.min
 
     print(line)
     for entry in missed_lines:

@@ -2611,6 +2611,68 @@ mod tests {
         );
     }
 
+    /// The tests above only check that a declared entity cannot smuggle markup or a URL
+    /// past the sanitizer, which a reader that declared nothing would pass too. These say
+    /// what the subset reader returns: every general entity in order, in either quote,
+    /// with parameter entities skipped and the first declaration of a name binding.
+    #[test]
+    fn declared_entities_reads_every_general_entity_of_the_internal_subset() {
+        let entities = DeclaredEntities::from_doctype(
+            "svg [ <!ENTITY % p \"param\"><!ENTITY a \"one\"><!ENTITY b 'two'>\n<!ENTITY a \"again\">  <!ENTITY   c   \"three\">]",
+        );
+        let read: Vec<(&str, &str)> = entities
+            .0
+            .iter()
+            .map(|(name, text)| (name.as_str(), text.as_str()))
+            .collect();
+        assert_eq!(read, [("a", "one"), ("b", "two"), ("c", "three")]);
+    }
+
+    #[test]
+    fn declared_entities_is_empty_without_an_internal_subset() {
+        assert!(
+            DeclaredEntities::from_doctype("svg PUBLIC \"-//W3C//DTD SVG 1.1//EN\"")
+                .0
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn declared_entities_resolves_predefined_declared_and_unknown_names() {
+        let entities =
+            DeclaredEntities::from_doctype("svg [<!ENTITY a \"one\"><!ENTITY b \"two\">]");
+        assert_eq!(entities.resolve("a"), "one");
+        assert_eq!(entities.resolve("b"), "two");
+        assert_eq!(entities.resolve("amp"), "&");
+        assert_eq!(entities.resolve("missing"), "\u{FFFD}");
+    }
+
+    #[test]
+    fn is_xml_name_accepts_the_xml_name_start_characters_and_nothing_else() {
+        for name in ["a", "_a", ":a", "\u{e9}a", "a-b.c:d_e", "a\u{3042}"] {
+            assert!(is_xml_name(name), "{name:?} is an XML name");
+        }
+        for name in ["", "1a", "-a", ".a", "\"a", "a\"", "a b", "a="] {
+            assert!(!is_xml_name(name), "{name:?} is not an XML name");
+        }
+    }
+
+    /// A tab inside a fragment reference is removed by a URL parser, so the value is read
+    /// both as written and with the tab removed, and neither reading leaves the document.
+    #[test]
+    fn a_fragment_reference_with_a_tab_inside_is_not_dangerous() {
+        assert!(!is_dangerous_href("#a\tb"));
+        assert!(!is_dangerous_href("#a\nb"));
+    }
+
+    #[test]
+    fn mentions_css_resource_is_false_for_a_function_that_fetches_nothing() {
+        assert!(!mentions_css_resource("red"));
+        assert!(!mentions_css_resource("rgb(1, 2, 3)"));
+        assert!(!mentions_css_resource("translate(1px) \\31 "));
+        assert!(mentions_css_resource("u\\72 l(x)"));
+    }
+
     // --- Presentation attributes carry the same url() as `style` ---
 
     /// Every SVG presentation attribute that takes a `<funciri>` is another
