@@ -16,6 +16,7 @@ on:
       - "Cargo.toml"
       - "Cargo.lock"
       - ".github/release-targets.json"
+      - ".github/requirements/**"
       - ".github/workflows/release.yml"
       - ".github/workflows/rust.yml"
   pull_request:
@@ -31,6 +32,7 @@ on:
       - "Cargo.toml"
       - "Cargo.lock"
       - ".github/release-targets.json"
+      - ".github/requirements/**"
       - ".github/workflows/release.yml"
       - ".github/workflows/rust.yml"
 
@@ -335,8 +337,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      # Every package, transitive ones included, is pinned by hash in
+      # .github/requirements/openapi.txt (regenerate it from openapi.in).
       - name: Install openapi-spec-validator
-        run: pip install openapi-spec-validator==0.9.0
+        run: pip install --require-hashes --no-deps -r .github/requirements/openapi.txt
 
       - name: Validate OpenAPI spec
         run: python -m openapi_spec_validator docs/openapi.yaml

@@ -1,0 +1,22 @@
+# Line coverage of the unit tests, the Rust integration tests and the atago CLI
+# suite together (scripts/coverage.sh), so the CLI paths that only the real
+# binary reaches are measured against one number. The cloud storage backends
+# (S3, GCS, Azure) talk to emulators only in integration.yml, so their
+# adapters stay lower here than the rest of the server.
+coverage:
+  paths:
+    - lcov.info
+  acceptable: 90%
+testExecutionTime:
+  if: true
+comment:
+  if: is_pull_request
+summary:
+  if: true
+report:
+  if: is_default_branch
+  datastores:
+    - artifact://${GITHUB_REPOSITORY}
+diff:
+  datastores:
+    - artifact://${GITHUB_REPOSITORY}

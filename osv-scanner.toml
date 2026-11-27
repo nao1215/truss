@@ -1,0 +1,6 @@
+# osv-scanner configuration, also read by OpenSSF Scorecard's Vulnerabilities check.
+# Each entry needs a reason that says why truss is not affected and when to remove it.
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0543"
+reason = "chrono (unmaintained) is listed in Cargo.lock only because serde_with's enabled alloc/std features name it through weak features (chrono_0_4?/alloc), and Cargo writes weakly referenced optional dependencies to the lockfile (rust-lang/cargo#10801). The dep:chrono_0_4 feature is never enabled, so chrono is not compiled into any truss build: cargo tree --workspace --all-features --target all -i chrono prints nothing and cargo deny check advisories passes. Remove this entry when serde_with or the google-cloud-* crates stop pulling serde_with, or when the lockfile no longer lists chrono."

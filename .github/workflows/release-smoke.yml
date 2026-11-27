@@ -1,0 +1,229 @@
+name: Release Smoke
+
+# Builds the release archives the way release.yml does, without a tag and
+# without publishing, signing, provenance or an SBOM, so a packaging
+# regression (a binary that needs a newer glibc, an archive with the wrong
+# layout, a manifest that no longer verifies, a license cargo-about cannot
+# bundle) shows up on the pull request instead of halfway through a release.
+# The compiler, features and targets are read from release.yml and
+# .github/release-targets.json so this job cannot drift from the release.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "about.toml"
+      - "about.hbs"
+      - "scripts/**"
+      - ".github/release-targets.json"
+      - ".github/workflows/release.yml"
+      - ".github/workflows/release-smoke.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "about.toml"
+      - "about.hbs"
+      - "scripts/**"
+      - ".github/release-targets.json"
+      - ".github/workflows/release.yml"
+      - ".github/workflows/release-smoke.yml"
+
+concurrency:
+  group: release-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  NODE_VERSION: "22"
+
+jobs:
+  config:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.read.outputs.matrix }}
+      toolchain: ${{ steps.read.outputs.toolchain }}
+      features: ${{ steps.read.outputs.features }}
+      tag: ${{ steps.read.outputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The archive names and `truss --version` carry the crate version, so
+      # the stand-in tag is v<version> from Cargo.toml.
+      - name: Read the release configuration
+        id: read
+        run: |
+          echo "matrix=$(jq -c . .github/release-targets.json)" >> "$GITHUB_OUTPUT"
+          echo "toolchain=$(grep -oP '^\s*RUST_TOOLCHAIN:\s*"\K[^"]+' .github/workflows/release.yml)" >> "$GITHUB_OUTPUT"
+          echo "features=$(grep -oP '^\s*RELEASE_FEATURES:\s*"\K[^"]+' .github/workflows/release.yml)" >> "$GITHUB_OUTPUT"
+          echo "tag=v$(grep -oP '^version\s*=\s*"\K[^"]+' Cargo.toml | head -n 1)" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: build (${{ matrix.target }})
+    needs: config
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.config.outputs.matrix) }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    env:
+      RUST_TOOLCHAIN: ${{ needs.config.outputs.toolchain }}
+      RELEASE_FEATURES: ${{ needs.config.outputs.features }}
+      TAG: ${{ needs.config.outputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: ${{ matrix.target }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      # Unlike release.yml, the smoke build may reuse main's cache: a stale
+      # cache can only make it slower, and the release itself still builds clean.
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: release-smoke-${{ matrix.target }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Build release binary
+        run: cargo build --release --locked --target ${{ matrix.target }} --features "${{ env.RELEASE_FEATURES }}"
+
+      - name: Determine binary path
+        id: bin
+        shell: bash
+        run: |
+          if [ "${RUNNER_OS}" = "Windows" ]; then
+            echo "path=target/${{ matrix.target }}/release/truss.exe" >> "$GITHUB_OUTPUT"
+          else
+            echo "path=target/${{ matrix.target }}/release/truss" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Strip binary
+        if: runner.os != 'Windows'
+        run: strip ${{ steps.bin.outputs.path }}
+
+      # The same gate as release.yml: the Linux binaries must start on
+      # Ubuntu 22.04 and on the Debian base image of Dockerfile.release.
+      - name: Check the glibc the binary requires
+        if: endsWith(matrix.target, '-linux-gnu')
+        env:
+          MAX_GLIBC: "2.35"
+        run: |
+          set -o pipefail
+          need="$(objdump -T "${{ steps.bin.outputs.path }}" | grep -oE 'GLIBC_[0-9]+\.[0-9]+(\.[0-9]+)?' | sed 's/^GLIBC_//' | sort -uV | tail -n 1)"
+          test -n "${need}"
+          highest="$(printf '%s\n%s\n' "${need}" "${MAX_GLIBC}" | sort -V | tail -n 1)"
+          if [ "${highest}" != "${MAX_GLIBC}" ]; then
+            echo "::error title=glibc too new::${{ matrix.target }} requires GLIBC_${need}, the release allows up to ${MAX_GLIBC}"
+            exit 1
+          fi
+          echo "${{ matrix.target }} requires GLIBC_${need} (allowed up to ${MAX_GLIBC})"
+
+      - name: Create archive
+        shell: bash
+        run: |
+          archive="truss-${TAG}-${{ matrix.target }}.${{ matrix.archive }}"
+          ./scripts/pack-release-archive.sh "${{ steps.bin.outputs.path }}" "${archive}"
+          echo "ARCHIVE=${archive}" >> "$GITHUB_ENV"
+
+      - name: Check archive
+        shell: bash
+        run: |
+          node ./scripts/check-release-archive.mjs \
+            --archive "${ARCHIVE}" \
+            --target "${{ matrix.target }}" \
+            --tag "${TAG}" \
+            ${{ matrix.executable && '--exec' || '' }}
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: smoke-binary-${{ matrix.target }}
+          path: ${{ env.ARCHIVE }}
+          retention-days: 3
+
+  manifest:
+    needs: [config, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      RELEASE_FEATURES: ${{ needs.config.outputs.features }}
+      TAG: ${{ needs.config.outputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: smoke-binary-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Generate the release manifest and checksums
+        run: |
+          node ./scripts/generate-release-manifest.mjs \
+            --dir release-assets \
+            --tag "${TAG}" \
+            --repository "${GITHUB_REPOSITORY}" \
+            --features "${RELEASE_FEATURES}"
+
+      - name: Verify the archives against the manifest
+        run: |
+          node ./scripts/verify-release-manifest.mjs \
+            --dir release-assets \
+            --tag "${TAG}" \
+            --repository "${GITHUB_REPOSITORY}" \
+            --exec-target x86_64-unknown-linux-gnu
+
+  licenses:
+    needs: config
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      RUST_TOOLCHAIN: ${{ needs.config.outputs.toolchain }}
+      RELEASE_FEATURES: ${{ needs.config.outputs.features }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      # The same cargo-about as release.yml.
+      - name: Install cargo-about
+        run: cargo install cargo-about --version 0.9.2 --locked --features cli
+
+      - name: Write the third-party licenses
+        run: |
+          cargo about generate --locked --fail --features "${RELEASE_FEATURES}" about.hbs -o THIRD_PARTY_LICENSES.html
+          test -s THIRD_PARTY_LICENSES.html

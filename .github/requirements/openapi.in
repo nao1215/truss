@@ -1,0 +1,5 @@
+# Input for openapi.txt, which rust.yml installs with --require-hashes.
+# Regenerate after editing:
+#   uv pip compile --generate-hashes --universal --python-version 3.12 --no-header \
+#     --output-file .github/requirements/openapi.txt .github/requirements/openapi.in
+openapi-spec-validator==0.9.0

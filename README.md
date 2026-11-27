@@ -6,6 +6,7 @@
 [![CI](https://github.com/nao1215/truss/actions/workflows/rust.yml/badge.svg)](https://github.com/nao1215/truss/actions/workflows/rust.yml)
 [![CLI Integration](https://github.com/nao1215/truss/actions/workflows/integration-cli.yml/badge.svg)](https://github.com/nao1215/truss/actions/workflows/integration-cli.yml)
 [![API Integration](https://github.com/nao1215/truss/actions/workflows/integration.yml/badge.svg)](https://github.com/nao1215/truss/actions/workflows/integration.yml)
+![Coverage](https://raw.githubusercontent.com/nao1215/octocovs-central-repo/main/badges/nao1215/truss/coverage.svg)
 [![Gitleaks](https://github.com/nao1215/truss/actions/workflows/gitleaks.yml/badge.svg)](https://github.com/nao1215/truss/actions/workflows/gitleaks.yml)
 [![Trivy](https://github.com/nao1215/truss/actions/workflows/trivy.yml/badge.svg)](https://github.com/nao1215/truss/actions/workflows/trivy.yml)
 [![cargo-deny](https://github.com/nao1215/truss/actions/workflows/cargo-deny.yml/badge.svg)](https://github.com/nao1215/truss/actions/workflows/cargo-deny.yml)

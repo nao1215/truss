@@ -55,9 +55,10 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install atago
-        uses: nao1215/setup-atago@5c563dcd9d85e114f8abe8bbdcd058e51de09efb # v0.1.3
+        uses: nao1215/setup-atago@e573acee4be10bbfc6089f3319cb406918d566fa # v0.1.6
         with:
-          version: v0.26.1
+          version: v0.26.3
+          verify-attestation: "true"
 
       # e2e/run.sh builds truss (cargo build --release --locked) and runs the
       # atago specs in e2e/atago against the freshly built binary. `shell: bash`
