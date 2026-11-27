@@ -1,0 +1,85 @@
+name: Coverage
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "tests/**"
+      - "e2e/**"
+      - "integration/fixtures/**"
+      - "scripts/coverage.sh"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".octocov.yml"
+      - ".github/workflows/coverage.yml"
+  pull_request:
+    paths:
+      - "src/**"
+      - "tests/**"
+      - "e2e/**"
+      - "integration/fixtures/**"
+      - "scripts/coverage.sh"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".octocov.yml"
+      - ".github/workflows/coverage.yml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  coverage:
+    name: Coverage (unit + integration + atago)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    # octocov reads and writes its report in the Actions-artifact datastore and
+    # comments on pull requests, so this job alone gets those scopes. The
+    # central repository (nao1215/octocovs-central-repo) collects the report
+    # from the artifact and draws the README badge.
+    permissions:
+      contents: read
+      actions: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: stable
+          components: llvm-tools-preview
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@3a3daafd3b7f23b8f65d9f5ba2db203fb59b79e2 # v2.90.2
+        with:
+          tool: cargo-llvm-cov@0.9.1
+
+      # The same atago as integration-cli.yml.
+      - name: Install atago
+        uses: nao1215/setup-atago@e573acee4be10bbfc6089f3319cb406918d566fa # v0.1.6
+        with:
+          version: v0.26.3
+          verify-attestation: "true"
+
+      - name: Measure unit + integration + atago coverage
+        run: ./scripts/coverage.sh lcov.info
+
+      - uses: k1LoW/octocov-action@a167dc0dee441b7ffc45e1b862ab55ec0d87f278 # v1.5.2
+        with:
+          config: .octocov.yml

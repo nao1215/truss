@@ -216,7 +216,7 @@ Run `just` with no arguments to see the full list. Key recipes:
 | `just lint` | Clippy with strict warnings |
 | `just fmt` | Format all code |
 | `just ci` | All CI checks locally |
-| `just coverage` | Code coverage summary |
+| `just coverage` | Line coverage of unit, integration and atago tests together (writes `lcov.info`, the number CI reports) |
 | `just integration` | Docker-based CLI + API tests |
 | `just fuzz TARGET` | Run one cargo-fuzz target (nightly) |
 | `just url-signer-package-typecheck` | Compile-check the TypeScript URL signer package definitions |

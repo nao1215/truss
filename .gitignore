@@ -24,3 +24,6 @@ web/dist/
 
 # atago run state (local last-failed cache)
 .atago/
+
+# scripts/coverage.sh output
+lcov.info

@@ -83,9 +83,10 @@ docker-build:
 # Coverage
 # ---------------------------------------------------------------------------
 
-# Run code coverage (requires cargo-llvm-cov)
+# Coverage of unit + integration tests and the atago CLI suite, the number CI
+# reports (requires cargo-llvm-cov and atago). Writes lcov.info.
 coverage:
-    cargo llvm-cov --workspace --all-targets --summary-only
+    ./scripts/coverage.sh lcov.info
 
 # Run code coverage with HTML report
 coverage-html:
